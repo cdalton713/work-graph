@@ -1,0 +1,56 @@
+// Who may call the API. The API changes Linear with the user's key, so only this page may call it.
+// Tailscale decides which devices can connect at all; this check makes sure that the caller is the
+// page itself and not another site in the same browser.
+
+/** The names under which this server answers besides 127.0.0.1 and localhost. */
+export interface Rules {
+  port: number;
+  /** The tailnet name of this machine, while Tailscale Serve sends requests to this server. */
+  tailnet: { host: string } | null;
+  /** The name of the hosted page (see deploy/). Then this server answers only under that name. */
+  hosted?: { host: string } | null;
+}
+
+/**
+ * The reason to refuse an API request, or null when the request may pass.
+ *
+ * The host says which page made the request. A page of another site cannot send one of these
+ * hosts, so this check stops DNS rebinding. A request that changes data must also come from the
+ * page of that same host, as JSON: a form on another site can send neither.
+ *
+ * `header` gives a request header by its lowercase name, or undefined.
+ */
+export function refusal(method: string, header: (name: string) => string | undefined, rules: Rules): string | null {
+  const get = (name: string) => header(name) ?? "";
+  const page = pageOf(get, rules);
+  if (page.refused) return page.refused;
+  if (method !== "GET" && (get("origin") !== page.origin || !get("content-type").startsWith("application/json"))) return "bad origin";
+  return null;
+}
+
+/** The origin of the page that the host names, or why the host is refused. */
+function pageOf(get: (name: string) => string, rules: Rules): { origin: string; refused?: string } {
+  const host = get("host").toLowerCase();
+  if (rules.hosted) return host === rules.hosted.host ? { origin: `https://${host}` } : { origin: "", refused: "bad host" };
+  if (host === `127.0.0.1:${rules.port}` || host === `localhost:${rules.port}`) return { origin: `http://${host}` };
+  if (rules.tailnet && host === rules.tailnet.host) {
+    // Tailscale Serve sets this header for a request that came from the internet through Funnel.
+    if (get("tailscale-funnel-request")) return { origin: "", refused: "a request from the internet may not use this page" };
+    return { origin: `https://${host}` };
+  }
+  return { origin: "", refused: "bad host" };
+}
+
+/**
+ * The reason to refuse a link connection (`/api/link`), or null. A WebSocket is not subject to the
+ * browser's same-origin rules, so the origin decides the role: a browser always sends an Origin, so a
+ * page must send the exact origin of this page, and a coordinator (`wg next`) must send none.
+ */
+export function linkRefusal(role: string, header: (name: string) => string | undefined, rules: Rules): string | null {
+  const get = (name: string) => header(name) ?? "";
+  const page = pageOf(get, rules);
+  if (page.refused) return page.refused;
+  if (role === "page") return get("origin") === page.origin ? null : "bad origin";
+  if (role === "coordinator") return get("origin") ? "a coordinator sends no Origin" : null;
+  return "role must be page or coordinator";
+}

@@ -1,0 +1,497 @@
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { Rules } from "./access.ts";
+import { createApp } from "./app.ts";
+
+const rules: Rules = { port: 4747, tailnet: null };
+const local = { host: "127.0.0.1:4747" };
+const write = { ...local, origin: "http://127.0.0.1:4747", "content-type": "application/json" };
+let dist: string;
+
+beforeAll(async () => {
+  dist = (await mkdtemp(join(tmpdir(), "wg-ui-"))) + sep;
+  await mkdir(join(dist, "assets"));
+  await writeFile(join(dist, "index.html"), "<html>wg</html>");
+  await writeFile(join(dist, "assets", "app.js"), "console.log(1)");
+});
+afterEach(() => vi.unstubAllGlobals());
+
+// The one workspace of most tests. Its key is read when the app is made, as the server reads its config.
+const workWorkspace = () => ({ id: "work", name: "Work", team: "CD", key: process.env.LINEAR_API_KEY ?? "", teamLabels: true });
+const app = () => createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()] });
+/** An issue that the page may change: in a project of the served team, with no node card. */
+const mine = { team: { key: "CD" }, project: { id: "p1" }, description: "", labels: { nodes: [] }, comments: { nodes: [] } };
+/** A fetch stub that answers each Linear call with `data`, and records the GraphQL variables. */
+function linear(data: unknown) {
+  const calls: Record<string, unknown>[] = [];
+  vi.stubEnv("LINEAR_API_KEY", "test-key");
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+    calls.push(JSON.parse(init.body as string).variables);
+    return { ok: true, json: async () => ({ data }) };
+  }));
+  return calls;
+}
+
+describe("static page", () => {
+  it("serves the built files with their type, and the app for an unknown path", async () => {
+    const js = await app().request("/assets/app.js", { headers: local });
+    expect(js.status).toBe(200);
+    expect(js.headers.get("content-type")).toBe("text/javascript");
+    expect(js.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    const deep = await app().request("/projects/abc", { headers: local });
+    expect(deep.headers.get("cache-control")).toBe("no-store");
+    expect(await deep.text()).toBe("<html>wg</html>");
+    expect(deep.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  });
+  it("answers 404 for a missing file with a known type", async () => {
+    expect((await app().request("/assets/gone.js", { headers: local })).status).toBe(404);
+  });
+});
+
+describe("project links", () => {
+  it("looks up IDs and names only in the selected workspace", async () => {
+    const { projectFromQuery } = await import("../src/App");
+    const project = { id: "p1", name: "A project", url: "u", status: "", statusType: "", workspace: "work", workspaceName: "Work" };
+    const directory = {
+      workspaces: [{ id: "work", name: "Work" }, { id: "home", name: "Home" }],
+      projects: [project],
+    };
+    expect(projectFromQuery(directory, new URLSearchParams("project=p1")).project).toEqual(project);
+    expect(projectFromQuery(directory, new URLSearchParams("project=A+PROJECT")).project).toEqual(project);
+    expect(projectFromQuery(directory, new URLSearchParams("workspace=home&project=A+project"))).toEqual({
+      project: null, missing: 'No project "A project" in Home',
+    });
+    expect(projectFromQuery(directory, new URLSearchParams()).missing).toBeNull();
+    expect(projectFromQuery(directory, new URLSearchParams("project="))).toEqual({ project: null, missing: null });
+    const unavailable = { ...directory, workspaces: [{ id: "home", name: "Home", error: "Unavailable" }] };
+    expect(projectFromQuery(unavailable, new URLSearchParams("workspace=home&project=Unknown"))).toEqual({ project: null, missing: null });
+  });
+});
+
+describe("api", () => {
+  it("refuses a caller that is not this page", async () => {
+    const response = await app().request("/api/projects", { headers: { host: "evil.example" } });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "bad host" });
+  });
+  it("lists the projects of the team", async () => {
+    const labels = { nodes: [{ name: "AI", parent: null }, { name: "Tooling", parent: { name: "Initiative" } }, { name: "full", parent: { name: "Autonomy" } }, { name: "paused", parent: null }] };
+    linear({ teams: { nodes: [{ projects: { nodes: [{ id: "p2", name: "B", url: "u", status: null }, { id: "p1", name: "A", url: "u", status: { name: "Started", type: "started" }, labels }], pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+    const response = await app().request("/api/projects", { headers: local });
+    expect(await response.json()).toEqual({
+      workspaces: [{ id: "work", name: "Work" }],
+      projects: [
+        { id: "p1", name: "A", url: "u", status: "Started", statusType: "started", initiative: "Tooling", autonomy: "full", paused: true, workspace: "work", workspaceName: "Work" },
+        { id: "p2", name: "B", url: "u", status: "", statusType: "", initiative: null, autonomy: null, paused: false, workspace: "work", workspaceName: "Work" },
+      ],
+    });
+  });
+  it("lists both workspaces and keeps concurrent comment requests on their own keys", async () => {
+    const keys: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const key = (init.headers as Record<string, string>).Authorization;
+      keys.push(key);
+      await new Promise((resolve) => setTimeout(resolve, key === "home-key" ? 1 : 5));
+      const { query } = JSON.parse(init.body as string);
+      const data = query.includes("projects(first")
+        ? { teams: { nodes: [{ projects: { nodes: [], pageInfo: { hasNextPage: false } } }] } }
+        : { issue: { comments: { nodes: [{ id: key, body: key === "home-key" ? "home" : "work", createdAt: "today", user: null }], pageInfo: { hasNextPage: false } } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const both = createApp(rules, { team: "CD", dist, workspaces: [
+      { id: "work", name: "Work", team: "CD", key: "work-key", teamLabels: true },
+      { id: "home", name: "Home", team: "HOM", key: "home-key", teamLabels: false },
+    ] });
+    const projects = await (await both.request("/api/projects", { headers: local })).json();
+    expect(projects).toEqual({
+      workspaces: [{ id: "work", name: "Work" }, { id: "home", name: "Home" }],
+      projects: [],
+    });
+    const [work, home] = await Promise.all(["work", "home"].map(async (workspace) => {
+      const response = await both.request("/api/issues/same-id/comments", { headers: { ...local, "x-workspace": workspace } });
+      return response.json();
+    }));
+    expect(work[0].body).toBe("work");
+    expect(home[0].body).toBe("home");
+    const count = keys.length;
+    const bad = await both.request("/api/issues/i1/comments", { headers: { ...local, "x-workspace": "missing" } });
+    expect(bad.status).toBe(400);
+    expect(keys).toHaveLength(count);
+    expect(JSON.stringify(projects)).not.toContain("home-key");
+  });
+  it("marks an unavailable workspace and gives the route of an unknown call", async () => {
+    linear({ teams: { nodes: [] } });
+    const missing = await app().request("/api/projects", { headers: local });
+    expect(missing.status).toBe(200);
+    expect(await missing.json()).toEqual({
+      workspaces: [{ id: "work", name: "Work", error: "Work is unavailable. Reload to try again." }],
+      projects: [],
+    });
+    const unknown = await app().request("/api/nothing", { headers: local });
+    expect(await unknown.json()).toEqual({ error: "no route GET /api/nothing" });
+  });
+  it("keeps work projects available when the home key fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const home = (init.headers as Record<string, string>).Authorization === "home-key";
+      return { ok: !home, status: home ? 401 : 200, json: async () => home
+        ? { errors: [{ message: "revoked" }] }
+        : { data: { teams: { nodes: [{ projects: { nodes: [{ id: "work-project", name: "Work", url: "u", status: null }], pageInfo: { hasNextPage: false } } }] } } },
+      };
+    }));
+    const both = createApp(rules, { team: "CD", dist, workspaces: [
+      { id: "work", name: "Work", team: "CD", key: "work-key", teamLabels: true },
+      { id: "home", name: "Home", team: "HOM", key: "home-key", teamLabels: false },
+    ] });
+    const response = await both.request("/api/projects", { headers: local });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      workspaces: [
+        { id: "work", name: "Work" },
+        { id: "home", name: "Home", error: "Home is unavailable. Reload to try again." },
+      ],
+      projects: [{ id: "work-project", name: "Work", url: "u", status: "", statusType: "", initiative: null, autonomy: null, paused: false, workspace: "work", workspaceName: "Work" }],
+    });
+  });
+  it("loads project issues across pages without mixing workspace graph caches", async () => {
+    const seen: string[] = [];
+    const raw = (id: string, key: string) => ({
+      id, identifier: `${key}-${id}`, title: id, description: null, priority: 0, url: "u", sortOrder: 0, updatedAt: "today",
+      team: { id: "team", key }, state: { id: "s", name: "Todo", type: "unstarted", color: "" }, assignee: null,
+      labels: { nodes: [] }, projectMilestone: null,
+      relations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+      inverseRelations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+      comments: { nodes: [] }, attachments: { nodes: [] }, project: { id: "p" },
+    });
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const key = (init.headers as Record<string, string>).Authorization;
+      const { query, variables } = JSON.parse(init.body as string);
+      seen.push(key);
+      let data;
+      if (query.includes("viewer{")) data = { viewer: { id: "me" }, project: { id: "p", name: "A project", url: "u", projectMilestones: { nodes: [] } } };
+      else if (query.includes("issues(first:25")) data = { project: { issues: {
+        nodes: [raw(variables.after ? "2" : "1", key === "home-key" ? "HOM" : "CD")],
+        pageInfo: { hasNextPage: !variables.after, endCursor: "page2" },
+      } } };
+      else if (query.includes("members(first")) data = { teams: { nodes: [{ id: "team", key: "HOM", states: { nodes: [] }, members: { nodes: [] } }] } };
+      else data = { issueLabels: { nodes: [], pageInfo: { hasNextPage: false } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const both = createApp(rules, { team: "CD", dist, workspaces: [
+      { id: "work", name: "Work", team: "CD", key: "work-key", teamLabels: true },
+      { id: "home", name: "Home", team: "HOM", key: "home-key", teamLabels: false },
+    ] });
+    for (const workspace of ["work", "home"]) {
+      const response = await both.request("/api/projects/p/graph", { headers: { ...local, "x-workspace": workspace } });
+      expect(response.status).toBe(200);
+      const graph = await response.json();
+      expect(graph.issues.map((i: { identifier: string }) => i.identifier)).toEqual(workspace === "home" ? ["HOM-1", "HOM-2"] : ["CD-1", "CD-2"]);
+      expect(graph.project.name).toBe("A project");
+    }
+    expect(seen).toContain("work-key");
+    expect(seen).toContain("home-key");
+  });
+  it("summarizes each open project, and marks a project whose graph did not load", async () => {
+    const pr = { number: 7, url: "https://github.com/example/repo/pull/7", status: "open", reviewUrl: "https://linear.app/work/review/review-7" };
+    const asked: string[] = [];
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      let data;
+      if (query.includes("projects(first:50")) data = { teams: { nodes: [{ projects: { nodes: [
+        { id: "p1", name: "Open", url: "u", status: { name: "In Progress", type: "started" } },
+        { id: "p2", name: "Shut", url: "u", status: { name: "Completed", type: "completed" } },
+        { id: "p3", name: "Broken", url: "u", status: { name: "Planned", type: "planned" } },
+      ], pageInfo: { hasNextPage: false, endCursor: null } } }] } };
+      else if (variables.id === "p3") return { ok: false, status: 500, json: async () => null };
+      else if (query.includes("viewer{")) { asked.push(variables.id); data = { viewer: { id: "me" }, project: { id: variables.id, name: "Open", url: "u", projectMilestones: { nodes: [] } } }; }
+      else if (query.includes("issues(first:25")) data = { project: { issues: { nodes: [{
+        id: "i1", identifier: "CD-1", title: "Answer me", description: null, priority: 0, url: "https://linear.app/work/issue/CD-1", sortOrder: 0, updatedAt: "2026-11-20T00:00:00Z",
+        team: { id: "team", key: "CD" }, state: { id: "s", name: "Needs Human", type: "started", color: "" }, assignee: null,
+        labels: { nodes: [] }, projectMilestone: null,
+        relations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+        inverseRelations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+        comments: { nodes: [{ id: "c1", body: "**work-graph node card** `k`\n\n```json\n{\"wg\":1}\n```" }] },
+        attachments: { nodes: [{ url: pr.url, title: "Open PR", metadata: { status: pr.status } }] }, project: { id: "p1" },
+      }], pageInfo: { hasNextPage: false, endCursor: null } } } };
+      else if (query.includes("pullRequests(first")) data = { pullRequests: { nodes: [{ url: pr.url, slugId: "review-7" }] } };
+      else if (query.includes("members(first")) data = { teams: { nodes: [] } };
+      else data = { issueLabels: { nodes: [], pageInfo: { hasNextPage: false } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const response = await app().request("/api/overview", { headers: local });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.projects.map((p: { id: string }) => p.id)).toEqual(["p3", "p1", "p2"]);
+    expect(asked).toEqual(["p1"]); // no graph for the completed project
+    const byId = new Map(body.summaries.map((s: { id: string }) => [s.id, s]));
+    expect(byId.get("p1")).toMatchObject({ workspace: "work", planned: 1, done: 0, freshness: { state: "never", ran: null }, you: [{ identifier: "CD-1", title: "Answer me", why: "Needs Human", pullRequests: [pr] }] });
+    expect(byId.get("p3")).toMatchObject({ you: [], error: expect.stringContaining("Linear") });
+    expect(byId.has("p2")).toBe(false);
+  });
+  it("refuses a body that is not JSON, and a field that is not editable", async () => {
+    const bad = await app().request("/api/issues/i1", { method: "PATCH", headers: write, body: "{" });
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toEqual({ error: "request body is not JSON" });
+    const field = await app().request("/api/issues/i1", { method: "PATCH", headers: write, body: JSON.stringify({ teamId: "x" }) });
+    expect(await field.json()).toEqual({ error: "fields not editable: teamId" });
+  });
+  it("refuses a body over the size limit", async () => {
+    const big = await app().request("/api/issues/i1/comments", { method: "POST", headers: write, body: JSON.stringify({ body: "x".repeat(2_000_001) }) });
+    expect(big.status).toBe(413);
+  });
+  it("adds a comment with the body that the page sent", async () => {
+    const calls = linear({ issue: mine, commentCreate: { success: true, comment: { id: "c1", body: "hi", createdAt: "2026-11-20", parent: null, user: { name: "C", displayName: "cd" }, botActor: null } } });
+    const response = await app().request("/api/issues/i1/comments", { method: "POST", headers: write, body: JSON.stringify({ body: "hi" }) });
+    expect(await response.json()).toEqual({ id: "c1", body: "hi", createdAt: "2026-11-20", parentId: null, author: "cd" });
+    expect(calls).toEqual([{ id: "i1" }, { i: { issueId: "i1", body: "hi" } }]);
+  });
+  it("refuses a write to an issue of another team", async () => {
+    for (const issue of [{ ...mine, team: { key: "ENG" } }]) {
+      const calls = linear({ issue });
+      const patch = await app().request("/api/issues/i1", { method: "PATCH", headers: write, body: JSON.stringify({ priority: 1 }) });
+      expect(patch.status).toBe(403);
+      expect(await patch.json()).toEqual({ error: "this issue is not in team CD: it is read-only here" });
+      const comment = await app().request("/api/issues/i1/comments", { method: "POST", headers: write, body: JSON.stringify({ body: "hi" }) });
+      expect(comment.status).toBe(403);
+      expect(calls).toEqual([{ id: "i1" }, { id: "i1" }]); // no mutation went to Linear
+    }
+  });
+  it("can comment on home issues with no project using only the home key", async () => {
+    const keys: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      keys.push((init.headers as Record<string, string>).Authorization);
+      return { ok: true, json: async () => ({ data: {
+        issue: { ...mine, team: { key: "HOM" }, project: null },
+        commentCreate: { success: true, comment: { id: "c", body: "home comment", createdAt: "today", user: null } },
+      } }) };
+    }));
+    const both = createApp(rules, { team: "CD", dist, workspaces: [
+      { id: "work", name: "Work", team: "CD", key: "work-key", teamLabels: true },
+      { id: "home", name: "Home", team: "HOM", key: "home-key", teamLabels: false },
+    ] });
+    const response = await both.request("/api/issues/i1/comments", { method: "POST", headers: { ...write, "x-workspace": "home" }, body: JSON.stringify({ body: "home comment" }) });
+    expect(response.status).toBe(200);
+    expect((await response.json()).body).toBe("home comment");
+    expect(keys).toEqual(["home-key", "home-key"]);
+  });
+  it("refuses a description save that started from an older text", async () => {
+    const calls = linear({ issue: { ...mine, description: "new design" }, issueUpdate: { success: false } });
+    const save = (baseDescription: string) => app().request("/api/issues/i1", { method: "PATCH", headers: write, body: JSON.stringify({ description: "mine", baseDescription }) });
+    const stale = await save("old design");
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).error).toContain("the description changed in Linear");
+    expect(calls).toEqual([{ id: "i1" }]);
+    await save("new design");
+    expect(calls[2]).toEqual({ id: "i1", i: { description: "mine" } }); // the base text does not go to Linear
+  });
+  it("moves an ops node to a done status only with its evidence, and writes the evidence first", async () => {
+    const ops = { ...mine, labels: { nodes: [{ id: "l", name: "ops", color: "", parent: null }] } };
+    const done = { issue: ops, workflowState: { type: "completed" }, commentCreate: { success: true }, issueUpdate: { success: false } };
+    const move = (body: object) => app().request("/api/issues/i1", { method: "PATCH", headers: write, body: JSON.stringify(body) });
+    let calls = linear(done);
+    const bare = await move({ stateId: "s-done" });
+    expect(bare.status).toBe(400);
+    expect(await bare.json()).toEqual({ error: "an ops node goes to a done status only with its evidence" });
+    expect(calls).toEqual([{ id: "i1" }, { id: "s-done" }]); // no comment and no move
+    calls = linear(done);
+    await move({ stateId: "s-done", note: " deployed abc to beta; check: /healthz; result: 200 " });
+    expect(calls.slice(2)).toEqual([
+      { i: { issueId: "i1", body: "Evidence: deployed abc to beta; check: /healthz; result: 200" } },
+      { id: "i1", i: { stateId: "s-done" } }, // the note itself does not go into the issue update
+    ]);
+    calls = linear({ ...done, commentCreate: { success: false } });
+    expect((await move({ stateId: "s-done", note: "x" })).status).toBe(502);
+    expect(calls).toHaveLength(3); // the comment failed: no move
+    calls = linear({ ...done, workflowState: { type: "started" } });
+    await move({ stateId: "s-needs" });
+    expect(calls[2]).toEqual({ id: "i1", i: { stateId: "s-needs" } }); // another status needs no note
+    calls = linear({ ...done, issue: { ...mine, labels: { nodes: [{ id: "l", name: "decision", color: "", parent: null }] } } });
+    await move({ stateId: "s-done", note: "yes, cut over" });
+    expect(calls[2]).toEqual({ i: { issueId: "i1", body: "Answer: yes, cut over" } });
+  });
+  it("answers 404 for an issue that Linear does not have", async () => {
+    linear({ issue: null });
+    expect((await app().request("/api/issues/i1", { method: "PATCH", headers: write, body: JSON.stringify({ priority: 1 }) })).status).toBe(404);
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ errors: [{ message: "Entity not found: Issue" }] }) })));
+    const response = await app().request("/api/issues/i1", { method: "PATCH", headers: write, body: JSON.stringify({ priority: 1 }) });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "issue i1 not found" });
+  });
+  it("refuses a new title for a wg node, and takes one for an issue with no node card", async () => {
+    const calls = linear({ issue: { ...mine, comments: { nodes: [{ id: "card" }] } } });
+    const node = await app().request("/api/issues/i1", { method: "PATCH", headers: write, body: JSON.stringify({ title: "New" }) });
+    expect(node.status).toBe(400);
+    expect((await node.json()).error).toContain("plan.json has the title");
+    expect(calls).toEqual([{ id: "i1" }]);
+    const plain = linear({ issue: mine, issueUpdate: { success: false } });
+    await app().request("/api/issues/i1", { method: "PATCH", headers: write, body: JSON.stringify({ title: "New" }) });
+    expect(plain[1]).toEqual({ id: "i1", i: { title: "New" } });
+  });
+});
+
+describe("hosted page", () => {
+  const hosted: Rules = { port: 4747, tailnet: null, hosted: { host: "wg.example.com" } };
+  const hostedApp = () => createApp(hosted, { team: "CD", dist, workspaces: [workWorkspace()] });
+
+  it("serves the page and the API under its name", async () => {
+    expect(await (await hostedApp().request("/", { headers: { host: "wg.example.com" } })).text()).toBe("<html>wg</html>");
+    linear({ teams: { nodes: [{ projects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+    expect((await hostedApp().request("/api/projects", { headers: { host: "wg.example.com" } })).status).toBe(200);
+  });
+  it("refuses the API under another name", async () => {
+    expect((await hostedApp().request("/api/projects", { headers: { host: "127.0.0.1:4747" } })).status).toBe(403);
+  });
+  it("answers the health check under any name", async () => {
+    expect((await hostedApp().request("/healthz")).status).toBe(200);
+  });
+});
+
+
+describe("close project", () => {
+  it("resolves a project slug and marks every issue Done across pages before completing it", async () => {
+    const updates: unknown[] = [];
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      let data: unknown;
+      if (query.includes("CloseProjectInfo")) data = { project: { id: "p1", name: "Example", teams: { nodes: [{ key: "CD" }] } }, projectStatuses: { nodes: [{ id: "complete", name: "Completed", type: "completed" }] } };
+      else if (query.includes("CloseProjectIssues")) data = { issues: { nodes: variables.id !== "p1" ? [] : [{ id: variables.after ? "i2" : "i1", team: { key: "CD", states: { nodes: [{ id: "done", name: "Done", type: "completed" }] } }, state: { id: "todo" } }], pageInfo: { hasNextPage: !variables.after, endCursor: "next" } } };
+      else if (query.includes("issueUpdate")) { updates.push(variables); data = { issueUpdate: { success: true } }; }
+      else if (query.includes("projectUpdate")) { updates.push(variables); data = { projectUpdate: { success: true } }; }
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const response = await app().request("/api/projects/example-slug/close", { method: "POST", headers: write, body: JSON.stringify({ confirm: true }) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ completedIssues: 2 });
+    expect(updates).toEqual([
+      { id: "i1", stateId: "done" }, { id: "i2", stateId: "done" }, { id: "p1", statusId: "complete" },
+    ]);
+  });
+});
+
+
+describe("close project safety", () => {
+  function setup(options: { failIssue?: boolean; team?: string; issueTeam?: string; missing?: boolean; failProject?: boolean; trashed?: boolean } = {}) {
+    const writes: string[] = [];
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      let data: unknown;
+      if (query.includes("CloseProjectInfo")) data = { project: options.missing ? null : { id: "p1", teams: { nodes: [{ key: options.team ?? "CD" }] } }, projectStatuses: { nodes: [{ id: "complete", name: "Completed", type: "completed" }] } };
+      else if (query.includes("CloseProjectIssues")) data = { issues: { nodes: [{ id: "i1", trashed: options.trashed, state: { id: "todo" }, team: { key: options.issueTeam ?? "CD", states: { nodes: [{ id: "done", name: "Done", type: "completed" }] } } }], pageInfo: { hasNextPage: false } } };
+      else if (query.includes("issueUpdate")) { writes.push("issue"); data = { issueUpdate: { success: !options.failIssue } }; }
+      else if (query.includes("projectUpdate")) { writes.push("project"); data = { projectUpdate: { success: !options.failProject } }; }
+      else throw new Error(`Unexpected query: ${query} ${JSON.stringify(variables)}`);
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    return writes;
+  }
+  const close = (id = "p1", confirm: unknown = true, headers = write) => app().request(`/api/projects/${id}/close`, { method: "POST", headers, body: JSON.stringify({ confirm }) });
+  it("requires explicit confirmation and a real project", async () => {
+    const writes = setup();
+    expect((await close("p1", false)).status).toBe(400);
+    expect((await close("all")).status).toBe(400);
+    expect(writes).toEqual([]);
+  });
+  it("refuses foreign projects and mixed-team projects before any write", async () => {
+    for (const options of [{ team: "ENG" }, { issueTeam: "ENG" }]) {
+      const writes = setup(options);
+      expect((await close()).status).toBe(403);
+      expect(writes).toEqual([]);
+    }
+    setup({ missing: true });
+    expect((await close()).status).toBe(404);
+  });
+  it("leaves the project open when an issue fails and permits retry", async () => {
+    const writes = setup({ failIssue: true });
+    const result = await close();
+    expect(result.status).toBe(502);
+    expect((await result.json()).error).toContain("project was not closed");
+    expect(writes).toEqual(["issue"]);
+    setup();
+    expect((await close()).status).toBe(200);
+  });
+  it("does not change deleted issues when closing a project", async () => {
+    const writes = setup({ trashed: true });
+    const result = await close();
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({ completedIssues: 0 });
+    expect(writes).toEqual(["project"]);
+  });
+  it("reports a failed project completion", async () => {
+    setup({ failProject: true });
+    const result = await close();
+    expect(result.status).toBe(502);
+    expect((await result.json()).error).toContain("project could not be closed");
+  });
+  it("applies origin and workspace checks to closeout", async () => {
+    const writes = setup();
+    expect((await close("p1", true, { ...write, origin: "https://evil.example" })).status).toBe(403);
+    expect((await close("p1", true, { ...write, "x-workspace": "unknown" } as typeof write)).status).toBe(400);
+    expect(writes).toEqual([]);
+  });
+});
+
+describe("autonomy", () => {
+  /** A Linear stub for the label calls: the project has the label `labelled`, and the group exists when `group`. */
+  function labelLinear({ teams = ["CD"], group = true, labelled = "standard-id" } = {}) {
+    const calls: { query: string; variables: Record<string, any> }[] = [];
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      calls.push({ query, variables });
+      let data: unknown = {};
+      if (query.includes("project(id")) {
+        data = { project: { id: "p1", teams: { nodes: teams.map((key) => ({ key })) }, labels: { nodes: labelled ? [{ id: labelled, parent: { id: "g" } }, { id: "init", parent: { id: "other" } }] : [] } },
+          teams: { nodes: [{ id: "team-cd" }] } };
+      } else if (query.includes("projectLabels(")) {
+        data = { projectLabels: { nodes: group ? [{ id: "g", name: "Autonomy", isGroup: true, retiredAt: null, parent: null },
+          { id: "standard-id", name: "standard", isGroup: false, retiredAt: null, parent: { id: "g" } }] : [] } };
+      } else if (query.includes("projectLabelCreate")) {
+        data = { projectLabelCreate: { projectLabel: { id: `new-${variables.i.name}` } } };
+      } else {
+        data = { ok: { success: true } };
+      }
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    return calls;
+  }
+  const post = (a: ReturnType<typeof app>, level: unknown) =>
+    a.request("/api/projects/p1/autonomy", { method: "POST", headers: write, body: JSON.stringify({ level }) });
+
+  it("sets the level label, removes the old one, and tells the coordinator", async () => {
+    const calls = labelLinear();
+    const a = app();
+    const response = await post(a, "full");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, level: "full", queued: 1 });
+    const created = calls.find((c) => c.query.includes("projectLabelCreate"));
+    expect(created?.variables.i).toEqual({ name: "full", teamId: "team-cd", parentId: "g" });
+    expect(calls.find((c) => c.query.includes("projectRemoveLabel"))?.variables).toEqual({ id: "p1", l: "standard-id" });
+    expect(calls.find((c) => c.query.includes("projectAddLabel"))?.variables).toEqual({ id: "p1", l: "new-full" });
+    // A coordinator that connects now gets the command from the queue.
+    const sent: string[] = [];
+    const connection = a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
+    connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
+    expect(JSON.parse(sent[0])).toMatchObject({ type: "command", payload: { name: "autonomy", key: null, issue: null, level: "full" } });
+  });
+  it("makes the group when it is missing, and changes nothing for the level the project has", async () => {
+    let calls = labelLinear({ group: false, labelled: "" });
+    expect((await post(app(), "supervised")).status).toBe(200);
+    const made = calls.filter((c) => c.query.includes("projectLabelCreate")).map((c) => c.variables.i);
+    expect(made[0]).toMatchObject({ name: "autonomy", isGroup: true, groupType: "singleSelect", teamId: "team-cd" });
+    expect(made[1]).toEqual({ name: "supervised", teamId: "team-cd", parentId: "new-autonomy" });
+    calls = labelLinear();
+    expect((await post(app(), "standard")).status).toBe(200);
+    expect(calls.some((c) => /projectLabelCreate|projectRemoveLabel|projectAddLabel/.test(c.query))).toBe(false);
+  });
+  it("refuses an unknown level and a project of another team", async () => {
+    labelLinear();
+    expect((await post(app(), "yolo")).status).toBe(400);
+    const calls = labelLinear({ teams: ["ENG"] });
+    expect((await post(app(), "full")).status).toBe(403);
+    expect(calls.some((c) => c.query.includes("mutation"))).toBe(false);
+  });
+});

@@ -1,0 +1,511 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, setOpenProject } from "./api";
+import { Board } from "./components/Board";
+import { Canvas } from "./components/Canvas";
+import { Overview } from "./components/Overview";
+import { Panel } from "./components/Panel";
+import { CopyButton, Lamp, Picker } from "./components/ui";
+import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type Signal, toggleReviewed } from "./lib/graph";
+import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
+import { liveJob, presenceText } from "./lib/link";
+import { type OverviewData, PROJECT_LAMP, movesWithAsks, summaryKey } from "./lib/overview";
+import { site, statusOrder } from "./lib/site";
+import { type Layout, layout as runLayout } from "./lib/layout";
+import type { GraphData, Issue, IssuePatch, Project, ProjectList } from "./lib/types";
+import { useLink } from "./useLink";
+
+const POLL_MS = 15_000;
+/** The overview loads a graph for each open project, so it polls less often than one graph. */
+const OVERVIEW_MS = 60_000;
+
+function useQuery() {
+  const read = () => new URLSearchParams(location.search);
+  const [query, setQuery] = useState(read);
+  useEffect(() => {
+    const sync = () => setQuery(read());
+    addEventListener("popstate", sync);
+    return () => removeEventListener("popstate", sync);
+  }, []);
+  const set = useCallback((changes: Record<string, string | null>, push = false) => {
+    const next = read();
+    for (const [k, v] of Object.entries(changes)) v === null ? next.delete(k) : next.set(k, v);
+    history[push ? "pushState" : "replaceState"](null, "", `?${next}`);
+    setQuery(next);
+  }, []);
+  return [query, set] as const;
+}
+
+// The project parameter holds an ID or the name that wg ui passed.
+export function projectFromQuery(directory: ProjectList | null, query: URLSearchParams) {
+  const wanted = query.get("project") || null;
+  const workspace = query.get("workspace") ?? site.defaultWorkspace;
+  const project = directory?.projects.find((p) => p.workspace === workspace
+    && (p.id === wanted || p.name.toLowerCase() === wanted?.toLowerCase())) ?? null;
+  const entry = directory?.workspaces.find((w) => w.id === workspace);
+  const missing = directory && wanted && !project && !entry?.error ? `No project "${wanted}" in ${entry?.name ?? workspace}` : null;
+  return { project, missing };
+}
+
+export function App() {
+  const [query, setQuery] = useQuery();
+  const [directory, setDirectory] = useState<ProjectList | null>(null);
+  const [data, setData] = useState<GraphData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [syncedAt, setSyncedAt] = useState<Date | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [openOnly, setOpenOnly] = useState(false);
+  const [allEdges, setAllEdges] = useState(false);
+  const [map, setMap] = useState(() => localStorage.getItem("wg-map") !== "off");
+  useEffect(() => localStorage.setItem("wg-map", map ? "on" : "off"), [map]);
+  // The board starts open on a wide pane. On a phone it covers the canvas, so it starts closed there.
+  const [board, setBoard] = useState(() => localStorage.getItem("wg-board") !== "off" && matchMedia("(min-width: 721px)").matches);
+  useEffect(() => localStorage.setItem("wg-board", board ? "on" : "off"), [board]);
+  const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set());
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  const [focus, setFocus] = useState<{ id: string; tick: number } | null>(null);
+  const [placed, setPlaced] = useState<{ key: string; layout: Layout } | null>(null);
+  const pending = useRef(0);
+  // The version of the graph that the server sent last. An edit changes the graph on screen, so it clears this.
+  const version = useRef<{ project: string; value: string } | null>(null);
+  const generation = useRef(0);
+
+  const { project, missing } = useMemo(() => projectFromQuery(directory, query), [directory, query]);
+
+  useEffect(() => { api.projects().then((list) => setDirectory((now) => now ?? list)).catch((e) => setError(e.message)); }, []);
+
+  // The overview also gives the project picker the count of issues that wait on the human.
+  const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [overviewBusy, setOverviewBusy] = useState(false);
+  const [overviewTick, setOverviewTick] = useState(0);
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    let live = true, running = false;
+    const poll = () => {
+      if (running || document.hidden) return;
+      running = true;
+      setOverviewBusy(true);
+      api.overview().then((o) => { if (live) { setOverview(o); setDirectory(o); setNow(Date.now()); } })
+        .catch((e) => live && setError(`overview: ${e.message}`))
+        .finally(() => { running = false; if (live) setOverviewBusy(false); });
+    };
+    poll();
+    const timer = setInterval(poll, OVERVIEW_MS);
+    document.addEventListener("visibilitychange", poll);
+    return () => { live = false; clearInterval(timer); document.removeEventListener("visibilitychange", poll); };
+  }, [overviewTick]);
+
+
+  const load = useCallback(async (project: Project) => {
+    if (pending.current) return; // A poll result older than an edit in flight would undo the edit on screen.
+    const mine = ++generation.current;
+    setNow(Date.now());
+    setBusy(true);
+    try {
+      const scope = `${project.workspace}:${project.id}`;
+      const have = version.current?.project === scope ? version.current.value : undefined;
+      const next = await api.graph(project.id, have, project.workspace);
+      if (mine !== generation.current || pending.current) return;
+      if (next) {
+        version.current = { project: scope, value: next.version };
+        setData(next);
+      }
+      setSyncedAt(new Date()); // also for an answer of "no change": the page is as new as this poll
+      setError(null);
+    } catch (e) {
+      if (mine === generation.current) setError((e as Error).message);
+    } finally {
+      if (mine === generation.current) setBusy(false);
+    }
+  }, []);
+
+  // Each overview poll gives the directory new objects, so `project` gets a new identity with the same project.
+  // The graph resets only when the open project is a different project: else each poll blanks the page.
+  const openKey = project ? `${project.workspace}:${project.id}` : null;
+  const currentProject = useRef(project);
+  currentProject.current = project;
+  useEffect(() => {
+    setData(null);
+    version.current = null;
+    setPlaced(null);
+    const project = currentProject.current;
+    if (!project) return;
+    setStatusFilter(new Set()); // The statuses of one project are not the statuses of the next.
+    void load(project);
+    const timer = setInterval(() => !document.hidden && void load(project), POLL_MS);
+    const wake = () => !document.hidden && void load(project);
+    document.addEventListener("visibilitychange", wake);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", wake);
+      generation.current++;
+    };
+  }, [openKey, load]);
+
+  // The link: the coordinator of this project (or of every project, on the overview), and a change on the
+  // page or in Linear at once instead of at the next poll.
+  useEffect(() => { setOpenProject(project?.id ?? null); }, [openKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const linkRef = useMemo(() => (project ? { workspace: project.workspace ?? site.defaultWorkspace, id: project.id } : null), [openKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const link = useLink(linkRef, () => { if (project && !document.hidden) void load(project); });
+  // A worker's question is a move of the human's: it counts in "Your move", the picker, and the badge.
+  const yours = useMemo(() => new Map((overview?.summaries ?? []).map((s) => [summaryKey(s), movesWithAsks(s.you, link.asksBy.get(summaryKey(s))).length])), [overview, link.asksBy]);
+  const asked = useMemo(() => new Set(link.asks.flatMap((a) => (a.issue ? [a.issue] : []))), [link.asks]);
+  const presence = linkRef ? link.presence.get(summaryKey(linkRef)) : undefined;
+  const coordinator = useMemo(() => (linkRef ? presenceText(presence, now) : null), [presence, linkRef, now]);
+  // The project label `paused` is the record; an older coordinator report stands in until the list has it.
+  const paused = project?.paused ?? !!presence?.coordinators[0]?.paused;
+  const [commandNote, setCommandNote] = useState<string | null>(null);
+  const command = useCallback(async (cmd: Parameters<typeof api.command>[1], done: string) => {
+    if (!project) return;
+    try {
+      const result = await api.command(project.id, cmd, project.workspace);
+      if (cmd.name === "pause" || cmd.name === "resume") {
+        const target = project, on = cmd.name === "pause";
+        setDirectory((list) => list && { ...list, projects: list.projects.map((p) => p.id === target.id && p.workspace === target.workspace ? { ...p, paused: on } : p) });
+      }
+      setCommandNote(coordinator?.state === "listening" ? done : `${done} It waits in the queue (${result.queued}) until the next wg next.`);
+      setTimeout(() => setCommandNote(null), 6000);
+    } catch (e) {
+      setError(`${cmd.name}: ${(e as Error).message}`);
+    }
+  }, [project, coordinator]);
+  const commands = coordinator && (
+    <span className="effort-commands">
+      {commandNote && <span className="effort-note" role="status">{commandNote}</span>}
+      <button type="button" className="ghost" onClick={() => void command({ name: "next" }, "wg next runs again.")} title="The coordinator reads Linear and publishes again at once.">Run wg next now</button>
+      <button type="button" className="ghost" onClick={() => void command({ name: paused ? "resume" : "pause" }, paused ? "Resumed." : "Paused.")}
+        title={paused ? "The coordinator acts again." : "The coordinator stops acting: wg next holds each action until you resume."}>{paused ? "Resume" : "Pause"}</button>
+    </span>
+  );
+
+  // The autonomy level is a label of the project. A change goes to Linear, then to the coordinator at once.
+  const [autonomyBusy, setAutonomyBusy] = useState(false);
+  const setAutonomy = async (level: AutonomyLevel) => {
+    if (!project || autonomyBusy) return;
+    const target = project;
+    setAutonomyBusy(true);
+    try {
+      const result = await api.autonomy(target.id, level, target.workspace);
+      setDirectory((list) => list && { ...list, projects: list.projects.map((p) => p.id === target.id && p.workspace === target.workspace ? { ...p, autonomy: level } : p) });
+      setCommandNote(coordinator?.state === "listening" ? `Autonomy ${level}: the coordinator was told.`
+        : `Autonomy ${level}. The coordinator gets it at its next wg next${result.queued ? ` (queue: ${result.queued})` : ""}.`);
+      setTimeout(() => setCommandNote(null), 6000);
+    } catch (e) {
+      setError(`autonomy: ${(e as Error).message}`);
+    } finally {
+      setAutonomyBusy(false);
+    }
+  };
+  const autonomy = project?.autonomy ?? AUTONOMY_DEFAULT;
+
+  const closeProject = async () => {
+    if (!project || closing || pending.current) return;
+    const target = project;
+    if (!window.confirm(`Close “${target.name}” in ${target.workspaceName}?\n\nThis marks every issue in this project Done, including canceled issues, and completes the project.`)) return;
+    setClosing(true);
+    setCloseError(null);
+    pending.current++;
+    generation.current++;
+    version.current = null;
+    setError(null);
+    try {
+      await api.closeProject(target.id, target.workspace);
+      // Keep the current selection if the user changed projects during the request.
+      setDirectory((list) => list && { ...list, projects: list.projects.map((p) => p.id === target.id && p.workspace === target.workspace
+        ? { ...p, status: "Completed", statusType: "completed" } : p) });
+      setOverview(null);
+      setOverviewTick((tick) => tick + 1);
+    } catch (e) {
+      setCloseError(`“${target.name}” was not closed: ${(e as Error).message}`);
+    } finally {
+      pending.current--;
+      setClosing(false);
+      setBusy(false);
+      // Refresh even after a partial failure so completed issues are visible.
+      const current = new URLSearchParams(location.search);
+      if ((current.get("workspace") ?? site.defaultWorkspace) === target.workspace
+        && [target.id, target.name.toLowerCase()].includes((current.get("project") ?? "").toLowerCase())) void load(target);
+    }
+  };
+
+  const graph = useMemo(() => (data ? buildGraph(data, { openOnly }) : null), [data, openOnly]);
+  const full = useMemo(() => (data ? buildGraph(data) : null), [data]);
+  const edges = useMemo(() => (graph ? (allEdges ? graph.edges : reduceEdges(graph)) : []), [graph, allEdges]);
+  const key = graph ? shapeKey(graph, edges) : "";
+  useEffect(() => {
+    if (!graph || !data) return;
+    let live = true;
+    runLayout(graph.nodes, edges, data.milestones).then((l) => live && setPlaced({ key, layout: l })).catch((e) => live && setError(`layout: ${e.message}`));
+    return () => { live = false; };
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selected = useMemo(() => {
+    const wanted = query.get("issue");
+    return full?.nodes.find((n) => n.issue.identifier === wanted) ?? null;
+  }, [full, query]);
+  const select = useCallback((id: string | null) => {
+    // A click pins the node. The canvas then shows the pinned state, not the trace of the pointer,
+    // until the pointer goes onto a node again.
+    setHoverId(null);
+    setQuery({ issue: id ? full?.byId.get(id)?.issue.identifier ?? null : null });
+  }, [full, setQuery]);
+
+  const onPatch = useCallback((id: string, patch: IssuePatch, optimistic: Partial<Issue>) => {
+    let before: Issue | undefined;
+    const swap = (issue: Issue) => setData((d) => d && d.workspace === project?.workspace && d.project.id === project?.id ? {
+      ...d, issues: d.issues.map((i) => (i.id === id ? issue : i)),
+    } : d);
+    setData((d) => {
+      before = d?.issues.find((i) => i.id === id);
+      return d && { ...d, issues: d.issues.map((i) => (i.id === id ? { ...i, ...optimistic } : i)) };
+    });
+    pending.current++;
+    generation.current++;
+    version.current = null;
+    return api.update(id, patch, project?.workspace).then((issue) => { swap(issue); return true; }, (e) => {
+      if (before) swap(before);
+      setError(`${before?.identifier ?? "Issue"} not saved: ${e.message}`);
+      return false;
+    }).finally(() => { pending.current--; });
+  }, [project]);
+
+  // The human marks a PR reviewed with the `reviewed` label (work-graph SKILL.md "Mark a PR reviewed").
+  const reviewedLabel = (teamId: string) => data?.labels.find((l) => l.name === REVIEWED && (!l.teamId || l.teamId === teamId));
+  const onReview = useCallback((id: string) => {
+    const issue = data?.issues.find((i) => i.id === id), label = issue && reviewedLabel(issue.teamId);
+    if (!issue || !label) return;
+    const labels = toggleReviewed(issue.labels, label);
+    void onPatch(id, { labelIds: labels.map((l) => l.id) }, { labels });
+  }, [data, onPatch]); // eslint-disable-line react-hooks/exhaustive-deps
+  const canReview = !!data?.labels.some((l) => l.name === REVIEWED);
+
+  // A board row selects the issue and centres it. On a phone the board then gives the screen to the canvas.
+  const pick = useCallback((id: string) => {
+    select(id);
+    setFocus({ id, tick: Date.now() });
+    if (!matchMedia("(min-width: 721px)").matches) setBoard(false);
+  }, [select]);
+
+  // The keys of a project page. `j` and `k` step through the issues in board order (Your move first).
+  const [keys, setKeys] = useState(false);
+  const order = useMemo(() => (full ? boardOrder(full, asked) : []), [full, asked]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const typing = e.target instanceof HTMLElement && e.target.closest("input, textarea, select, [contenteditable]");
+      // A picker that is open takes its keys for itself.
+      if (typing || document.querySelector(".picker-list") || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "Escape") {
+        if (keys) setKeys(false);
+        else if (query.get("issue")) select(null);
+        return;
+      }
+      if (e.key === "?") { setKeys((on) => !on); return; }
+      if (!full) return;
+      const at = selected ? order.findIndex((n) => n.id === selected.id) : -1;
+      if ((e.key === "j" || e.key === "k") && order.length) {
+        e.preventDefault();
+        const next = order[at < 0 ? 0 : (at + (e.key === "j" ? 1 : -1) + order.length) % order.length];
+        select(next.id);
+        setFocus({ id: next.id, tick: Date.now() });
+      } else if (e.key === "o" && selected) {
+        window.open(selected.issue.url, "_blank", "noopener");
+      } else if (e.key === "p" && selected?.issue.pullRequests[0]) {
+        window.open(selected.issue.pullRequests[0].url, "_blank", "noopener");
+      } else if (e.key === "b") {
+        setBoard((on) => !on);
+      }
+    };
+    addEventListener("keydown", onKey);
+    return () => removeEventListener("keydown", onKey);
+  }, [query, select, full, order, selected, keys]);
+
+  const counts = useMemo(() => {
+    const tally = new Map<string, { n: number; signal: Signal }>();
+    for (const n of full?.nodes ?? []) tally.set(n.status, { n: (tally.get(n.status)?.n ?? 0) + 1, signal: n.signal });
+    return [...tally].sort((a, b) => statusOrder().indexOf(a[0]) - statusOrder().indexOf(b[0]));
+  }, [full]);
+  const toggleStatus = useCallback((status: string) => setStatusFilter((now) => {
+    const next = new Set(now);
+    if (!next.delete(status)) next.add(status);
+    return next;
+  }), []);
+  const effort = useMemo(() => parseStatus(data?.status?.content), [data?.status?.content]);
+  const hasCards = useMemo(() => full?.nodes.some((n) => n.card && !n.issue.external) ?? false, [full]);
+  const timing = statusTiming(effort, hasCards, data?.status?.updatedAt ?? null, now);
+  const ageLabel = timing?.state === "unknown" ? "changed" : timing?.state === "stale" ? "last ran" : "ran";
+  const contractMismatch = effort?.contract != null && effort.contract !== import.meta.env.WG_CONTRACT_HASH;
+  const listed = useMemo(() => projectGroups(directory?.projects ?? []), [directory]);
+  const initiatives = useMemo(() => (directory?.projects ?? []).some((p) => p.initiative), [directory]);
+  // One group per workspace and initiative, open projects first; the projects with no initiative come last in
+  // their workspace. The lamp is the status; the text names it only when it is not In Progress.
+  const projectOptions = useMemo(() => (directory?.workspaces ?? []).flatMap(({ id, name }) => [...listed.open, ...listed.closed]
+    .filter((p) => p.workspace === id)
+    .map((p, at) => ({ p, at }))
+    .sort((a, b) => Number(!a.p.initiative) - Number(!b.p.initiative) || (a.p.initiative ?? "").localeCompare(b.p.initiative ?? "") || a.at - b.at)
+    .map(({ p }) => {
+      const closed = p.statusType === "completed" || p.statusType === "canceled";
+      const mine = yours.get(summaryKey(p)) ?? 0;
+      const hint = [mine ? `${mine} for you` : "", p.statusType === "started" ? "" : p.status].filter(Boolean).join(" · ");
+      return {
+        id: `${p.workspace}:${p.id}`, label: p.name, dim: closed,
+        group: [directory && directory.workspaces.length > 1 ? name : "", p.initiative ?? (initiatives ? "No initiative" : "")].filter(Boolean).join(" · ") || undefined,
+        hint: hint || undefined, lead: <Lamp signal={mine ? "stop" : PROJECT_LAMP[p.statusType] ?? "idle"} />,
+      };
+    })), [directory, listed, yours, initiatives]);
+  const openProject = useCallback((p: Project, issue?: string) =>
+    setQuery({ workspace: p.workspace ?? site.defaultWorkspace, project: p.id, issue: issue ?? null }, true), [setQuery]);
+  const home = () => setQuery({ workspace: null, project: null, issue: null }, true);
+  const waitingTotal = [...yours.values()].reduce((a, b) => a + b, 0);
+  const total = full?.nodes.length ?? 0;
+  const done = full?.nodes.filter((n) => n.status === "Done").length ?? 0;
+  // A canceled issue is not work that is left, so it is not in the total that "done" counts to.
+  const planned = total - (full?.nodes.filter((n) => n.status === "Canceled").length ?? 0);
+
+  return (
+    <div className="app">
+      <header className="bar">
+        <span className="brand">work-graph</span>
+        {(project || missing) && (
+          <button type="button" className="bar-home" onClick={home} title="All projects: which ones wait on you, and how far each one is.">
+            Overview{waitingTotal > 0 && <b className="bar-home-count mono" aria-label={`${waitingTotal} issues wait on you`}>{waitingTotal}</b>}
+          </button>
+        )}
+        <Picker value={project ? [`${project.workspace}:${project.id}`] : []} onChange={([id]) => {
+          const selected = directory?.projects.find((p) => `${p.workspace}:${p.id}` === id);
+          if (selected) openProject(selected);
+        }} wide options={projectOptions}>
+          <span className="bar-project">{project ? [project.workspaceName, project.initiative, project.name].filter(Boolean).join(" / ") : (directory ? "Open a project" : "Loading projects…")}</span><span className="caret">▾</span>
+        </Picker>
+        {project && <CopyButton text={project.name} label="Copy the project name" />}
+        {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
+          <Picker wide value={[autonomy]} onChange={([level]) => void setAutonomy(level as AutonomyLevel)} disabled={autonomyBusy}
+            title={`Autonomy level: what the coordinator may do without you.${project.autonomy ? "" : " No label on the project: standard."} A change tells the coordinator at once.`}
+            options={AUTONOMY_LEVELS.map((level) => ({ id: level, label: level, hint: AUTONOMY_HINTS[level] }))}>
+            <span className={`bar-autonomy auto-${autonomy}`}>{autonomyBusy ? "Autonomy…" : <>Autonomy <b>{autonomy}</b></>}</span><span className="caret">▾</span>
+          </Picker>
+        )}
+        <span className="station-fill" />
+        {full && (
+          <>
+            <button type="button" className={`toggle toggle-board${board ? " is-on" : ""}`} aria-pressed={board} onClick={() => setBoard(!board)}
+              title="Show or hide the list of issues by the action they need. Press / to find an issue.">Board</button>
+            {/* The view options change rarely, so they share one menu and leave the bar to the work. */}
+            <Picker multi align="right" title="View options" value={[openOnly && "open", allEdges && "edges", map && "map"].filter(Boolean) as string[]}
+              onChange={(ids) => { setOpenOnly(ids.includes("open")); setAllEdges(ids.includes("edges")); setMap(ids.includes("map")); }}
+              options={[
+                { id: "open", label: "Open issues only", hint: "hide done, canceled" },
+                { id: "edges", label: "Every blocks edge", hint: "also implied ones" },
+                { id: "map", label: "Small map" },
+              ]}>
+              <span className="bar-view">View{(openOnly || allEdges) && <i className="bar-view-dot" aria-label="filters on" />}</span><span className="caret">▾</span>
+            </Picker>
+            <button type="button" className="sync" onClick={() => project && void load(project)} title={`Refresh now. The graph also refreshes every 15 s.${syncedAt ? ` Last sync ${syncedAt.toLocaleTimeString()}.` : ""}`}>
+              <span className={`sync-dot${busy ? " is-busy" : ""}`} /><span className="sync-time">{syncedAt ? syncedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "…"}</span>
+            </button>
+          </>
+        )}
+        <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} title="Keyboard keys (?)">?</button>
+        {/* Apart from the view toggles: it changes every issue of the project in Linear. */}
+        {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
+          <button type="button" className="ghost bar-close" disabled={closing || busy} onClick={() => void closeProject()}
+            title="Mark every issue in this project Done and complete the project.">{closing ? "Closing…" : "Close project"}</button>
+        )}
+      </header>
+
+      {full && (
+        <div className="rail-bar">
+          <div className={`aspects${statusFilter.size ? " is-filtered" : ""}`} role="group" aria-label="Show only these statuses">
+            {counts.map(([status, c]) => (
+              <button type="button" key={status} className={`aspect${statusFilter.has(status) ? " is-on" : ""}`} aria-pressed={statusFilter.has(status)}
+                onClick={() => toggleStatus(status)} title={statusFilter.has(status) ? `Stop the filter on ${status}` : `Dim all but ${status}`}>
+                <Lamp signal={c.signal} />{status}<b className="mono">{c.n}</b>
+              </button>
+            ))}
+            {statusFilter.size > 0 && <button type="button" className="ghost" onClick={() => setStatusFilter(new Set())}>Show all</button>}
+          </div>
+          <div className="tally">
+            <div className="tally-track">
+              {counts.map(([status, c]) => (
+                <span key={status} className="tally-segment" style={{ flexGrow: c.n }} tabIndex={0}
+                  role="img" aria-label={`${status}: ${c.n} of ${total} issues`}>
+                  <i className={`sig-bg-${c.signal}`} />
+                  <span className="tally-tip" aria-hidden="true">{status} · {c.n}/{total}</span>
+                </span>
+              ))}
+            </div>
+            <span><b className="mono">{done}/{planned}</b> done</span>
+          </div>
+        </div>
+      )}
+
+      {contractMismatch && (
+        // A hash cannot tell which side is older: an old record and an old page look the same.
+        <div className="effort effort-warning" role="status">
+          wg next wrote this record with contract <span className="mono">{effort?.contract}</span>; this page has <span className="mono">{import.meta.env.WG_CONTRACT_HASH}</span>.
+          Run wg next with the wg of this repository.
+        </div>
+      )}
+      {!timing && coordinator && (
+        <div className="effort">
+          <span className="effort-mark">wg next</span><span className="effort-status" />
+          <span className={`effort-age coord-${coordinator.state}`} title={coordinator.title}>{coordinator.text}</span>
+          {commands}
+        </div>
+      )}
+      {timing && (
+        <div className={`effort${timing.state === "stale" || timing.state === "never" ? " effort-warning" : ""}`}
+          title={effort?.lines.map((l) => `${l.level} ${l.text}`).join("\n") || undefined}>
+          <span className="effort-mark">wg next</span>
+          {timing.state === "never"
+            ? <span>wg next has not published this effort</span>
+            : <span className="effort-status">{effort?.status}</span>}
+          {coordinator
+            ? <span className={`effort-age coord-${coordinator.state}`} title={coordinator.title}>{coordinator.text}</span>
+            : timing.state === "listening" && <span className="effort-age">listening</span>}
+          {timing.age && <span className="effort-age" title={timing.state === "unknown" ? "When the result last changed." : "When wg next last published."}>{ageLabel} {timing.age}</span>}
+          {commands}
+        </div>
+      )}
+
+      {(closeError || error) && <div className="error" role="alert"><span>{closeError || error}</span><button type="button" className="ghost" onClick={() => { setError(null); setCloseError(null); }}>Dismiss</button></div>}
+
+      {keys && (
+        <div className="keys" role="dialog" aria-label="Keyboard keys">
+          <header><b>Keys</b><button type="button" className="ghost" onClick={() => setKeys(false)} aria-label="Close">✕</button></header>
+          <dl>
+            <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Next or previous issue, in board order: Your move first</dd>
+            <dt><kbd>o</kbd></dt><dd>Open the issue in Linear</dd>
+            <dt><kbd>p</kbd></dt><dd>Open the PR of the issue in GitHub</dd>
+            <dt><kbd>b</kbd></dt><dd>Show or hide the board</dd>
+            <dt><kbd>/</kbd></dt><dd>Find an issue (board) or a project (overview)</dd>
+            <dt><kbd>Esc</kbd></dt><dd>Close the issue</dd>
+            <dt><kbd>⌘</kbd> <kbd>↵</kbd></dt><dd>Send a comment or a reply</dd>
+          </dl>
+        </div>
+      )}
+
+      <main className="stage">
+        {!project && directory && (
+          <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} presence={link.presence} asks={link.asksBy}
+            initiative={query.get("initiative")} onInitiative={(name) => setQuery({ initiative: name }, true)} />
+        )}
+        {project && !data && !error && <div className="blank">Loading {project.name}…</div>}
+        {board && full && full.nodes.length > 0 && <Board graph={full} now={now} selectedId={selected?.id ?? null} onPick={pick} onHover={setHoverId} onReview={canReview ? onReview : undefined}
+          asked={asked}
+          live={new Map(link.progress.flatMap((p) => { const job = liveJob(p); return job && p.issue ? [[p.issue, job] as [string, string]] : []; }))} />}
+        {graph && data && !graph.nodes.length && <div className="blank">{openOnly ? "No open issues. Turn off “Open issues only” under View to see all." : "This project has no issues."}</div>}
+        {graph && placed && graph.nodes.length > 0 && (
+          <Canvas graph={graph} now={now} edges={edges} layout={placed.layout} selectedId={selected?.id ?? null} hoverId={hoverId} statusFilter={statusFilter}
+            focus={focus} showMap={map} onSelect={select} onHover={setHoverId} />
+        )}
+        {selected && full && data && (
+          <Panel node={selected} now={now} graph={full} data={data} asks={link.asks.filter((a) => a.issue === selected.issue.identifier)}
+            progress={link.progress.find((p) => p.issue === selected.issue.identifier)}
+            onDispatch={coordinator ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview ? onReview : undefined}
+            onGo={(id) => { select(id); setFocus({ id, tick: Date.now() }); }} />
+        )}
+      </main>
+    </div>
+  );
+}

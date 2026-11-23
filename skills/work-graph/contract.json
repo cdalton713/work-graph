@@ -1,0 +1,415 @@
+{
+  "version": 3,
+  "kinds": [
+    "decision",
+    "merge-point",
+    "ops",
+    "ship-point",
+    "spike",
+    "task"
+  ],
+  "kind_labels": [
+    "decision",
+    "merge-point",
+    "ops",
+    "ship-point",
+    "spike"
+  ],
+  "status_aliases": {
+    "Ready for Deploy": "Merged",
+    "External QA": "In Review",
+    "In Dev": "In Progress",
+    "Ready for Eng": "Todo"
+  },
+  "human": {
+    "default": "Human",
+    "status": "Needs {name}",
+    "label": "needs-{slug}",
+    "wait": "wait human",
+    "slug": "lowercase; each run of other characters than a-z and 0-9 is one -; no - at the ends"
+  },
+  "labels": {
+    "needs_human": "needs-human",
+    "ready_to_merge": "ready-to-merge",
+    "reviewed": "reviewed",
+    "claim_prefix": "agent:",
+    "answered": "answered"
+  },
+  "project_labels": {
+    "initiative_group": "initiative",
+    "autonomy_group": "autonomy",
+    "autonomy_levels": [
+      "full",
+      "standard",
+      "supervised"
+    ],
+    "autonomy_default": "standard",
+    "paused": "paused"
+  },
+  "card": {
+    "prefix": "**work-graph node card**",
+    "footers": [
+      "Generated from plan.json by `wg load`. Change plan.json, not this comment.",
+      "No acceptance or files in plan.json."
+    ],
+    "fields": [
+      "key",
+      "kind",
+      "phase",
+      "lane",
+      "role",
+      "branch",
+      "pr",
+      "review",
+      "merge_review",
+      "state",
+      "job",
+      "started_at",
+      "soak_until",
+      "code_done",
+      "wave",
+      "next"
+    ],
+    "samples": [
+      {
+        "data": {
+          "wg": 1,
+          "key": "a",
+          "kind": "decision",
+          "phase": "1"
+        },
+        "body": "**work-graph node card** `a` \u00b7 kind `decision` \u00b7 phase `1`\n\n**Acceptance**\n\nPass.\n\n```json\n{\"wg\": 1, \"key\": \"a\", \"kind\": \"decision\", \"phase\": \"1\"}\n```\n\nGenerated from plan.json by `wg load`. Change plan.json, not this comment."
+      },
+      {
+        "data": {
+          "wg": 1,
+          "key": "a",
+          "kind": "merge-point",
+          "phase": "1"
+        },
+        "body": "**work-graph node card** `a` \u00b7 kind `merge-point` \u00b7 phase `1`\n\n**Acceptance**\n\nPass.\n\n```json\n{\"wg\": 1, \"key\": \"a\", \"kind\": \"merge-point\", \"phase\": \"1\"}\n```\n\nGenerated from plan.json by `wg load`. Change plan.json, not this comment."
+      },
+      {
+        "data": {
+          "wg": 1,
+          "key": "a",
+          "kind": "ops",
+          "phase": "1"
+        },
+        "body": "**work-graph node card** `a` \u00b7 kind `ops` \u00b7 phase `1`\n\n**Acceptance**\n\nPass.\n\n```json\n{\"wg\": 1, \"key\": \"a\", \"kind\": \"ops\", \"phase\": \"1\"}\n```\n\nGenerated from plan.json by `wg load`. Change plan.json, not this comment."
+      },
+      {
+        "data": {
+          "wg": 1,
+          "key": "a",
+          "kind": "ship-point",
+          "phase": "1",
+          "branch": "wg/xy-write-00-a",
+          "pr": "7",
+          "review": "clean",
+          "merge_review": "requested",
+          "state": "running",
+          "job": "review",
+          "started_at": "2025-12-31T23:00:00Z",
+          "soak_until": "2026-01-01T00:00:00Z",
+          "code_done": "yes",
+          "wave": "yes",
+          "next": "do ask-merge: #7\nwait human: 2 review rounds; accept or ask for a fix"
+        },
+        "body": "**work-graph node card** `a` \u00b7 kind `ship-point` \u00b7 phase `1`\n\n**Acceptance**\n\nPass.\n\n```json\n{\"wg\": 1, \"key\": \"a\", \"kind\": \"ship-point\", \"phase\": \"1\", \"branch\": \"wg/xy-write-00-a\", \"pr\": \"7\", \"review\": \"clean\", \"merge_review\": \"requested\", \"state\": \"running\", \"job\": \"review\", \"started_at\": \"2025-12-31T23:00:00Z\", \"soak_until\": \"2026-01-01T00:00:00Z\", \"code_done\": \"yes\", \"wave\": \"yes\", \"next\": \"do ask-merge: #7\\nwait human: 2 review rounds; accept or ask for a fix\"}\n```\n\nGenerated from plan.json by `wg load`. Change plan.json, not this comment."
+      },
+      {
+        "data": {
+          "wg": 1,
+          "key": "a",
+          "kind": "spike",
+          "phase": "1"
+        },
+        "body": "**work-graph node card** `a` \u00b7 kind `spike` \u00b7 phase `1`\n\n**Acceptance**\n\nPass.\n\n```json\n{\"wg\": 1, \"key\": \"a\", \"kind\": \"spike\", \"phase\": \"1\"}\n```\n\nGenerated from plan.json by `wg load`. Change plan.json, not this comment."
+      },
+      {
+        "data": {
+          "wg": 1,
+          "key": "a",
+          "kind": "task",
+          "phase": "1",
+          "lane": "write",
+          "role": "sync",
+          "branch": "wg/xy-write-00-a",
+          "pr": "7",
+          "review": "clean",
+          "merge_review": "requested",
+          "state": "running",
+          "job": "review",
+          "started_at": "2025-12-31T23:00:00Z",
+          "soak_until": "2026-01-01T00:00:00Z",
+          "code_done": "yes",
+          "wave": "yes",
+          "next": "do ask-merge: #7\nwait human: 2 review rounds; accept or ask for a fix"
+        },
+        "body": "**work-graph node card** `a` \u00b7 kind `task` \u00b7 phase `1` \u00b7 lane `write` \u00b7 role `sync`\n\n**Acceptance**\n\nPass.\n\n**Files**\n\n- owns `src/a/**`\n- shares `pnpm-lock.yaml` (additive only)\n\n```json\n{\"wg\": 1, \"key\": \"a\", \"kind\": \"task\", \"phase\": \"1\", \"lane\": \"write\", \"role\": \"sync\", \"branch\": \"wg/xy-write-00-a\", \"pr\": \"7\", \"review\": \"clean\", \"merge_review\": \"requested\", \"state\": \"running\", \"job\": \"review\", \"started_at\": \"2025-12-31T23:00:00Z\", \"soak_until\": \"2026-01-01T00:00:00Z\", \"code_done\": \"yes\", \"wave\": \"yes\", \"next\": \"do ask-merge: #7\\nwait human: 2 review rounds; accept or ask for a fix\"}\n```\n\nGenerated from plan.json by `wg load`. Change plan.json, not this comment."
+      }
+    ]
+  },
+  "status_doc": {
+    "title": "work-graph status",
+    "fields": [
+      "status",
+      "wave",
+      "lines",
+      "at",
+      "ran",
+      "wait_interval",
+      "contract"
+    ]
+  },
+  "statuses": [
+    "Todo",
+    "Ready",
+    "In Progress",
+    "Needs Human",
+    "In Review",
+    "Ready to Merge",
+    "Merged",
+    "Verifying",
+    "Done",
+    "Canceled"
+  ],
+  "satisfied": [
+    {
+      "name": "a task of the same lane",
+      "blocker": {
+        "kind": "task",
+        "lane": "x",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "task",
+        "lane": "x",
+        "phase": "1"
+      },
+      "clear": [
+        "In Review",
+        "Ready to Merge",
+        "Merged",
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Merged",
+        "Done",
+        "Canceled"
+      ]
+    },
+    {
+      "name": "a task of another lane",
+      "blocker": {
+        "kind": "task",
+        "lane": "x",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "task",
+        "lane": "y",
+        "phase": "1"
+      },
+      "clear": [
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Done",
+        "Canceled"
+      ]
+    },
+    {
+      "name": "a task of the same lane name in another phase",
+      "blocker": {
+        "kind": "task",
+        "lane": "x",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "task",
+        "lane": "x",
+        "phase": "2"
+      },
+      "clear": [
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Done",
+        "Canceled"
+      ]
+    },
+    {
+      "name": "a task before its merge point",
+      "blocker": {
+        "kind": "task",
+        "lane": "x",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "merge-point",
+        "phase": "1"
+      },
+      "clear": [
+        "Merged",
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Merged",
+        "Done",
+        "Canceled"
+      ]
+    },
+    {
+      "name": "a post-merge task before its ship point",
+      "blocker": {
+        "kind": "task",
+        "lane": "sync",
+        "role": "sync",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "ship-point",
+        "phase": "1"
+      },
+      "clear": [
+        "Merged",
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Merged",
+        "Done",
+        "Canceled"
+      ]
+    },
+    {
+      "name": "a pre-merge task before a ship point",
+      "blocker": {
+        "kind": "task",
+        "lane": "x",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "ship-point",
+        "phase": "1"
+      },
+      "clear": [
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Done",
+        "Canceled"
+      ]
+    },
+    {
+      "name": "a merge point before an ops node",
+      "blocker": {
+        "kind": "merge-point",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "ops",
+        "phase": "1"
+      },
+      "clear": [
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Done",
+        "Canceled"
+      ]
+    },
+    {
+      "name": "an ops node before a ship point",
+      "blocker": {
+        "kind": "ops",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "ship-point",
+        "phase": "1"
+      },
+      "clear": [
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Done",
+        "Canceled"
+      ]
+    },
+    {
+      "name": "a ship point before the next phase",
+      "blocker": {
+        "kind": "ship-point",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "task",
+        "lane": "x",
+        "phase": "2"
+      },
+      "clear": [
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Done",
+        "Canceled"
+      ]
+    },
+    {
+      "name": "a decision before a task",
+      "blocker": {
+        "kind": "decision",
+        "phase": "1"
+      },
+      "node": {
+        "kind": "task",
+        "lane": "x",
+        "phase": "1"
+      },
+      "clear": [
+        "Done",
+        "Canceled"
+      ],
+      "clear_without_code_done": [
+        "Done",
+        "Canceled"
+      ]
+    }
+  ],
+  "link": {
+    "version": 1,
+    "path": "/api/link",
+    "to_coordinator": [
+      "changed",
+      "answer",
+      "reply",
+      "command"
+    ],
+    "from_coordinator": [
+      "hello",
+      "state",
+      "asks",
+      "progress",
+      "ack",
+      "wrote"
+    ],
+    "commands": [
+      "next",
+      "dispatch",
+      "pause",
+      "resume",
+      "autonomy"
+    ]
+  }
+}

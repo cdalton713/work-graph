@@ -1,0 +1,42 @@
+# Worker spec templates
+
+`wg dispatch` and `wg claim` fill these sections and write the result to `<plan-dir>/specs/`. The coordinator does not paste or fill them by hand. Each `{name}` is a value that `wg` supplies; `wg` stops if a name has no value.
+
+## task
+
+**Task:** Linear issue `{identifier}` ({url}), node `{key}`. Worktree `{path}`, branch `{branch}`, stax parent and PR base `{parent}`, diff base `{lower}`. `wg` = `{wg}`, plan dir `{plan_dir}`. The coordinator holds the claim and moves the issue. You change no `agent:*` label, no assignee, and no status, except in step 8.
+
+1. Immediately before each edit, commit, and rebase, run `git branch --show-current` and `git status --short` (and `st ls` once at the start). The branch and parent must match the values above, and the tree must hold only your changes; if not, send an `escalation` and stop.
+2. Read the issue (Linear MCP `get_issue` and `list_comments`): the design is in the description; the acceptance, owns, and shares are in the `work-graph node card` comment. Edit only owns files, and shares files additively. For any other file, `orca orchestration ask` first.
+3. Commit per unit of work, with conventional messages and `--no-verify`. Stage only your own hunks. No ticket IDs in code comments.
+4. **Push checks**, before every push that opens or updates a PR, in this order: one lint of what your diff affects, `moon run :lint --affected --downstream deep --base {lower}`; commit, also what the lint fixed; then, with a clean tree, `{wg} evidence {plan_dir} {key}`. It runs the test tasks that your diff affects on the test server, on the committed head. While you work, your test runs are focused vitest files. Exit 3 means the evidence is invalid. If the test server fails, report the exact error; `wg evidence` is the only run of a `:test` task. The known failures on the base are the `baseline` field of `{wg} run show {plan_dir} @effort`; no field means none.
+5. {submit}
+6. Attach the PR to the issue (`save_issue` with `links`), and comment the PR URL, the head SHA, and the `wg evidence` result.
+7. Your work ends at the open draft PR. The human merges, undrafts, and deploys. The coordinator creates worktrees and agents and sends follow-up jobs. Run `st sync` or `st restack` only inside a restack job; never `st merge`, `st restack --all`, `gh stack`, or a push to `main` or `<release>`.
+8. If you need the human (a decision, a login, a secret), comment what you need, run `{wg} move {plan_dir} {key} "Needs <human>"`, and send an `escalation`.
+9. New work you find: create an issue in the plan's team in status `Triage`, in project `{project}`, related to `{identifier}`. Do not do it now.
+10. Send one `worker_done` for each job: this dispatch and each follow-up job. `--outcome succeeded` only if the PR is open, `wg evidence` exited 0 on the pushed head (or failed only on the known failures on the base), and `{wg} owns diff {plan_dir} {key} {lower}` exits 0. Body: PR URL and head SHA; the check commands and results; what is left. Add `--files-modified` with the PR diff files. Otherwise `--outcome failed` with the failing command and its first error, also when no PR exists.
+
+## submit lane
+
+First PR: `st branch submit --draft --no-restack --no-native-stack --no-prompt --yes` (current branch only; `--no-restack` keeps the tested head). Title in conventional commit form. Check that the PR head equals the SHA that `wg evidence` tested, and with `st ll` that the base is `{parent}`. Each later update: `st branch submit --no-restack --no-native-stack --no-prompt --yes`. Never run `st submit` or `st ss`, and never omit `--no-native-stack`: a native GitHub stack retargets the bottom PR to the stax trunk. Then check scope: `gh pr view <n> --json commits --jq '.commits|length'` must equal `git rev-list --count {lower}..HEAD`; a larger number means the branch is not based on its PR base, so stop and report it.
+
+## submit hotfix
+
+First PR: follow the repository's hotfix rules for the PR body, if it has them (the local rules file names them); never ask for approval. `git push -u origin {branch}`, then `gh pr create --draft --base <release> --title "HOTFIX: <summary>" --body-file <body>`. Check that the PR head equals the SHA that `wg evidence` tested. Each later update: `git push --force-with-lease origin {branch}`.
+
+## submit sync
+
+Your work is one merge, and it comes before the push checks of step 4: `git fetch origin && git merge origin/<release>` (conflicts: `resolving-merge-conflicts`). Run the push checks on the merge commit. First PR: `git push -u origin {branch}`, then `gh pr create --draft --base main --title "SYNC: <release> → main (#a, #b)"`. Check that the PR head equals the SHA that `wg evidence` tested. Each later update: merge again, run the push checks again, then `git push origin {branch}`.
+
+## spike
+
+**Spike:** Linear issue `{identifier}` ({url}), node `{key}`. Worktree `{path}`, branch `{branch}`. Read the issue. Research only: no commit, no push, no PR. Write the findings as one comment on the issue. Send one `worker_done` with a summary.
+
+## job
+
+**Job `{job}`:** Linear issue `{identifier}`, node `{key}`. Worktree `{path}`, branch `{branch}`, PR #{pr}, stax parent and PR base `{parent}`, diff base `{lower}`. `wg` = `{wg}`, plan dir `{plan_dir}`. {restack}
+
+Do the work below on this branch only. A restack job follows the owner steps in `{skill}/references/review-and-merge.md` "Restack job". Then run the push checks and the update push of step 4 and step 5 of your task contract. Send one `worker_done` for this job with the new head SHA and the `wg evidence` result, or `--outcome failed` with the failing command and its first error.
+
+**Work:**

@@ -1,0 +1,3 @@
+# Orca (https://github.com/stablyai/orca): the setup script of each new workspace of this repository.
+scripts:
+  setup: pnpm install

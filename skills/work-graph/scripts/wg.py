@@ -575,8 +575,8 @@ def _epoch_seconds(value):
 
 def _reset_wait(headers):
     """Seconds until Linear accepts the refused request again, from the headers of that refusal: the
-    Retry-After header, and the reset time of each limit that is used up (the latest one counts). None when
-    the refusal gives no time."""
+    Retry-After header, and the reset time of each limit that is used up (the latest one counts). Without
+    these, the reset time of the request limit. None when the refusal gives no time."""
     if headers is None:
         return None
     now = gql_clock()
@@ -593,6 +593,10 @@ def _reset_wait(headers):
             at = _epoch_seconds(headers.get(f"X-RateLimit-{limit}-Reset"))
             if at is not None:
                 waits.append(at - now)
+    if not waits:
+        at = _epoch_seconds(headers.get("X-RateLimit-Requests-Reset"))
+        if at is not None:
+            waits.append(at - now)
     return max(0.0, max(waits)) if waits else None
 
 
@@ -605,10 +609,10 @@ def _gql_try(req):
     except urllib.error.HTTPError as e:
         _note_rate(e.headers)
         try:
-            detail = e.read(500).decode(errors="replace")
+            detail = e.read().decode(errors="replace")  # all of it: an error code can follow a long message
         except (http.client.HTTPException, OSError) as read_error:  # OSError covers a timeout and a reset
             detail = f"(body not read: {read_error})"
-        message = f"Linear HTTP {e.code}: {detail}"
+        message = f"Linear HTTP {e.code}: {detail[:500]}"
         if e.code >= 500:
             kind = "transient"
         elif e.code == 429:

@@ -4190,6 +4190,30 @@ class GqlRetryTests(unittest.TestCase):
                 self.assertIsNone(error)
                 self.assertEqual(sleeps, [10.5])
 
+    def test_a_rate_limit_code_after_a_long_message_is_found(self):
+        body = json.dumps({"errors": [{"message": "x" * 600, "extensions": {"code": "RATELIMITED"}}]})
+        self.assertGreater(body.index("RATELIMITED"), 500)
+        for query in (self.QUERY, self.MUTATION):
+            with self.subTest(query):
+                _, error, sleeps, err, calls, _ = self.run_gql([self.http_error(400, body), self.ok()], query=query)
+                self.assertIsNone(error)
+                self.assertEqual((calls, sleeps), (2, [1.0]))
+                self.assert_warnings(err, 1)
+                self.assertLess(len(err), 300)
+
+    def test_the_request_reset_counts_when_no_limit_is_marked_used_up(self):
+        for code in (429, 400):
+            with self.subTest(code):
+                body = '{"errors":[{"extensions":{"code":"RATELIMITED"}}]}'
+                headers = {"X-RateLimit-Requests-Reset": self.reset_at(30)}
+                _, error, sleeps, _, calls, _ = self.run_gql([self.http_error(code, body, headers), self.ok()])
+                self.assertIsNone(error)
+                self.assertEqual((calls, sleeps), (2, [30.5]))
+        far = {"X-RateLimit-Requests-Reset": self.reset_at(900), "Retry-After": "10"}
+        _, error, sleeps, _, _, _ = self.run_gql([self.http_error(429, "too many", far), self.ok()])
+        self.assertIsNone(error)
+        self.assertEqual(sleeps, [10.5])
+
     def test_a_refusal_uses_its_own_headers_not_the_headers_of_an_earlier_response(self):
         old = {"X-RateLimit-Requests-Remaining": "0", "X-RateLimit-Requests-Reset": self.reset_at(900)}
         _, error, sleeps, _, calls, rate = self.run_gql([self.http_error(502, "bad", old),

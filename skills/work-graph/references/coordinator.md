@@ -6,7 +6,7 @@ The coordinator is this session. It reads `wg next`, runs the Orca commands that
 
 0. At the start of a run only: ask for the autonomy level and record it with `wg autonomy <plan-dir> <level>` (SKILL.md "Autonomy level"). `wg autonomy <plan-dir>` prints the current level.
 1. `wg next <plan-dir>`.
-2. Do each `do` line (table below). Put the lines that ask the human for the same thing into one message.
+2. Do each `do` line (table below). Put the lines that ask the human for the same thing into one message. A line that one `wg` command does ends with ` -> <command>`, with each argument filled in: run that command. For a verb that you have not handled in this session, run `wg explain <verb>` first: it prints only the part of the references that tells you what to do for that `do` or `wait` verb. `wg explain` lists the verbs.
 3. When no `do` line is left: "Wait".
 4. An Orca message wakes you. A question: answer it from the issue design, or ask the human. A `worker_done`: "Job end". An `escalation`: recovery.md "Failure". Then step 1.
 
@@ -26,7 +26,8 @@ The coordinator is this session. It reads `wg next`, runs the Orca commands that
 | `closed <key>` | recovery.md "Failure", row "PR closed without a merge" |
 | `reconcile <key>` | recovery.md "Resume" |
 
-A `wait` line needs no action from you. `human`: The human must act, and your status line says what. At level `full`, a `wait human` line for a review hold after 2 rounds, a `decision`, or triage is yours: SKILL.md "Autonomy level". `worker` and `reviewer`: Orca wakes you. `review`: the thorough review runs. `coordinator`: an `ops` node with `"by": "coordinator"` that you started and still run (for example a check that needs a market session first); finish it, then `wg move … Done --note`. `below`, `blockers`, `soak`: the node waits for other nodes or for time. A `note triage` line: "Discovered work". The last line, `note page <url>`, is the link of the effort in the page (SKILL.md "See the graph"): put it in each message that asks the human for something. `wg move … "Needs <human>"` prints `page <url>`, the link of that one issue.
+<!-- explain: below,blockers,soak,worker,reviewer,coordinator,human,review -->
+A `wait` line needs no action from you. `human`: The human must act, and your status line says what. At level `full`, a `wait human` line for a review hold after 2 rounds, a `decision`, or triage is yours: SKILL.md "Autonomy level". `worker` and `reviewer`: Orca wakes you. `review`: the thorough review runs. `coordinator`: an `ops` node with `"by": "coordinator"` that you started and still run (for example a check that needs a market session first); finish it, then `wg move … Done --note`. `below`, `blockers`, `soak`: the node waits for other nodes or for time. On the terminal, the `wait` lines with the same verb are one line (`wait worker: a (dispatch), b (review)`), and the `note` lines other than `autonomy`, `triage`, and `page` are counted in one line; `wg next <plan-dir> --all` prints each line in full. The page and the status document always get each full line. A `note triage` line: "Discovered work". The last line, `note page <url>`, is the link of the effort in the page (SKILL.md "See the graph"): put it in each message that asks the human for something. `wg move … "Needs <human>"` prints `page <url>`, the link of that one issue.
 
 ## Wait
 
@@ -36,7 +37,9 @@ A `wait` line needs no action from you. `human`: The human must act, and your st
 4. Exception to step 3. If a Stop hook or a goal keeps the session open and every open line is a `wait` line, keep one `wg next <plan-dir> --wait` in the background while you wait. Say once what you wait for. Do not start work in the human's place.
 
 An Orca message, the end of `wg next --wait`, or a message from the human wakes the coordinator.
+<!-- /explain -->
 
+<!-- explain: human -->
 ### Never block on a prompt
 
 The coordinator often runs where nobody sees a prompt: a background session, an autostart run, or a session that the human left. A question that waits for an answer stops the whole effort, while workers report and the page still shows the coordinator as working.
@@ -44,6 +47,7 @@ The coordinator often runs where nobody sees a prompt: a background session, an 
 - Inside the loop, never use `AskUserQuestion` or any other tool that waits for an answer. The one exception is the autonomy question at the start of a run in a foreground session (SKILL.md "Autonomy level").
 - Ask through Linear: `wg move <plan-dir> <key> "Needs <human>"` with a comment that gives the question, the options with their costs, your recommendation, and the page link. A question that is not a node goes to a `decision` node (recovery.md "Replan"). Then act on the other lines and Wait. Their answer arrives as `do answer` (page) or as a status change.
 - When a permission check refuses a tool call, do not retry it and do not work around it. Write the step that needs their approval to `Needs <human>` and continue with the other lines.
+<!-- /explain -->
 
 ### One coordinator per effort
 
@@ -54,6 +58,7 @@ Exactly one session coordinates an effort, and Orca wakes only the terminal that
 - Take-over, only on the human's word: (1) send the old coordinator a stop message and wait for its reply, or confirm that it exited; (2) in the new session, `orca orchestration run-use --id <run_id>`; (3) recovery.md "Resume" steps 3 to 6; (4) name the new coordinator session in the next status line and in a comment on the project.
 - A coordinator that sees a `wait human` line for more than 30 minutes with nothing else to do says so once in its status line. It does not sit on a prompt.
 
+<!-- explain: answer,relay,replied,autonomy,paused,resumed -->
 ### Lines from the page
 
 The link (page.md "Link") gives these lines. The server keeps each message until `wg next` prints its line, so a message that comes while you work is in your next `wg next`.
@@ -67,6 +72,7 @@ The link (page.md "Link") gives these lines. The server keeps each message until
 | `do autonomy @effort -: …` | The human changed the autonomy level on the page or in Linear. Act at the new level from now on (SKILL.md "Autonomy level"), and say the change in your status line. `note autonomy @effort -: <level>` is the level when it did not change. |
 | `wait paused @effort -: …` | The human paused the effort on the page (the project label `paused`). Start no job and move no status until the line goes; `wg next` holds each `do` line until they resume. |
 | `do resumed @effort -: …` | The human resumed the effort. Say so in your next status line, then act on the other lines. `wg next` prints it once, so `wg next --wait` wakes even when every other line is a wait. |
+<!-- /explain -->
 
 The human can reply to a worker's Orca question on the page. You still answer a question that they did not answer.
 
@@ -76,6 +82,7 @@ The human can reply to a worker's Orca question on the page. You still answer a 
 
 A worktree with uncommitted changes, or with a live job, stays, and `wg` prints a `warning:` line with the cause. The move itself still passes. The run row gets `worktree_removed=<time>` (or `gone` when the worktree was already removed by hand). To keep a worktree, pass `--keep-worktree` to `wg move`. To retry the warnings or to clean up an effort from before this rule, run `wg cleanup <plan-dir>` (`--dry-run` lists and removes nothing); it exits 1 while a worktree stays.
 
+<!-- explain: dispatch -->
 ## Dispatch
 
 Use one command: `wg dispatch <plan-dir> <key> --run [--agent codex|claude] [--model <id>]`. It checks the node: ready (the node below it in the lane is code done), and in the wave. Then it does each step that the printed form below lists: the claim and the move to `In Progress`, the lane parent when `orca worktree list` does not show it, the child worktree and its display name, `st branch track` for a stax branch, the worktree checks, the worker spec, `worker-start --environment local`, and the record of `wg started`. `--agent` and `--model` apply from this first call. It prints at most 3 lines:
@@ -100,7 +107,9 @@ The run row records each step (`step=claim|status|parent|child|track|spec|start|
 - `wg dispatch` prints no `st branch track` for a SYNC branch, a spike branch, or a HOTFIX branch that does not stack (lab result, stax 0.120.0: an untracked non-trunk parent moved onto `main` at the next restack). A HOTFIX of an effort with `stacked_hotfix` stacks like a lane node: both forms track it.
 
 Done when: `wg run show <plan-dir> <key>` shows `state=running` and the dispatch id.
+<!-- /explain -->
 
+<!-- explain: adopt -->
 ## Adopt an existing branch or PR
 
 A node whose branch or PR exists gets no dispatch. `wg next` prints `adopt <key>` for a node with `branch` or `pr` in `plan.json`, and `reconcile <key>: … with no run row` for work that started before the graph.
@@ -109,7 +118,9 @@ A node whose branch or PR exists gets no dispatch. `wg next` prints `adopt <key>
 2. `git -C <child-path> branch --show-current` must equal the branch. With a PR, `git -C <child-path> rev-parse HEAD` must equal `headRefOid`. With a PR, the branch must sit on its PR base: `git -C <child-path> rev-list --count origin/<baseRefName>..HEAD` must equal the PR's commit count (`gh pr view <pr> --json commits --jq '.commits|length'`) and the node's own commits. A larger count means the branch was cut from another base (for example `main` under a `<release>` PR): stop and ask the human which base is right, then rebase only the node's own commits onto it. Record `parent` and `lower` from that PR base, never from where the branch happened to be cut. Then `(cd <child-path> && st branch track --parent <parent>)`.
 3. `wg run set <plan-dir> <key> branch=<branch> parent=<parent> lower=<lower> path=<child-path>`. `<lower>` is `origin/<target>` for the bottom of a lane, else the branch below; `<parent>` is that branch name, or `<target>`.
 4. `wg done <plan-dir> <key>`: it finds the PR and checks code done. Then start the first worker job in that worktree, when one is needed ("Follow-up jobs"). With no PR: `wg claim <plan-dir> <key> dispatch`. With a PR and a `FAIL` line: `wg claim <plan-dir> <key> ci`.
+<!-- /explain -->
 
+<!-- explain: verify -->
 ## Job end
 
 At each `worker_done`: `wg done <plan-dir> <key> --dispatch <dispatch id of that message>`. For a `verify` line: `wg done <plan-dir> <key>`. It removes the claim, finds the PR, moves the stax parent to the target after the PR below merged, checks code done in the node's worktree, and moves the issue to `In Review`. When it finds a PR, it attaches the URL to the issue if the URL is missing, even if a check fails. An attachment error is a warning. A PR in `Ready to Merge` whose patch changed goes back to `In Review`.
@@ -126,7 +137,9 @@ At each `worker_done`: `wg done <plan-dir> <key> --dispatch <dispatch id of that
 | `kept the review: new head, same patch` | A restack with no conflict. Nothing to review again. |
 
 A worker that reports `--outcome failed`: `wg done <plan-dir> <key> --dispatch <id> --failed "<its first error>"`, then recovery.md "Failure". A spike: `wg done` moves it to `Done`; its findings are a comment on the issue.
+<!-- /explain -->
 
+<!-- explain: review,restack -->
 ## Follow-up jobs
 
 Review fixes, CI fixes, thread fixes, and restack jobs. Write the work of the job to a file first: the findings, the failed check with its first error, or the threads. Then use one command: `wg claim <plan-dir> <key> <review|ci|threads|restack> --send --work-file <file>`. It refuses a second job on the node, a fourth live worker, and a second restack job in the effort. Then it adds the claim, writes the job header and the work text to `<plan-dir>/specs/<key>-<job>.md`, runs `orca orchestration send` to the node's dispatch (or `worker-start` in the recorded worktree when the node has no dispatch), and records the receipt. A send to a finished worker gives a new dispatch and task; `wg` records those. It prints `claimed …`, the restack line of a restack job, and `started <key> dispatch=<id> job=<job>`.
@@ -140,14 +153,17 @@ After a `FAIL` line or a lost reply, run the same command again: it adds a label
 3. Record the receipt with the printed `wg started <plan-dir> <key> dispatch=<id> task=<id>`.
 
 `wg claim <plan-dir> <key> dispatch` continues a node that has a branch and no PR: an adopted node, or a first job that failed. For a node with no dispatch it prints `worker-start` and puts the full task contract in the spec.
+<!-- /explain -->
 
 ## PRs outside a worker job
 
 The coordinator never runs `gh pr create`. A PR that stax did not open is missing from the stax stack comments on every PR of the lane. Open each PR through a worker job (worker-spec.md "submit lane"). When the coordinator must open one itself, it runs the same command in the child worktree: `st branch submit --draft --no-restack --no-native-stack --no-prompt --yes`. If a PR was opened another way, run `st branch submit --no-restack --no-native-stack --no-prompt --yes` on its branch: stax records the PR and refreshes the stack links on the whole lane.
 
+<!-- explain: triage -->
 ## Discovered work
 
 A `note triage <identifier>` line is an issue in the effort's project that is not a node, for example one a worker made. For each one, ask the human. At level `full`, `wg next` prints it as `do triage <identifier>` and the page does not count it as the human's: decide yourself, and comment the reason on the issue. Then add it through recovery.md "Replan" (it names the anchor), or move it to `Backlog` or `Canceled` with the Linear MCP (`save_issue`): an issue that is not a node has no key. An adopted issue joins the next wave, never the current one.
+<!-- /explain -->
 
 ## Who moves what
 

@@ -4,6 +4,7 @@ Agents review, undraft, restack, and push feature branches. The human merges PRs
 
 A review covers a **patch** (SKILL.md "Terms"). `wg done` clears `review` and `merge_review` when the patch changes, and keeps them through a restack with no conflict.
 
+<!-- explain: review -->
 ## Wave review
 
 `wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. The reviewer is a different agent from the writer (Claude reviews Codex). Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review (SKILL.md "Mark a PR reviewed").
@@ -20,12 +21,18 @@ A review covers a **patch** (SKILL.md "Terms"). `wg done` clears `review` and `m
 3. After a review fix, only the branch directly above it in the lane gets a restack job, and only if that branch exists. Higher branches wait for their turn at the merge point.
 
 Done when: the node's run row has `review=clean` or `review=accepted`, or the issue has the `reviewed` label. Then this PR goes on to "Merge point".
+<!-- /explain -->
 
+<!-- explain: ask-ready,undraft,merge-review,ask-merge,merged,close -->
 ## Merge point
 
 Each PR starts these steps as soon as its own wave review passes; it does not wait for the other PRs of the phase. `wg next` prints the lines below. A PR that left draft is at the merge point; from then on its gate is the merge review, and the wave review does not run again. Each time you wait for the human, follow coordinator.md "Wait".
+<!-- /explain -->
 
+<!-- explain: undraft,ask-ready -->
 1. **Ready** (`undraft <key> #<n>`). Run `st undraft <branch>` in the node's child worktree. Do not ask the human. Only when they take this step back for the effort (`wg run set <plan-dir> @effort merge_prep=human`) do the lines become `ask-ready`: ask them once for all of them to mark the PRs ready, then `wg run set <plan-dir> <key> draft=yes` for each PR.
+<!-- /explain -->
+<!-- explain: merge-review -->
 2. **Merge review** (`merge-review <key> #<n>: request the thorough review`). First `wg run set <plan-dir> <key> merge_review=requested`: it counts the PR's reviews and comments, without the requests. Then post the request yourself: the comment `@claude-thorough` on the PR. `wg next` prints `merge-review … read the new review` when a new review or comment arrives. If the new item is not the review, run the same `wg run set` command again.
 
    Read the review (`gh pr view <n> --json reviews,comments`). It covers the head in `code_done_head` when it names that head, or when it names no head and the PR head did not move after the request (`wg` clears the merge review when the patch changes). A `reviewed` label on the issue replaces this step.
@@ -36,15 +43,23 @@ Each PR starts these steps as soon as its own wave review passes; it does not wa
 
    Request a second thorough review only when the check finds that the fix is new work: it adds a behavior, a contract, or a file that no finding asked for, or a conflict resolution rewrote reviewed code. Write the reason in an issue comment, then do the request steps above. `wg` refuses a third request: the fix check is the gate, or the human accepts the PR with the `reviewed` label.
 3. **Threads.** `wg claim <plan-dir> <key> threads`, with the job "load `gh-close-review-loop`, prepare phase". Relay the push-ready report. After the human accepts, the worker pushes, reports the new head SHA, runs the finalize phase with `pr_threads.py resolve --expected-head-oid <new head SHA>`, and fetches the threads again. Each thread that stays open needs the human's disposition; write it as an issue comment. The push changes the patch, so step 2 comes back for this PR as a fix check, not as a new thorough review.
+<!-- /explain -->
+<!-- explain: ask-merge -->
 4. **Merge request** (`ask-merge <key> #<n>`: the bottom PR of a lane, with a merge review). `wg move <plan-dir> <key> "Ready to Merge"`; `wg` checks the PR, its base, its head, its checks, conflicts, the merge review, and the lane order. Ask: "PR #a: thorough review done, threads settled, code done on `<sha>`. Please merge #a with <method>." The method is squash, or a merge commit for a SYNC PR. One message can name a whole lane in order ("merge #a, then #b after I restack it"). At autonomy level `full` in a repository where agents may merge, merge it yourself instead of asking (SKILL.md "Autonomy level"). At level `supervised`, ask only after the issue has the `reviewed` label.
+<!-- /explain -->
+<!-- explain: merged -->
 5. **After each merge** (`merged <key> #<n> <sha>`). `wg move <plan-dir> <key> Merged`: `wg` checks that the PR is merged and comments the merge commit. It also removes the node's Orca worktree, and the lane parent when every node of the lane is settled (coordinator.md "Worktree cleanup"). Then `git fetch origin`. After a SYNC merge, also check `git merge-base --is-ancestor <<release> head SHA in the SYNC PR> origin/main`. Then:
    - The merged branch has a child in its lane: `wg next` prints `restack <child> …: the PR below it merged`. Send that restack job. A branch higher in the lane is restacked when the branch below it merges.
    - It has no child: on a trunk target, run `st sync --force --no-stash --no-delete` from the coordinator worktree; on a frozen base, run `wg base <plan-dir>`.
    - The bottom PR of another lane gets a restack job only when `wg next` prints `restack <key> …: conflicts with <target>` or `…: its base is <branch>, not <target>`.
+<!-- /explain -->
+<!-- explain: close -->
 6. **Close** (`close <merge point>`). `wg move <plan-dir> <merge point> Done`. `wg` proves that every pre-merge task is `Merged` and that `origin/<target>` holds each merge commit, and comments it. A node that is `Canceled` is skipped. A closed unmerged PR is not `Merged`: follow recovery.md "Failure".
+<!-- /explain -->
 
 Native GitHub stacks are off for work-graph efforts: every submit passes `--no-native-stack`, and `wg done` fails `stack` when a PR is in one (`st stack unlink <n>`, then check each PR base). If `st submit` or `st branch submit` fails with 422 "part of a stack": stop. Give the human the stack number (`gh api repos/{owner}/{repo}/pulls/<n> --jq .stack.number`) and ask them to unstack it. After they confirm, run `st submit --native-stack --no-prompt --yes`. GitHub's retarget of a stacked PR is not verified: after each submit, `gh pr view <n> --json baseRefName` must show the expected base, or stop and tell the human.
 
+<!-- explain: restack -->
 ## Restack job
 
 The only way a branch is refreshed onto a moved base. The coordinator never starts a restack in a worker-owned worktree. One job at a time, across the whole effort, bottom of a lane first.
@@ -65,19 +80,32 @@ Coordinator: `wg done <plan-dir> <key> --dispatch <id>`. For "parent merged: yes
 `st restack --dry-run` can predict "no conflicts" for a restack that then conflicts. Do not plan on it.
 
 Done when: `wg done` passed, and the restacked branch does not show "needs restack" in `st ls` (branches above it may).
+<!-- /explain -->
 
+<!-- explain: full-suite,ops,ask,verifying,ship -->
 ## Ship point
 
 The `ops` chain can start as soon as the merge point is `Done`; post-merge tasks (SYNC, integration) run at the same time. The ship point waits for both. The human does each `ops` node; you never run a deploy, a backfill, or a flag change, unless the node has `"by": "coordinator"`.
+<!-- /explain -->
 
+<!-- explain: full-suite -->
 1. `full-suite <ship key>`: the phase needs its one repo-wide test run on the merged target. `wg next` prints the line and the command when the merge point is `Done`; the `ops` chain does not wait for it. Run the command in a clean worktree whose HEAD is `origin/<target>` after the last merge: a new Orca child worktree of the coordinator from `origin/<target>`, or the first worktree of the next phase when it starts at that commit. `wg` refuses `Verifying` and `Done` for the ship point until the run passed on a commit that holds each merge commit of the phase. On a failure, read the log: a test that the phase broke is a `Regression` (step 3, **Fail**); a known failure of the target is accepted with `wg run set <plan-dir> <ship key> "tests_accepted=<sha>:<reason>"`.
+<!-- /explain -->
+<!-- explain: ops,ask -->
 2. `ops <ops key>` (`"by": "coordinator"`): do the step yourself as the repository's rules say. When it must wait (for example for a market session), `wg move <plan-dir> <key> "In Progress"`: `wg next` then prints `wait coordinator`, and the page does not show the human as the one who must act. When the acceptance holds, `wg move <plan-dir> <key> Done --note "<evidence>"`.
 
    `ask <ops key>`: `wg move <plan-dir> <key> "Needs <human>"` and tell them: "Ready for you: <title> (<identifier>). Done when: <acceptance>. Please send what you deployed (commit or version, environment), the check you ran, and its result."
 3. Test their reply against the node's acceptance.
    - **Pass:** if this node starts a soak (phase table), first compute the deadline from the confirmed start and run `wg run set <plan-dir> <ship key> soak_until=<YYYY-MM-DDTHH:MM:SSZ>`. Then `wg move <plan-dir> <key> Done --note "<what> to <env> at <time>; check: <check>; result: <result>"`. `wg` refuses a `Done` `ops` node with no note.
    - **Fail or incomplete** (or a problem during a soak): the node stays open. `wg move <plan-dir> <ship key> "Needs <human>"` with a comment `Regression: <evidence>`, and follow recovery.md "Failure", row "Regression".
+<!-- /explain -->
+<!-- explain: ask -->
 4. `ask <decision key>`: `wg move` it to `Needs <human>` and resolve it with them through `grilling`. Then `wg move <plan-dir> <key> Done --note "<their answer>"`. **No:** the note is "no", and you Replan the nodes after it with them. **Defer:** leave it in `Needs <human>` and write "deferred: <reason>" in `PLAN.md` `## Notes`; the ship point stays blocked.
+<!-- /explain -->
+<!-- explain: verifying,ship -->
 5. `verifying <ship key>`: `wg move <plan-dir> <ship key> Verifying`. `wg next` then prints `wait soak … until <time>`, and `ship <ship key>` when the soak passed or the phase has none (`wait blockers` when a blocker opened again). On `ship`: check the `ops` evidence again and that no regression is open, then `wg move <plan-dir> <ship key> Done`. `wg` checks the blockers and the soak, and moves each `Merged` task of the phase to `Done`. Start the next phase from the updated target (SKILL.md step 3). After the last phase: SKILL.md step 7.
+<!-- /explain -->
 
+<!-- explain: verifying,ship -->
 Done when: the repo-wide test run of the phase passed, each `ops` node of the phase is `Done` with passing evidence, the soak deadline passed (when the phase has a soak), and the ship point is `Done`.
+<!-- /explain -->

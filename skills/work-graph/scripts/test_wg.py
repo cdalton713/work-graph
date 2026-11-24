@@ -4131,13 +4131,13 @@ class GqlRetryTests(unittest.TestCase):
     def test_a_mutation_after_a_comment_is_a_mutation(self):
         for query in ("# set the status\n" + self.MUTATION, "\ufeff ,\n# one\r\n  # two\n" + self.MUTATION):
             with self.subTest(query):
-                self.assertTrue(wg.is_mutation(query))
+                self.assertFalse(wg.is_query(query))
                 _, error, sleeps, _, calls, _ = self.run_gql([TimeoutError("timed out"), self.ok()], query=query)
                 self.assertIsInstance(error, wg.ReadError)
                 self.assertEqual((calls, sleeps), (1, []))
         for query in (self.QUERY, "{ viewer { id } }", "# mutation\nquery { viewer { id } }", "mutationX { a }"):
             with self.subTest(query):
-                self.assertFalse(wg.is_mutation(query))
+                self.assertTrue(wg.is_query(query))
 
     def test_a_mutation_is_tried_again_when_linear_refused_it(self):
         for failure in (self.http_error(429, "too many"),
@@ -4213,6 +4213,109 @@ class GqlRetryTests(unittest.TestCase):
         _, error, sleeps, _, _, _ = self.run_gql([self.http_error(429, "too many", far), self.ok()])
         self.assertIsNone(error)
         self.assertEqual(sleeps, [10.5])
+
+    def test_a_rate_limit_during_execution_never_repeats_a_mutation(self):
+        partial = {"data": {"issueUpdate": {"success": True}},
+                   "errors": [{"message": "limit", "path": ["other"], "extensions": {"code": "RATELIMITED"}}]}
+        path_only = {"data": None, "errors": [{"path": ["issueUpdate"], "extensions": {"code": "RATELIMITED"}}]}
+        for name, body in (("partial data", partial), ("error path", path_only)):
+            with self.subTest(name):
+                answer = self.Response({"data": {"issueUpdate": {"success": True}}})
+                _, error, sleeps, err, calls, _ = self.run_gql([self.Response(body), answer], query=self.MUTATION)
+                self.assertIsInstance(error, wg.ReadError)
+                self.assertEqual((calls, sleeps, err), (1, [], ""))
+                self.assertIn("after 1 try", str(error))
+                _, error, sleeps, _, calls, _ = self.run_gql([self.Response(body), self.ok()])
+                self.assertIsNone(error)
+                self.assertEqual((calls, sleeps), (2, [1.0]))
+        with self.subTest("HTTP 400 with data"):
+            _, error, _, _, calls, _ = self.run_gql([self.http_error(400, json.dumps(partial)), self.ok()],
+                                                    query=self.MUTATION)
+            self.assertIsInstance(error, wg.ReadError)
+            self.assertEqual(calls, 1)
+
+    def test_a_mutation_after_a_fragment_is_not_tried_again(self):
+        documents = ("fragment F on Issue { id } mutation M { issueUpdate(id: \"i\", input: {}) { issue { ...F } } }",
+                     "query Q { viewer { id } } mutation M { a }", "subscription { a }", "query { a",
+                     "query { a(s: \"open)")
+        for query in documents:
+            with self.subTest(query):
+                self.assertFalse(wg.is_query(query))
+                _, error, sleeps, _, calls, _ = self.run_gql([TimeoutError("timed out"), self.ok()], query=query)
+                self.assertIsInstance(error, wg.ReadError)
+                self.assertEqual((calls, sleeps), (1, []))
+        for query in ("fragment F on User { id } query { viewer { ...F } }", 'query { a(s: "mutation {") }',
+                      'query { a(s: """x \\""" mutation""") }', "query($m: mutation) { a }"):
+            with self.subTest(query):
+                self.assertTrue(wg.is_query(query))
+
+    def test_a_tls_read_failure_is_a_transport_failure(self):
+        class TlsEof(self.Response):
+            def read(self, *args):
+                raise wg.ssl.SSLEOFError(8, "EOF occurred in violation of protocol")
+
+        for error_type in (wg.ssl.SSLEOFError, wg.ssl.SSLZeroReturnError):
+            with self.subTest(error_type.__name__):
+                broken = TlsEof({})
+                broken.read = Mock(side_effect=error_type(8, "TLS stream ended"))
+                _, error, sleeps, err, calls, _ = self.run_gql([broken, self.ok()])
+                self.assertIsNone(error)
+                self.assertEqual((calls, sleeps), (2, [1.0]))
+                self.assert_warnings(err, 1)
+                _, error, sleeps, err, calls, _ = self.run_gql([TlsEof({}), self.ok()], query=self.MUTATION)
+                self.assertIsInstance(error, wg.ReadError)
+                self.assertEqual((calls, sleeps, err), (1, [], ""))
+                self.assertIn("after 1 try", str(error))
+
+    def test_a_complexity_limit_with_points_left_can_be_the_refused_limit(self):
+        cases = {
+            "one point left": {"X-RateLimit-Requests-Remaining": "4000",
+                               "X-RateLimit-Requests-Reset": self.reset_at(900),
+                               "X-RateLimit-Complexity-Remaining": "1",
+                               "X-RateLimit-Complexity-Reset": self.reset_at(10)},
+            "cost above the points": {"X-Complexity": "50", "X-RateLimit-Requests-Remaining": "4000",
+                                      "X-RateLimit-Requests-Reset": self.reset_at(900),
+                                      "X-RateLimit-Complexity-Remaining": "500000",
+                                      "X-RateLimit-Complexity-Reset": self.reset_at(900),
+                                      "X-RateLimit-Endpoint-Complexity-Remaining": "20",
+                                      "X-RateLimit-Endpoint-Complexity-Reset": self.reset_at(10)},
+        }
+        for name, headers in cases.items():
+            with self.subTest(name):
+                body = '{"errors":[{"extensions":{"code":"RATELIMITED"}}]}'
+                _, error, sleeps, _, calls, _ = self.run_gql([self.http_error(400, body, headers), self.ok()])
+                self.assertIsNone(error)
+                self.assertEqual((calls, sleeps), (2, [10.5]))
+
+    def test_a_reset_exactly_60_s_away_is_awaited(self):
+        for seconds, expected in ((60, [60.5]), (61, [])):
+            with self.subTest(seconds):
+                headers = {"X-RateLimit-Requests-Remaining": "0", "X-RateLimit-Requests-Reset": self.reset_at(seconds)}
+                _, error, sleeps, _, _, _ = self.run_gql([self.http_error(429, "too many", headers), self.ok()])
+                self.assertEqual(sleeps, expected)
+                self.assertEqual(error is None, bool(expected))
+
+    def test_the_error_body_read_is_bounded_and_closed(self):
+        class Body(io.BytesIO):
+            def __init__(self, data):
+                super().__init__(data)
+                self.sizes = []
+                self.closed_by_gql = False
+
+            def read(self, size=-1):
+                self.sizes.append(size)
+                return super().read(size)
+
+            def close(self):
+                self.closed_by_gql = True
+                super().close()
+
+        for code, size in ((429, wg.GQL_STATUS_BODY), (502, wg.GQL_STATUS_BODY), (400, wg.GQL_ERROR_BODY)):
+            with self.subTest(code):
+                body = Body(b"y" * (2 * wg.GQL_ERROR_BODY))
+                self.run_gql([self.http_error(code, fp=body), self.ok()])
+                self.assertEqual(body.sizes, [size])
+                self.assertTrue(body.closed_by_gql)
 
     def test_a_refusal_uses_its_own_headers_not_the_headers_of_an_earlier_response(self):
         old = {"X-RateLimit-Requests-Remaining": "0", "X-RateLimit-Requests-Reset": self.reset_at(900)}

@@ -57,6 +57,7 @@ import random
 import re
 import shlex
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -522,11 +523,15 @@ gql_jitter = random.random
 # The last rate limit headers that Linear sent, for reports: header name without "X-RateLimit-" (lower case) -> value.
 LINEAR_RATE = {}
 RATE_LIMITS = ("Requests", "Complexity", "Endpoint-Requests", "Endpoint-Complexity")
+COMPLEXITY_LIMITS = ("Complexity", "Endpoint-Complexity")
+GQL_STATUS_BODY = 500        # bytes of an HTTP 429 or 5xx body to read for the error text
+GQL_ERROR_BODY = 64 * 1024   # bytes of another HTTP error body to read for its GraphQL error code
 
 
 class _GqlFailure(Exception):
-    """One failed try. `kind` is "refused" (Linear did not run the request: HTTP 429 or RATELIMITED),
-    "transient" (a network error, a timeout, or HTTP 5xx: Linear can have run it), or "final".
+    """One failed try. `kind` is "refused" (Linear did not run the request: HTTP 429, or RATELIMITED with
+    no data and no error path), "transient" (a network error, a timeout, HTTP 5xx, or a rate limit during
+    execution: Linear can have run it), or "final".
     `headers` are the headers of this failed response, or None."""
 
     def __init__(self, message, kind, cause=None, headers=None):
@@ -536,17 +541,44 @@ class _GqlFailure(Exception):
         self.headers = headers
 
 
-def is_mutation(query):
-    """True when the first operation of a GraphQL document is a mutation. GraphQL ignores white space,
-    commas, a byte order mark, and comments (from # to the end of the line) before the first token."""
-    rest = query
-    while True:
-        stripped = rest.lstrip(" \t\r\n,\ufeff")
-        if stripped.startswith("#"):
-            newline = re.search(r"[\r\n]", stripped)
-            rest = stripped[newline.start():] if newline else ""
-            continue
-        return re.match(r"mutation(?![_0-9A-Za-z])", stripped) is not None
+def is_query(query):
+    """True only when the GraphQL document is known to hold no mutation and no subscription. A document can
+    start with a fragment, so each top-level name counts, not only the first token. The check skips white
+    space, commas, a byte order mark, comments, and strings. A document that it cannot read is not a query."""
+    i, depth, n = 0, 0, len(query)
+    while i < n:
+        c = query[i]
+        if c in " \t\r\n,\ufeff":
+            i += 1
+        elif c == "#":
+            newline = re.compile(r"[\r\n]").search(query, i)
+            i = newline.start() if newline else n
+        elif query.startswith('"""', i):
+            end = re.compile(r'(?<!\\)"""').search(query, i + 3)
+            if not end:
+                return False
+            i = end.end()
+        elif c == '"':
+            end = re.compile(r'(?:[^"\\\r\n]|\\.)*"').match(query, i + 1)
+            if not end:
+                return False
+            i = end.end()
+        elif c in "{(":
+            depth += 1
+            i += 1
+        elif c in "})":
+            depth -= 1
+            if depth < 0:
+                return False
+            i += 1
+        elif c == "_" or c.isascii() and c.isalpha():
+            name = re.compile(r"[_0-9A-Za-z]+").match(query, i).group()
+            if depth == 0 and name in ("mutation", "subscription"):
+                return False
+            i += len(name)
+        else:
+            i += 1
+    return depth == 0
 
 
 def _note_rate(headers):
@@ -565,6 +597,23 @@ def _rate_limited(errors):
         for e in errors)
 
 
+def _executed(body):
+    """True when a GraphQL response shows that execution began: it has data, or an error has a path."""
+    if not isinstance(body, dict):
+        return False
+    errors = body.get("errors")
+    return body.get("data") is not None or (isinstance(errors, list) and any(
+        isinstance(e, dict) and e.get("path") is not None for e in errors))
+
+
+def _rate_kind(body):
+    """The kind of a failure whose body has GraphQL errors: "refused" when Linear refused the request at a
+    rate limit before execution, "transient" when a rate limit stopped part of an execution, else "final"."""
+    if not isinstance(body, dict) or not _rate_limited(body.get("errors")):
+        return "final"
+    return "transient" if _executed(body) else "refused"
+
+
 def _epoch_seconds(value):
     try:
         at = float(value)
@@ -575,8 +624,10 @@ def _epoch_seconds(value):
 
 def _reset_wait(headers):
     """Seconds until Linear accepts the refused request again, from the headers of that refusal: the
-    Retry-After header, and the reset time of each limit that is used up (the latest one counts). Without
-    these, the reset time of the request limit. None when the refusal gives no time."""
+    Retry-After header, and the reset time of each limit that is used up (the latest one counts). A
+    complexity limit is used up when its points are fewer than the cost of the request (X-Complexity). When
+    no limit is used up, the reset of the complexity limits: a request can cost more than the points that
+    are left. Without these, the reset time of the request limit. None when the refusal gives no time."""
     if headers is None:
         return None
     now = gql_clock()
@@ -588,15 +639,28 @@ def _reset_wait(headers):
         except ValueError:
             with contextlib.suppress(TypeError, ValueError, IndexError):
                 waits.append(email.utils.parsedate_to_datetime(retry_after).timestamp() - now)
-    for limit in RATE_LIMITS:
-        if headers.get(f"X-RateLimit-{limit}-Remaining") == "0":
-            at = _epoch_seconds(headers.get(f"X-RateLimit-{limit}-Reset"))
-            if at is not None:
-                waits.append(at - now)
+    try:
+        cost = float(headers.get("X-Complexity"))
+    except (TypeError, ValueError):
+        cost = None
+
+    def used_up(limit):
+        try:
+            remaining = float(headers.get(f"X-RateLimit-{limit}-Remaining"))
+        except (TypeError, ValueError):
+            return False
+        return remaining <= 0 or (limit in COMPLEXITY_LIMITS and cost is not None and remaining < cost)
+
+    def resets(limits):
+        found = (_epoch_seconds(headers.get(f"X-RateLimit-{limit}-Reset")) for limit in limits)
+        return [at - now for at in found if at is not None]
+
+    waits += resets([limit for limit in RATE_LIMITS if used_up(limit)])
     if not waits:
-        at = _epoch_seconds(headers.get("X-RateLimit-Requests-Reset"))
-        if at is not None:
-            waits.append(at - now)
+        waits = resets([limit for limit in COMPLEXITY_LIMITS
+                        if headers.get(f"X-RateLimit-{limit}-Remaining") is not None])
+    if not waits:
+        waits = resets(["Requests"])
     return max(0.0, max(waits)) if waits else None
 
 
@@ -608,27 +672,29 @@ def _gql_try(req):
             body = json.load(response)
     except urllib.error.HTTPError as e:
         _note_rate(e.headers)
+        by_status = e.code == 429 or e.code >= 500  # the status alone gives the kind
         try:
-            detail = e.read().decode(errors="replace")  # all of it: an error code can follow a long message
+            # An error code can follow a long message, so a body that must be read gets a larger budget.
+            detail = e.read(GQL_STATUS_BODY if by_status else GQL_ERROR_BODY).decode(errors="replace")
         except (http.client.HTTPException, OSError) as read_error:  # OSError covers a timeout and a reset
             detail = f"(body not read: {read_error})"
-        message = f"Linear HTTP {e.code}: {detail[:500]}"
-        if e.code >= 500:
-            kind = "transient"
-        elif e.code == 429:
-            kind = "refused"
+        finally:
+            e.close()
+        message = f"Linear HTTP {e.code}: {detail[:GQL_STATUS_BODY]}"
+        if by_status:
+            kind = "transient" if e.code >= 500 else "refused"
         else:
             try:
-                errors = json.loads(detail).get("errors")
-            except (ValueError, AttributeError):
-                errors = None
-            kind = "refused" if _rate_limited(errors) else "final"
+                kind = _rate_kind(json.loads(detail))
+            except ValueError:
+                kind = "final"
         raise _GqlFailure(message, kind, e, e.headers) from e
-    except (urllib.error.URLError, TimeoutError, http.client.HTTPException, ConnectionError) as e:
+    except (urllib.error.URLError, TimeoutError, http.client.HTTPException, ConnectionError,
+            ssl.SSLEOFError, ssl.SSLZeroReturnError) as e:
         raise _GqlFailure(f"Linear request failed: {e}", "transient", e) from e
     if body.get("errors"):
         message = "Linear error: " + json.dumps(body["errors"])[:800]
-        raise _GqlFailure(message, "refused" if _rate_limited(body["errors"]) else "final", headers=headers)
+        raise _GqlFailure(message, _rate_kind(body), headers=headers)
     return body
 
 
@@ -642,7 +708,7 @@ def gql(query, variables=None):
         data=json.dumps({"query": query, "variables": variables or {}}).encode(),
         headers={"Authorization": key, "Content-Type": "application/json"},
     )
-    mutation = is_mutation(query)
+    mutation = not is_query(query)  # a document not known to be a query counts as a mutation
     for attempt in range(1, GQL_TRIES + 1):
         try:
             body = _gql_try(req)

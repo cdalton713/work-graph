@@ -5663,3 +5663,11 @@ class ExplainTests(unittest.TestCase):
         self.assertIn("Run `wg next /plans/x` first", prompt)
         self.assertIn("`wg explain <verb>`", prompt)
         self.assertNotIn("read references/coordinator.md,", prompt)
+        # wg explain covers the verbs of do and wait lines, not note lines such as `note page`.
+        self.assertIn("verb of each `do` and `wait` line", prompt)
+        for verb in re.findall(r"`wg explain (\w+)`", prompt):
+            self.assertIn(verb, wg.EXPLAIN)
+        # The wait rules are named at the point of use, and the verb that prints them has them.
+        self.assertIn('references/coordinator.md "Wait"', prompt)
+        self.assertIn("`wg explain human`", prompt)
+        self.assertIn("## Wait", wg.explain_text("human"))

@@ -66,7 +66,7 @@ The run rows in `keymap.json` hold what Linear and GitHub cannot tell: the Orca 
 | `@effort` `autonomy_seen` | `wg autonomy` and `wg next`: the last autonomy level that the coordinator saw. The level itself is the project label (autonomy.md). An old `@effort` `autonomy` field moves to the label at the next `wg next`. |
 | `@effort` `merge_prep` | Absent: the coordinator undrafts each PR. `human`: only on their word, they mark PRs ready themselves. |
 
-`wg run set <plan-dir> <key|@effort> <field>=<value>...` sets fields; `<field>=` deletes one. `wg run reset <plan-dir> <key>` removes a node's row. For an adopted node, the coordinator also sets `branch`, `parent`, `lower`, and `path` (jobs.md "Adopt"). `wg` copies `branch`, `pr`, `review`, `merge_review`, `state`, `job`, `soak_until`, and the current job's `started_at` to the node card comment for the page; if Linear is unreachable it prints `node card not updated` and still saves the row.
+`wg run set <plan-dir> <key|@effort> <field>=<value>...` sets fields; `<field>=` deletes one. `wg run reset <plan-dir> <key>` removes a node's row. For an adopted node, the coordinator also sets `branch`, `parent`, `lower`, and `path` (jobs.md "Adopt an existing branch or PR"). `wg` copies `branch`, `pr`, `review`, `merge_review`, `state`, `job`, `soak_until`, and the current job's `started_at` to the node card comment for the page; if Linear is unreachable it prints `node card not updated` and still saves the row.
 
 `PLAN.md` `## Notes` holds only "Dropped" PRs with the reason, deferred decisions, and open regressions. History goes to Linear comments. Never append a checkpoint log to `PLAN.md`.
 

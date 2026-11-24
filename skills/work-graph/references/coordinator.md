@@ -8,7 +8,7 @@ The coordinator is this session. It reads `wg next`, runs the Orca commands that
 1. `wg next <plan-dir>`.
 2. Do each `do` line (table below). Put the lines that ask the human for the same thing into one message. A line that one `wg` command does ends with ` -> <command>`, with each argument filled in: run that command. For a verb that you have not handled in this session, run `wg explain <verb>` first: it prints only the part of the references that tells you what to do for that `do` or `wait` verb. `wg explain` lists the verbs.
 3. When no `do` line is left: "Wait".
-4. An Orca message wakes you. A question: answer it from the issue design, or ask the human. A `worker_done`: jobs.md "Job end". An `escalation`: recovery.md "Failure". Then step 1.
+4. An Orca message wakes you. A question: answer it from the issue design, or ask the human. A `worker_done`: jobs.md "Job end"; from a reviewer, its step in review-and-merge.md ("Wave review" step 2, or "Merge point" step 2). An `escalation`: recovery.md "Failure". Then step 1.
 
 | `do` line | Action |
 |---|---|
@@ -25,7 +25,6 @@ The coordinator is this session. It reads `wg next`, runs the Orca commands that
 | `triage <identifier>` (level `full`) | "Discovered work" |
 | `closed <key>` | recovery.md "Failure", row "PR closed without a merge" |
 | `reconcile <key>` | recovery.md "Resume" |
-
 | `answer`, `dispatch`, `relay` from the page | page.md "Lines from the page" |
 
 <!-- explain: below,blockers,soak,worker,reviewer,coordinator,human,review -->

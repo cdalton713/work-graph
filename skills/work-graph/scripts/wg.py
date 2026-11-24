@@ -3779,10 +3779,11 @@ def wake_command(plan_dir, plan):
 
 def autostart_prompt(plan_dir):
     return (f"You are the work-graph coordinator of the effort in {plan_dir}. `wg autostart` started you: `wg next` has "
-            f"work and no coordinator was running. Load the work-graph skill. Run `wg next {plan_dir}` first. For each "
-            "verb of its lines, read `wg explain <verb>` before you act on it; do not read references/coordinator.md "
-            f"as a whole. Act on each line, then wait with `wg next {plan_dir} --wait`, until the effort is complete "
-            f"or a line needs {HUMAN}. Do not ask for the autonomy level: this run uses the project's current level "
+            f"work and no coordinator was running. Load the work-graph skill. Run `wg next {plan_dir}` first. For the "
+            "verb of each `do` and `wait` line, read `wg explain <verb>` before you act on it; do not read "
+            "references/coordinator.md as a whole. Act on each line, until the effort is complete or a line needs "
+            f"{HUMAN}. Then wait as references/coordinator.md \"Wait\" says (`wg explain human` prints it): one "
+            f"`wg next {plan_dir} --wait` in the background, then end the turn. Do not ask for the autonomy level: this run uses the project's current level "
             f"(`wg autonomy {plan_dir}`), as setup.md \"Autostart\" says.")
 
 

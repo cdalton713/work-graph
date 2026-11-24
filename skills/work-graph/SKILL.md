@@ -19,7 +19,7 @@ Load `stax` and `orchestration` when a step names their commands. Read `<cmd> --
 
 ## Terms
 
-[references/terms.md](references/terms.md) defines each term of this skill: node, phase, wave, wave review, lane, pre-merge and post-merge task, code done, evidence, patch, reviewed, merge review, approval, run row, merge point, ship point, soak, claim, the six node kinds, and ENG nodes. Read it before step 1, and each time a term is not clear.
+[references/terms.md](references/terms.md) defines each term of this skill (node, phase, wave, lane, code done, evidence, patch, claim, and the others), the six node kinds, and ENG nodes. Read it before step 1, and each time a term is not clear.
 
 ## Rules
 
@@ -35,13 +35,19 @@ Load `stax` and `orchestration` when a step names their commands. Read `<cmd> --
 
 ## Autonomy level
 
-The level (`full`, `standard`, or `supervised`; no label means `standard`) is a project label that `wg autonomy <plan-dir> [<level>]` prints or sets. Ask for it once at the start of each run, except when the request names it, autostart started the run, or the session runs in the background. It decides what the human does and what you do in their place. Before you ask, and at each `do autonomy` line, read [references/autonomy.md](references/autonomy.md) (also `wg explain autonomy`).
+The level (`full`, `standard`, or `supervised`; no label means `standard`) is a project label that `wg autonomy <plan-dir> [<level>]` prints or sets. Ask for it once at the start of each run, except when the request names it, autostart started the run, or the session runs in the background. Before you ask, and at each `do autonomy` line, read [references/autonomy.md](references/autonomy.md) (also `wg explain autonomy`).
 
-## Linear workspace, initiatives, and autostart
+## Linear workspace
 
-- The Linear workspace and key, the retries of a failed request, and the Free-plan archive: setup.md "Linear workspace". Read it before step 0 and after a failed Linear mutation.
-- The initiative that groups related efforts: graph.md "Initiatives" (step 1).
-- `wg autostart`, which starts a fresh coordinator when the effort has work: setup.md "Autostart". The human installs it.
+`effort.workspace` names the workspace that owns the work; `wg` uses only its key. `wg` tries a failed request again only when that is safe: after a failed mutation, read the issue before you run the command again. On the Free plan, `wg` archives settled issues. Details: setup.md "Linear workspace". Read it before step 0.
+
+## Initiatives
+
+An initiative is a project label that groups related efforts. Set `effort.initiative` in step 1; `wg load --apply` creates and sets the label. Details: graph.md "Initiatives".
+
+## Autostart
+
+`wg autostart <plan-dir> --install` makes an Orca automation that starts a fresh coordinator when the effort has work and none runs. The human installs it; that run uses the current autonomy level. Details: setup.md "Autostart".
 
 ## Steps
 
@@ -59,7 +65,7 @@ Set `effort.initiative` (graph.md "Initiatives"). Write `<plan-dir>/PLAN.md`: on
 - End each phase on a **shippable** state: after its ship point, prod works and the effort can stop. For live data, APIs, or schemas, shape phases as **expand → migrate → contract**.
 - Put each deploy, backfill run, flag flip, and prod check in the graph as an `ops` node, and each soak length in the phase table. Give an `ops` node `"by": "coordinator"` when the repository's own rules make that step the agent's (for example, the agent checks its own deploy); otherwise it is the human's (`do ask`).
 
-Show the human the flowchart and the phase table, and continue to step 2 without waiting (at level `supervised`, wait for their approval first). Change the graph when they comment.
+Show the human the flowchart and the phase table, and go on to step 2 (at level `supervised`, wait for their approval first). Change the graph when they comment.
 
 Done when: every phase has a target, a merge point, and a ship point, every `task` has a lane, and no edge joins two lanes inside one phase.
 
@@ -106,9 +112,9 @@ Repeat steps 3–4 for each wave until every pre-merge task of the phase is code
 
 ### 5. Pass the merge point
 
-Follow [references/review-and-merge.md](references/review-and-merge.md#merge-point) "Merge point": ready, merge review, threads, then the merge requests, bottom to top in each lane. A push that changes the patch brings the merge review back for that PR.
+Follow [references/review-and-merge.md](references/review-and-merge.md#merge-point) "Merge point": ready, merge review, threads, then the merge requests, bottom to top in each lane.
 
-Done when: every pre-merge task is `Merged`, and `wg move <plan-dir> <merge point> Done` passed. It proves that the target branch holds each merge commit.
+Done when: every pre-merge task is `Merged`, and `wg move <plan-dir> <merge point> Done` passed.
 
 ### 6. Ship the phase
 
@@ -133,12 +139,12 @@ The human marks a PR reviewed with the issue label **`reviewed`**; an agent neve
 
 ## See the graph
 
-The page is the web app at the root of this repository: the hosted `page_url` of the config, or `wg ui`. Give the human the link that `wg next` prints. For page data, links, edits, local use, and contract updates: [references/page.md](references/page.md).
+The page is the web app at the root of this repository: the hosted `page_url` of the config, or `wg ui`. Give the human the link that `wg next` prints. Page data, links, edits, local use, and the contract: [references/page.md](references/page.md).
 
 ## When the plan breaks
 
-Red CI, a failed worker, a PR closed without a merge, a regression, a graph change, a `reconcile` line, or a new coordinator session: follow [references/recovery.md](references/recovery.md).
+Red CI, a failed worker, a PR closed unmerged, a regression, a graph change, a `reconcile` line, or a new coordinator session: [references/recovery.md](references/recovery.md).
 
 ## Report progress
 
-Post the status line of coordinator.md "Report progress" after each wave and each merge point.
+The status line and the PR numbers: coordinator.md "Report progress".

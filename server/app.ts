@@ -135,15 +135,17 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const fixed = c.req.path.startsWith("/assets/") && c.res.status === 200;
     c.header("Cache-Control", fixed ? "public, max-age=31536000, immutable" : "no-store");
   });
-  // Static files and JSON answers of 1 KiB or more, when the client accepts gzip. Every client that accepts
-  // Brotli or deflate accepts gzip too.
+  // Static files and JSON answers of any size, when the client accepts gzip. Every client that accepts Brotli
+  // or deflate accepts gzip too. The 1 KiB minimum of `compress` applies only to a reply with a Content-Length,
+  // and these replies have none.
   app.use(compress({ encoding: "gzip" }));
-  // A slow API request or a server error writes one log line. The line has no body and no query.
+  // A slow API request or a server error writes one log line. The line has no body and no query. The path is
+  // the encoded path of the URL: `c.req.path` is decoded, so `%0A` in it would start a second line.
   app.use("/api/*", async (c, next) => {
     const start = clock();
     await next();
     const ms = clock() - start;
-    if (ms > SLOW_MS || c.res.status >= 500) console.warn(`wg api: ${c.req.method} ${c.req.path} ${c.res.status} ${Math.round(ms)}ms`);
+    if (ms > SLOW_MS || c.res.status >= 500) console.warn(`wg api: ${c.req.method} ${new URL(c.req.url).pathname} ${c.res.status} ${Math.round(ms)}ms`);
   });
   app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -430,11 +432,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (!body) return c.text("not found (run `pnpm build`)", 404);
     const contentType = type ?? TYPES[".html"];
     if (contentType !== TYPES[".html"]) return c.body(body, 200, { "Content-Type": contentType });
-    // The page has `no-store`; the ETag lets a client that has it skip the body. Compression makes it weak (`W/`).
-    const tag = `"${createHash("sha1").update(body).digest("hex")}"`;
+    // The page has `no-store`; the ETag lets a client that has it skip the body. The tag is weak, so that the
+    // gzip and the plain reply have the same validator, and the 304 has the same ETag and Vary as the 200.
+    const tag = `W/"${createHash("sha1").update(body).digest("hex")}"`;
+    const vary = { ETag: tag, Vary: "Accept-Encoding" };
     const have = c.req.header("if-none-match")?.split(",").map((t) => t.trim().replace(/^W\//, ""));
-    if (have?.includes(tag) || have?.includes("*")) return c.body(null, 304, { ETag: tag });
-    return c.body(body, 200, { "Content-Type": contentType, ETag: tag });
+    if (have?.includes(tag.slice(2)) || have?.includes("*")) return c.body(null, 304, vary);
+    return c.body(body, 200, { "Content-Type": contentType, ...vary });
   });
 
   app.onError((error, c) => {

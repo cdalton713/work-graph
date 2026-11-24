@@ -893,6 +893,13 @@ describe("server status", () => {
     expect(error).not.toHaveBeenCalled();
     expect((await app().request("/api/config", { headers: local })).status).toBe(200);
     expect(warn).toHaveBeenCalledTimes(2);
+    // A path with an encoded line break stays one physical line: the log has the encoded path.
+    expect((await broken.request("/api/issues/a%0Dwg%20api:%20GET%20%2Ffake%0Ab/comments", { headers: local })).status).toBe(500);
+    expect(warn).toHaveBeenCalledTimes(3);
+    const line = warn.mock.calls[2][0] as string;
+    expect(line.split(/[\r\n]/)).toHaveLength(1);
+    expect(line).toMatch(/^wg api: GET \/api\/issues\/a%0Dwg%20api:%20GET%20%2Ffake%0Ab\/comments 500 \d+ms$/);
+    expect(error).not.toHaveBeenCalled();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
@@ -921,14 +928,32 @@ describe("server status", () => {
     expect(list.headers.get("content-encoding")).toBe("gzip");
     expect(JSON.parse(gunzipSync(Buffer.from(await list.arrayBuffer())).toString()).projects).toHaveLength(30);
 
+    // A small reply is compressed too: the 1 KiB minimum of `compress` needs a Content-Length (README).
+    const health = await app().request("/healthz", { headers: { "accept-encoding": "gzip" } });
+    expect(health.headers.get("content-encoding")).toBe("gzip");
+    expect(JSON.parse(gunzipSync(Buffer.from(await health.arrayBuffer())).toString())).toEqual({ ok: true });
+
+    // The plain and the gzip reply of index.html have the same weak ETag and Vary, and so has each 304.
     const page = await app().request("/", { headers: local });
     const tag = page.headers.get("etag");
-    expect(tag).toMatch(/^"[0-9a-f]{40}"$/);
+    expect(tag).toMatch(/^W\/"[0-9a-f]{40}"$/);
     expect(page.headers.get("cache-control")).toBe("no-store");
-    const again = await app().request("/", { headers: { ...local, "if-none-match": tag! } });
-    expect(again.status).toBe(304);
-    expect(await again.text()).toBe("");
-    expect((await app().request("/", { headers: { ...local, "if-none-match": `W/${tag}` } })).status).toBe(304);
+    expect(page.headers.get("vary")).toBe("Accept-Encoding");
+    expect(page.headers.get("content-encoding")).toBeNull();
+    const zipped = await app().request("/", { headers: { ...local, "accept-encoding": "gzip" } });
+    expect(zipped.headers.get("content-encoding")).toBe("gzip");
+    expect(zipped.headers.get("etag")).toBe(tag);
+    expect(zipped.headers.get("vary")).toBe("Accept-Encoding");
+    for (const encoding of [{}, { "accept-encoding": "gzip" }] as Record<string, string>[]) {
+      for (const sent of [tag!, tag!.slice(2)]) {
+        const again = await app().request("/", { headers: { ...local, ...encoding, "if-none-match": sent } });
+        expect(again.status).toBe(304);
+        expect(await again.text()).toBe("");
+        expect(again.headers.get("etag")).toBe(tag);
+        expect(again.headers.get("vary")).toBe("Accept-Encoding");
+        expect(again.headers.get("content-encoding")).toBeNull();
+      }
+    }
     expect((await app().request("/", { headers: { ...local, "if-none-match": '"other"' } })).status).toBe(200);
   });
 });

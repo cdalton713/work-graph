@@ -1,6 +1,6 @@
 // What the page says about the health of the server: a stale graph, a low Linear budget, and the build.
 import { ageText } from "./graph";
-import type { GraphData, ServerStatus } from "./types";
+import type { GraphData, ProjectList, ServerStatus } from "./types";
 
 /** Below this count of remaining Linear requests, the overview warns. The key gives 5,000 each hour. */
 export const LOW_BUDGET = 500;
@@ -24,7 +24,8 @@ export function budgetWarnings(status: ServerStatus | null, now: number): { id: 
   return (status?.workspaces ?? [])
     .filter((w) => w.requestsRemaining !== null && w.requestsRemaining < LOW_BUDGET)
     .map((w) => {
-      const reset = w.requestsReset === null ? null : Math.max(0, Math.ceil((w.requestsReset - now) / 60_000));
+      // A reset time in the past: the budget is an old one (no Linear answer since), so no countdown.
+      const reset = w.requestsReset === null || w.requestsReset <= now ? null : Math.ceil((w.requestsReset - now) / 60_000);
       return {
         id: w.id,
         text: `${w.name}: ${w.requestsRemaining} Linear requests left${reset === null ? "" : ` · resets in ${reset} min`}`,
@@ -52,4 +53,14 @@ export async function pollGraph<T extends { version: string; stale?: boolean }>(
   const have = held?.project === project && !held.stale ? held.value : undefined;
   const next = await fetchGraph(have);
   return next ? { held: { project, value: next.version, stale: next.stale }, next } : { held, next: null };
+}
+
+/**
+ * The directory after a poll. A workspace that reports an error (Linear failed) sends no projects; then the page
+ * keeps the projects that it had for that workspace, so the open project, its graph, and its banner stay.
+ */
+export function mergeDirectory<T extends ProjectList>(old: ProjectList | null, next: T): T {
+  const failed = new Set(next.workspaces.filter((w) => w.error).map((w) => w.id));
+  const kept = (old?.projects ?? []).filter((p) => failed.has(p.workspace));
+  return kept.length ? { ...next, projects: [...next.projects, ...kept] } : next;
 }

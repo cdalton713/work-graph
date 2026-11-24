@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { type HeldGraph, LOW_BUDGET, budgetWarnings, pollGraph, staleBanner, versionText } from "./health";
+import { type HeldGraph, LOW_BUDGET, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./health";
+import type { ProjectList } from "./types";
 import type { ServerStatus } from "./types";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
@@ -35,8 +36,10 @@ describe("budgetWarnings", () => {
     expect(warning).toMatchObject({ id: "w", text: "Work: 120 Linear requests left · resets in 14 min" });
     expect(warning.title).toContain("120 of 5000");
   });
-  it("leaves out the reset when Linear sent none", () => {
+  it("leaves out the reset when Linear sent none, or when its time is past", () => {
     expect(budgetWarnings(status([{ requestsRemaining: 0 }]), now)[0].text).toBe("Work: 0 Linear requests left");
+    expect(budgetWarnings(status([{ requestsRemaining: 10, requestsReset: now - 60_000 }]), now)[0].text).toBe("Work: 10 Linear requests left");
+    expect(budgetWarnings(status([{ requestsRemaining: 10, requestsReset: now }]), now)[0].text).toBe("Work: 10 Linear requests left");
   });
 });
 
@@ -82,5 +85,51 @@ describe("pollGraph", () => {
     const asked: (string | undefined)[] = [];
     await pollGraph({ project: "w:a", value: "v1" }, "w:b", async (have) => { asked.push(have); return null; });
     expect(asked).toEqual([undefined]);
+  });
+});
+
+describe("mergeDirectory", () => {
+  const project = (id: string, workspace: string) => ({ id, name: id, url: "", status: "Started", statusType: "started", workspace, workspaceName: workspace });
+  const list = (workspaces: { id: string; error?: string }[], projects: ReturnType<typeof project>[]): ProjectList =>
+    ({ workspaces: workspaces.map((w) => ({ name: w.id, ...w })), projects });
+  const open = (directory: ProjectList | null, id: string) => directory?.projects.find((p) => p.workspace === "w" && p.id === id) ?? null;
+
+  it("keeps the open project and its stale graph while its workspace fails, and shows the fresh graph after", async () => {
+    // Both poll paths: the overview poll gives the directory, the graph poll the graph of the open project.
+    const linear = { down: false };
+    const overview = () => linear.down
+      ? list([{ id: "w", error: "w is unavailable. Reload to try again." }, { id: "x" }], [project("q", "x")])
+      : list([{ id: "w" }, { id: "x" }], [project("p", "w"), project("q", "x")]);
+    const fetchGraph = async (have?: string) => {
+      const stale = linear.down || undefined;
+      if (!stale && have === "v1") return null;
+      return { version: "v1", ...(stale ? { stale, loadedAt: now - 60_000 } : {}) };
+    };
+    let directory: ProjectList | null = null, held: HeldGraph | null = null, shown: { version: string; stale?: boolean; loadedAt?: number } | null = null;
+    const pollAll = async () => {
+      directory = mergeDirectory(directory, overview());
+      if (!open(directory, "p")) { shown = null; held = null; return; } // the page would close the project
+      const result = await pollGraph(held, "w:p", fetchGraph);
+      held = result.held;
+      if (result.next) shown = result.next;
+    };
+    await pollAll();
+    expect(shown).toMatchObject({ version: "v1" });
+    linear.down = true;
+    await pollAll();
+    expect(open(directory, "p")).not.toBeNull();
+    expect(directory!.workspaces[0].error).toBeDefined();
+    expect(staleBanner(shown, now)?.text).toBe("Linear is unavailable: this graph is from 1 min ago");
+    await pollAll();
+    expect(directory!.projects.map((p) => p.id).sort()).toEqual(["p", "q"]); // kept once, not twice
+    linear.down = false;
+    await pollAll();
+    expect(staleBanner(shown, now)).toBeNull();
+    expect(shown).toMatchObject({ version: "v1" });
+  });
+  it("drops the projects of a workspace that answers without an error", () => {
+    const old = list([{ id: "w" }], [project("p", "w")]);
+    expect(mergeDirectory(old, list([{ id: "w" }], [])).projects).toEqual([]);
+    expect(mergeDirectory(null, list([{ id: "w", error: "e" }], [])).projects).toEqual([]);
   });
 });

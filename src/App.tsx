@@ -7,7 +7,7 @@ import { Panel } from "./components/Panel";
 import { CopyButton, Lamp, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
-import { type HeldGraph, budgetWarnings, pollGraph, staleBanner, versionText } from "./lib/health";
+import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./lib/health";
 import { liveJob, presenceText } from "./lib/link";
 import { type OverviewData, PROJECT_LAMP, movesWithAsks, summaryKey } from "./lib/overview";
 import { site, statusOrder } from "./lib/site";
@@ -85,13 +85,17 @@ export function App() {
   // The build and the Linear budget of the server, with the overview poll. A failed status changes nothing.
   const [status, setStatus] = useState<ServerStatus | null>(null);
   useEffect(() => {
-    let live = true, running = false;
+    let live = true, running = false, statusRunning = false;
     const poll = () => {
       if (running || document.hidden) return;
       running = true;
       setOverviewBusy(true);
-      api.status().then((s) => live && setStatus(s)).catch(() => {});
-      api.overview().then((o) => { if (live) { setOverview(o); setDirectory(o); setNow(Date.now()); } })
+      // Status has its own guard: a slow status answer must not come after a newer one.
+      if (!statusRunning) {
+        statusRunning = true;
+        api.status().then((s) => live && setStatus(s)).catch(() => {}).finally(() => { statusRunning = false; });
+      }
+      api.overview().then((o) => { if (live) { setOverview(o); setDirectory((old) => mergeDirectory(old, o)); setNow(Date.now()); } })
         .catch((e) => live && setError(`overview: ${e.message}`))
         .finally(() => { running = false; if (live) setOverviewBusy(false); });
     };

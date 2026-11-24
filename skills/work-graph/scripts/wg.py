@@ -4102,12 +4102,21 @@ def spec_sections():
     return {name: "\n".join(body).strip() for name, body in sections.items()}
 
 
+class Literal(str):
+    """A spec value that `render` puts in after its check: a `{name}` in it is text, not a missing value."""
+
+
 def render(text, values):
     for name, value in values.items():
-        text = text.replace("{" + name + "}", str(value))
-    missing = sorted(set(re.findall(r"\{[a-z_]+\}", text)))
+        if not isinstance(value, Literal):
+            text = text.replace("{" + name + "}", str(value))
+    missing = sorted(set(re.findall(r"\{[a-z_]+\}", text)) - {"{" + n + "}" for n, v in values.items()
+                                                                if isinstance(v, Literal)})
     if missing:
         die("worker-spec.md: no value for " + ", ".join(missing))
+    for name, value in values.items():
+        if isinstance(value, Literal):
+            text = text.replace("{" + name + "}", value)
     return text
 
 
@@ -4144,12 +4153,13 @@ def spec_values(plan_dir, plan, node, entry, issue, row):
             "path": row.get("path", "-"), "branch": row["branch"], "parent": row["parent"], "lower": row["lower"],
             "pr": row.get("pr", "-"), "wg": wg_command(), "plan_dir": shlex.quote(str(plan_path)),
             "project": plan["effort"]["name"], "skill": str(Path(__file__).resolve().parent.parent),
-            "lint": lint_step(plan, row["lower"]),
+            "lint": Literal(lint_step(plan, row["lower"])),
             "dispatch_spec": shlex.quote(str(plan_path / "specs" / f"{node['key']}.md"))}
 
 
-# The Agent notes block that `wg load` adds to each issue description (node_body). A worker spec drops it.
-NOTES_START = "+++ Agent notes\n\nwork-graph node "
+# The Agent notes block that `wg load` adds to each issue description (node_body). A worker spec drops it,
+# and keeps the text before and after it.
+NOTES_BLOCK = re.compile(r"\+\+\+ Agent notes\n\nwork-graph node .*?\n\+\+\+[ \t]*(?=\n|$)", re.S)
 
 
 def issue_design(entry, issue):
@@ -4158,7 +4168,7 @@ def issue_design(entry, issue):
     if text is None:
         text = (gql("query($id:String!){ issue(id:$id){ description } }", {"id": entry["id"]}).get("issue") or {}
                 ).get("description")
-    text = (text or "").split(NOTES_START, 1)[0].strip()
+    text = re.sub(r"\n{3,}", "\n\n", NOTES_BLOCK.sub("", text or "")).strip()
     return text or "The issue has no description."
 
 
@@ -4489,6 +4499,12 @@ def claim_steps(plan_dir, plan, key, snap, quiet=False, warnings=None):
 
 def dispatch_spec(plan_dir, plan, node, entry, issue, row):
     """Write the worker spec of a node's first job. Returns the spec path and the task title."""
+    text = dispatch_text(plan_dir, plan, node, entry, issue, row)
+    return write_spec(plan_dir, node["key"], text), f"{entry['identifier']}: {node.get('title') or issue.get('title', node['key'])}"
+
+
+def dispatch_text(plan_dir, plan, node, entry, issue, row):
+    """The dispatch spec: the time line, the task or spike section, the design, the node card, the rules."""
     sections, values = spec_sections(), spec_values(plan_dir, plan, node, entry, issue, row)
     if node["kind"] == "spike":
         text = render(sections["spike"], values)
@@ -4499,8 +4515,7 @@ def dispatch_spec(plan_dir, plan, node, entry, issue, row):
     when = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
     first = (f"Written by `wg dispatch` at {when}: a copy of Linear issue `{entry['identifier']}` and of the node "
              f"`{node['key']}` of plan.json. The issue stays the record.")
-    text = "\n\n".join([first, text, spec_context(plan, node, entry, issue)])
-    return write_spec(plan_dir, node["key"], text), f"{entry['identifier']}: {node.get('title') or issue.get('title', node['key'])}"
+    return "\n\n".join([first, text, spec_context(plan, node, entry, issue)])
 
 
 def dispatch_target(plan_dir, plan, key):
@@ -5037,6 +5052,8 @@ def restack_line(plan_dir, plan, node, row, nodes, deps, st):
         old = run_row(load_keymap(plan_dir), below).get("code_done_head") or ""
         if not old:
             raise ReadError(f"no old tip of the merged parent {row['parent']}: ask {HUMAN}")
+        if row.get("branch"):  # a rewritten parent: its last head can be off the branch's history
+            old = git_output("merge-base", row["branch"], old, cwd=plan_dir)
     return f"{line}; refresh: git rebase --onto origin/{pin} {old}, then st branch reparent --parent {pin}"
 
 
@@ -5095,6 +5112,10 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
     if problems:
         refuse(ident, problems, "not claimed")
     restack = restack_line(plan_dir, plan, node, row, nodes, deps, st) if job == "restack" else ""
+    if "parent merged: yes" in restack:
+        # The worker's push checks and `wg evidence` count from the new target, not the merged parent.
+        # `wg done` sets the parent when the PR's base is the target.
+        row["lower"] = f"origin/{bottom_base(node, phase_of(plan, node)['target'])}"
     if not resume:
         held = claim_labels(issue)
         if send and held:  # the same refusal as take_claim, before the run row changes
@@ -5121,6 +5142,8 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
         header = render(sections["task"], {"submit": sections[f"submit {kind}"]} | values) + "\n\n" + header
     spec_path = Path(plan_dir).resolve() / "specs" / f"{key}-{job}.md"
     if not (resume and row.get("retry_request") and spec_path.is_file()):  # a pending request keeps its spec
+        if fresh:  # step 2 names the dispatch spec: an adopted node has none, so write it (design, card, rules)
+            write_spec(plan_dir, key, dispatch_text(plan_dir, plan, node, entry, issue, row))
         spec_path = write_spec(plan_dir, f"{key}-{job}", header + (f"\n\n{work}" if work else ""))
     spec = shlex.quote(str(spec_path))
     task_title = f"{ident}: {node.get('title') or issue.get('title', key)}"

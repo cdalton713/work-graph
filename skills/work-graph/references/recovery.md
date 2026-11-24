@@ -28,7 +28,7 @@ To replace a worker that may be live, the human must ask; then `worker-stop --di
 
 **Regression** (a failed `ops` check, or a problem during a soak). The ship point is in `Needs <human>` with a `Regression:` comment (review-and-merge.md "Ship point"). Give the human the commit and the evidence. They choose a revert or a forward fix: new nodes through Replan with anchor = the open ship point (fix `task`, new deploy and verify `ops`). On `<release>` the fix is a HOTFIX node, and the human rolls back the deploy and tells the team (local rules file). List the regression in `PLAN.md` `## Notes` until it is resolved. A new build restarts the soak: `wg run set <plan-dir> <ship key> soak_until=<UTC time>`. When the new verify passes: `wg move` the failed `ops` node to `Canceled` with a comment `superseded by <new identifier>`, comment `Regression resolved: <fix PR> merged; <evidence>` on the ship point, and `wg move` it back to `Todo`.
 
-**`keymap.json` lost or empty.** With no mapped project, `wg load` exits 2 when a project with the effort name exists. Run `wg load <plan-dir> --adopt`: it maps a plan-team node by its marker, else by exact title when exactly one unmapped plan node and exactly one unmapped project issue have that title (`adopted <key> -> <identifier> (by title)`), an `issue` node by its field, and an ENG node by `eng`. Then `wg load <plan-dir>` (dry run) and `--apply`. On any `conflict <key>: …` line: set `"issue": "<identifier>"` for that node in `plan.json`; two nodes cannot name the same issue, so ask the human which is which. `--apply` exits 2 before any create while a conflict exists. The run rows are lost with the file: `wg next` then prints a `reconcile` line for each node that has work, and "Resume" rebuilds the rows.
+**`keymap.json` lost or empty.** With no mapped project, `wg load` exits 2 when a project with the effort name exists. Run `wg load <plan-dir> --adopt`: it maps a plan-team node by its marker, else by exact title when exactly one unmapped plan node and exactly one unmapped project issue have that title (`adopted <key> -> <identifier> (by title)`), an `issue` node by its field, and an ENG node by `eng`. Then `wg load <plan-dir>` (dry run) and `--apply`. On any `conflict <key>: …` line: set `"issue": "<identifier>"` for that node in `plan.json`; two nodes cannot name the same issue, so ask the human which is which. `--apply` exits 2 before any create while a conflict exists. The run rows are lost with the file. After the adopt, `wg run rebuild <plan-dir>` prints the run rows that the journal gives (`journal.jsonl`, "Run state"); read them, then write them with `wg run rebuild <plan-dir> --apply`. The command refuses `--apply` while `keymap.json` maps no node. With no journal, `wg next` prints a `reconcile` line for each node that has work, and "Resume" rebuilds the rows. A rebuilt row holds only what the journal recorded: follow "Resume" to check each row against Orca and GitHub.
 
 ## Replan
 
@@ -51,6 +51,12 @@ Done when: every check in step 2 passes and a new `wg load <plan-dir>` reports n
 ## Run state
 
 The run rows in `keymap.json` hold what Linear and GitHub cannot tell: the Orca and Git ids of each node, and the results that only the coordinator knows. `wg next` derives each next action from Linear, GitHub, and these rows, so no step and no stage is stored. Read the rows with `wg run show <plan-dir> [<key>|@effort]`. One `wg` command writes `keymap.json` at a time.
+
+Each `wg` command that changes a status, a claim, or a run row also appends one JSON line to `<plan-dir>/journal.jsonl` under the same lock: the UTC time, the command, the node key, the kind (`run`, `status`, `claim`, or `issue`), and each changed field as `[old, new]`. It holds no field with a secret name and no comment body: for `approved` it holds only the date, and the human's words stay in the Linear comment. Each new file (the first one, and the one after the rotation at 5 MB, when the file moves to `journal.1.jsonl`) starts with a baseline line: the run rows at that time. Both files have mode 600. A journal failure prints `warn: journal not written` and does not fail the command; an append waits at most 5 seconds for the plan lock.
+
+- `wg log <plan-dir> [<key>] [--since <2h|3d|UTC time>] [-n N]`: one short line for each entry, newest last, 30 by default. Read it first after a context loss or in a new session.
+- `wg log <plan-dir> --times`: for each task, the time from the start of the dispatch job (`started_at`, the worker's receipt) to code done, from code done to merged, and the time it waited on the human (in `Needs <human>` or `Ready to Merge`).
+- `wg run rebuild <plan-dir> [--apply]`: the run rows that the journal gives: the last baseline, then each change after it ("Failure", "`keymap.json` lost or empty"). With no baseline line it changes nothing. `--apply` copies the run rows that it replaces to `keymap.run-before-rebuild.json`. A rebuilt `approved` holds the date only.
 
 | Field | Written by |
 |---|---|
@@ -77,7 +83,7 @@ The run rows in `keymap.json` hold what Linear and GitHub cannot tell: the Orca 
 
 A new session starts here. So does each `reconcile` line.
 
-1. `wg next <plan-dir>` and `wg run show <plan-dir>`. Read `PLAN.md` `## Notes`.
+1. `wg next <plan-dir>`, `wg run show <plan-dir>`, and `wg log <plan-dir>` (the last changes). Read `PLAN.md` `## Notes`.
 2. `orca orchestration run-list`, confirm the `run_id`, then `orca orchestration run-use --id <run_id>`.
 3. `orca orchestration task-list --run <run_id> --brief`, `orca orchestration worker-list --run <run_id> --include-remote`, and `orca orchestration inbox --terminal run:<run_id> --limit 50`. Handle unanswered questions and each unread `worker_done` (jobs.md "Job end").
 4. Each `reconcile` line and each `wait worker` line:

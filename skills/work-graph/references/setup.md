@@ -10,6 +10,10 @@
 | `specs/` | Written by `wg dispatch` and `wg claim`: the worker spec of each job |
 | Linear | The plan's team. One project per effort; one project milestone per phase. |
 
+## Run wg
+
+Run `scripts/wg.py` as `wg`: the command uses `uv run --script`, which supplies the `websockets` package for the link to the page (page.md "Link"). `python3 -I <skill-dir>/scripts/wg.py` also works; without `websockets` in that Python, `wg next` polls Linear. `~/.local/bin/wg` is a link to the script. If a shell says `command not found`, make the link again: `ln -s <skill-dir>/scripts/wg.py ~/.local/bin/wg`.
+
 ## Plan location
 
 Select or create the `<slug>-core` coordinator worktree through Orca before writing the plan: `orca worktree list --json`, else `orca worktree create --name <slug>-core --branch <prefix><slug>-core --no-parent --base-branch origin/<target> --setup skip --json`. It is the only top-level workspace of the effort; every lane parent, spike, and integration workspace nests under it. Reuse it for the core lane parent when the names match. Keep `PLAN.md`, `plan.json`, `keymap.json`, `evidence/`, and `specs/` together at its root. Do not commit them unless the human asks. If `keymap.json` is lost, follow recovery.md "Failure" before any `wg load --apply`.
@@ -18,9 +22,9 @@ When moving an existing setup, copy all of them, check that `wg status <new-dir>
 
 ## Linear
 
-1. Configure the plan's Linear workspace and key as described in SKILL.md "Linear workspace". `wg preflight <plan-dir> [--phase P]` checks the tools (`git`, `gh auth`, `st`), the selected key, the statuses and claim labels below, and the target of each phase ("Stax trunk and targets").
+1. Configure the plan's Linear workspace and key as "Linear workspace" below says. `wg preflight <plan-dir> [--phase P]` checks the tools (`git`, `gh auth`, `st`), the selected key, the statuses and claim labels below, and the target of each phase ("Stax trunk and targets").
 2. The plan's team needs these statuses. For a team that owns its statuses (`inheritWorkflowStatuses: false`), configure them on the team: Triage, Backlog, Todo, Ready, In Progress, Needs <human>, In Review, Ready to Merge, Merged, Verifying, Done, Canceled, Duplicate. `Needs <human>` is `Needs` and the config's `human` (for example `Needs Ada`). `wg` uses these names; do not rename them. The meanings are in the table below.
-3. Kind labels for the plan's team: `merge-point`, `ship-point`, `ops`, `decision`. `wg load` creates `spike` on first use, and the `reviewed` label (SKILL.md "Mark a PR reviewed").
+3. Kind labels for the plan's team: `merge-point`, `ship-point`, `ops`, `decision`. `wg load` creates `spike` on first use, and the `reviewed` label (review-and-merge.md "Mark a PR reviewed").
 4. Claim labels: the workspace label group `agent` (single-select) with `agent:codex`, `agent:claude`, and `agent:coordinator`. Single-select means an issue holds at most one claim. The claim comment names the Orca dispatch.
 5. Initiatives: the project label group `initiative` (single-select): a team group where the workspace has `team_labels: true`, else a workspace group. `wg load --apply` creates it and its labels on first use. If Linear says that a label it just created is a duplicate, `wg` reads the labels again and uses that label.
 6. Agents use the human's API key, so Linear shows them as the author of each agent comment and status change. A comment is no proof of who wrote it. Their words about a node can be recorded with `wg approve --quote`; their `ops` evidence and their answers go in `wg move --note`.
@@ -40,6 +44,22 @@ When moving an existing setup, copy all of them, check that `wg status <new-dir>
 | Done | Acceptance criteria verified. |
 | Canceled, Duplicate | Closed without the work. |
 
+## Linear workspace
+
+The config lists the Linear workspaces. Set `effort.workspace` to the id of the workspace that owns the work; a plan without it uses the first one. `effort.team` defaults to the workspace's `team`. A workspace with `teams` accepts only those teams, and a team that another workspace names stops `wg`. Choose from the work's owner, not the current shell key. Do not copy issues from one workspace into another.
+
+`wg` selects the key for every command from the plan: `LINEAR_<ID>_API_KEY`, then the workspace's `key_env` names, then the private file `~/.config/work-graph/<id>-linear-api-key` (mode 600). A missing key stops the command; it never uses the key of another workspace. Keep keys out of plans, comments, and command arguments.
+
+`wg` tries a Linear request again when it failed for a short time, at most 4 tries. The base delay is 1 s and doubles for each new try; a random factor from 0.5 to 1.5 changes each delay, so one delay can be shorter than the one before. It tries a query again after a network error, a timeout, HTTP 429, HTTP 5xx, or a `RATELIMITED` error. It tries a mutation again only when Linear refused it before it ran (HTTP 429, or a `RATELIMITED` error code below HTTP 500 with no data and no error path), because after a timeout, a 5xx, or a partial execution Linear can have applied it. A document that `wg` cannot prove to be a query counts as a mutation. At a rate limit, `wg` uses the times of that refusal (`Retry-After`, and the reset time of each used-up limit, also the limit of one endpoint; a complexity limit with fewer points than the request costs is used up). When that time is at most 60 s away, `wg` waits for it in place of the base delay; when it is farther, `wg` stops at once. Each new try prints one `warn linear:` line to stderr. After a failed mutation, read the issue before you run the command again.
+
+Linear's Free plan holds 250 issues in a workspace; archived issues do not count. In a workspace with no paid plan, `wg` archives every completed and canceled issue of the workspace, not only the nodes of the plan: at each `wg move` to `Done` or `Canceled`, and at each `wg tick`. `wg archive <plan-dir>` shows what it would archive; `--apply` archives it. An archived node stays in the graph, on the page, and in `wg next`. A `wg move` of an archived node to an open status restores it first. Do not archive or restore issues by hand.
+
+## Autostart
+
+`wg autostart <plan-dir> --install` makes an Orca automation for the effort's `<effort>-core` worktree. Every 5 minutes it runs `wg wake <plan-dir>` as its precheck, and starts a coordinator agent (the human's default agent, in a fresh session) only when `wg wake` says `start`. `wg wake` says `start` when all of these hold: no agent that Orca reports as not done runs in that worktree; fewer than 2 coordinator agents run on the machine; fewer than 3 starts for this effort in the last hour; the autonomy level is not `supervised`; the effort is not paused; and the effort has work (a page message waits for a coordinator, an answer from the page, an autonomy change, or a `do` line from `wg next`). Otherwise it prints `skip: <reason>`, which Orca keeps in the automation's run history. `wg autostart <plan-dir>` prints the state; `--uninstall` removes the automation. The human installs it; a coordinator does not install it on its own.
+
+A run that autostart started uses the project's current autonomy level and does not ask for one. It runs the coordinator loop (coordinator.md) as any other run.
+
 ## Stax trunk and targets
 
 stax has one trunk for the repository (`git cat-file -p refs/stax/trunk`); it stays as it is. A lane runs in one of two modes:
@@ -48,6 +68,10 @@ stax has one trunk for the repository (`git cat-file -p refs/stax/trunk`); it st
 - **Target is an imported, frozen base:** its metadata (`git cat-file -p refs/branch-metadata/<target>`) has a non-empty `sourceRemote` and `"frozen": true`. stax never pushes, restacks, or syncs it. `wg base <plan-dir>` refreshes it (fast-forward only, one refresh at a time in the repository). The coordinator runs it, and each lane worker runs it immediately before each `st branch submit` (worker-spec.md "submit lane"), because the base moves while a worker runs and stax refuses a submit whose parent is behind `origin`. On a `FAIL base` line the coordinator stops and asks the human; a worker escalates.
 
 Setup of a base, one time for each branch, in the checkout that holds it: `st get <target> --parent <trunk> --no-checkout --downstack --no-restack && st freeze <target>`. Only the human runs or approves it: on `FAIL trunk` the coordinator stops and asks them. In a routine refresh, the coordinator and the workers never run `st sync`, `st get`, `st unfreeze`, or `st branch untrack` on a frozen base. If the human later makes a base the trunk, they first run `st branch untrack <branch>`.
+
+<!-- explain: load -->
+On `FAIL base` in `wg preflight` or `wg load`: the frozen base's PR targets another branch than its stax parent, carries foreign commits, or sits in a native stack. Stop and ask the human which base is right; never pick one. On `FAIL trunk`: stop and ask the human to do what the `FAIL trunk` lines say: set up the base (this section), set the trunk with `st init`, or freeze the integration branch. Never run `st trunk`: it checks out the trunk.
+<!-- /explain -->
 
 ## ENG tickets
 
@@ -70,7 +94,7 @@ Reading (`next`, `ready`, `status`): the `needs-<human>` label reads as `Needs <
 
 ## Queries
 
-- `wg next <plan-dir>`: one status line for the open phase, then each `do`, `wait`, and `note` line (coordinator.md "Loop").
+- `wg next <plan-dir>`: one status line for the open phase, then each `do`, `wait`, and `note` line (coordinator.md "Loop"). It reads Linear, GitHub, and the run rows: one GitHub request for each 50 PRs of the run rows, and one `gh pr view` only for a PR that the request does not return. It changes no status, no claim, and no run field. It copies its result to Linear for the page: the wave and the next action on each node card, and every line in the project document `work-graph status`; `--no-publish` skips the copy.
 - `wg verify <plan-dir> <key>`: the code done checks of `wg done`, on the PR's current head, with the node's worktree as the current directory. It prints each `ok` and `FAIL` line and sets or removes `code_done_head`. It changes no claim, no status, and no review. Use it to see why a node is not code done; a `verify <key>` line of `wg next` still means `wg done`.
 - `wg status <plan-dir> [--phase P]`: every node in run order, with its status, claim, and run row (`state`, `pr`, `code_done_head`, `review`, `dispatch`).
 - Run order (also the Linear manual sort order, set by `wg load --apply`): phases in `plan.json` order; inside a phase, a topological order of the edges, with lane nodes kept together. Linear shows a lower `sortOrder` higher, so the first node to run is at the top. ENG nodes keep their own sort order. In Linear, set the project view's ordering to **Manual** to see it.

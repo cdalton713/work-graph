@@ -34,7 +34,7 @@ Edges among tasks, milestones, and `ops` nodes follow this list only (A → B: A
 
 The effort coordinator is `<slug>-core`, with branch `<prefix><slug>-core` (config `branch_prefix`, default `wg/`); its root holds the plan files (setup.md). Reuse it as the core lane parent.
 
-One Orca child worktree per branch, SYNC and integration branches included. One parent workspace per lane and phase, nested under the `<slug>-core` coordinator, so the effort is one tree in Orca: `<slug>-core` › `<stack>` › `NN <key>`. Spikes are children of `<slug>-core` itself. The coordinator creates both with the commands that `wg dispatch` prints (coordinator.md "Dispatch"); workers never create worktrees. `wg dispatch` computes these names:
+One Orca child worktree per branch, SYNC and integration branches included. One parent workspace per lane and phase, nested under the `<slug>-core` coordinator, so the effort is one tree in Orca: `<slug>-core` › `<stack>` › `NN <key>`. Spikes are children of `<slug>-core` itself. The coordinator creates both with the commands that `wg dispatch` prints (jobs.md "Dispatch"); workers never create worktrees. `wg dispatch` computes these names:
 
 | Item | Form | Example |
 |---|---|---|
@@ -48,7 +48,7 @@ One Orca child worktree per branch, SYNC and integration branches included. One 
 | SYNC branch | `sync/<slug>-p<P>` from `origin/main`, stack `<slug>-p<P>-sync`, child `00 sync`; not tracked by stax | `sync/z-p1` |
 | Spike branch | `<prefix><slug>-spike-<key>` from `origin/<target>`, under the `<slug>-core` coordinator; no PR | `wg/xy-spike-load` |
 
-An adopted branch keeps its own name (coordinator.md "Adopt an existing branch or PR").
+An adopted branch keeps its own name (jobs.md "Adopt an existing branch or PR").
 
 A new phase starts its stacks again at `00` from the updated target.
 

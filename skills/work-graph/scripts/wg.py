@@ -144,7 +144,7 @@ ENG_LABELS = {WAIT_STATUS: WAIT_LABEL, "Ready to Merge": MERGE_LABEL}
 REVIEW_OK = {"clean", "accepted"}
 MAX_THOROUGH = 2  # thorough reviews of one PR; the second only when a fix needs it
 INITIATIVE_GROUP = "initiative"  # the team's single-select project label group; each child label is one initiative
-# The autonomy level of each effort (SKILL.md "Autonomy level"): one child label of the single-select project label
+# The autonomy level of each effort (references/autonomy.md): one child label of the single-select project label
 # group `autonomy`. No label means AUTONOMY_DEFAULT. The human changes it on the page at any time.
 AUTONOMY_GROUP = "autonomy"
 AUTONOMY_LEVELS = ("full", "standard", "supervised")
@@ -1170,7 +1170,7 @@ def autonomy_lines(plan_dir, plan):
             save_keymap(plan_dir, km)
     if seen and seen != level:
         return [("do", f"autonomy @effort -: {HUMAN} set the autonomy level to {level} (was {seen}); "
-                       f"from now on act as SKILL.md \"Autonomy level\" says for {level}")]
+                       f"from now on act as references/autonomy.md says for {level}")]
     return [("note", f"autonomy @effort -: {level}")]
 
 
@@ -3487,7 +3487,7 @@ DO_COMMANDS = {
     "close": "move {dir} {key} Done",
     "verifying": "move {dir} {key} Verifying",
     "ship": "move {dir} {key} Done",
-    "load": "load {dir} --apply",  # coordinator.md: the dry run `wg load <plan-dir>` comes first
+    "load": "load {dir} --apply",  # coordinator.md "Loop": the dry run `wg load <plan-dir>` comes first
 }
 # The `note` lines that the terminal prints in full. It counts the other notes in one line.
 NOTES_SHOWN = ("autonomy", "triage", "page")
@@ -3779,10 +3779,12 @@ def wake_command(plan_dir, plan):
 
 def autostart_prompt(plan_dir):
     return (f"You are the work-graph coordinator of the effort in {plan_dir}. `wg autostart` started you: `wg next` has "
-            "work and no coordinator was running. Load the work-graph skill, read references/coordinator.md, and run "
-            f"its loop: `wg next {plan_dir} --wait`, then act on each line, until the effort is complete or a line "
-            f"needs {HUMAN}. Do not ask for the autonomy level: this run uses the project's current level "
-            f"(`wg autonomy {plan_dir}`), as SKILL.md \"Autostart\" says.")
+            f"work and no coordinator was running. Load the work-graph skill. Run `wg next {plan_dir}` first. For the "
+            "verb of each `do` and `wait` line, read `wg explain <verb>` before you act on it; do not read "
+            "references/coordinator.md as a whole. Act on each line, until the effort is complete or a line needs "
+            f"{HUMAN}. Then wait as references/coordinator.md \"Wait\" says (`wg explain human` prints it): one "
+            f"`wg next {plan_dir} --wait` in the background, then end the turn. Do not ask for the autonomy level: this run uses the project's current level "
+            f"(`wg autonomy {plan_dir}`), as setup.md \"Autostart\" says.")
 
 
 def autostart_command(plan_dir, plan, install, uninstall):
@@ -4440,7 +4442,7 @@ def first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=False, war
     ident = entry["identifier"]
     problems = []
     if node.get("branch") or node.get("pr"):
-        problems.append(f"{key}: its branch or PR exists: adopt it (coordinator.md)")
+        problems.append(f"{key}: its branch or PR exists: adopt it (jobs.md \"Adopt an existing branch or PR\")")
     if row.get("state") or row.get("branch"):
         problems.append(f"{key}: the run row has state={row.get('state', '-')} branch={row.get('branch', '-')}")
     if st.get(key) not in ("Todo", "Ready"):

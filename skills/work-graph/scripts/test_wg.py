@@ -3995,3 +3995,63 @@ class CleanupTests(LaneTests):
     def test_plan_lock_is_reentrant(self):
         with wg.plan_lock(self.d), wg.plan_lock(self.d):
             pass
+
+
+class FreePlanTests(DirTests):
+    """Linear's Free plan holds 250 issues: wg archives the completed and canceled ones."""
+
+    def setUp(self):
+        super().setUp()
+        wg.FREE_PLAN.clear()
+        self.addCleanup(wg.FREE_PLAN.clear)
+
+    def test_free_plan_is_a_workspace_with_no_subscription(self):
+        for org, free in (({"subscription": None}, True), ({"subscription": {"type": "business"}}, False), ({}, False)):
+            wg.FREE_PLAN.clear()
+            with patch.object(wg, "gql", return_value={"organization": org}) as request:
+                self.assertEqual(wg.free_plan(), free)
+                self.assertEqual(wg.free_plan(), free)
+            self.assertEqual(request.call_count, 1)  # one read for each workspace
+
+    def test_archive_reads_every_page_then_archives_each_issue(self):
+        pages = [{"issues": {"nodes": [{"id": "i1", "identifier": "CD-1"}],
+                             "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}},
+                 {"issues": {"nodes": [{"id": "i2", "identifier": "CD-2"}],
+                             "pageInfo": {"hasNextPage": False, "endCursor": None}}}]
+        with patch.object(wg, "gql", side_effect=pages + [{}, {}]) as request:
+            self.assertEqual(wg.archive_settled(), ["CD-1", "CD-2"])
+        queries = [c.args[0] for c in request.call_args_list]
+        self.assertIn('"completed","canceled"', queries[0])
+        self.assertEqual(request.call_args_list[1].args[1], {"after": "c1"})
+        self.assertEqual([c.args[1] for c in request.call_args_list[2:]], [{"id": "i1"}, {"id": "i2"}])
+        self.assertTrue(all("issueArchive" in q for q in queries[2:]))
+        with patch.object(wg, "gql", side_effect=pages) as request:
+            self.assertEqual(wg.archive_settled(apply=False), ["CD-1", "CD-2"])
+        self.assertEqual(request.call_count, 2)  # a dry run archives nothing
+
+    def test_archive_runs_only_on_the_free_plan_and_a_failure_only_warns(self):
+        with patch.object(wg, "free_plan", return_value=False), patch.object(wg, "archive_settled") as sweep:
+            self.assertEqual(wg.archive_free(), [])
+        sweep.assert_not_called()
+        with patch.object(wg, "free_plan", return_value=True), \
+             patch.object(wg, "archive_settled", return_value=["CD-1"]):
+            out, _ = self.call(lambda: len(wg.archive_free()), code=1)
+        self.assertIn("archived 1 completed or canceled issues (Linear Free plan, 250 issues): CD-1", out)
+        with patch.object(wg, "free_plan", side_effect=wg.ReadError("offline")):
+            _, err = self.call(lambda: len(wg.archive_free()), code=0)
+        self.assertIn("warn: archive of settled issues failed: offline", err)
+
+    def test_move_to_done_or_canceled_archives_and_a_reopen_unarchives(self):
+        self.write_plan()
+        self.keymap()
+        states = {"team": {"states": {"nodes": [{"name": n, "id": n} for n in ("Canceled", "In Progress")]}}}
+        for status, archived, sweeps in (("Canceled", None, True), ("In Progress", "2026-01-01T00:00:00Z", False)):
+            issue = live_issue("Done", archivedAt=archived)
+            with patch.object(wg, "fetch_nodes", return_value={"a": issue}), \
+                 patch.object(wg, "gql", return_value=states) as request, patch.object(wg, "sync_ready"), \
+                 patch.object(wg, "issue_update"), patch.object(wg, "comment"), \
+                 patch.object(wg, "archive_free") as sweep:
+                self.call(wg.move, self.d, self.p, "a", status, None, "test")
+            self.assertEqual(sweep.called, sweeps)
+            unarchive = [c for c in request.call_args_list if "issueUnarchive" in c.args[0]]
+            self.assertEqual([c.args[1] for c in unarchive], [] if sweeps else [{"id": "a"}])

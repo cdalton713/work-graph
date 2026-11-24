@@ -20,6 +20,7 @@ that Python, and without it `wg next` polls Linear.
   wg started   <dir> <key> dispatch=<id> [<field>=<value>...]
   wg done      <dir> <key> [--dispatch <id>] [--failed "<error>"] [--worktree <path>]
   wg move      <dir> <key> <status> [--note "<text>"] [--force "<reason>"]
+  wg archive   <dir> [--apply]      (Linear Free plan: archive completed and canceled issues)
   wg run set   <dir> <key|@effort> <field>=<value>...
   wg run show  <dir> [<key>|@effort] [--json]
   wg run reset <dir> <key>
@@ -578,11 +579,59 @@ def fetch_nodes(km):
     out = {}
     for i in range(0, len(ids), 25):
         res = gql("""query($ids:[ID!]){ issues(first:25, includeArchived:true, filter:{id:{in:$ids}}){ nodes{ id identifier url sortOrder title team{id} project{id} projectMilestone{id}
-                     state{name type} labels(first:100){nodes{id name}}
-                     relations(first:50){nodes{id type relatedIssue{id}} pageInfo{hasNextPage endCursor}} } } }""", {"ids": ids[i:i + 25]})
+                     state{name type} archivedAt labels(first:100){nodes{id name}}
+                     relations(first:50,includeArchived:true){nodes{id type relatedIssue{id}} pageInfo{hasNextPage endCursor}} } } }""", {"ids": ids[i:i + 25]})
         for n in res["issues"]["nodes"]:
             out[n["id"]] = n
     return out
+
+
+# Linear's Free plan holds 250 issues in a workspace; archived issues do not count. On that plan, wg archives
+# each completed and canceled issue of the workspace. An archived issue keeps its relations, but Linear lists
+# them only with includeArchived, so every relation query of wg and the page passes it.
+FREE_PLAN = {}
+
+
+def free_plan():
+    """True when the workspace of this command has no paid Linear subscription."""
+    workspace = LINEAR_WORKSPACE.get()
+    if workspace not in FREE_PLAN:
+        org = gql("query{ organization{ subscription{ type } } }").get("organization") or {}
+        FREE_PLAN[workspace] = "subscription" in org and org["subscription"] is None
+    return FREE_PLAN[workspace]
+
+
+def archive_settled(apply=True):
+    """Archive each completed or canceled issue of the workspace that is not archived. Returns the identifiers."""
+    found, after = [], None
+    while True:
+        page = gql("""query($after:String){ issues(first:100,after:$after,
+                       filter:{state:{type:{in:["completed","canceled"]}}}){
+                       nodes{id identifier} pageInfo{hasNextPage endCursor} } }""", {"after": after})["issues"]
+        found += page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        after = page["pageInfo"]["endCursor"]
+    if apply:
+        for issue in found:
+            gql("mutation($id:String!){ issueArchive(id:$id){ success } }", {"id": issue["id"]})
+    return [issue["identifier"] for issue in found]
+
+
+def archive_free(apply=True):
+    """On the Free plan, archive the settled issues and print one line. A failure warns; it stops nothing."""
+    try:
+        if not free_plan():
+            return []
+        archived = archive_settled(apply)
+    except ReadError as error:
+        print(f"warn: archive of settled issues failed: {error}", file=sys.stderr)
+        return []
+    if archived:
+        verb = "archived" if apply else "would archive"
+        print(f"{verb} {len(archived)} completed or canceled issues (Linear Free plan, 250 issues): "
+              + " ".join(archived[:20]) + (" …" if len(archived) > 20 else ""))
+    return archived
 
 
 def node_marker(n):
@@ -1171,7 +1220,7 @@ def issue_relations(issue_id, page):
         if not info.get("hasNextPage"):
             return
         page = gql("""query($id:String!,$after:String){issue(id:$id){
-                       relations(first:50,after:$after){nodes{id type relatedIssue{id}}
+                       relations(first:50,after:$after,includeArchived:true){nodes{id type relatedIssue{id}}
                        pageInfo{hasNextPage endCursor}} } }""",
                    {"id": issue_id, "after": info["endCursor"]})["issue"]["relations"]
 
@@ -1572,6 +1621,8 @@ def move(plan_dir, plan, key, status_name, note=None, force=None, keep_worktree=
     stale += [label["id"] for label in issue_labels(issue) if label["name"] == ANSWERED_LABEL]
     if stale:
         fields["removedLabelIds"] = stale
+    if issue.get("archivedAt") and status_name not in ("Done", "Canceled"):
+        gql("mutation($id:String!){ issueUnarchive(id:$id){ success } }", {"id": entry["id"]})
     if fields:
         issue_update(entry["id"], fields)
     before = next((status for status, name in ENG_LABELS.items() if name in markers), old)
@@ -1590,6 +1641,8 @@ def move(plan_dir, plan, key, status_name, note=None, force=None, keep_worktree=
         sync_ready(plan_dir, plan)  # code done lets the node above in the lane start
     if status_name in MERGED and not keep_worktree:
         cleanup_worktrees(plan_dir, plan, [key], settled={key: status_name})
+    if status_name in ("Done", "Canceled"):
+        archive_free()
     return 0
 
 
@@ -3445,10 +3498,27 @@ def tick_command(ns):
             failed |= outcome.startswith("error:")
             print(f"{path}: {' '.join(outcome.splitlines())}", flush=True)
         save()
+        for workspace in tick_workspaces(plans):
+            selected = LINEAR_WORKSPACE.set(workspace)
+            try:
+                archive_free()
+            finally:
+                LINEAR_WORKSPACE.reset(selected)
         return int(failed)
     finally:
         COMMAND_TIMEOUT.reset(token)
         os.close(fd)
+
+
+def tick_workspaces(plans):
+    """The workspaces of the loaded plans, for the archive step of Linear's Free plan."""
+    found = set()
+    for path in plans:
+        try:
+            found.add(plan_workspace(load_plan(path)))
+        except (SystemExit, OSError, ValueError):
+            continue
+    return sorted(found)
 
 
 def tick_agent(ns):
@@ -4249,6 +4319,7 @@ def cli_parser():
     m.add_argument("--force", metavar="REASON")
     m.add_argument("--keep-worktree", action="store_true", help="at Merged or Done, keep the node's Orca worktree")
     add(sub, "cleanup").add_argument("--dry-run", action="store_true")
+    add(sub, "archive").add_argument("--apply", action="store_true")
     r = sub.add_parser("run").add_subparsers(dest="mode", required=True)
     r_set = add(r, "set")
     r_set.add_argument("key")
@@ -4328,6 +4399,13 @@ def run_command(ns, d, plan, given):
         return move(d, plan, ns.key, ns.status, ns.note, ns.force, ns.keep_worktree)
     if ns.cmd == "cleanup":
         return cleanup_command(d, plan, ns.dry_run)
+    if ns.cmd == "archive":
+        if not free_plan():
+            print("no archive: the workspace has a paid Linear plan")
+            return 0
+        if not archive_free(ns.apply):
+            print("no completed or canceled issue to archive")
+        return 0
     if ns.cmd == "run":
         if ns.mode == "set":
             return run_set(d, plan, ns.key, ns.fields)

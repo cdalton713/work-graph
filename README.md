@@ -68,6 +68,10 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 A workspace's key comes from `LINEAR_<ID>_API_KEY`, then the `key_env` names, then the private file
 `~/.config/work-graph/<id>-linear-api-key` (mode 600). Keys never go in the config.
 
+In a workspace on Linear's Free plan (250 issues; archived issues do not count), `wg` archives each completed and
+canceled issue of the workspace at each `wg move` to Done or Canceled and at each `wg tick`. `wg archive <dir>`
+shows the list; `--apply` archives it. `wg` and the page read archived issues and their relations.
+
 Each Linear team of a plan needs the statuses Triage, Backlog, Todo, Ready, In Progress, `Needs <human>`,
 In Review, Ready to Merge, Merged, Verifying, Done, Canceled, and Duplicate
 (`skills/work-graph/references/setup.md`).

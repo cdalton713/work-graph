@@ -90,8 +90,8 @@ const ISSUE = `id identifier title description priority url sortOrder updatedAt
   team{id key} ${STATE} assignee{id name displayName avatarUrl}
   labels(first:20){nodes{id name color parent{name}}}
   projectMilestone{id}
-  relations(first:${RELATION_PAGE}){${RELATIONS}}
-  inverseRelations(first:${RELATION_PAGE}){${INVERSE_RELATIONS}}
+  relations(first:${RELATION_PAGE},includeArchived:true){${RELATIONS}}
+  inverseRelations(first:${RELATION_PAGE},includeArchived:true){${INVERSE_RELATIONS}}
   comments(first:1, filter:{body:{startsWith:"${CARD_PREFIX}"}}){nodes{id body}}
   attachments(first:20){nodes{url title sourceType metadata}}`;
 
@@ -162,8 +162,8 @@ async function completeIssue(issue: RawIssue, projectId: string | undefined): Pr
     const data = await gql(
       `query($id:String!,$afterRelations:String,$afterInverseRelations:String,$moreRelations:Boolean!,$moreInverseRelations:Boolean!){
         issue(id:$id){
-          relations(first:${RELATION_PAGE},after:$afterRelations) @include(if:$moreRelations){${RELATIONS}}
-          inverseRelations(first:${RELATION_PAGE},after:$afterInverseRelations) @include(if:$moreInverseRelations){${INVERSE_RELATIONS}}
+          relations(first:${RELATION_PAGE},after:$afterRelations,includeArchived:true) @include(if:$moreRelations){${RELATIONS}}
+          inverseRelations(first:${RELATION_PAGE},after:$afterInverseRelations,includeArchived:true) @include(if:$moreInverseRelations){${INVERSE_RELATIONS}}
         }
       }`,
       {

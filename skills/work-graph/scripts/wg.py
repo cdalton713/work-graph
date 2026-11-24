@@ -1715,6 +1715,20 @@ def adopt_project(plan_dir, plan, km, project, team_id):
     return 0
 
 
+def name_coordinator(plan_dir, name, apply, changes):
+    """Give the coordinator's Orca worktree the name of the Linear project. Only the display name in Orca
+    changes: the path and the branch stay `<slug>-core`. A failure of Orca is a warning; it never stops `wg load`."""
+    try:
+        tree = find_tree(orca_worktrees(), path=plan_dir)
+        if not tree or tree.get("displayName") == name:
+            return
+        changes.append(f"name the Orca worktree {tree.get('displayName') or tree['path']!r} as {name!r}")
+        if apply:
+            orca_result("worktree", "set", "--worktree", f"id:{tree['id']}", "--display-name", name)
+    except (ReadError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+        print(f"warn load: Orca did not name the coordinator worktree ({one_line(e, 120)})", file=sys.stderr)
+
+
 @journaled("load")
 def load(plan_dir, plan, apply, prune, adopt=False):
     errs = check(plan)
@@ -1752,6 +1766,7 @@ def load(plan_dir, plan, apply, prune, adopt=False):
                            "description": eff.get("summary", f"work-graph effort {eff.get('slug', '')}")[:255]}})
             km["project"] = p["projectCreate"]["project"]
             save_keymap(plan_dir, km)
+    name_coordinator(plan_dir, eff["name"], apply, changes)
     if eff.get("initiative"):
         sync_initiative(team_id, (km.get("project") or {}).get("id"), eff["initiative"].strip(), apply, changes,
                         team_scoped=team_labels(plan))
@@ -5578,11 +5593,14 @@ def dispatch(plan_dir, plan, key, agent, worktree, model=None):
     out = [f"branch {names['branch']} on {names['lower']}"
            + (f", stax parent {names['parent']}" if names["stax"] else ", not tracked by stax"),
            "Run these in order. Each <...> is an id or a path from Orca's output:",
-           f"  orca worktree list --json    # find the parent worktree {names['stack']}"]
+           "  orca worktree list --json    # find "]
     core = f"{plan['effort']['slug']}-core"
-    if names["stack"] != core:
+    # Orca shows the coordinator with the name of the Linear project (wg load), so find it by its path.
+    if names["stack"] == core:
+        out[-1] += f"the parent worktree: the coordinator (path {here})"
+    else:
         # A lane parent nests under the coordinator, so each effort is one tree in Orca (ordering.md).
-        out[-1] += f" and the coordinator {core}"
+        out[-1] += f"the parent worktree {names['stack']} and the coordinator (path {here})"
         out.append(f"  orca worktree create --name {names['stack']} --branch {BRANCH_PREFIX}{names['stack']} "
                    f"--parent-worktree id:<core-id> --base-branch {lane_base} --setup skip --json"
                    f"    # only when {names['stack']} is missing")

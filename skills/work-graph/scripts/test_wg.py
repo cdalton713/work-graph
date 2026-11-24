@@ -535,6 +535,29 @@ Generated from plan.json by `wg load`. Change plan.json, not this comment."""
             self.assertIn("CD-50: issue is not in team CD", err)
             request.assert_not_called()
 
+    def test_load_names_the_coordinators_orca_worktree_after_the_project(self):
+        tree = {"id": "r::core", "path": str(self.d), "displayName": "ex-core"}
+        with patch.object(wg, "orca_worktrees", return_value={"r::core": tree}), patch.object(wg, "orca_result") as orca:
+            changes = []
+            wg.name_coordinator(self.d, "Example effort", False, changes)
+            self.assertEqual(changes, ["name the Orca worktree 'ex-core' as 'Example effort'"])
+            orca.assert_not_called()
+            wg.name_coordinator(self.d, "Example effort", True, changes)
+            orca.assert_called_once_with("worktree", "set", "--worktree", "id:r::core", "--display-name", "Example effort")
+            # The name is already right, or the plan folder is not an Orca worktree: no change and no call.
+            orca.reset_mock()
+            changes = []
+            wg.name_coordinator(self.d, "ex-core", True, changes)
+            wg.name_coordinator(self.d / "other", "Example effort", True, changes)
+            self.assertEqual(changes, [])
+            orca.assert_not_called()
+            # A failure of Orca is a warning: the load continues.
+            orca.side_effect = wg.ReadError("no Orca")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                wg.name_coordinator(self.d, "Example effort", True, changes)
+            self.assertIn("warn load: Orca did not name the coordinator worktree (no Orca)", stderr.getvalue())
+
     def test_initiative_creates_group_and_label_then_replaces_the_old_one(self):
         calls = []
         labels = []
@@ -2342,7 +2365,7 @@ class JobTests(LaneTests):
         self.assertEqual(self.row("a"), {"approved": "x", "state": "creating", "job": "dispatch", "agent": "codex"} | BRANCH)
         here = wg.shlex.quote(str(self.d.resolve()))
         for text in ("claimed CD-1 agent:codex\n", "branch wg/ex-one-00-a on origin/main, stax parent main\n",
-                     "  orca worktree list --json    # find the parent worktree ex-one and the coordinator ex-core\n",
+                     "  orca worktree list --json    # find the parent worktree ex-one and the coordinator (path " + here + ")\n",
                      "  orca worktree create --name ex-one --branch wg/ex-one --parent-worktree id:<core-id> "
                      "--base-branch origin/main --setup skip --json    # only when ex-one is missing\n",
                      "  orca worktree create --name ex-one-00-a --branch wg/ex-one-00-a --base-branch origin/main "
@@ -2388,7 +2411,7 @@ class JobTests(LaneTests):
         self.job(wg.claim, "c", "dispatch", "codex", live={"a": "In Review", "c": "In Progress", "s": "Done"}, rows=adopted)
         out, _ = self.job(wg.dispatch, "s", "codex", None, rows={"s": {"approved": "x"}}, effort={"wave": "s"})
         self.assertIn("branch wg/ex-spike-s on origin/main, not tracked by stax\n", out)
-        self.assertIn("# find the parent worktree ex-core\n", out)
+        self.assertIn(f"# find the parent worktree: the coordinator (path {wg.shlex.quote(str(self.d.resolve()))})\n", out)
         self.assertNotIn("--no-parent", out)
         self.assertNotIn("<core-id>", out)
         self.assertNotIn("st branch track", out)

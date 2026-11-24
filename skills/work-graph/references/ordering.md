@@ -32,7 +32,7 @@ Edges among tasks, milestones, and `ops` nodes follow this list only (A → B: A
 
 ## Branches and worktrees
 
-The effort coordinator is `<slug>-core`, with branch `<prefix><slug>-core` (config `branch_prefix`, default `wg/`); its root holds the plan files (setup.md). Reuse it as the core lane parent.
+The effort coordinator is `<slug>-core`, with branch `<prefix><slug>-core` (config `branch_prefix`, default `wg/`); its root holds the plan files (setup.md). Reuse it as the core lane parent. Orca shows it with the name of the Linear project (`wg load --apply` sets that display name); the path and the branch do not change.
 
 One Orca child worktree per branch, SYNC and integration branches included. One parent workspace per lane and phase, nested under the `<slug>-core` coordinator, so the effort is one tree in Orca: `<slug>-core` › `<stack>` › `NN <key>`. Spikes are children of `<slug>-core` itself. The coordinator creates both with the commands that `wg dispatch` prints (jobs.md "Dispatch"); workers never create worktrees. `wg dispatch` computes these names:
 

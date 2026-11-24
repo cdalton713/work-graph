@@ -4234,7 +4234,7 @@ def first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=False):
         problems.append(f"{key}: {below} below it has a push that is not code done (wg done)")
     if problems:
         if quiet:  # one line: the one-command form prints at most 3
-            print("FAIL " + "; ".join(problems))
+            print(flat_line("FAIL " + "; ".join(problems)))
             die(f"{ident}: not dispatched", 1)
         refuse(ident, problems, "not dispatched")
     held = claim_labels(live[entry["id"]])
@@ -4394,7 +4394,9 @@ def orca_mutation(*args, retry=None, warnings=None):
     argv = [orca_cli(), *args, "--json"] + (["--retry-request", retry] if retry else [])
     try:
         result = command(*argv)
-    except OSError as e:  # the CLI did not run, so Orca did nothing
+    except OSError as e:
+        if retry:  # the replay did not run, but the first request may have: keep its id
+            raise ReadError(f"orca did not run: {e}") from e
         raise OrcaRefused(f"orca did not run: {e}") from e
     try:
         answer = json.loads(result.stdout)
@@ -4480,9 +4482,9 @@ def run_durable(plan_dir, key, step, args, retry, warnings):
     except OrcaRefused as e:
         # Orca did not do the call: the next call writes the spec and tries again.
         update_row(plan_dir, key, step="spec" if step == "start" else None, retry_request=None)
-        print(f"FAIL {step}: {e}")
+        print_fail(step, e)
     except (ReadError, subprocess.SubprocessError) as e:
-        print(f"FAIL {step}: {e}")
+        print_fail(step, e)
         warnings.append(f"{key}: the outcome is not known; " + (
             f"the next call retries request {retry}" if retry else "the next call refuses until you look in Orca"))
     return None
@@ -4505,6 +4507,8 @@ def record_started(plan_dir, plan, key, fields):
     km["nodes"].get(key) or die(f"{key}: not loaded")
     run = run_rows(km)
     row = run["nodes"].setdefault(key, {})
+    if row.get("state") == "running" and row.get("step") == "receipt" and fields.get("dispatch") == row.get("dispatch"):
+        return finish_receipt(plan_dir, plan, key)  # the ids are saved; only the claim comment is missing
     if row.get("state") != "starting":
         die(f"{key}: no job is starting (state={row.get('state', '-')}): use wg dispatch or wg claim first", 1)
     if not fields.get("dispatch"):
@@ -4549,21 +4553,38 @@ def start_and_record(plan_dir, plan, key, step, args, row, warnings, old):
     try:
         fields = receipt(result, old)
     except ReadError as e:
-        print(f"FAIL {step}: {e}")
+        print_fail(step, e)
         warnings.append(f"{key}: the outcome is not known; the next call refuses until you look in Orca")
         return None
+    given = dict(fields)
     try:
         return record_started(plan_dir, plan, key, fields)
     except (ReadError, OSError) as e:
-        print(f"FAIL receipt: {e}")
-        warnings.append(f"{key}: the worker runs; the next call writes the claim comment")
+        print_fail("receipt", e)
+        saved = run_row(load_keymap(plan_dir), key)
+        if saved.get("step") == "receipt" and saved.get("dispatch") == given["dispatch"]:
+            warnings.append(f"{key}: the worker runs; the next call writes the claim comment")
+        else:  # the ids are not saved: give them to the coordinator
+            ids = " ".join(f"{field}={shlex.quote(value)}" for field, value in given.items() if value)
+            warnings.append(f"{key}: the worker runs, but its ids are not saved; record them with: "
+                            f"{wg_command()} started {shlex.quote(str(Path(plan_dir).resolve()))} {key} {ids}")
         return None
+
+
+def flat_line(text):
+    """Diagnostic text on one line: command stderr can hold many."""
+    return " ".join(str(text).split())
+
+
+def print_fail(step, error):
+    """The one FAIL line of a one-command job."""
+    print(flat_line(f"FAIL {step}: {error}"))
 
 
 def print_warnings(warnings):
     """The one warning line of a one-command job: the output of `--run` is at most 3 lines."""
     if warnings:
-        print("warning: " + "; ".join(warnings), file=sys.stderr)
+        print(flat_line("warning: " + "; ".join(warnings)), file=sys.stderr)
 
 
 def dispatch_run(plan_dir, plan, key, agent, model):
@@ -4589,7 +4610,7 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
         try:
             row = finish_receipt(plan_dir, plan, key)
         except (ReadError, OSError) as e:
-            print(f"FAIL receipt: {e}")
+            print_fail("receipt", e)
             warnings.append(continues)
             return 1
         print(f"started {key} dispatch={row['dispatch']} worktree={row.get('path', '-')}")
@@ -4600,7 +4621,7 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
         elif row.get("step") in ("claim", "status"):
             claim_steps(plan_dir, plan, key, snap, quiet=True, warnings=warnings)
     except (ReadError, OSError, subprocess.SubprocessError) as e:
-        print(f"FAIL {run_row(load_keymap(plan_dir), key).get('step', 'claim')}: {e}")
+        print_fail(run_row(load_keymap(plan_dir), key).get('step', 'claim'), e)
         warnings.append(continues)
         return 1
     row = run_row(load_keymap(plan_dir), key)
@@ -4623,20 +4644,20 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
                     raise ReadError(f"st branch track: {command_error(tracked)}")
             row = update_row(plan_dir, key, step="spec")
     except (ReadError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
-        print(f"FAIL {run_row(load_keymap(plan_dir), key).get('step', step)}: {e}")
+        print_fail(run_row(load_keymap(plan_dir), key).get('step', step), e)
         warnings.append(continues)
         return 1
     try:
         if not row.get("retry_request"):
             problems = worktree_problems(node, row, path, names["stax"], plan_dir)
             if problems:
-                print("FAIL spec: " + "; ".join(problems))
+                print_fail("spec", "; ".join(problems))
                 warnings.append(f"{entry['identifier']}: no worker spec; {continues}")
                 return 1
             row = update_row(plan_dir, key, state="starting")
         spec, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
     except OSError as e:
-        print(f"FAIL spec: {e}")
+        print_fail("spec", e)
         warnings.append(continues)
         return 1
     args = ["orchestration", "worker-start", "--spec-file", str(spec), "--task-title", title,
@@ -4766,7 +4787,7 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
         try:
             row = finish_receipt(plan_dir, plan, key)
         except (ReadError, OSError) as e:
-            print(f"FAIL receipt: {e}")
+            print_fail("receipt", e)
             return 1
         print(f"started {key} dispatch={row['dispatch']} job={job}")
         return 0
@@ -4805,7 +4826,7 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
         try:
             take_claim(plan, entry, issue, agent)
         except ReadError as e:
-            print(f"FAIL claim: {e}")
+            print_fail("claim", e)
             return 1
     sections, values = spec_sections(), spec_values(plan_dir, plan, node, entry, issue, row)
     header = render(sections["job"], {"job": job, "restack": f"Restack: `{restack}`." if restack else ""} | values)

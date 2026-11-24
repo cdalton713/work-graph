@@ -2643,6 +2643,9 @@ if fail == "lost":
         "queryCommand": f"orchestration request-show --request {request} --json"}}}}, "error: runtime_timeout: timeout")
 if fail == "garbage":
     out = (lambda out: lambda code, answer, err="": out(1, "socket closed", "error: socket closed"))(out)
+if fail == "multiline":
+    out(1, {"ok": False, "error": {"code": "refused", "message": "first line\nsecond line"}},
+        "error: first line\nsecond line")
 warn = "warning: one\nwarning: two" if fail == "warn" else ""
 if verb == "worktree list":
     out(0, {"ok": True, "result": {"worktrees": state["trees"]}})
@@ -2922,6 +2925,76 @@ class OneCommandTests(LaneTests):
         self.assertEqual(len(self.calls()), 1)
         self.assertTrue(self.calls()[0].endswith("--json --retry-request req_6"))
         self.assertNotIn("retry_request", self.row("a"))
+
+    def test_a_replay_that_cannot_run_keeps_its_request_id(self):
+        self.status = ("Todo", [])
+        self.run_dispatch(code=1, fail={"orchestration worker-start": "lost"})
+        real = wg.command
+
+        def command(*args, cwd=None):
+            if "worker-start" in args:
+                raise FileNotFoundError(2, "No such file or directory", args[0])
+            return real(*args, cwd=cwd)
+        with patch.object(wg, "command", side_effect=command):
+            out, err = self.run_again(code=1)
+        self.assertIn("FAIL start: orca did not run", out)
+        self.assertIn("the next call retries request req_6", err)
+        self.assertEqual((self.row("a")["retry_request"], self.row("a")["step"]), ("req_6", "start"))
+        self.run_again()
+        self.assertTrue(self.calls()[0].endswith("--json --retry-request req_6"), self.calls())
+        self.assertEqual(self.state()["jobs"], 1)
+
+    def test_multiline_errors_stay_within_three_lines(self):
+        for failing, step in (("worktree create:ex-one", "parent"), ("orchestration worker-start", "start")):
+            with self.subTest(failing=failing):
+                self.keymap(rows={})
+                self.fake(trees=[self.core])
+                self.status = ("Todo", [])
+                out, err = self.run_dispatch(code=1, fail={failing: "multiline"})
+                lines = (out + err).splitlines()
+                self.assertLessEqual(len(lines), 3, lines)
+                self.assertEqual(lines[0], "claimed CD-1 agent:claude")
+                self.assertTrue(lines[1].startswith(f"FAIL {step}: "), lines)
+                self.assertIn("first line second line", lines[1])
+                self.assertTrue(all(line.startswith("warning: ") for line in lines[2:]), lines)
+
+    def test_a_failed_receipt_save_prints_the_wg_started_command_that_records_it(self):
+        self.status = ("Todo", [])
+        real, seen = wg.save_keymap, []
+
+        def save(plan_dir, km):
+            if not seen and any(r.get("step") == "receipt" for r in wg.run_rows(km)["nodes"].values()):
+                seen.append(km)
+                raise OSError("disk full")
+            return real(plan_dir, km)
+        with patch.object(wg, "save_keymap", side_effect=save):
+            out, err = self.run_dispatch(code=1)
+        self.assertEqual(len((out + err).splitlines()), 3)
+        self.assertIn("FAIL receipt: disk full", out)
+        self.assertEqual((self.row("a")["state"], self.row("a")["step"]), ("starting", "start"))
+        command = wg.shlex.split(err.split("record them with: ", 1)[1])
+        self.assertEqual(command[-6:-4], [str(self.d.resolve()), "a"])
+        out, _ = self.job(wg.started, "a", command[-4:], rows={"a": self.row("a")})
+        row = self.row("a")
+        self.assertEqual((row["state"], row["dispatch"], row["task"], row["worktree"]),
+                         ("running", "ctx_1", "task_1", f"repo::{self.d / 'trees' / 'ex-one-00-a'}"))
+        self.assertNotIn("step", row)
+        self.assertEqual(self.effort["run_id"], "run_1")
+        self.assertEqual(self.comment.call_count, 1)
+        self.assertEqual(self.state()["jobs"], 1)
+
+    def test_wg_started_finishes_a_recorded_receipt_of_its_own_dispatch(self):
+        self.status = ("Todo", [])
+        self.run_dispatch(code=1, comments=wg.ReadError("Linear is down"))
+        row = self.row("a")
+        self.assertEqual((row["state"], row["step"]), ("running", "receipt"))
+        _, err = self.job(wg.started, "a", ["dispatch=ctx_9"], rows={"a": row}, code=1)
+        self.assertIn("a: no job is starting (state=running)", err)
+        self.comment.assert_not_called()
+        self.job(wg.started, "a", ["dispatch=ctx_1"], rows={"a": row})
+        self.assertEqual(self.comment.call_args.args, ("a", f"Claimed: dispatch ctx_1, worktree {self.child}, job dispatch"))
+        self.assertNotIn("step", self.row("a"))
+        self.assertEqual(self.state()["jobs"], 1)
 
     def test_an_unknown_start_outcome_with_no_request_id_is_not_started_again(self):
         for failure in ("garbage", "timeout"):

@@ -529,6 +529,61 @@ export async function changedSince(projectId: string, since: string): Promise<bo
     || (data.project?.documents.nodes.length ?? 0) > 0;
 }
 
+/** How many requests `changedProjects` makes at most. More changes than these pages hold: all changed. */
+export const CHANGED_PAGES = 3;
+const CHANGED_PAGE = 100;
+
+/**
+ * Which of these projects changed after `since`: one question for all of them, not one for each.
+ * The answer maps each changed project to the time of its latest change, so a caller can compare each
+ * project with its own time. It looks at issues, comments (node cards), and the status document of each
+ * project. Null: more changes than `CHANGED_PAGES` requests hold, so treat every project as changed.
+ */
+export async function changedProjects(ids: string[], since: string): Promise<Map<string, string> | null> {
+  const changed = new Map<string, string>();
+  if (!ids.length) return changed;
+  // Times as numbers: two ISO texts of one time can differ in precision or offset.
+  const note = (projectId: string | undefined, at: string) => {
+    if (!projectId || !ids.includes(projectId)) return;
+    const before = changed.get(projectId);
+    if (before === undefined || Date.parse(at) > Date.parse(before)) changed.set(projectId, at);
+  };
+  const scope = "project:{id:{in:$ids}}";
+  const page = "pageInfo{hasNextPage endCursor}";
+  // The status document of each project is an alias of the first request.
+  const docs = ids.map((_, at) =>
+    `d${at}: project(id:$d${at}){ documents(first:1, filter:{title:{eq:"${STATUS_DOC}"}, updatedAt:{gt:$t}}){ nodes{updatedAt} } }`);
+  let issuesAfter: string | null = null, commentsAfter: string | null = null;
+  for (let request = 1; ; request++) {
+    const first = request === 1;
+    const parts: string[] = [], params = ["$ids:[ID!]!", "$t:DateTimeOrDuration!"];
+    const variables: Record<string, unknown> = { ids, t: since };
+    if (first || issuesAfter) {
+      params.push("$ia:String");
+      variables.ia = issuesAfter;
+      parts.push(`issues(first:${CHANGED_PAGE}, after:$ia, filter:{${scope}, updatedAt:{gt:$t}}){ nodes{updatedAt project{id}} ${page} }`);
+    }
+    if (first || commentsAfter) {
+      params.push("$ca:String");
+      variables.ca = commentsAfter;
+      parts.push(`comments(first:${CHANGED_PAGE}, after:$ca, filter:{issue:{${scope}}, updatedAt:{gt:$t}}){ nodes{updatedAt issue{project{id}}} ${page} }`);
+    }
+    if (first) ids.forEach((id, at) => { params.push(`$d${at}:String!`); variables[`d${at}`] = id; });
+    const data = await gql(`query(${params.join(",")}){ ${[...parts, ...(first ? docs : [])].join("\n")} }`, variables);
+    if (first) ids.forEach((id, at) => { for (const d of data[`d${at}`]?.documents.nodes ?? []) note(id, d.updatedAt); });
+    if (data.issues) {
+      for (const i of data.issues.nodes) note(i.project?.id, i.updatedAt);
+      issuesAfter = data.issues.pageInfo.hasNextPage ? data.issues.pageInfo.endCursor : null;
+    }
+    if (data.comments) {
+      for (const c of data.comments.nodes) note(c.issue?.project?.id, c.updatedAt);
+      commentsAfter = data.comments.pageInfo.hasNextPage ? data.comments.pageInfo.endCursor : null;
+    }
+    if (!issuesAfter && !commentsAfter) return changed;
+    if (request >= CHANGED_PAGES) return null;
+  }
+}
+
 /** The states, members, and labels of the teams change seldom: one load serves ten minutes. */
 const META_MS = 10 * 60_000;
 const metaCache = new Map<string, { at: number; teams: Record<string, Team>; labels: Label[] }>();
@@ -644,12 +699,16 @@ async function writable(issueId: string, team: string): Promise<Writable> {
 /** The first word of the comment that records why an `ops` or `decision` node is done, as `wg move --note` writes it. */
 const NOTE_WORD: Record<string, string> = { ops: "Evidence", decision: "Answer" };
 
-export async function updateIssue(issueId: string, { baseDescription, note, ...patch }: IssuePatch, team: string): Promise<Issue> {
+/** Hears the project of the issue that a write changes (null: the issue has no project), before the write. */
+export type ProjectOfWrite = (projectId: string | null) => void;
+
+export async function updateIssue(issueId: string, { baseDescription, note, ...patch }: IssuePatch, team: string, project?: ProjectOfWrite): Promise<Issue> {
   const unknown = Object.keys(patch).filter((k) => !EDITABLE.has(k));
   if (unknown.length || !Object.keys(patch).length) {
     throw new LinearError(`fields not editable: ${unknown.join(", ") || "(none given)"}`, 400);
   }
   const current = { issue: await writable(issueId, team) };
+  project?.(current.issue.project?.id ?? null);
   // `wg load` sets the title of a node from plan.json, so a title that is changed here is lost.
   if (patch.title !== undefined && current.issue.comments.nodes.length) {
     throw new LinearError("plan.json has the title of a wg node: change it there, then run `wg load --apply`", 400);
@@ -702,10 +761,10 @@ export async function listComments(issueId: string): Promise<Comment[]> {
   return nodes.map(comment).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
-export async function addComment(issueId: string, body: unknown, team: string): Promise<Comment> {
+export async function addComment(issueId: string, body: unknown, team: string, project?: ProjectOfWrite): Promise<Comment> {
   if (typeof body !== "string" || !body.trim()) throw new LinearError("comment body is empty", 400);
   if (body.startsWith(CARD_PREFIX)) throw new LinearError("that text is reserved for the wg node card", 400);
-  await writable(issueId, team);
+  project?.((await writable(issueId, team)).project?.id ?? null);
   const data = await gql(
     `mutation($i:CommentCreateInput!){ commentCreate(input:$i){ success comment{${COMMENT}} } }`,
     { i: { issueId, body } },

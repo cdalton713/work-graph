@@ -549,3 +549,170 @@ describe("autonomy", () => {
     expect(calls.some((c) => c.query.includes("mutation"))).toBe(false);
   });
 });
+
+/** The fictional team of the graph cache tests. */
+const TEAM = "TM";
+/** An issue of the fictional team in project `project`, as Linear sends it in a graph. */
+const rawIssue = (id: string, identifier: string, project: string) => ({
+  id, identifier, title: id, description: null, priority: 0, url: "u", sortOrder: 0, updatedAt: "2026-11-20T00:00:00Z",
+  team: { id: "team", key: TEAM }, state: { id: "s", name: "In Progress", type: "started", color: "" }, assignee: null,
+  labels: { nodes: [] }, projectMilestone: null,
+  relations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+  inverseRelations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+  comments: { nodes: [] }, attachments: { nodes: [] }, project: { id: project },
+});
+
+/**
+ * A fake Linear with the open projects p1 and p2 of the team `TEAM`. It counts the full loads of each
+ * project, the checks, and the comments, and can fail every request. `issueProject` is the project of the
+ * issue that a write changes (null: no project); `issues` are the issues of each project's graph.
+ */
+function graphLinear() {
+  const asked = { loads: [] as string[], one: 0, many: [] as unknown[], comments: [] as string[] };
+  const state = { down: false, changed: [] as string[], issueProject: "p1" as string | null, issues: {} as Record<string, unknown[]> };
+  const empty = { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+  vi.stubEnv("LINEAR_API_KEY", "test-key");
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+    const { query, variables } = JSON.parse(init.body as string);
+    if (state.down) return { ok: false, status: 500, json: async () => null };
+    let data;
+    if (query.includes("projects(first:50")) data = { teams: { nodes: [{ projects: { nodes: [
+      { id: "p1", name: "One", url: "u", status: { name: "Started", type: "started" } },
+      { id: "p2", name: "Two", url: "u", status: { name: "Started", type: "started" } },
+    ], pageInfo: { hasNextPage: false, endCursor: null } } }] } };
+    else if (query.includes("project:{id:{in:$ids}}")) {
+      asked.many.push(variables.ids);
+      data = { issues: { ...empty, nodes: state.changed.map((id) => ({ updatedAt: "2999-01-01T00:00:00Z", project: { id } })) }, comments: empty,
+        ...Object.fromEntries((variables.ids as string[]).map((_, at) => [`d${at}`, { documents: { nodes: [] } }])) };
+    } else if (query.includes("issues(first:1,")) {
+      asked.one++;
+      data = { issues: { nodes: state.changed.includes(variables.id) ? [{ id: "x" }] : [] }, comments: { nodes: [] }, project: { documents: { nodes: [] } } };
+    }
+    else if (query.includes("viewer{")) { asked.loads.push(variables.id); data = { viewer: { id: "me" }, project: { id: variables.id, name: variables.id, url: "u", projectMilestones: { nodes: [] }, documents: { nodes: [] } } }; }
+    else if (query.includes("issues(first:25")) data = { project: { issues: { ...empty, nodes: state.issues[variables.id] ?? [] } } };
+    else if (query.includes("commentCreate")) {
+      asked.comments.push(variables.i.body);
+      data = { commentCreate: { success: true, comment: { id: "c1", body: variables.i.body, createdAt: "2026-11-20", parent: null, user: null, botActor: null } } };
+    } else if (query.includes("issue(id:$id)")) data = { issue: { ...mine, team: { key: TEAM }, project: state.issueProject ? { id: state.issueProject } : null } };
+    else if (query.includes("teams(first:10)")) data = { project: { id: variables.id, teams: { nodes: [{ key: TEAM }] }, labels: { nodes: [] } }, teams: { nodes: [{ id: "team" }] } };
+    else if (query.includes("projectLabels(first:250")) data = { projectLabels: { nodes: [] } };
+    else if (query.includes("projectLabelCreate")) data = { projectLabelCreate: { projectLabel: { id: "label-id" } } };
+    else if (query.includes("projectAddLabel")) data = { projectAddLabel: { success: true } };
+    else if (query.includes("projectRemoveLabel")) data = { projectRemoveLabel: { success: true } };
+    else if (query.includes("members(first")) data = { teams: { nodes: [] } };
+    else data = { issueLabels: empty };
+    return { ok: true, json: async () => ({ data }) };
+  }));
+  return { asked, state };
+}
+
+describe("graph cache of the server", () => {
+  const clock = { at: 1_000_000 };
+  const workspace = () => ({ ...workWorkspace(), team: TEAM });
+  const cached = () => createApp(rules, { team: TEAM, dist, workspaces: [workspace()], watchMs: 0, now: () => clock.at });
+  const graph = (server: ReturnType<typeof cached>, id: string, have = "") =>
+    server.request(`/api/projects/${id}/graph${have ? `?have=${have}` : ""}`, { headers: local });
+  const comment = (server: ReturnType<typeof cached>, headers: Record<string, string>) =>
+    server.request("/api/issues/i1/comments", { method: "POST", headers: { ...write, ...headers }, body: JSON.stringify({ body: "hi" }) });
+
+  it("forgets only the graph of the project of the written issue, not the project that the request names", async () => {
+    const { asked, state } = graphLinear();
+    const server = cached();
+    await graph(server, "p1");
+    await graph(server, "p2");
+    // The issue is in p1; the header names p2.
+    expect((await comment(server, { "x-project": "p2" })).status).toBe(200);
+    await graph(server, "p1");
+    await graph(server, "p2");
+    expect(asked.loads).toEqual(["p1", "p2", "p1"]);
+    // A write to an issue with no project forgets every graph of the workspace.
+    state.issueProject = null;
+    await comment(server, {});
+    await graph(server, "p1");
+    await graph(server, "p2");
+    expect(asked.loads).toEqual(["p1", "p2", "p1", "p1", "p2"]);
+    // A change of the autonomy level of p2 forgets only the graph of p2.
+    expect((await server.request("/api/projects/p2/autonomy", { method: "POST", headers: write, body: JSON.stringify({ level: "full" }) })).status).toBe(200);
+    await graph(server, "p1");
+    await graph(server, "p2");
+    expect(asked.loads).toEqual(["p1", "p2", "p1", "p1", "p2", "p2"]);
+  });
+  it("forgets only the graph of the project of a wrote message", async () => {
+    const { asked } = graphLinear();
+    const server = cached();
+    await graph(server, "p1");
+    await graph(server, "p2");
+    const sent: string[] = [];
+    const wg = server.link.hub.joinCoordinator({ send: (text) => sent.push(text), close: () => {} }, { workspace: "work", id: "p2" });
+    wg.receive(JSON.stringify({ v: 1, type: "wrote", id: "w", project: { workspace: "work", id: "p2" }, at: "", payload: { issues: [`${TEAM}-1`] } }));
+    await graph(server, "p1");
+    await graph(server, "p2");
+    expect(asked.loads).toEqual(["p1", "p2", "p2"]);
+  });
+  it("does not use a stale graph for a write that depends on the issues of the project", async () => {
+    const { asked, state } = graphLinear();
+    const server = cached();
+    await graph(server, "p1"); // this graph has no issues yet
+    state.issues.p1 = [rawIssue("i2", `${TEAM}-2`, "p1")];
+    const coordinator = server.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, { workspace: "work", id: "p1" });
+    coordinator.receive(JSON.stringify({ v: 1, type: "hello", id: "h", project: { workspace: "work", id: "p1" }, at: "", payload: { plan: "p1", session: "p1", host: "test", wg: "1" } }));
+    coordinator.receive(JSON.stringify({ v: 1, type: "asks", id: "x", project: {}, at: "", payload: { asks: [{ id: "msg_q", key: "a", issue: `${TEAM}-2`, from: "w", body: "Which API?", at: "t" }] } }));
+    expect(server.link.hub.ask({ workspace: "work", id: "p1" }, "msg_q")).not.toBeNull();
+    state.down = true;
+    clock.at += 60_000;
+    expect((await graph(server, "p1")).status).toBe(200); // the page still gets the stale graph
+    const reply = await server.request("/api/projects/p1/asks/msg_q/reply", { method: "POST", headers: write, body: JSON.stringify({ body: "Use v2." }) });
+    expect(reply.status).toBe(502);
+    expect(server.link.hub.ask({ workspace: "work", id: "p1" }, "msg_q")).not.toBeNull(); // the question stays open
+    const dispatch = await server.request("/api/projects/p1/commands", { method: "POST", headers: write, body: JSON.stringify({ name: "dispatch", key: "a", issue: `${TEAM}-2` }) });
+    expect(dispatch.status).toBe(502);
+    expect(asked.comments).toEqual([]);
+    // Linear is back: the reply is saved on the issue that the stale graph did not have.
+    state.down = false;
+    state.changed = ["p1"];
+    const saved = await server.request("/api/projects/p1/asks/msg_q/reply", { method: "POST", headers: write, body: JSON.stringify({ body: "Use v2." }) });
+    expect(await saved.json()).toEqual({ ok: true, recorded: true });
+    expect(asked.comments).toHaveLength(1);
+  });
+  it("sends the last graph with stale and the error when Linear fails, and 204 for the version the page has", async () => {
+    const { state } = graphLinear();
+    const server = cached();
+    const first = await (await graph(server, "p1")).json();
+    expect(first.stale).toBeUndefined();
+    state.down = true;
+    clock.at += 60_000;
+    const response = await graph(server, "p1");
+    expect(response.status).toBe(200);
+    const stale = await response.json();
+    expect(stale).toMatchObject({ project: first.project, version: first.version, stale: true, error: expect.stringContaining("HTTP 500") });
+    expect((await graph(server, "p1", first.version)).status).toBe(204);
+    clock.at += 20 * 60_000;
+    expect((await graph(server, "p1")).status).toBe(502);
+  });
+  it("checks all open projects of the overview, and of the link check, with one request for the workspace", async () => {
+    const { asked, state } = graphLinear();
+    const server = cached();
+    await server.request("/api/overview", { headers: local });
+    expect(asked.loads.sort()).toEqual(["p1", "p2"]);
+    expect(asked.many).toEqual([]); // nothing cached yet: nothing to check
+    clock.at += 60_000;
+    state.changed = ["p2"];
+    const body = await (await server.request("/api/overview", { headers: local })).json();
+    expect(body.summaries).toHaveLength(2);
+    expect(asked.many).toEqual([["p1", "p2"]]);
+    expect(asked.one).toBe(0);
+    expect(asked.loads.sort()).toEqual(["p1", "p2", "p2"]);
+    // The link check of the projects with a coordinator: one request too.
+    for (const id of ["p1", "p2"]) {
+      server.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, { workspace: "work", id })
+        .receive(JSON.stringify({ v: 1, type: "hello", id: "h", project: { workspace: "work", id }, at: "", payload: { plan: id, session: id, host: "test", wg: "1" } }));
+    }
+    expect(server.link.hub.active()).toHaveLength(2);
+    clock.at += 60_000;
+    state.changed = [];
+    await server.link.check();
+    expect(asked.many).toEqual([["p1", "p2"], ["p1", "p2"]]);
+    expect(asked.one).toBe(0);
+    expect(asked.loads).toHaveLength(3);
+  });
+});

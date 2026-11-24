@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
-  INITIATIVE_GROUP, LinearError, MAX_PARALLEL, addComment, addReviewUrls, changedSince, gql, initiativeOf, linearBudget, loadGraph,
+  CHANGED_PAGES, INITIATIVE_GROUP, LinearError, MAX_PARALLEL, addComment, addReviewUrls, changedProjects, changedSince, gql, initiativeOf, linearBudget, loadGraph,
   delay, isMutation, mapLimit, pullRequestsOf, setTransport,
 } from "./linear.ts";
 
@@ -33,6 +33,52 @@ describe("addReviewUrls", () => {
     const list = issues();
     await addReviewUrls(list);
     expect(list[0].pullRequests.map((p) => p.reviewUrl)).toEqual([null, null]);
+  });
+});
+
+describe("changedProjects", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const page = (next: string | null) => ({ hasNextPage: !!next, endCursor: next });
+
+  it("asks one question for all projects, with the status document of each, and gives the latest change of each", async () => {
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    const sent: { query: string; variables: Record<string, unknown> }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      sent.push(body);
+      const data = sent.length === 1
+        ? {
+          issues: { nodes: [{ updatedAt: "2026-11-20T01:00:00Z", project: { id: "a" } }, { updatedAt: "2026-11-20T03:00:00Z", project: { id: "a" } }], pageInfo: page("i2") },
+          // The comment of "a" is half a second later than its issue, in a text that sorts before it.
+          comments: { nodes: [{ updatedAt: "2026-11-20T02:00:00Z", issue: { project: { id: "b" } } }, { updatedAt: "2026-11-20T03:00:00.500Z", issue: { project: { id: "a" } } }], pageInfo: page(null) },
+          d0: { documents: { nodes: [] } }, d1: { documents: { nodes: [] } }, d2: { documents: { nodes: [{ updatedAt: "2026-11-20T04:00:00Z" }] } },
+        }
+        : { issues: { nodes: [{ updatedAt: "2026-11-20T02:00:00Z", project: { id: "a" } }], pageInfo: page(null) } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const changed = await changedProjects(["a", "b", "c"], "2026-11-20T00:00:00Z");
+    expect(changed).toEqual(new Map([["a", "2026-11-20T03:00:00.500Z"], ["b", "2026-11-20T02:00:00Z"], ["c", "2026-11-20T04:00:00Z"]]));
+    expect(sent).toHaveLength(2);
+    expect(sent[0].variables).toMatchObject({ ids: ["a", "b", "c"], t: "2026-11-20T00:00:00Z", d0: "a", d1: "b", d2: "c" });
+    expect(sent[0].query).toContain("project:{id:{in:$ids}}");
+    // The next page asks only for the issues, from the cursor of the first page.
+    expect(sent[1].variables).toMatchObject({ ia: "i2" });
+    expect(sent[1].query).not.toContain("comments(");
+    expect(sent[1].query).not.toContain("documents(");
+  });
+
+  it("treats every project as changed past the last page, and asks nothing for no projects", async () => {
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    let requests = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      requests++;
+      const data = { issues: { nodes: [], pageInfo: page(`i${requests}`) }, comments: { nodes: [], pageInfo: page(null) }, d0: { documents: { nodes: [] } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    expect(await changedProjects([], "2026-11-20T00:00:00Z")).toEqual(new Map());
+    expect(requests).toBe(0);
+    expect(await changedProjects(["a"], "2026-11-20T00:00:00Z")).toBeNull();
+    expect(requests).toBe(CHANGED_PAGES);
   });
 });
 

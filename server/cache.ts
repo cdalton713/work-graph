@@ -14,59 +14,189 @@ export const FULL_MS = 5 * 60_000;
 /** The clock of Linear and the clock of this server can differ. The check looks this far back. */
 const SKEW_MS = 5_000;
 
+/** A failed refresh gives the last graph of the project, marked stale, while it is at most this old. */
+export const STALE_MS = 15 * 60_000;
+
 export interface Loaders {
   /** The full graph of a project: several requests to Linear. */
   load: (projectId: string) => Promise<GraphData>;
   /** Did an issue or a comment of the project change after `since` (ISO time)? One request. */
   changed: (projectId: string, since: string) => Promise<boolean>;
+  /**
+   * Which of these projects changed after `since`: one request for all. Each changed project maps to
+   * the time of its latest change. Null: too many changes to list, so all changed.
+   */
+  changedMany?: (projectIds: string[], since: string) => Promise<Map<string, string> | null>;
   now?: () => number;
 }
-export interface Versioned { data: GraphData; version: string }
-interface Entry extends Versioned { loadedAt: number; checkedAt: number }
-
-export interface GraphCache {
-  /** The graph of the project, at most `FRESH_MS` old. Callers at the same time share one load. */
-  get: (projectId: string) => Promise<Versioned>;
-  /** Forget everything: a write of this server changed Linear. */
-  clear: () => void;
+export interface Versioned {
+  data: GraphData; version: string;
+  /** The refresh failed: this is the last graph that loaded, and `error` says why the refresh failed. */
+  stale?: boolean; error?: string;
+}
+interface Entry extends Versioned {
+  /**
+   * `checkedAt`: the start of the last check that found no change; the next check asks for changes since then.
+   * `freshAt`: from when the entry serves the reads with no request, for `FRESH_MS`. A slow check of all
+   * projects sets it to when its answer came, so the reads of the same poll make no check of their own.
+   */
+  loadedAt: number; checkedAt: number; freshAt: number; changed?: boolean;
+  /**
+   * The check of all projects failed; `failedAt` is when its answer came, not when it started, so a slow check
+   * still gives its error to the reads of the same poll. Until `FRESH_MS` after that, a read gives this error
+   * (or the stale graph) with no request of its own.
+   */
+  failure?: Error; failedAt?: number;
 }
 
-export function createGraphCache({ load, changed, now = Date.now }: Loaders): GraphCache {
+export interface ReadOptions {
+  /** A write depends on this graph (which issues are in the project): give the refresh error, never a stale graph. */
+  fresh?: boolean;
+}
+
+export interface GraphCache {
+  /**
+   * The graph of the project, at most `FRESH_MS` old. Callers at the same time share one load. When the
+   * refresh fails and the last graph of the project is at most `STALE_MS` old, it gives that graph with `stale`.
+   */
+  get: (projectId: string, options?: ReadOptions) => Promise<Versioned>;
+  /**
+   * Checks the projects that are due for a check in one request (`changedMany`), so the next `get` of each
+   * needs no request of its own when it did not change. A failed check changes nothing.
+   */
+  check: (projectIds: string[]) => Promise<void>;
+  /** A write of this server changed Linear: forget the graph of that project, or of all projects. */
+  clear: (projectId?: string) => void;
+}
+
+export function createGraphCache({ load, changed, changedMany, now = Date.now }: Loaders): GraphCache {
   const entries = new Map<string, Entry>();
-  const running = new Map<string, Promise<Entry>>();
-  let generation = 0;
+  /** The last graph that loaded for each project, also after a write: what a failed refresh gives. */
+  const last = new Map<string, Entry>();
+  const running = new Map<string, Promise<Versioned>>();
+  // A write increments the generation of its project, or the shared one when the project is not known.
+  let shared = 0;
+  const generations = new Map<string, number>();
+  const generation = (projectId: string) => `${shared}:${generations.get(projectId) ?? 0}`;
+  let checking: Promise<void> | null = null;
+  /** The error behind each stale answer, for a read with `fresh`. */
+  const causes = new WeakMap<Versioned, unknown>();
+
+  const since = (entry: Entry) => new Date(entry.checkedAt - SKEW_MS).toISOString();
+  const due = (entry: Entry | undefined, at: number): entry is Entry =>
+    !!entry && !entry.changed && at - entry.freshAt >= FRESH_MS && at - entry.loadedAt < FULL_MS;
 
   async function refresh(projectId: string): Promise<Entry> {
-    const at = now(), mine = generation;
+    const at = now(), mine = generation(projectId);
     const old = entries.get(projectId);
-    if (old && at - old.loadedAt < FULL_MS) {
-      const since = new Date(old.checkedAt - SKEW_MS).toISOString();
-      if (!(await changed(projectId, since))) {
+    if (old && !old.changed && at - old.loadedAt < FULL_MS) {
+      if (!(await changed(projectId, since(old)))) {
         old.checkedAt = at;
+        old.freshAt = at;
+        old.failure = undefined;
         return old;
       }
     }
     const data = await load(projectId);
-    const entry: Entry = { data, version: createHash("sha1").update(JSON.stringify(data)).digest("hex"), loadedAt: at, checkedAt: at };
-    // A write that came while this load ran can be missing from it. Do not keep such a load.
-    if (mine === generation) entries.set(projectId, entry);
+    const entry: Entry = { data, version: createHash("sha1").update(JSON.stringify(data)).digest("hex"), loadedAt: at, checkedAt: at, freshAt: at };
+    // A write that came while this load ran can be missing from it. Do not keep such a load, also not as the fallback.
+    if (mine === generation(projectId)) {
+      entries.set(projectId, entry);
+      last.set(projectId, entry);
+    }
     return entry;
   }
 
-  return {
-    get(projectId) {
-      const entry = entries.get(projectId);
-      if (entry && now() - entry.checkedAt < FRESH_MS) return Promise.resolve(entry);
-      let job = running.get(projectId);
-      if (!job) {
-        job = refresh(projectId).finally(() => running.delete(projectId));
-        running.set(projectId, job);
+  /** The last graph with `stale` and the error, while the graph is at most `STALE_MS` old (from its load). */
+  function fallback(projectId: string, error: unknown): Versioned {
+    const old = last.get(projectId);
+    if (!old || now() - old.loadedAt > STALE_MS) throw error;
+    const answer: Versioned = { data: old.data, version: old.version, stale: true, error: (error as Error).message };
+    causes.set(answer, error);
+    return answer;
+  }
+
+  async function guarded(projectId: string): Promise<Versioned> {
+    try {
+      const { data, version } = await refresh(projectId);
+      return { data, version };
+    } catch (error) {
+      return fallback(projectId, error);
+    }
+  }
+
+  async function checkDue(projectIds: string[]): Promise<void> {
+    const at = now();
+    const ids = [...new Set(projectIds)].filter((id) => !running.has(id) && due(entries.get(id), at));
+    if (!changedMany || !ids.length) return;
+    const checked = ids.map((id) => [id, entries.get(id)!, generation(id)] as const);
+    const from = checked.reduce((min, [, entry]) => Math.min(min, entry.checkedAt), Infinity);
+    let found: Map<string, string> | null;
+    try {
+      found = await changedMany(ids, new Date(from - SKEW_MS).toISOString());
+    } catch (error) {
+      // The reads after this check give the error (or the stale graph), with no check of their own for each project.
+      const failedAt = now();
+      for (const [id, entry, mine] of checked) {
+        if (entries.get(id) !== entry || mine !== generation(id)) continue;
+        entry.failure = error instanceof Error ? error : new Error(String(error));
+        entry.failedAt = failedAt;
       }
-      return job;
+      return;
+    }
+    const answeredAt = now();
+    for (const [id, entry, mine] of checked) {
+      // A write or a new load during the check: that entry is not the one the check saw.
+      if (entries.get(id) !== entry || mine !== generation(id)) continue;
+      entry.failure = undefined;
+      const latest = found === null ? undefined : found.get(id);
+      // Times as numbers: two ISO texts of one time can differ in precision or offset.
+      if (found !== null && (latest === undefined || Date.parse(latest) <= entry.checkedAt - SKEW_MS)) {
+        entry.checkedAt = at; // the next check asks from the start of this one
+        entry.freshAt = answeredAt;
+      } else entry.changed = true;
+    }
+  }
+
+  return {
+    get(projectId, { fresh = false } = {}) {
+      const answer = read(projectId);
+      if (!fresh) return answer;
+      return answer.then((value) => {
+        if (value.stale) throw causes.get(value) ?? new Error(value.error);
+        return value;
+      });
     },
-    clear() {
-      generation++;
-      entries.clear();
+    async check(projectIds) {
+      // Two pollers at the same time share the request of the first.
+      while (checking) await checking;
+      checking = checkDue(projectIds).finally(() => { checking = null; });
+      await checking;
+    },
+    clear(projectId) {
+      if (projectId === undefined) {
+        shared++;
+        entries.clear();
+        return;
+      }
+      generations.set(projectId, (generations.get(projectId) ?? 0) + 1);
+      entries.delete(projectId);
     },
   };
+
+  /** The graph from memory, from the failure of the last check of all projects, or from a refresh. */
+  function read(projectId: string): Promise<Versioned> {
+    const entry = entries.get(projectId);
+    if (entry && !entry.changed && now() - entry.freshAt < FRESH_MS) return Promise.resolve({ data: entry.data, version: entry.version });
+    if (entry?.failure && now() - entry.failedAt! < FRESH_MS) {
+      const failure = entry.failure;
+      return new Promise<Versioned>((resolve) => resolve(fallback(projectId, failure)));
+    }
+    let job = running.get(projectId);
+    if (!job) {
+      job = guarded(projectId).finally(() => running.delete(projectId));
+      running.set(projectId, job);
+    }
+    return job;
+  }
 }

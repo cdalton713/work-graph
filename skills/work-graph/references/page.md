@@ -2,9 +2,9 @@
 
 ## Data and links
 
-The page reads Linear. It needs no plan directory. It groups the projects by configured workspace, each under its `name`. The overview groups the projects of each workspace by initiative (SKILL.md "Initiatives"), with a roll-up for each initiative; the projects with no initiative come last. The picker and the top bar name the initiative. It reads the kind, phase, lane, wave, next action, and reviews from each node card. It gets the PR link from the issue attachments. Work flows from top to bottom through the phase and lane boxes. The page hides an edge when a longer path gives the same order. Use **All edges** to show every edge.
+The page reads Linear. It needs no plan directory. It groups the projects by configured workspace, each under its `name`. The overview groups the projects of each workspace by initiative (graph.md "Initiatives"), with a roll-up for each initiative; the projects with no initiative come last. The picker and the top bar name the initiative. It reads the kind, phase, lane, wave, next action, and reviews from each node card. It gets the PR link from the issue attachments. Work flows from top to bottom through the phase and lane boxes. The page hides an edge when a longer path gives the same order. Use **All edges** to show every edge.
 
-- The top bar of a project has the **Autonomy** menu: `full`, `standard`, or `supervised` (SKILL.md "Autonomy level"). The overview shows the level of each project that has a label.
+- The top bar of a project has the **Autonomy** menu: `full`, `standard`, or `supervised` (autonomy.md). The overview shows the level of each project that has a label.
 - `wg next` prints `note page <url>` for the effort. The URL uses `?project=<URL-encoded name>`. It includes `&workspace=<id>` for a plan of a workspace other than the first.
 - `?initiative=<URL-encoded name>` opens the overview with only that initiative, in each workspace that has it.
 - `wg move … "Needs <human>"` prints `page <url>` for one issue. The URL also has `&issue=<identifier>`.
@@ -38,10 +38,30 @@ The `work-graph status` document gives the status, wave, and result lines. Its `
 `wg next` connects to the page server over a WebSocket (`/api/link`, protocol `wg-link/1`, `contract.json` `link`). The server is `WG_UI_URL`, or the hosted page.
 
 - `wg next` sends its status and lines, the open Orca questions of the effort's workers, and the job and test evidence of each node. The page shows the coordinator as `coordinator listening`, `coordinator working · <age>`, or `coordinator not listening · <age>`.
-- The server sends `wg next` each change that the page makes, and each change in Linear for a project with a connected coordinator (about every 30 seconds). It also sends the human's answers, their replies to worker questions, and their commands: **Run wg next now**, **Dispatch**, **Pause**, **Resume**, and an **Autonomy** change (`command` `autonomy`, with `level`). The server sets the project label first; `wg next` reads it and prints `do autonomy`. coordinator.md "Lines from the page" lists the lines.
+- The server sends `wg next` each change that the page makes, and each change in Linear for a project with a connected coordinator (about every 30 seconds). It also sends the human's answers, their replies to worker questions, and their commands: **Run wg next now**, **Dispatch**, **Pause**, **Resume**, and an **Autonomy** change (`command` `autonomy`, with `level`). The server sets the project label first; `wg next` reads it and prints `do autonomy`. "Lines from the page" below lists the lines.
 - The server keeps the messages of each project until a `wg next` acknowledges them. Any number of coordinators of different projects can connect at the same time.
 - Linear stays the record. An answer and a reply are comments on the issue. A dispatch is a comment on the issue. An answer also gets the issue label `answered`, so `wg next` finds it after a server restart. Pause is the project label `paused`. The server's queue is in memory and only wakes `wg next` sooner.
 - Without the link (no server, no `websockets` package, or `WG_LINK=off`), `wg next` prints one `warn link:` line and polls Linear.
+
+<!-- explain: answer,relay,replied,autonomy,paused,resumed -->
+### Lines from the page
+
+The link gives these lines. The server keeps each message until `wg next` prints its line, so a message that comes while you work is in your next `wg next`.
+
+| Line | Do this |
+|---|---|
+| `do answer <key> <issue>: <text>` | The human answered on the page. The full text is their comment on the issue, which has the label `answered`. Act on it as their answer: for a `decision` node, `wg move <plan-dir> <key> Done --note "<answer>"`; for a worker's question, send it to the worker and `wg move` the issue out of `Needs <human>`. The line comes back at each `wg next` until a `wg move` of the issue removes the label. |
+| `do dispatch <key> <issue>: …` | The human asked for this dispatch. Run jobs.md "Dispatch". |
+| `do relay <key> <issue>: …` | `wg next` could not send the human's reply to the worker. Send it with `orca orchestration reply --id <ask>`. |
+| `note replied <key> <issue>: …` | `wg next` sent the human's reply to the worker with `orca orchestration reply`. Do nothing. |
+| `do autonomy @effort -: …` | The human changed the autonomy level on the page or in Linear. Act at the new level from now on (autonomy.md), and say the change in your status line. `note autonomy @effort -: <level>` is the level when it did not change. |
+| `wait paused @effort -: …` | The human paused the effort on the page (the project label `paused`). Start no job and move no status until the line goes; `wg next` holds each `do` line until they resume. |
+| `do resumed @effort -: …` | The human resumed the effort. Say so in your next status line, then act on the other lines. `wg next` prints it once, so `wg next --wait` wakes even when every other line is a wait. |
+<!-- /explain -->
+
+The human can reply to a worker's Orca question on the page. You still answer a question that they did not answer.
+
+A `wg next --wait` that runs in the background stays connected and takes the queued page commands. To check the queue yourself (for example after a deploy of the page), stop that process first.
 
 ## Scheduled page refresh
 

@@ -1,13 +1,13 @@
 # Review, merge point, and ship point
 
-Agents review, undraft, restack, and push feature branches. The human merges PRs and does every `ops` node, except an `ops` node with `"by": "coordinator"`. A review holds only the merge request of its own PR: the node above it in the lane started at code done, and every other node continues. Each job to a worker follows coordinator.md "Follow-up jobs".
+Agents review, undraft, restack, and push feature branches. The human merges PRs and does every `ops` node, except an `ops` node with `"by": "coordinator"`. A review holds only the merge request of its own PR: the node above it in the lane started at code done, and every other node continues. Each job to a worker follows jobs.md "Follow-up jobs".
 
-A review covers a **patch** (SKILL.md "Terms"). `wg done` clears `review` and `merge_review` when the patch changes, and keeps them through a restack with no conflict.
+A review covers a **patch** (terms.md). `wg done` clears `review` and `merge_review` when the patch changes, and keeps them through a restack with no conflict.
 
 <!-- explain: review -->
 ## Wave review
 
-`wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. The reviewer is a different agent from the writer (Claude reviews Codex). Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review (SKILL.md "Mark a PR reviewed").
+`wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. The reviewer is a different agent from the writer (Claude reviews Codex). Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review ("Mark a PR reviewed").
 
 1. Start the reviewer in your own worktree: `orca orchestration worker-start --spec-file <review-spec> --worktree current --agent claude --json`. Then `wg run set <plan-dir> <key> review_round=<k> review_dispatch=<dispatch_id>`. Give it the PR, not the worker's report. The spec:
 
@@ -33,7 +33,7 @@ Each PR starts these steps as soon as its own wave review passes; it does not wa
 1. **Ready** (`undraft <key> #<n>`). Run `st undraft <branch>` in the node's child worktree. Do not ask the human. Only when they take this step back for the effort (`wg run set <plan-dir> @effort merge_prep=human`) do the lines become `ask-ready`: ask them once for all of them to mark the PRs ready, then `wg run set <plan-dir> <key> draft=yes` for each PR.
 <!-- /explain -->
 <!-- explain: merge-review -->
-2. **Merge review** (`merge-review <key> #<n>: request the thorough review`). First `wg run set <plan-dir> <key> merge_review=requested`: it counts the PR's reviews and comments, without the requests. Then post the request yourself: the comment `@claude-thorough` on the PR. `wg next` prints `merge-review … read the new review` when a new review or comment arrives. If the new item is not the review, run the same `wg run set` command again.
+2. **Merge review** (`merge-review <key> #<n>: request the thorough review`). First `wg run set <plan-dir> <key> merge_review=requested`: it counts the PR's reviews and comments, without the requests. Then post the request yourself: the comment `@claude-thorough` on the PR. A repository with no workflow for that comment gives no answer: there, start the thorough review as an Orca worker of a different agent from the writer, which posts its report as one PR comment. `wg next` prints `merge-review … read the new review` when a new review or comment arrives. If the new item is not the review, run the same `wg run set` command again.
 
    Read the review (`gh pr view <n> --json reviews,comments`). It covers the head in `code_done_head` when it names that head, or when it names no head and the PR head did not move after the request (`wg` clears the merge review when the patch changes). A `reviewed` label on the issue replaces this step.
    - No blocking finding and no open thread: `wg run set <plan-dir> <key> merge_review=clean` (`accepted` when the human accepted the rest).
@@ -45,10 +45,10 @@ Each PR starts these steps as soon as its own wave review passes; it does not wa
 3. **Threads.** `wg claim <plan-dir> <key> threads`, with the job "load `gh-close-review-loop`, prepare phase". Relay the push-ready report. After the human accepts, the worker pushes, reports the new head SHA, runs the finalize phase with `pr_threads.py resolve --expected-head-oid <new head SHA>`, and fetches the threads again. Each thread that stays open needs the human's disposition; write it as an issue comment. The push changes the patch, so step 2 comes back for this PR as a fix check, not as a new thorough review.
 <!-- /explain -->
 <!-- explain: ask-merge -->
-4. **Merge request** (`ask-merge <key> #<n>`: the bottom PR of a lane, with a merge review). `wg move <plan-dir> <key> "Ready to Merge"`; `wg` checks the PR, its base, its head, its checks, conflicts, the merge review, and the lane order. Ask: "PR #a: thorough review done, threads settled, code done on `<sha>`. Please merge #a with <method>." The method is squash, or a merge commit for a SYNC PR. One message can name a whole lane in order ("merge #a, then #b after I restack it"). At autonomy level `full` in a repository where agents may merge, merge it yourself instead of asking (SKILL.md "Autonomy level"). At level `supervised`, ask only after the issue has the `reviewed` label.
+4. **Merge request** (`ask-merge <key> #<n>`: the bottom PR of a lane, with a merge review). `wg move <plan-dir> <key> "Ready to Merge"`; `wg` checks the PR, its base, its head, its checks, conflicts, the merge review, and the lane order. Ask: "PR #a: thorough review done, threads settled, code done on `<sha>`. Please merge #a with <method>." The method is squash, or a merge commit for a SYNC PR. One message can name a whole lane in order ("merge #a, then #b after I restack it"). At autonomy level `full` in a repository where agents may merge, merge it yourself instead of asking (autonomy.md). At level `supervised`, ask only after the issue has the `reviewed` label.
 <!-- /explain -->
 <!-- explain: merged -->
-5. **After each merge** (`merged <key> #<n> <sha>`). `wg move <plan-dir> <key> Merged`: `wg` checks that the PR is merged and comments the merge commit. It also removes the node's Orca worktree, and the lane parent when every node of the lane is settled (coordinator.md "Worktree cleanup"). Then `git fetch origin`. After a SYNC merge, also check `git merge-base --is-ancestor <<release> head SHA in the SYNC PR> origin/main`. Then:
+5. **After each merge** (`merged <key> #<n> <sha>`). `wg move <plan-dir> <key> Merged`: `wg` checks that the PR is merged and comments the merge commit. It also removes the node's Orca worktree, and the lane parent when every node of the lane is settled (jobs.md "Worktree cleanup"). Then `git fetch origin`. After a SYNC merge, also check `git merge-base --is-ancestor <<release> head SHA in the SYNC PR> origin/main`. Then:
    - The merged branch has a child in its lane: `wg next` prints `restack <child> …: the PR below it merged`. Send that restack job. A branch higher in the lane is restacked when the branch below it merges.
    - It has no child: on a trunk target, run `st sync --force --no-stash --no-delete` from the coordinator worktree; on a frozen base, run `wg base <plan-dir>`.
    - The bottom PR of another lane gets a restack job only when `wg next` prints `restack <key> …: conflicts with <target>` or `…: its base is <branch>, not <target>`.
@@ -59,12 +59,18 @@ Each PR starts these steps as soon as its own wave review passes; it does not wa
 
 Native GitHub stacks are off for work-graph efforts: every submit passes `--no-native-stack`, and `wg done` fails `stack` when a PR is in one (`st stack unlink <n>`, then check each PR base). If `st submit` or `st branch submit` fails with 422 "part of a stack": stop. Give the human the stack number (`gh api repos/{owner}/{repo}/pulls/<n> --jq .stack.number`) and ask them to unstack it. After they confirm, run `st submit --native-stack --no-prompt --yes`. GitHub's retarget of a stacked PR is not verified: after each submit, `gh pr view <n> --json baseRefName` must show the expected base, or stop and tell the human.
 
+## Mark a PR reviewed
+
+The human marks a PR reviewed with the Linear label **`reviewed`** on its issue, in Linear or in `wg ui`. The label counts as the wave review and the merge review of that PR. It also accepts blocking findings that held the PR after 2 review rounds. Remove the label to undo it. An agent never adds or removes this label. A merge of the PR is also their review.
+
+They have nothing else to mark: agent reviews run by themselves, and the coordinator undrafts each PR and requests its thorough review. A GitHub "Approve" cannot work, because agents open the PRs with their account, and GitHub refuses an approval from the author of a PR.
+
 <!-- explain: restack -->
 ## Restack job
 
 The only way a branch is refreshed onto a moved base. The coordinator never starts a restack in a worker-owned worktree. One job at a time, across the whole effort, bottom of a lane first.
 
-Coordinator: `wg claim <plan-dir> <key> restack`. It refuses a second restack job. It refreshes a frozen base first (a `FAIL base` error stops the job, and you ask the human) and prints the pinned line `target <target> at <sha>; base: <trunk|frozen|integration|hotfix|sync>; parent merged: <yes|no>`. For `yes`, the line ends with the refresh: `; refresh: git rebase --onto origin/<target> <old parent tip>, then st branch reparent --parent <target>`. The old parent tip is where the branch left the parent (`git merge-base`): after a squash merge, `st restack` replays the parent's commits and conflicts. The line is also in the job spec. Send the job (coordinator.md "Follow-up jobs"). If the owner exited, the job arrives as a follow-up Task.
+Coordinator: `wg claim <plan-dir> <key> restack`. It refuses a second restack job. It refreshes a frozen base first (a `FAIL base` error stops the job, and you ask the human) and prints the pinned line `target <target> at <sha>; base: <trunk|frozen|integration|hotfix|sync>; parent merged: <yes|no>`. For `yes`, the line ends with the refresh: `; refresh: git rebase --onto origin/<target> <old parent tip>, then st branch reparent --parent <target>`. The old parent tip is where the branch left the parent (`git merge-base`): after a squash merge, `st restack` replays the parent's commits and conflicts. The line is also in the job spec. Send the job (jobs.md "Follow-up jobs"). If the owner exited, the job arrives as a follow-up Task.
 
 A second restack job on a branch that is already restacked is safe: the worker reports the same head.
 

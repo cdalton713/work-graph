@@ -3598,7 +3598,7 @@ class RehearsalTests(unittest.TestCase):
         self.wg("run", "set", "@effort", "wave=a,b")
         self.assertEqual(self.next()[1:], ["do dispatch a CD-1"])
 
-        # coordinator.md "Dispatch"
+        # jobs.md "Dispatch"
         out = self.wg("dispatch", "a")
         self.assertIn("orca worktree create --name ex-one-00-a --branch wg/ex-one-00-a --base-branch origin/main", out)
         self.assertEqual(self.issues["a"], {"state": "In Progress", "labels": {"agent:codex"}})
@@ -3610,7 +3610,7 @@ class RehearsalTests(unittest.TestCase):
         self.assertEqual(self.next()[1:], ["wait worker a CD-1: job=dispatch dispatch=d1"])
         self.assertIn(("a", f"Claimed: dispatch d1, worktree {path_a}, job dispatch"), self.comments)
 
-        # coordinator.md "Job end", then review-and-merge.md "Review"
+        # jobs.md "Job end", then review-and-merge.md "Review"
         self.worker("a", path_a, "1", "main")
         self.assertIn("pass --dispatch <id> of the worker_done", self.wg("done", "a", code=2))
         out = self.wg("done", "a", "--dispatch", "d1")
@@ -5602,13 +5602,13 @@ class ExplainTests(unittest.TestCase):
 
     def test_the_text_is_the_marked_part_only(self):
         text = wg.explain_text("dispatch")
-        self.assertTrue(text.startswith("(references/coordinator.md)\n## Dispatch\n"))
+        self.assertTrue(text.startswith("(references/jobs.md)\n## Dispatch\n"))
         self.assertIn("Done when: `wg run show <plan-dir> <key>` shows `state=running`", text)
         self.assertNotIn("## Adopt", text)
         both = wg.explain_text("review")
         self.assertIn("(references/review-and-merge.md)\n## Wave review", both)
-        self.assertIn("\n\n## Follow-up jobs", both)
-        self.assertEqual(both.count("(references/coordinator.md)"), 1)
+        self.assertIn("(references/jobs.md)\n## Follow-up jobs", both)
+        self.assertEqual(both.count("(references/jobs.md)"), 1)
 
     def test_the_command_lists_explains_and_refuses_an_unknown_verb(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -5643,3 +5643,23 @@ class ExplainTests(unittest.TestCase):
     def test_the_coordinator_text_names_wg_explain(self):
         text = (Path(wg.__file__).resolve().parent.parent / "references" / "coordinator.md").read_text()
         self.assertIn("wg explain <verb>", text)
+
+    def test_the_start_text_has_a_word_limit(self):
+        # The text that a coordinator reads in full at each session start and at each autostart.
+        root = Path(wg.__file__).resolve().parent.parent
+        for name, limit in (("SKILL.md", 2200), ("references/coordinator.md", 1800)):
+            with self.subTest(name=name):
+                self.assertLessEqual(len((root / name).read_text().split()), limit)
+
+    def test_each_relative_link_of_the_skill_text_names_a_file(self):
+        root = Path(wg.__file__).resolve().parent.parent
+        for path in [root / "SKILL.md", *sorted((root / "references").glob("*.md"))]:
+            for target in re.findall(r"\]\(([^)#:]+\.md)(?:#[^)]*)?\)", path.read_text()):
+                with self.subTest(file=path.name, target=target):
+                    self.assertTrue((path.parent / target).is_file())
+
+    def test_the_autostart_prompt_starts_at_wg_next_and_wg_explain(self):
+        prompt = wg.autostart_prompt("/plans/x")
+        self.assertIn("Run `wg next /plans/x` first", prompt)
+        self.assertIn("`wg explain <verb>`", prompt)
+        self.assertNotIn("read references/coordinator.md,", prompt)

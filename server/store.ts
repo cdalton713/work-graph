@@ -1,9 +1,9 @@
 // The state of the link that must survive a server restart: the queue and the open asks of each room.
 // Presence and progress are not here: they come back with the next `hello` and report of a coordinator.
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import type { Ask, Envelope, ProjectRef } from "../src/lib/link.ts";
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { type Ask, type Envelope, LINK_VERSION, type ProjectRef, type ToCoordinator, projectKey } from "../src/lib/link.ts";
 
 /** The version of the state file. A file of another version gives an empty state. */
 export const STATE_VERSION = 1;
@@ -32,8 +32,12 @@ export interface Store {
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isText = (v: unknown): v is string => typeof v === "string";
 const isRef = (v: unknown): v is ProjectRef => isObject(v) && isText(v.workspace) && isText(v.id);
-const isEnvelope = (v: unknown): v is Envelope =>
-  isObject(v) && isText(v.type) && isText(v.id) && !!v.id && isRef(v.project) && isText(v.at) && typeof v.v === "number";
+/** The message types of the queue: what the server sends to a coordinator. */
+const QUEUE_TYPES: Record<keyof ToCoordinator, true> = { changed: true, answer: true, reply: true, command: true };
+/** A queued message of this link version and of a queue type, for the room `ref`. */
+const isEnvelope = (ref: ProjectRef) => (v: unknown): v is Envelope =>
+  isObject(v) && v.v === LINK_VERSION && isText(v.type) && Object.hasOwn(QUEUE_TYPES, v.type) && isText(v.id) && !!v.id
+  && isRef(v.project) && projectKey(v.project) === projectKey(ref) && isText(v.at) && isObject(v.payload);
 const isAsk = (v: unknown): v is Ask =>
   isObject(v) && isText(v.id) && !!v.id && isText(v.from) && isText(v.body) && isText(v.at)
   && (v.key === null || isText(v.key)) && (v.issue === null || isText(v.issue));
@@ -44,11 +48,21 @@ export function parseState(raw: string, queueMax: number): LinkState {
   if (!isObject(data) || data.version !== STATE_VERSION) throw new Error(`not a state of version ${STATE_VERSION}`);
   const rooms = (Array.isArray(data.rooms) ? data.rooms : []).filter(isObject).flatMap((r): RoomState[] => {
     if (!isRef(r.ref)) return [];
-    const queue = (Array.isArray(r.queue) ? r.queue : []).filter(isEnvelope).slice(-queueMax);
+    const queue = (Array.isArray(r.queue) ? r.queue : []).filter(isEnvelope(r.ref)).slice(-queueMax);
     const asks = (Array.isArray(r.asks) ? r.asks : []).filter(isAsk).slice(0, ASKS_MAX);
     return queue.length || asks.length ? [{ ref: { workspace: r.ref.workspace, id: r.ref.id }, queue, asks }] : [];
   });
   return { rooms };
+}
+
+/** True when `dir` is `root` or a directory in it, also through a symbolic link of a directory that exists. */
+export function isInside(dir: string, root: string): boolean {
+  const real = (p: string) => { try { return realpathSync(p); } catch { return resolve(p); } };
+  for (const [d, r] of [[resolve(dir), resolve(root)], [real(dir), real(root)]]) {
+    const rel = relative(r, d);
+    if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return true;
+  }
+  return false;
 }
 
 /**

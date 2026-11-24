@@ -106,7 +106,10 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
 - `WG_STATE_DIR` (optional): a directory where the link keeps the queue of each project and the open worker
   questions over a restart. Without it, a restart loses them: a reply or a command that a coordinator did not get
   yet does not arrive. The server writes one file, `link-state.json` (mode 600), at most 1 s after a change, and
-  reads it at start. Give the directory a volume, so that the file stays when the container changes.
+  reads it at start. Give the directory a volume, so that the file stays when the container changes. Put the
+  directory outside the built page (`dist`): the server refuses a state directory there and keeps the state in
+  memory only. If the server cannot write the file, it logs the error and exits with code 1 at a stop, and after
+  the restart a coordinator can get a message again that it acknowledged.
 
 The server listens on `127.0.0.1:4747`. It does not check who the user is: keep it on a private network, such as a
 tailnet, or put an authenticating proxy in front of it. Then set `page_url` in the config of each machine that

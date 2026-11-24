@@ -1,7 +1,7 @@
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Envelope } from "../src/lib/link.ts";
 import { createApp } from "./app.ts";
 import { LinkHub, type Peer, QUEUE_MAX, stopOnSignals } from "./link.ts";
@@ -247,6 +247,72 @@ describe("fileStore", () => {
     expect(rooms[0].asks).toEqual([ask]);
   });
 
+  it("drops a saved message of another link version, of a type that is not for the queue, with no payload, or of another room", () => {
+    const dir = tempDir();
+    const good = { v: 1, type: "reply", id: "good", project: A, at: "", payload: { ask: "a", issue: null, key: null, body: "yes" } };
+    const queue = [
+      good, { ...good, id: "v2", v: 2 }, { ...good, id: "hello", type: "hello" }, { ...good, id: "bad-type", type: "toString" },
+      { ...good, id: "no-payload", payload: undefined }, { ...good, id: "other-room", project: { workspace: "work", id: "p2" } },
+    ];
+    writeFileSync(join(dir, STATE_FILE), JSON.stringify({ version: STATE_VERSION, rooms: [{ ref: A, queue, asks: [] }] }));
+    const { rooms } = fileStore(dir, { queueMax: QUEUE_MAX, after: fakeAfter().after, log: () => {} }).load();
+    expect(rooms[0].queue.map((m) => m.id)).toEqual(["good"]);
+  });
+
+  it("starts empty with one log line when the file cannot be read", () => {
+    const dir = tempDir(), logs: string[] = [];
+    mkdirSync(join(dir, STATE_FILE)); // a read gives EISDIR
+    const hub = new LinkHub(undefined, undefined, undefined, fileStore(dir, { queueMax: QUEUE_MAX, after: fakeAfter().after, log: (l) => logs.push(l) }));
+    expect(hub.state()).toEqual({ rooms: [] });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/^link state: cannot read .*EISDIR.*; the link starts empty$/);
+    const page = peer();
+    hub.joinPage(page, A); // the hub works
+    expect(page.of("asks")[0].payload).toEqual({ asks: [] });
+  });
+
+  it("refuses a state directory in the page directory, with one log line, and keeps the state in memory only", async () => {
+    const dist = tempDir(), stateDir = join(dist, "state");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: `${dist}/`, watchMs: 0, stateDir });
+      app.link.hub.publish(A, "reply", { ask: "a", issue: null, key: null, body: "secret" });
+      expect(await app.link.shutdown()).toBe(true);
+      expect(existsSync(stateDir)).toBe(false);
+      const lines = log.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("link state:"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/is in the page directory/);
+      const res = await app.request("/state/link-state.json");
+      expect(await res.text()).not.toContain("secret");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("loads only the rooms of the configured workspaces, so the overview gets no ask of a removed workspace", () => {
+    const dir = tempDir();
+    const gone = { workspace: "gone", id: "p9" };
+    writeFileSync(join(dir, STATE_FILE), JSON.stringify({
+      version: STATE_VERSION,
+      rooms: [{ ref: A, queue: [], asks: [ask] }, { ref: gone, queue: [], asks: [{ ...ask, id: "ask-gone" }] }],
+    }));
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const app = createApp({ port: 4747, tailnet: null, hosted: null }, {
+        team: "T", dist: `${tempDir()}/`, watchMs: 0, stateDir: dir,
+        workspaces: [{ id: "work", name: "Work", team: "T", key: "", teamLabels: true }],
+      });
+      const overview = peer();
+      app.link.hub.joinPage(overview, null);
+      expect(overview.of("asks").map((m) => m.project)).toEqual([A]);
+      expect(app.link.hub.ask(gone, "ask-gone")).toBeNull();
+      expect(log.mock.calls.map((c) => String(c[0]))).toContain("link state: ignored 1 rooms of workspaces that the config does not name");
+      app.link.stop();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("writes nothing without a state directory", () => {
     const dir = tempDir();
     delete process.env.WG_STATE_DIR;
@@ -260,7 +326,7 @@ describe("fileStore", () => {
     const dir = tempDir();
     process.env.WG_STATE_DIR = dir;
     try {
-      const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: dir, watchMs: 0 });
+      const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: `${tempDir()}/`, watchMs: 0 });
       const sent = app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
       await app.link.shutdown();
       const saved = JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8"));
@@ -272,7 +338,7 @@ describe("fileStore", () => {
 
   it("builds the store from the state directory of the app", async () => {
     const dir = tempDir();
-    const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: dir, watchMs: 0, stateDir: dir });
+    const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: `${tempDir()}/`, watchMs: 0, stateDir: dir });
     const sent = app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
     await app.link.shutdown();
     const saved = JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8"));

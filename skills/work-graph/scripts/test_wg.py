@@ -4002,6 +4002,7 @@ class GqlRetryTests(unittest.TestCase):
 
     QUERY = "query { viewer { id } }"
     MUTATION = "mutation { issueUpdate(id: \"i\", input: {}) { success } }"
+    NOW = 1_700_000_000.0
 
     class Response:
         def __init__(self, body, headers=None):
@@ -4017,21 +4018,39 @@ class GqlRetryTests(unittest.TestCase):
         def __exit__(self, *args):
             return False
 
+    class UnreadableBody(io.BytesIO):
+        def read(self, *args):
+            raise TimeoutError("timed out while reading")
+
     @staticmethod
-    def http_error(code, body="", headers=None):
-        return wg.urllib.error.HTTPError("https://api.linear.app/graphql", code, "error", headers or {},
-                                         io.BytesIO(body.encode()))
+    def http_error(code, body="", headers=None, fp=None):
+        """An HTTP error of the fake transport. It is made at the request, with the request's URL."""
+        return lambda request: wg.urllib.error.HTTPError(request.full_url, code, "error", headers or {},
+                                                         fp or io.BytesIO(body.encode()))
 
     def ok(self, headers=None):
         return self.Response({"data": {"viewer": {"id": "me"}}}, headers)
 
-    def run_gql(self, answers, query=None, now=1_700_000_000.0):
+    def reset_at(self, seconds):
+        return str(int((self.NOW + seconds) * 1000))
+
+    def run_gql(self, answers, query=None):
+        answers = iter(answers)
+
+        def transport(request, **kwargs):
+            answer = next(answers)
+            if callable(answer) and not isinstance(answer, BaseException):
+                answer = answer(request)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
         sleeps = []
         stderr = io.StringIO()
         with patch.object(wg, "linear_key", return_value="key"), \
-                patch.object(wg.urllib.request, "urlopen", side_effect=answers) as request, \
+                patch.object(wg.urllib.request, "urlopen", side_effect=transport) as request, \
                 patch.object(wg, "gql_sleep", side_effect=sleeps.append), \
-                patch.object(wg, "gql_clock", return_value=now), \
+                patch.object(wg, "gql_clock", return_value=self.NOW), \
                 patch.object(wg, "gql_jitter", return_value=0.5), \
                 patch.dict(wg.LINEAR_RATE, clear=True), contextlib.redirect_stderr(stderr):
             error = None
@@ -4042,6 +4061,11 @@ class GqlRetryTests(unittest.TestCase):
             rate = dict(wg.LINEAR_RATE)
         return result, error, sleeps, stderr.getvalue(), request.call_count, rate
 
+    def assert_warnings(self, err, count):
+        lines = err.splitlines()
+        self.assertEqual(len(lines), count, err)
+        self.assertTrue(all(line.startswith("warn linear: ") for line in lines), err)
+
     def test_a_query_is_tried_again_after_each_short_failure(self):
         failures = {
             "network": wg.urllib.error.URLError("connection refused"),
@@ -4050,6 +4074,7 @@ class GqlRetryTests(unittest.TestCase):
             "429": self.http_error(429, "too many"),
             "502": self.http_error(502, "bad gateway"),
             "503": self.http_error(503, "unavailable"),
+            "502 body not read": self.http_error(502, fp=self.UnreadableBody()),
             "ratelimited 400": self.http_error(400, '{"errors":[{"extensions":{"code":"RATELIMITED"}}]}'),
             "ratelimited 200": self.Response({"errors": [{"message": "limit", "extensions": {"code": "RATELIMITED"}}]}),
         }
@@ -4060,15 +4085,15 @@ class GqlRetryTests(unittest.TestCase):
                 self.assertEqual(result, {"viewer": {"id": "me"}})
                 self.assertEqual(calls, 2)
                 self.assertEqual(sleeps, [1.0])
-                self.assertEqual(len([line for line in err.splitlines() if line.startswith("warn linear:")]), 1)
+                self.assert_warnings(err, 1)
                 self.assertIn("try 2 of 4", err)
 
-    def test_the_delay_grows_and_the_last_failure_gives_the_count_of_tries(self):
+    def test_the_base_delay_doubles_and_the_last_failure_gives_the_count_of_tries(self):
         result, error, sleeps, err, calls, _ = self.run_gql([self.http_error(502, "bad gateway")] * 4)
         self.assertIsNone(result)
         self.assertEqual(calls, 4)
         self.assertEqual(sleeps, [1.0, 2.0, 4.0])
-        self.assertEqual(err.count("warn linear:"), 3)
+        self.assert_warnings(err, 3)
         self.assertIn("Linear HTTP 502", str(error))
         self.assertIn("after 4 tries", str(error))
 
@@ -4080,18 +4105,45 @@ class GqlRetryTests(unittest.TestCase):
             wg.gql(self.QUERY)
         sleep.assert_called_once_with(0.5)
 
+    def test_a_body_with_a_newline_gives_one_warning_line(self):
+        _, error, _, err, calls, _ = self.run_gql([self.http_error(502, "bad\ngateway\r\n"), self.ok()])
+        self.assertIsNone(error)
+        self.assertEqual(calls, 2)
+        self.assert_warnings(err, 1)
+        self.assertIn("bad gateway", err)
+
     def test_a_mutation_is_not_tried_again_after_a_timeout_or_a_5xx(self):
-        for failure in (TimeoutError("timed out"), wg.urllib.error.URLError("reset"), self.http_error(502, "bad")):
-            with self.subTest(str(failure)):
+        failures = {
+            "timeout": TimeoutError("timed out"),
+            "reset": wg.urllib.error.URLError("reset"),
+            "502": self.http_error(502, "bad"),
+            "502 that names RATELIMITED": self.http_error(502, "upstream said RATELIMITED, maybe"),
+            "503 with a RATELIMITED body": self.http_error(503, '{"errors":[{"extensions":{"code":"RATELIMITED"}}]}'),
+            "502 body not read": self.http_error(502, fp=self.UnreadableBody()),
+        }
+        for name, failure in failures.items():
+            with self.subTest(name):
                 result, error, sleeps, err, calls, _ = self.run_gql([failure, self.ok()], query=self.MUTATION)
-                self.assertIsNotNone(error)
+                self.assertIsInstance(error, wg.ReadError)
                 self.assertEqual((calls, sleeps, err), (1, [], ""))
-                self.assertNotIn("after", str(error))
+                self.assertIn("after 1 try", str(error))
+
+    def test_a_mutation_after_a_comment_is_a_mutation(self):
+        for query in ("# set the status\n" + self.MUTATION, "\ufeff ,\n# one\r\n  # two\n" + self.MUTATION):
+            with self.subTest(query):
+                self.assertTrue(wg.is_mutation(query))
+                _, error, sleeps, _, calls, _ = self.run_gql([TimeoutError("timed out"), self.ok()], query=query)
+                self.assertIsInstance(error, wg.ReadError)
+                self.assertEqual((calls, sleeps), (1, []))
+        for query in (self.QUERY, "{ viewer { id } }", "# mutation\nquery { viewer { id } }", "mutationX { a }"):
+            with self.subTest(query):
+                self.assertFalse(wg.is_mutation(query))
 
     def test_a_mutation_is_tried_again_when_linear_refused_it(self):
         for failure in (self.http_error(429, "too many"),
+                        self.http_error(400, '{"errors":[{"extensions":{"code":"RATELIMITED"}}]}'),
                         self.Response({"errors": [{"extensions": {"code": "RATELIMITED"}}]})):
-            with self.subTest(type(failure).__name__):
+            with self.subTest(str(failure)):
                 answer = self.Response({"data": {"issueUpdate": {"success": True}}})
                 result, error, sleeps, _, calls, _ = self.run_gql([failure, answer], query=self.MUTATION)
                 self.assertIsNone(error)
@@ -4099,15 +4151,17 @@ class GqlRetryTests(unittest.TestCase):
                 self.assertEqual((calls, sleeps), (2, [1.0]))
 
     def test_other_errors_are_not_tried_again(self):
-        for failure in (self.http_error(400, "bad query"), self.http_error(401, "no key"),
+        for failure in (self.http_error(400, "bad query"), self.http_error(400, "the word RATELIMITED in text"),
+                        self.http_error(401, "no key"), self.http_error(400, fp=self.UnreadableBody()),
                         self.Response({"errors": [{"message": "Entity not found"}]})):
             with self.subTest(str(failure)):
                 _, error, sleeps, err, calls, _ = self.run_gql([failure, self.ok()])
+                self.assertIsInstance(error, wg.ReadError)
                 self.assertEqual((calls, sleeps, err), (1, [], ""))
-                self.assertNotIn("after", str(error))
+                self.assertIn("after 1 try", str(error))
 
     def test_a_rate_limit_waits_for_the_reset_time_when_it_is_near(self):
-        headers = {"X-RateLimit-Requests-Remaining": "0", "X-RateLimit-Requests-Reset": "1700000030000"}
+        headers = {"X-RateLimit-Requests-Remaining": "0", "X-RateLimit-Requests-Reset": self.reset_at(30)}
         _, error, sleeps, err, calls, _ = self.run_gql([self.http_error(429, "too many", headers), self.ok()])
         self.assertIsNone(error)
         self.assertEqual(sleeps, [30.5])
@@ -4115,26 +4169,42 @@ class GqlRetryTests(unittest.TestCase):
         self.assertEqual(calls, 2)
 
     def test_a_rate_limit_with_a_far_reset_time_stops_at_once(self):
-        headers = {"X-RateLimit-Requests-Remaining": "0", "X-RateLimit-Requests-Reset": "1700000900000"}
+        headers = {"X-RateLimit-Requests-Remaining": "0", "X-RateLimit-Requests-Reset": self.reset_at(900)}
         _, error, sleeps, _, calls, _ = self.run_gql([self.http_error(429, "too many", headers), self.ok()])
         self.assertEqual((calls, sleeps), (1, []))
-        self.assertIn("resets in 900 s", str(error))
+        self.assertIn("again in 900 s", str(error))
         self.assertIn("after 1 try", str(error))
 
-    def test_the_complexity_reset_is_used_when_that_limit_is_used_up(self):
-        headers = {"X-RateLimit-Requests-Remaining": "100", "X-RateLimit-Requests-Reset": "1700000900000",
-                   "X-RateLimit-Complexity-Remaining": "0", "X-RateLimit-Complexity-Reset": "1700000010000"}
-        _, error, sleeps, _, _, _ = self.run_gql([self.http_error(400, "RATELIMITED", headers), self.ok()])
+    def test_the_reset_of_the_used_up_limit_counts(self):
+        cases = {
+            "complexity": {"X-RateLimit-Requests-Remaining": "100", "X-RateLimit-Requests-Reset": self.reset_at(900),
+                           "X-RateLimit-Complexity-Remaining": "0", "X-RateLimit-Complexity-Reset": self.reset_at(10)},
+            "endpoint": {"X-RateLimit-Requests-Remaining": "4000", "X-RateLimit-Requests-Reset": self.reset_at(900),
+                         "X-RateLimit-Endpoint-Requests-Remaining": "0",
+                         "X-RateLimit-Endpoint-Requests-Reset": self.reset_at(10)},
+            "retry-after": {"Retry-After": "10", "X-RateLimit-Requests-Reset": self.reset_at(900)},
+        }
+        for name, headers in cases.items():
+            with self.subTest(name):
+                _, error, sleeps, _, _, _ = self.run_gql([self.http_error(429, "too many", headers), self.ok()])
+                self.assertIsNone(error)
+                self.assertEqual(sleeps, [10.5])
+
+    def test_a_refusal_uses_its_own_headers_not_the_headers_of_an_earlier_response(self):
+        old = {"X-RateLimit-Requests-Remaining": "0", "X-RateLimit-Requests-Reset": self.reset_at(900)}
+        _, error, sleeps, _, calls, rate = self.run_gql([self.http_error(502, "bad", old),
+                                                         self.http_error(429, "too many"), self.ok()])
         self.assertIsNone(error)
-        self.assertEqual(sleeps, [10.5])
+        self.assertEqual((calls, sleeps), (3, [1.0, 2.0]))
+        self.assertEqual(rate["requests-reset"], self.reset_at(900))
 
     def test_the_last_limit_headers_are_kept(self):
         headers = {"X-RateLimit-Requests-Limit": "5000", "X-RateLimit-Requests-Remaining": "4321",
-                   "X-RateLimit-Requests-Reset": "1700000000000"}
+                   "X-RateLimit-Requests-Reset": "1700000000000", "X-RateLimit-Endpoint-Requests-Remaining": "9"}
         _, error, _, _, _, rate = self.run_gql([self.ok(headers)])
         self.assertIsNone(error)
         self.assertEqual(rate, {"requests-limit": "5000", "requests-remaining": "4321",
-                                "requests-reset": "1700000000000"})
+                                "requests-reset": "1700000000000", "endpoint-requests-remaining": "9"})
 
 
 class FreePlanTests(DirTests):

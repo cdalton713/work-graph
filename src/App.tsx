@@ -7,11 +7,12 @@ import { Panel } from "./components/Panel";
 import { CopyButton, Lamp, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
+import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./lib/health";
 import { liveJob, presenceText } from "./lib/link";
 import { type OverviewData, PROJECT_LAMP, movesWithAsks, summaryKey } from "./lib/overview";
 import { site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
-import type { GraphData, Issue, IssuePatch, Project, ProjectList } from "./lib/types";
+import type { GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
 import { useLink } from "./useLink";
 
 const POLL_MS = 15_000;
@@ -68,7 +69,8 @@ export function App() {
   const [placed, setPlaced] = useState<{ key: string; layout: Layout } | null>(null);
   const pending = useRef(0);
   // The version of the graph that the server sent last. An edit changes the graph on screen, so it clears this.
-  const version = useRef<{ project: string; value: string } | null>(null);
+  // While the graph is stale, the page asks without the version: a fresh graph with the same version must replace it.
+  const version = useRef<HeldGraph | null>(null);
   const generation = useRef(0);
 
   const { project, missing } = useMemo(() => projectFromQuery(directory, query), [directory, query]);
@@ -80,13 +82,20 @@ export function App() {
   const [overviewBusy, setOverviewBusy] = useState(false);
   const [overviewTick, setOverviewTick] = useState(0);
   const [now, setNow] = useState(Date.now);
+  // The build and the Linear budget of the server, with the overview poll. A failed status changes nothing.
+  const [status, setStatus] = useState<ServerStatus | null>(null);
   useEffect(() => {
-    let live = true, running = false;
+    let live = true, running = false, statusRunning = false;
     const poll = () => {
       if (running || document.hidden) return;
       running = true;
       setOverviewBusy(true);
-      api.overview().then((o) => { if (live) { setOverview(o); setDirectory(o); setNow(Date.now()); } })
+      // Status has its own guard: a slow status answer must not come after a newer one.
+      if (!statusRunning) {
+        statusRunning = true;
+        api.status().then((s) => live && setStatus(s)).catch(() => {}).finally(() => { statusRunning = false; });
+      }
+      api.overview().then((o) => { if (live) { setOverview(o); setDirectory((old) => mergeDirectory(old, o)); setNow(Date.now()); } })
         .catch((e) => live && setError(`overview: ${e.message}`))
         .finally(() => { running = false; if (live) setOverviewBusy(false); });
     };
@@ -104,13 +113,10 @@ export function App() {
     setBusy(true);
     try {
       const scope = `${project.workspace}:${project.id}`;
-      const have = version.current?.project === scope ? version.current.value : undefined;
-      const next = await api.graph(project.id, have, project.workspace);
+      const { held, next } = await pollGraph(version.current, scope, (have) => api.graph(project.id, have, project.workspace));
       if (mine !== generation.current || pending.current) return;
-      if (next) {
-        version.current = { project: scope, value: next.version };
-        setData(next);
-      }
+      version.current = held;
+      if (next) setData(next);
       setSyncedAt(new Date()); // also for an answer of "no change": the page is as new as this poll
       setError(null);
     } catch (e) {
@@ -153,6 +159,8 @@ export function App() {
   const asked = useMemo(() => new Set(link.asks.flatMap((a) => (a.issue ? [a.issue] : []))), [link.asks]);
   const presence = linkRef ? link.presence.get(summaryKey(linkRef)) : undefined;
   const coordinator = useMemo(() => (linkRef ? presenceText(presence, now) : null), [presence, linkRef, now]);
+  const stale = useMemo(() => (project ? staleBanner(data, now) : null), [project, data, now]);
+  const budget = useMemo(() => budgetWarnings(status, now), [status, now]);
   // The project label `paused` is the record; an older coordinator report stands in until the list has it.
   const paused = project?.paused ?? !!presence?.coordinators[0]?.paused;
   const [commandNote, setCommandNote] = useState<string | null>(null);
@@ -405,6 +413,7 @@ export function App() {
             </button>
           </>
         )}
+        {versionText(status) && <span className="bar-version mono" title={`The build of the server: ${status!.version}`}>{versionText(status)}</span>}
         <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} title="Keyboard keys (?)">?</button>
         {/* Apart from the view toggles: it changes every issue of the project in Linear. */}
         {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
@@ -468,6 +477,7 @@ export function App() {
         </div>
       )}
 
+      {stale && <div className="effort effort-warning" role="status" title={stale.title}>{stale.text}</div>}
       {(closeError || error) && <div className="error" role="alert"><span>{closeError || error}</span><button type="button" className="ghost" onClick={() => { setError(null); setCloseError(null); }}>Dismiss</button></div>}
 
       {keys && (
@@ -488,6 +498,7 @@ export function App() {
       <main className="stage">
         {!project && directory && (
           <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} presence={link.presence} asks={link.asksBy}
+            budget={budget}
             initiative={query.get("initiative")} onInitiative={(name) => setQuery({ initiative: name }, true)} />
         )}
         {project && !data && !error && <div className="blank">Loading {project.name}…</div>}

@@ -108,7 +108,7 @@ describe("graph cache", () => {
     linear.down = true;
     clock.at += FRESH_MS;
     const stale = await cache.get("p");
-    expect(stale).toEqual({ data: first.data, version: first.version, stale: true, error: "Linear: HTTP 500" });
+    expect(stale).toEqual({ data: first.data, version: first.version, stale: true, error: "Linear: HTTP 500", loadedAt: 1_000_000 });
     // After a write the graph is gone from the cache, but a failed load still gives the last graph.
     cache.clear("p");
     expect((await cache.get("p")).stale).toBe(true);
@@ -174,7 +174,7 @@ describe("graph cache", () => {
     clock.at += FRESH_MS;
     await cache.check(["a", "b"]);
     const [a, b] = await Promise.all([cache.get("a"), cache.get("b")]);
-    expect(a).toEqual({ data: first.data, version: first.version, stale: true, error: "Linear: HTTP 500" });
+    expect(a).toEqual({ data: first.data, version: first.version, stale: true, error: "Linear: HTTP 500", loadedAt: 1_000_000 });
     expect(b.stale).toBe(true);
     expect(count).toEqual({ load: 2, changed: 0, many: 1 });
     // A slow check: Linear rejects it after 30 s (its time-out). The reads of the same poll still get its error.

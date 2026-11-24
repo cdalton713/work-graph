@@ -682,18 +682,23 @@ describe("graph cache of the server", () => {
     expect(await saved.json()).toEqual({ ok: true, recorded: true });
     expect(asked.comments).toHaveLength(1);
   });
-  it("sends the last graph with stale and the error when Linear fails, and 204 for the version the page has", async () => {
+  it("sends the last graph with stale, the error, and its load time when Linear fails, also for the version the page has", async () => {
     const { state } = graphLinear();
     const server = cached();
+    const loaded = clock.at;
     const first = await (await graph(server, "p1")).json();
     expect(first.stale).toBeUndefined();
+    expect(first.loadedAt).toBeUndefined();
     state.down = true;
     clock.at += 60_000;
     const response = await graph(server, "p1");
     expect(response.status).toBe(200);
     const stale = await response.json();
-    expect(stale).toMatchObject({ project: first.project, version: first.version, stale: true, error: expect.stringContaining("HTTP 500") });
-    expect((await graph(server, "p1", first.version)).status).toBe(204);
+    expect(stale).toMatchObject({ project: first.project, version: first.version, stale: true, error: expect.stringContaining("HTTP 500"), loadedAt: loaded });
+    // The page has this version, but it must learn that the graph is stale: no 204.
+    const same = await graph(server, "p1", first.version);
+    expect(same.status).toBe(200);
+    expect((await same.json()).stale).toBe(true);
     clock.at += 20 * 60_000;
     expect((await graph(server, "p1")).status).toBe(502);
   });

@@ -1,7 +1,7 @@
 import type { AutonomyLevel } from "./lib/autonomy";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
-import type { Comment, GraphData, Issue, IssuePatch, ProjectList } from "./lib/types";
+import type { Comment, GraphData, Issue, IssuePatch, ProjectList, ServerStatus } from "./lib/types";
 
 /** The open project. A write names it (`x-project`), so the server can tell its coordinator at once. */
 let openProject: string | null = null;
@@ -20,6 +20,8 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
 export const api = {
   closeProject: (projectId: string, workspace?: string) => call<{ completedIssues: number }>(`projects/${projectId}/close`, { method: "POST", body: JSON.stringify({ confirm: true }) }, workspace),
   projects: () => call<ProjectList>("projects"),
+  /** The state of the server: its build and the Linear budget of each workspace. */
+  status: () => call<ServerStatus>("status"),
   /** The projects, with a summary of each open one. */
   overview: () => call<OverviewData>("overview"),
   /** The graph with its version, or null when the page already has version `have`. */

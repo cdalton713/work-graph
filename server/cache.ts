@@ -33,6 +33,8 @@ export interface Versioned {
   data: GraphData; version: string;
   /** The refresh failed: this is the last graph that loaded, and `error` says why the refresh failed. */
   stale?: boolean; error?: string;
+  /** When the stale graph loaded (epoch ms). Set only with `stale`. */
+  loadedAt?: number;
 }
 interface Entry extends Versioned {
   /**
@@ -113,7 +115,7 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
   function fallback(projectId: string, error: unknown): Versioned {
     const old = last.get(projectId);
     if (!old || now() - old.loadedAt > STALE_MS) throw error;
-    const answer: Versioned = { data: old.data, version: old.version, stale: true, error: (error as Error).message };
+    const answer: Versioned = { data: old.data, version: old.version, stale: true, error: (error as Error).message, loadedAt: old.loadedAt };
     causes.set(answer, error);
     return answer;
   }

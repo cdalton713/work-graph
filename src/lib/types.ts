@@ -28,6 +28,8 @@ export interface GraphData {
   stale?: boolean;
   /** Why the refresh failed. Set only with `stale`. */
   error?: string;
+  /** When the stale graph loaded from Linear (epoch ms). Set only with `stale`. */
+  loadedAt?: number;
 }
 export interface Project {
   id: string; name: string; url: string; status: string; statusType: string; workspace?: string; workspaceName?: string;

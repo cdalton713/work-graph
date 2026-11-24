@@ -40,13 +40,15 @@ export interface OverviewProps {
   /** The initiative filter from the link (`?initiative=`): null shows all; NO_INITIATIVE the projects with none. */
   initiative?: string | null;
   onInitiative?: (name: string | null) => void;
+  /** The workspaces with a low Linear budget (`budgetWarnings`). */
+  budget?: { id: string; text: string; title: string }[];
 }
 
 /**
  * All projects on one page: which ones wait on the human, how far each is, and what wg next last said.
  * `/` finds a project, the arrow keys move, Enter opens.
  */
-export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, initiative = null, onInitiative }: OverviewProps) {
+export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, initiative = null, onInitiative, budget = [] }: OverviewProps) {
   const list = useMemo<OverviewData | ProjectList>(() => ("summaries" in given && asks?.size
     ? { ...given, summaries: given.summaries.map((s) => ({ ...s, you: movesWithAsks(s.you, asks.get(summaryKey(s))) })) }
     : given), [given, asks]);
@@ -156,6 +158,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             : "Loading the projects…"}
           {loading && "summaries" in list && <span className="sync-dot is-busy" aria-label="Refreshing" />}
         </p>
+        {budget.map((w) => <span key={w.id} className="ov-budget is-warning mono" role="status" title={w.title}>{w.text}</span>)}
       </div>
       {missing && <p className="empty" role="status">{missing}</p>}
 

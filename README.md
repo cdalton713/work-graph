@@ -125,6 +125,12 @@ Checks of a running server:
   room the count of connected coordinators, pages, queued messages, and open asks. It gives no key, no issue
   text, and no message body. The same host check as the other API routes applies.
 
+The page shows the same state. The top bar shows the server `version`. The overview polls `/api/status` each
+60 s and warns for each workspace with fewer than 500 remaining Linear requests. When Linear fails, the graph
+answer is the last graph with `stale: true`, the error, and `loadedAt` (when that graph loaded, epoch ms), also for
+a page that has that version. The project page keeps the graph and shows `Linear is unavailable: this graph is
+from <age> ago` until a fresh graph comes.
+
 Each API request that takes more than 5 s or ends with status 500 or more writes one log line with the method, the
 path, the status, and the duration. The server compresses static files and JSON answers of any size with gzip when
 the client accepts it. `index.html` has a weak `ETag` and `Vary: Accept-Encoding`, also on a 304.

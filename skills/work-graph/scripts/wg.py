@@ -82,7 +82,7 @@ DEFAULT_WORKSPACE = {"id": "default", "name": "Linear", "team": None, "teams": N
 DEFAULT_CONFIG = {"human": "Human", "page_url": None, "github_user": None, "tick_roots": ["~/Projects"],
                   "tick_label": "dev.work-graph.tick", "test_runner": None, "branch_prefix": "wg/",
                   "release_branch": "release", "rules": "~/.config/work-graph/rules.md",
-                  "notify": [], "workspaces": [DEFAULT_WORKSPACE]}
+                  "notify": [], "agent_merge": [], "workspaces": [DEFAULT_WORKSPACE]}
 
 
 def read_config(path=CONFIG_PATH):
@@ -99,6 +99,10 @@ def read_config(path=CONFIG_PATH):
         raise SystemExit(f"{path}: each workspace needs a unique id of a-z, 0-9 and -")
     if not isinstance(config["human"], str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9 ]*", config["human"]):
         raise SystemExit(f"{path}: human must be a name of letters, digits and spaces")
+    merge = config["agent_merge"]
+    if not isinstance(merge, list) or not all(isinstance(m, str) and re.fullmatch(r"[\w.-]+(/[\w.-]+)?", m)
+                                               for m in merge):
+        raise SystemExit(f"{path}: agent_merge must be a list of GitHub owners or owner/repo names")
     if problem := notify_problem(config["notify"]):
         raise SystemExit(f"{path}: notify: {problem}")
     return config | {"workspaces": workspaces}
@@ -3280,6 +3284,28 @@ def bottom_base(node, target):
     return "main" if node.get("role") == "sync" else target
 
 
+AGENT_MERGE_REPOS = {}  # plan dir -> its GitHub owner/repo, read once for each process
+
+
+def agent_merge_repo(plan_dir):
+    """True when config `agent_merge` names the GitHub repository of `plan_dir` or its owner. There, at autonomy
+    level full, the coordinator merges each PR itself (references/autonomy.md "Where agents may merge"). A failed
+    read is False: the human is asked, as at level standard."""
+    allowed = CONFIG.get("agent_merge") or []
+    if not allowed:
+        return False
+    key = str(Path(plan_dir).resolve())
+    if key not in AGENT_MERGE_REPOS:
+        try:
+            result = command("gh", "repo", "view", "--json", "nameWithOwner", cwd=plan_dir)
+            name = json.loads(result.stdout).get("nameWithOwner") if not result.returncode else None
+        except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+            name = None
+        AGENT_MERGE_REPOS[key] = name
+    name = AGENT_MERGE_REPOS[key]
+    return bool(name) and any(m.lower() in (name.lower(), name.split("/")[0].lower()) for m in allowed)
+
+
 def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
     """One status line; then what the coordinator does now (do), waits for (wait), and must know (note).
 
@@ -3289,6 +3315,13 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
     effort = run_rows(km)["effort"]
     level = review_level(km)
     wave = [k for k in effort.get("wave", "").split(",") if k]
+    agent_merges = []  # read at the first PR that can merge
+
+    def coordinator_merges():
+        # At level full in a repository of config `agent_merge`, a merge is the coordinator's step, not the human's.
+        if not agent_merges:
+            agent_merges.append(effort.get("autonomy_seen") == "full" and agent_merge_repo(plan_dir))
+        return agent_merges[0]
     order = topo_order(plan)
     tasks = [k for k in order if nodes[k]["kind"] == "task"]
     lines, idle = [], []
@@ -3422,6 +3455,8 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
             add("do", "restack", k, f"#{number} conflicts with {info.get('baseRefName')}")
         elif not checks_pass(k, number):
             add("do", "verify", k, f"#{number}: a check failed")
+        elif coordinator_merges():
+            add("do", "merge", k, f"#{number}")
         elif s != "Ready to Merge":
             add("do", "ask-merge", k, f"#{number}")
         else:
@@ -4097,6 +4132,7 @@ EXPLAIN = {
     "undraft": "mark the PR ready for review yourself",
     "merge-review": "request, read, or check the thorough merge review",
     "ask-merge": "the PR can merge: move it to Ready to Merge and ask for the merge",
+    "merge": "the PR can merge (autonomy full, config agent_merge): move it to Ready to Merge and merge it yourself",
     "merged": "the PR merged: move the task to Merged",
     "close": "every pre-merge task merged: close the merge point",
     "restack": "send a restack job",
@@ -4577,7 +4613,9 @@ def tick_members(inputs, lines, triage):
         entry = km["nodes"][key]
         reasons = [part for part in said.get(key, "").splitlines()
                    if part.split(": ", 1)[0] in {"wait human", "do ask", "do ask-ready", "do ask-merge"}]
-        if reasons or status in {WAIT_STATUS, "Ready to Merge", "Triage"}:
+        # A Ready to Merge PR that the coordinator merges itself (`do merge`, autonomy full) is not the human's move.
+        coordinator_merges = any(part.startswith("do merge:") for part in said.get(key, "").splitlines())
+        if reasons or status in {WAIT_STATUS, "Triage"} or (status == "Ready to Merge" and not coordinator_merges):
             members[entry["id"]] = {
                 "issue": live[entry["id"]].get("identifier") or entry["identifier"],
                 "reason": " ".join(reasons) or status,

@@ -19,7 +19,7 @@ The coordinator is this session. It reads `wg next`, runs the Orca commands that
 | `integration <key>` | ordering.md "`effort/<slug>`: integration branch" |
 | `verify <key>` | `wg done <plan-dir> <key>` (jobs.md "Job end") |
 | `review <key>` | review-and-merge.md "Wave review" |
-| `ask-ready`, `undraft`, `merge-review`, `ask-merge`, `merged`, `close` | review-and-merge.md "Merge point" |
+| `ask-ready`, `undraft`, `merge-review`, `ask-merge`, `merge`, `merged`, `close` | review-and-merge.md "Merge point" |
 | `restack <key>`, a review, CI, or thread fix | review-and-merge.md "Restack job"; jobs.md "Follow-up jobs" |
 | `ask <ops or decision>`, `ops <key>`, `verifying`, `ship` | review-and-merge.md "Ship point" |
 | `triage <identifier>` (level `full`) | "Discovered work" |

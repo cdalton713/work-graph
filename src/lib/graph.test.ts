@@ -267,6 +267,13 @@ describe("what wg next published", () => {
     const quiet = issue("c", { state: rtm, card: card({ key: "c" }) });
     expect(ids(boardGroups(buildGraph(data([ask, verify, quiet], []))))).toMatchObject({ you: ["CD-a", "CD-c"], review: ["CD-b"] });
   });
+  it("keeps a merge that the coordinator does itself (do merge, autonomy full) out of Your move", () => {
+    const merges = issue("a", { state: state("Ready to Merge", "started"), card: card({ next: "do merge: #7" }) });
+    const inReview = issue("b", { state: state("In Review", "started"), card: card({ next: "do merge: #8" }) });
+    expect(yourMove("do merge: #7")).toBeNull();
+    expect(agentStep("do merge: #7")).toBe("merge");
+    expect(ids(boardGroups(buildGraph(data([merges, inReview], []))))).toMatchObject({ you: [], review: ["CD-a", "CD-b"] });
+  });
   it("names the action of the coordinator from what wg next said", () => {
     expect(agentStep("do verify: #8 head abc is not code done")).toBe("verify");
     expect(agentStep("wait review")).toBe("review");

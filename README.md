@@ -75,6 +75,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | `release_branch` | The target of a HOTFIX/SYNC phase (`skills/work-graph/references/ordering.md`). |
 | `rules` | A Markdown file of your own rules: your workspaces, the repositories where agents may merge, freeze rules. The skill tells the agent to read it. |
 | `github_user` | The `gh` login that `wg tick --install` requires for the scheduled job. |
+| `agent_merge` | The GitHub owners (`ada`) or repositories (`ada/tool`) where agents may merge. At autonomy level `full` there, `wg next` prints `do merge` in place of `ask-merge`: the merge is the coordinator's step, not the human's move. Default: none. |
 | `tick_label`, `tick_roots` | The launchd label of `wg tick --install`, and the folders where `wg tick` looks for `*-core/plan.json`. |
 | `notify` | The channels that tell `human` that a move is theirs (see "Notices" below). Default: none. |
 | `test_runner` | The default test command of `wg evidence`. A node runs the moon test tasks that its diff affects; `@full-<phase>` runs `suite`. `commit_marker` is a regular expression for the line where the runner prints the commit it tests; without it, the exit code is the proof. `lint` is the lint command of the worker spec's push checks, as a list of arguments; each `{lower}` is the node's diff base. Without it, the spec has no lint step. A plan's `effort.lint` replaces it, and a plan with `effort.test` does not use it (`skills/work-graph/references/graph.md`). |

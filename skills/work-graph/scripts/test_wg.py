@@ -2036,6 +2036,30 @@ class NextTests(LaneTests):
         lines = self.merge_stage({"review": None, "merge_review": "clean"}, ready, effort={"review_seen": "light"})
         self.assertIn("do ask-merge a CD-1: #7", lines)
 
+    def test_at_autonomy_full_in_an_agent_merge_repo_the_merge_is_the_coordinators_step(self):
+        ready = {"isDraft": False}
+        for allowed, effort, live, expected in [
+            (True, {"autonomy_seen": "full"}, None, "do merge a CD-1: #7"),
+            (True, {"autonomy_seen": "full"}, {"a": "Ready to Merge"}, "do merge a CD-1: #7"),
+            (False, {"autonomy_seen": "full"}, None, "do ask-merge a CD-1: #7"),
+            (True, {"autonomy_seen": "standard"}, None, "do ask-merge a CD-1: #7"),
+            (True, {"autonomy_seen": "standard"}, {"a": "Ready to Merge"}, "wait human a CD-1: merge PR #7"),
+        ]:
+            with self.subTest(allowed=allowed, effort=effort, live=live), \
+                 patch.object(wg, "agent_merge_repo", return_value=allowed):
+                lines = self.merge_stage({"merge_review": "clean"}, ready, live=live, effort=effort)
+                self.assertIn(expected, lines)
+
+    def test_agent_merge_repo_matches_the_owner_or_the_repository(self):
+        view = Mock(returncode=0, stdout='{"nameWithOwner": "Ada/tool"}')
+        for allowed, expected in [([], False), (["ada"], True), (["ada/tool"], True), (["ada/other", "bob"], False)]:
+            with self.subTest(allowed=allowed), patch.dict(wg.CONFIG, {"agent_merge": allowed}), \
+                 patch.dict(wg.AGENT_MERGE_REPOS, clear=True), patch.object(wg, "command", return_value=view):
+                self.assertEqual(wg.agent_merge_repo(self.d), expected)
+        with patch.dict(wg.CONFIG, {"agent_merge": ["ada"]}), patch.dict(wg.AGENT_MERGE_REPOS, clear=True), \
+             patch.object(wg, "command", side_effect=OSError("no gh")):
+            self.assertFalse(wg.agent_merge_repo(self.d))
+
     def test_run_set_records_the_gate_at_standard_and_light_and_a_new_patch_clears_it(self):
         pr = {"headRefOid": SHA}
         for level, gate in (("thorough", None), ("standard", "standard"), ("light", "light")):
@@ -2241,6 +2265,19 @@ class NextTests(LaneTests):
         inputs = (wg.load_keymap(self.d), {}, {n["key"]: n for n in self.p["nodes"]}, {"ops": "Ready"}, {}, {})
         inputs[0]["nodes"]["ops"] = {"id": "o", "identifier": "CD-7"}
         self.assertEqual(wg.tick_members(inputs, [("do", "ops ops CD-7: ops")], {}), {})
+
+    def test_a_merge_by_the_coordinator_is_not_humans_move(self):
+        self.keymap()
+        km = wg.load_keymap(self.d)
+        km["nodes"]["a"] = {"id": "ia", "identifier": "CD-1"}
+        nodes = {n["key"]: n for n in self.p["nodes"]}
+        for status in ("In Review", "Ready to Merge"):
+            with self.subTest(status=status):
+                inputs = (km, {"ia": {"identifier": "CD-1"}}, nodes, {"a": status}, {}, {})
+                self.assertEqual(wg.tick_members(inputs, [("do", "merge a CD-1: #7")], {}), {})
+                self.assertEqual(wg.tick_members(inputs, [("do", "ask-merge a CD-1: #7")], {}),
+                                 {"ia": {"issue": "CD-1", "reason": "do ask-merge: #7"}})
+        self.assertEqual(wg.notify_entries([("do", "merge a CD-1: #7")], []), {})
 
     def test_by_is_only_for_ops_nodes_with_a_known_runner(self):
         for kind, by in (("task", "coordinator"), ("ops", "worker")):

@@ -28,7 +28,8 @@ export interface ToCoordinator { changed: Changed; answer: Answer; reply: Reply;
 // Coordinator → server.
 export interface Hello { plan: string; session: string; host: string; wg: string }
 export interface CoordinatorState { mode: "waiting" | "working"; head: string; lines: { level: string; text: string }[] }
-export interface Ask { id: string; key: string | null; issue: string | null; from: string; body: string; at: string }
+/** `kind`: an `escalation` is a worker that stopped and that no coordinator read yet. None: a question. */
+export interface Ask { id: string; key: string | null; issue: string | null; from: string; body: string; at: string; kind?: "question" | "escalation" }
 export interface Progress { key: string; issue: string | null; job: string | null; state: string | null; ci: string | null; evidence: string | null; at: string | null }
 /** `wrote`: wg changed these issues in Linear. It may come without `hello`, on a short connection of any wg command. */
 export interface Wrote { issues: string[] }

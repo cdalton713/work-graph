@@ -142,6 +142,10 @@ describe("movesWithAsks", () => {
       { ...move, why: "Worker asks · Merge #7" },
     ]);
   });
+  it("names an escalation that no coordinator read", () => {
+    expect(movesWithAsks([move], [{ ...ask("e1", "CD-2", "Base differs"), kind: "escalation" as const }, { ...ask("e2", "CD-1"), kind: "escalation" as const }]).map((m) => m.why))
+      .toEqual(["Worker escalates:", "Worker escalates · Merge #7"]);
+  });
   it("keeps the moves as they are when no worker asks", () => {
     expect(movesWithAsks([move], [])).toEqual([move]);
     expect(movesWithAsks([move], undefined)).toEqual([move]);

@@ -417,6 +417,7 @@ export class LinkHub {
         } else if (type === "asks") {
           room.asks = (Array.isArray(payload.asks) ? payload.asks.filter(isObject) : []).slice(0, ASKS_MAX).map((a) => ({
             id: text(a.id, 200), key: text(a.key, 200) || null, issue: text(a.issue, 50) || null, from: text(a.from, 200), body: text(a.body), at: text(a.at, 50),
+            ...(a.kind === "escalation" ? { kind: "escalation" as const } : {}),
           })).filter((a) => a.id);
           this.changed();
           this.toPages(room, "asks", { asks: room.asks }, true);

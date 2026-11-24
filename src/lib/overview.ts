@@ -90,6 +90,9 @@ export function overviewRows(list: OverviewData | ProjectList, filter: OverviewF
  * move of the human's: the worker waits on the reply. Questions come first; a move whose worker also
  * asks says so. Each issue counts once.
  */
+/** What an open ask of a worker is: a question, or an escalation that no coordinator read. */
+const askVerb = (a: Ask) => (a.kind === "escalation" ? "Worker escalates" : "Worker asks");
+
 export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined): YourMove[] {
   if (!asks?.length) return you;
   const asked = new Set(asks.map((a) => a.issue ?? "worker"));
@@ -97,9 +100,10 @@ export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined): YourMov
   for (const a of asks) {
     const id = a.issue ?? "worker";
     if (you.some((m) => m.identifier === id) || extra.some((m) => m.identifier === id)) continue;
-    extra.push({ identifier: id, title: a.body.split("\n")[0].trim(), why: "Worker asks:", pullRequests: [], updatedAt: a.at });
+    extra.push({ identifier: id, title: a.body.split("\n")[0].trim(), why: `${askVerb(a)}:`, pullRequests: [], updatedAt: a.at });
   }
-  return [...extra, ...you.map((m) => (asked.has(m.identifier) ? { ...m, why: `Worker asks · ${m.why}` } : m))];
+  const verb = (id: string) => askVerb(asks.find((a) => (a.issue ?? "worker") === id)!);
+  return [...extra, ...you.map((m) => (asked.has(m.identifier) ? { ...m, why: `${verb(m.identifier)} · ${m.why}` } : m))];
 }
 
 /**

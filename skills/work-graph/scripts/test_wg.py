@@ -4186,6 +4186,8 @@ class NotifyTests(unittest.TestCase):
         same = [{"id": "m1", "key": "b", "issue": "CD-2", "body": "x" * 300 + "a"},
                 {"id": "m2", "key": "b", "issue": "CD-2", "body": "x" * 300 + "b"}]
         self.assertEqual(len(wg.notify_entries([], same)), 2)
+        stopped = [{"id": "m3", "key": "b", "issue": "CD-2", "body": "Base differs", "kind": "escalation"}]
+        self.assertEqual(list(wg.notify_entries([], stopped).values()), ["escalation CD-2: Base differs"])
         self.assertEqual(wg.notify_entries([("do", "dispatch b CD-2"), ("wait", "below b CD-2")], []), {})
 
     def test_a_webhook_posts_title_body_url_and_text_once_per_new_entry(self):
@@ -5164,6 +5166,8 @@ class AskTests(unittest.TestCase):
             {"id": "msg_q", "type": "question", "from": "ctx_1", "handled": False, "body": "Which API?", "payload": {"dispatchId": "ctx_1"}},
             {"id": "msg_done", "type": "question", "from": "ctx_1", "handled": True, "body": "Old", "payload": {"dispatchId": "ctx_1"}},
             {"id": "msg_other", "type": "question", "from": "ctx_9", "handled": False, "body": "Not ours", "payload": {"dispatchId": "ctx_9"}},
+            {"id": "msg_e", "type": "escalation", "from": "ctx_1", "handled": False, "body": "", "payload": {"dispatchId": "ctx_1", "stopReason": "exited"}},
+            {"id": "msg_e2", "type": "escalation", "from": "ctx_1", "handled": True, "body": "Read by the coordinator", "payload": {"dispatchId": "ctx_1"}},
             {"id": "msg_s", "type": "status", "from": "run:run_1", "handled": False, "body": "x"}]}}
 
     def test_open_asks_are_the_unhandled_questions_of_the_effort_workers(self):
@@ -5174,7 +5178,9 @@ class AskTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, json.dumps(self.inbox), "")
         with patch.object(wg, "command", side_effect=fake):
             asks = wg.open_asks(self.d)
-        self.assertEqual([(a["id"], a["key"], a["issue"], a["body"], a["run"]) for a in asks], [("msg_q", "a", "CD-1", "Which API?", "run_1")])
+        self.assertEqual([(a["id"], a["key"], a["issue"], a["body"], a["run"], a["kind"]) for a in asks],
+                         [("msg_q", "a", "CD-1", "Which API?", "run_1", "question"),
+                          ("msg_e", "a", "CD-1", "The worker stopped: exited", "run_1", "escalation")])
         self.assertEqual(calls[0][1:5], ("orchestration", "inbox", "--run", "run_1"))
 
     def test_a_failing_orca_gives_no_asks(self):

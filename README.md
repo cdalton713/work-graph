@@ -87,7 +87,7 @@ A workspace's key comes from `LINEAR_<ID>_API_KEY`, then the `key_env` names, th
 ### Notices
 
 `wg next` (also with `--wait`) and `wg tick` send one notice when the human's moves have a new entry. An entry is
-a `wait human` line, a `do ask` line (also `ask-ready` and `ask-merge`), or an open worker question. The notice has
+a `wait human` line, a `do ask` line (also `ask-ready` and `ask-merge`), an open worker question, or a worker escalation that no coordinator read. The notice has
 one line for each new entry and the page link. `wg next` prints its result first and then sends. The run row field
 `notified_<n>` of `@effort` holds the entries that channel `<n>` (0 is the first) got. An entry is not sent again to
 a channel while it stays. An entry that goes away and comes back is sent again. A

@@ -101,12 +101,13 @@ describe("LinkHub", () => {
     const hub = new LinkHub();
     const c = hub.joinCoordinator(peer(), A);
     c.receive(hello("a"));
-    c.receive(msg("asks", { asks: [{ id: "q1", issue: "CD-1", from: "w", body: "Which table?", at: "" }] }));
+    c.receive(msg("asks", { asks: [{ id: "q1", issue: "CD-1", from: "w", body: "Which table?", at: "" }, { id: "e1", issue: "CD-2", from: "w", body: "Stopped", at: "", kind: "escalation" }, { id: "x1", from: "w", body: "", at: "", kind: "other" }] }));
     const overview = peer();
     hub.joinPage(overview, null);
-    expect(overview.of("asks").at(-1)).toMatchObject({ project: A, payload: { asks: [{ id: "q1", issue: "CD-1" }] } });
+    expect(overview.of("asks").at(-1)).toMatchObject({ project: A, payload: { asks: [{ id: "q1", issue: "CD-1" }, { id: "e1", kind: "escalation" }, { id: "x1" }] } });
+    expect((overview.of("asks").at(-1)!.payload as { asks: Record<string, unknown>[] }).asks.map((a) => a.kind)).toEqual([undefined, "escalation", undefined]);
     hub.answered(A, "q1");
-    expect(overview.of("asks").at(-1)).toMatchObject({ project: A, payload: { asks: [] } });
+    expect((overview.of("asks").at(-1)!.payload as { asks: { id: string }[] }).asks.map((x) => x.id)).toEqual(["e1", "x1"]);
   });
 
   it("takes agents before hello: the pages of the project and the overview get the cleaned rows, also a page that opens later", () => {

@@ -3991,9 +3991,14 @@ def orca_cli():
             or (ORCA_APP_CLI if Path(ORCA_APP_CLI).is_file() else "orca"))
 
 
+ASK_TYPES = ("question", "escalation")  # the Orca message types that wait on an answer
+
+
 def open_asks(plan_dir):
-    """The open questions of the effort's workers, from Orca: each `question` message that is not handled and
-    came from the dispatch in a node's run row. A failure of `orca` gives no asks; it never stops `wg next`."""
+    """The open questions and escalations of the effort's workers, from Orca: each `question` or `escalation`
+    message that is not handled and came from the dispatch in a node's run row. `kind` is the message type. An
+    escalation that no coordinator read (`handled` false) waits like a question: the worker stopped. A failure of
+    `orca` gives no asks; it never stops `wg next`."""
     km = load_keymap(plan_dir)
     nodes = run_rows(km)["nodes"]
     by_dispatch = {row["dispatch"]: key for key, row in nodes.items() if row.get("dispatch")}
@@ -4015,12 +4020,13 @@ def open_asks(plan_dir):
             if not isinstance(payload, dict):
                 payload = {}
             dispatch = payload.get("dispatchId") or m.get("from")
-            if m.get("type") != "question" or m.get("handled") or dispatch not in by_dispatch:
+            if m.get("type") not in ASK_TYPES or m.get("handled") or dispatch not in by_dispatch:
                 continue
             key = by_dispatch[dispatch]
             asks.append({"id": m["id"], "key": key, "issue": (km["nodes"].get(key) or {}).get("identifier"),
-                         "from": m.get("from", ""), "body": m.get("body", ""), "at": m.get("createdAt") or m.get("at") or "",
-                         "run": run_id})
+                         "from": m.get("from", ""), "at": m.get("createdAt") or m.get("at") or "", "run": run_id,
+                         "kind": m["type"],
+                         "body": m.get("body") or (f"The worker stopped: {payload['stopReason']}" if payload.get("stopReason") else "")})
     return asks
 
 
@@ -4464,7 +4470,7 @@ def notify_entries(lines, asks):
         body = " ".join(str(ask.get("body") or "").split())
         source = f"ask:{ask.get('id')}" if ask.get("id") else f"ask-text:{ask.get('key')}:{body}"
         entries[hashlib.sha256(source.encode()).hexdigest()[:12]] = \
-            f"question {ask.get('issue') or ask.get('key')}: {body[:200]}"
+            f"{ask.get('kind') or 'question'} {ask.get('issue') or ask.get('key')}: {body[:200]}"
     return entries
 
 

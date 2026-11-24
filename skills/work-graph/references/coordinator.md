@@ -78,16 +78,26 @@ A worktree with uncommitted changes, or with a live job, stays, and `wg` prints 
 
 ## Dispatch
 
-`wg dispatch <plan-dir> <key>` checks the node: ready (the node below it in the lane is code done), and in the wave. Then it adds the claim, moves the issue to `In Progress`, records `state=creating` with the branch names, and prints the Orca commands with every name filled in (ordering.md "Branches and worktrees"). Run them in order:
+Use one command: `wg dispatch <plan-dir> <key> --run [--agent codex|claude] [--model <id>]`. It checks the node: ready (the node below it in the lane is code done), and in the wave. Then it does each step that the printed form below lists: the claim and the move to `In Progress`, the lane parent when `orca worktree list` does not show it, the child worktree and its display name, `st branch track` for a stax branch, the worktree checks, the worker spec, `worker-start --environment local`, and the record of `wg started`. `--agent` and `--model` apply from this first call. It prints at most 3 lines:
+
+- `claimed <identifier> agent:<agent>`
+- `started <key> dispatch=<id> worktree=<path>`
+- a warning or a `FAIL <step>: <error>` line
+
+The run row records each step (`step=claim|status|parent|child|track|spec|start|receipt`) before the step starts. The claim goes into the run row before the label and the move, so no worker starts on an issue that is not claimed and `In Progress`. After a `FAIL` line, fix the cause and run the same command again: it continues at the failed step, adds only the label or the move that Linear does not show, finds a worktree that it made before, and takes no second claim. Before a call that can start a worker, a resume checks that Linear shows the claim and `In Progress`, and writes what is missing (another agent's claim stops it). Each check of a step that passed is read-only: `st branch track` runs only while the row is at `track` or before. It uses only worktrees of the coordinator's repository, and it stops before it changes a lane parent that is not under the coordinator, a child that is not under its lane parent, or a worktree on another branch (Orca adds a number to a taken name). Stax tracks the branch when the branch plan says so (also a stacked HOTFIX). When Orca loses the reply of `worker-start`, `wg` records the request id that Orca names (`retry_request`) and keeps it until Orca gives a result; an error of the replay keeps it too, because it does not prove that the first request did nothing. The next `--run` sends the call again only with `--retry-request <id>`, with the spec that it sent first. A refusal of a first call (no request id) starts nothing, so the next `--run` starts again. While a start has no known result, the printed form refuses too (`wg dispatch` and `wg dispatch … --worktree`): use `--run`, or look in Orca and record the worker with `wg started`. If the outcome is not known (no JSON answer, a timeout) and there is no request id, `step=start` stays and `--run` refuses: look for the worker in Orca, then record it with `wg started`, or start again with `wg run set <plan-dir> <key> step=spec`. `step=receipt`: the worker runs, but the claim comment failed; the next `--run`, or `wg started` with the same dispatch id, writes only the comment. If `wg` cannot save the ids after Orca started the worker, the warning line gives the `wg started` command with those ids: run it.
+
+`--run` refuses outside an Orca terminal (no `ORCA_AGENT_SESSION_ID` and no `ORCA_TERMINAL_HANDLE`), before the claim: there Orca cannot find the caller, and cannot wake the coordinator at `worker_done`. Then use the printed form.
+
+**Printed form.** Without `--run`, `wg dispatch <plan-dir> <key>` adds the claim, moves the issue to `In Progress`, records `state=creating` with the branch names, and prints the Orca commands with every name filled in (ordering.md "Branches and worktrees"). Run them in order:
 
 1. The printed `orca worktree create`, `orca worktree set`, and `st branch track` commands. Create the lane parent only when `orca worktree list --json` does not show it, as a child of the `<slug>-core` coordinator (`<core-id>` is its `id`); the core lane uses the coordinator itself. A lane parent with `parentWorktreeId: null` is wrong: move it with `orca worktree set --worktree id:<lane-parent-id> --parent-worktree id:<core-id> --json`.
 2. `wg dispatch <plan-dir> <key> --worktree <child-path>`. It checks the new worktree: the branch name, the base, a clean tree, and the stax parent. Then it writes the worker spec to `<plan-dir>/specs/<key>.md` from [worker-spec.md](worker-spec.md) and prints the `worker-start` command. Fix each `FAIL` line and run it again. A worker starts only from this spec.
 3. The printed `orca orchestration worker-start`, then the printed `wg started <plan-dir> <key> dispatch=<id> task=<id> worktree=<id> run_id=<id>`. It records the ids, sets `state=running`, and comments the claim on the issue.
 
-- If an Orca reply is lost, re-issue the same command with the id from the error (`--retry-launch <operationId>` for `worktree create`, `--retry-request <id>` for `worker-start`); never a fresh start. With no such id: stop, `wg run set <plan-dir> <key> state=unknown`, and ask the human.
+- If an Orca reply is lost, re-issue the same command with the id from the error (`--retry-request <id>` for `worker-start`); never a fresh start. `worktree create` has no retry id: find the worktree with `orca worktree list --json` before you create it again. With no such id: stop, `wg run set <plan-dir> <key> state=unknown`, and ask the human.
 - Reuse a child worktree for a retry only after Orca shows its last worker exited (recovery.md).
 - Never use `worker-start --worktree new-child`: it cannot set the branch or the parent. Never use `st create`, `st wt create`, or `st lane`.
-- `wg dispatch` prints no `st branch track` for a HOTFIX, a SYNC, or a spike branch (lab result, stax 0.120.0: an untracked non-trunk parent moved onto `main` at the next restack).
+- `wg dispatch` prints no `st branch track` for a SYNC branch, a spike branch, or a HOTFIX branch that does not stack (lab result, stax 0.120.0: an untracked non-trunk parent moved onto `main` at the next restack). A HOTFIX of an effort with `stacked_hotfix` stacks like a lane node: both forms track it.
 
 Done when: `wg run show <plan-dir> <key>` shows `state=running` and the dispatch id.
 
@@ -119,9 +129,13 @@ A worker that reports `--outcome failed`: `wg done <plan-dir> <key> --dispatch <
 
 ## Follow-up jobs
 
-Review fixes, CI fixes, thread fixes, and restack jobs: `wg claim <plan-dir> <key> <review|ci|threads|restack>`. It refuses a second job on the node, a fourth live worker, and a second restack job in the effort. Then it adds the claim and writes the job header to `<plan-dir>/specs/<key>-<job>.md`.
+Review fixes, CI fixes, thread fixes, and restack jobs. Write the work of the job to a file first: the findings, the failed check with its first error, or the threads. Then use one command: `wg claim <plan-dir> <key> <review|ci|threads|restack> --send --work-file <file>`. It refuses a second job on the node, a fourth live worker, and a second restack job in the effort. Then it adds the claim, writes the job header and the work text to `<plan-dir>/specs/<key>-<job>.md`, runs `orca orchestration send` to the node's dispatch (or `worker-start` in the recorded worktree when the node has no dispatch), and records the receipt. A send to a finished worker gives a new dispatch and task; `wg` records those. It prints `claimed …`, the restack line of a restack job, and `started <key> dispatch=<id> job=<job>`.
 
-1. Add the work of this job at the end of that file: the findings, the failed check with its first error, or the threads.
+After a `FAIL` line or a lost reply, run the same command again: it adds a label that failed, takes no second claim, and retries a lost reply only with the request id that Orca named. An unknown outcome with no request id stays at `step=send`, and the command refuses until you look in Orca. At `step=receipt` it writes only the claim comment. `--send` refuses outside an Orca terminal, as `--run` does.
+
+**Printed form.** Without `--send`, `wg claim` adds the claim, writes the job header (and the text of `--work-file`, when given), and prints the commands:
+
+1. Add the work of this job at the end of that file, if `--work-file` did not.
 2. Run the printed `orca orchestration send` command. A working worker gets the message when its turn ends. A finished or closed worker gets it as a follow-up Task and sends a new `worker_done`.
 3. Record the receipt with the printed `wg started <plan-dir> <key> dispatch=<id> task=<id>`.
 

@@ -15,8 +15,8 @@ that Python, and without it `wg next` polls Linear.
   wg status    <dir> [--phase P]
   wg next      <dir> [--wait] [--interval <seconds>] [--no-publish]
   wg approve   <dir> <key>... --quote "<the human's words>"
-  wg dispatch  <dir> <key> [--agent codex|claude] [--worktree <path>]
-  wg claim     <dir> <key> <dispatch|review|ci|threads|restack> [--agent codex|claude]
+  wg dispatch  <dir> <key> [--agent codex|claude] [--model <id>] [--run | --worktree <path>]
+  wg claim     <dir> <key> <dispatch|review|ci|threads|restack> [--agent codex|claude] [--send] [--work-file <file>]
   wg started   <dir> <key> dispatch=<id> [<field>=<value>...]
   wg done      <dir> <key> [--dispatch <id>] [--failed "<error>"] [--worktree <path>]
   wg move      <dir> <key> <status> [--note "<text>"] [--force "<reason>"]
@@ -49,6 +49,7 @@ import fcntl
 import fnmatch
 import hashlib
 import http.client
+import io
 import json
 import math
 import os
@@ -2958,7 +2959,11 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
         if state in ("failed", "blocked", "unknown"):
             add("wait", "human", k, f"state={state}")
         elif state in ("creating", "starting"):
-            add("do", "reconcile", k, f"state={state}: no receipt of the job is recorded")
+            add("do", "reconcile", k, f"state={state}: no receipt of the job is recorded"
+                + (f" (step={row['step']})" if row.get("step") else ""))
+        elif state == "running" and row.get("step") == "receipt":
+            add("do", "reconcile", k, f"job={row.get('job', '?')} dispatch={row.get('dispatch', '?')} runs; "
+                "its claim comment is not written: run the same wg dispatch --run or wg claim --send again")
         elif state == "running":
             add("wait", "worker", k, f"job={row.get('job', '?')} dispatch={row.get('dispatch', '?')}")
         elif claims:
@@ -4204,70 +4209,134 @@ def branch_plan(plan, key, nodes, deps, st, rows, recorded=None):
     return names | {"branch": f"{BRANCH_PREFIX}{names['child']}", "lower": lower, "parent": parent, "stax": True}
 
 
-def dispatch(plan_dir, plan, key, agent, worktree):
-    """Start a node's first worker. First call: the claim and the Orca commands. With --worktree: the checks and the spec."""
-    km, live, nodes, st, deps, rows = snapshot(plan_dir, plan)
+def first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=False, warnings=None):
+    """The checks and the claim of a node's first job.
+
+    The run row records the claim (`step=claim`) before the label and the move, so a call that stops in between
+    can finish them (claim_steps): no job starts on an issue that is not claimed and In Progress."""
+    km, live, nodes, st, deps, rows = snap
+    node, entry, row = nodes[key], km["nodes"][key], rows[key]
+    ident = entry["identifier"]
+    problems = []
+    if node.get("branch") or node.get("pr"):
+        problems.append(f"{key}: its branch or PR exists: adopt it (coordinator.md)")
+    if row.get("state") or row.get("branch"):
+        problems.append(f"{key}: the run row has state={row.get('state', '-')} branch={row.get('branch', '-')}")
+    if st.get(key) not in ("Todo", "Ready"):
+        problems.append(f"{key}: the status is {st.get(key)}, not Todo or Ready")
+    blockers = open_blockers(key, nodes, deps, st, rows)
+    if blockers:
+        problems.append(f"{key}: open blockers: {', '.join(blockers)}")
+    if key not in run_rows(km)["effort"].get("wave", "").split(","):
+        problems.append(f"{key}: not in the wave (wg run set {plan_dir} @effort wave=...)")
+    below = lane_below(key, nodes, deps) if node["kind"] == "task" else None
+    if below and stale_push(nodes, rows, st, below, lambda number: pr_view(number, "headRefOid", cwd=plan_dir).get("headRefOid")):
+        problems.append(f"{key}: {below} below it has a push that is not code done (wg done)")
+    if problems:
+        if quiet:  # one line: the one-command form prints at most 3
+            print(flat_line("FAIL " + "; ".join(problems)))
+            die(f"{ident}: not dispatched", 1)
+        refuse(ident, problems, "not dispatched")
+    held = claim_labels(live[entry["id"]])
+    if held:
+        die(f"{ident}: {held[0]['name']} holds the claim; find its job with wg run show", 1)
+    row.update(state="creating", job="dispatch", agent=agent, step="claim",
+               branch=names["branch"], parent=names["parent"], lower=names["lower"])
+    if model:
+        row["model"] = model
+    save_keymap(plan_dir, km)
+    claim_steps(plan_dir, plan, key, snap, quiet, warnings)
+
+
+def claim_steps(plan_dir, plan, key, snap, quiet=False, warnings=None):
+    """The label and the move of a recorded first claim, each only when Linear does not show it yet."""
+    km, live, nodes, st, deps, rows = snap
+    entry = km["nodes"][key]
+    issue = live[entry["id"]]
+    row = run_row(load_keymap(plan_dir), key)
+    agent = row["agent"]
+    if row.get("step") == "claim":
+        if f"agent:{agent}" not in {label["name"] for label in claim_labels(issue)}:
+            take_claim(plan, entry, issue, agent)
+        update_row(plan_dir, key, step="status")
+    print(f"claimed {entry['identifier']} agent:{agent}")
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.ExitStack() as stack:
+            if quiet:
+                stack.enter_context(contextlib.redirect_stdout(out))
+                stack.enter_context(contextlib.redirect_stderr(err))
+            if st.get(key) != "In Progress":
+                move(plan_dir, plan, key, "In Progress")
+            update_row(plan_dir, key, step=None)
+            refresh_card(plan_dir, plan, key)
+            start_project(plan_dir)
+    finally:
+        if warnings is not None:
+            warnings += [line.strip() for line in err.getvalue().splitlines() if line.strip()]
+
+
+def dispatch_spec(plan_dir, plan, node, entry, issue, row):
+    """Write the worker spec of a node's first job. Returns the spec path and the task title."""
+    sections, values = spec_sections(), spec_values(plan_dir, plan, node, entry, issue, row)
+    if node["kind"] == "spike":
+        text = render(sections["spike"], values)
+    else:
+        kind = node.get("role") if node.get("role") in ("hotfix", "sync") else "lane"
+        text = render(sections["task"], {"submit": sections[f"submit {kind}"]} | values)
+    return write_spec(plan_dir, node["key"], text), f"{entry['identifier']}: {node.get('title') or issue.get('title', node['key'])}"
+
+
+def dispatch_target(plan_dir, plan, key):
+    """The snapshot, the node, its keymap entry, and its issue, for a node that can get a first worker."""
+    snap = snapshot(plan_dir, plan)
+    km, live, nodes = snap[0], snap[1], snap[2]
     node = nodes.get(key) or die(f"unknown key {key}")
     entry = km["nodes"].get(key) or die(f"{key}: not loaded")
-    ident, issue = entry["identifier"], live.get(entry["id"]) or die(f"{key}: issue not found")
+    issue = live.get(entry["id"]) or die(f"{key}: issue not found")
     if node["kind"] not in ("task", "spike") or node.get("role") == "integration":
         die(f"{key}: only a task or a spike gets a worker (an integration node: ordering.md)")
-    effort, row = run_rows(km)["effort"], rows.setdefault(key, {})
+    snap[5].setdefault(key, {})
+    return snap, node, entry, issue
+
+
+def dispatch(plan_dir, plan, key, agent, worktree, model=None):
+    """Start a node's first worker. First call: the claim and the Orca commands. With --worktree: the checks and the spec."""
+    snap, node, entry, issue = dispatch_target(plan_dir, plan, key)
+    km, live, nodes, st, deps, rows = snap
+    ident, row = entry["identifier"], rows[key]
     mine = row.get("job") == "dispatch" and row.get("state") in ("creating", "starting")
     here = shlex.quote(str(Path(plan_dir).resolve()))
+    # A retry prints the names of the claim, also when the node below merged or was canceled in between.
+    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None)
+    if mine:
+        pending_start(key, row, here)
     if worktree:
         if not mine:
             die(f"{key}: run 'wg dispatch {plan_dir} {key}' first (state={row.get('state', '-')})", 1)
+        if row.get("step") in ("claim", "status"):
+            die(f"{key}: the claim is not complete: run 'wg dispatch {plan_dir} {key}' again", 1)
         path = Path(worktree).resolve()
-        problems = worktree_problems(node, row, path)
+        problems = worktree_problems(node, row, path, names["stax"], plan_dir)
         if problems:
             save_keymap(plan_dir, km)
             refuse(ident, problems, "no worker spec")
         row.update(state="starting", path=str(path))
         save_keymap(plan_dir, km)
-        sections, values = spec_sections(), spec_values(plan_dir, plan, node, entry, issue, row)
-        if node["kind"] == "spike":
-            text = render(sections["spike"], values)
-        else:
-            kind = node.get("role") if node.get("role") in ("hotfix", "sync") else "lane"
-            text = render(sections["task"], {"submit": sections[f"submit {kind}"]} | values)
-        spec = shlex.quote(str(write_spec(plan_dir, key, text)))
-        task_title = shlex.quote(f"{ident}: {node.get('title') or issue.get('title', key)}")
+        path, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
+        spec, task_title = shlex.quote(str(path)), shlex.quote(title)
+        chosen = row.get("model")
         print(f"spec {spec}\nRun these in order. Each <...> is an id from Orca's output:\n"
               f"  orca orchestration worker-start --spec-file {spec} --task-title {task_title} "
-              f"--worktree id:<child-id> --agent {row.get('agent', agent)} --json\n"
+              f"--worktree id:<child-id> --agent {row.get('agent', agent)}"
+              + (f" --model {shlex.quote(chosen)}" if chosen else "") + " --json\n"
               f"  {wg_command()} started {here} {key} dispatch=<dispatch_id> task=<task_id> "
               f"worktree=<worktree id> run_id=<run_id>")
         return 0
-    # A retry prints the names of the claim, also when the node below merged or was canceled in between.
-    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None)
     if not mine:
-        problems = []
-        if node.get("branch") or node.get("pr"):
-            problems.append(f"{key}: its branch or PR exists: adopt it (coordinator.md)")
-        if row.get("state") or row.get("branch"):
-            problems.append(f"{key}: the run row has state={row.get('state', '-')} branch={row.get('branch', '-')}")
-        if st.get(key) not in ("Todo", "Ready"):
-            problems.append(f"{key}: the status is {st.get(key)}, not Todo or Ready")
-        blockers = open_blockers(key, nodes, deps, st, rows)
-        if blockers:
-            problems.append(f"{key}: open blockers: {', '.join(blockers)}")
-        if key not in effort.get("wave", "").split(","):
-            problems.append(f"{key}: not in the wave (wg run set {plan_dir} @effort wave=...)")
-        below = lane_below(key, nodes, deps) if node["kind"] == "task" else None
-        if below and stale_push(nodes, rows, st, below, lambda number: pr_view(number, "headRefOid", cwd=plan_dir).get("headRefOid")):
-            problems.append(f"{key}: {below} below it has a push that is not code done (wg done)")
-        if problems:
-            refuse(ident, problems, "not dispatched")
-        take_claim(plan, entry, issue, agent)
-        row.update(state="creating", job="dispatch", agent=agent,
-                   branch=names["branch"], parent=names["parent"], lower=names["lower"])
-        save_keymap(plan_dir, km)
-        print(f"claimed {ident} agent:{agent}")
-        if st.get(key) != "In Progress":
-            move(plan_dir, plan, key, "In Progress")
-        refresh_card(plan_dir, plan, key)
-        start_project(plan_dir)
+        first_claim(plan_dir, plan, key, agent, model, snap, names)
+    elif row.get("step") in ("claim", "status"):
+        claim_steps(plan_dir, plan, key, snap)
     lane_base = names["lower"] if names["lower"].startswith("origin/") else f"origin/{phase_of(plan, node)['target']}"
     out = [f"branch {names['branch']} on {names['lower']}"
            + (f", stax parent {names['parent']}" if names["stax"] else ", not tracked by stax"),
@@ -4290,10 +4359,421 @@ def dispatch(plan_dir, plan, key, agent, worktree):
     return 0
 
 
-def worktree_problems(node, row, path):
-    """Why a worker must not start in this new worktree yet (an empty list: start it)."""
+# ---------------------------------------------------------------- one-command jobs (--run, --send)
+
+# The `step` of a run row while `wg dispatch --run` works, in order. `receipt`: the worker runs, the claim comment
+# is not written yet.
+RUN_STEPS = ("claim", "status", "parent", "child", "track", "spec", "start", "receipt")
+
+
+class OrcaLost(Exception):
+    """Orca lost the reply of a durable call (worker-start, send). Retry it only with its request id."""
+
+    def __init__(self, request, query):
+        super().__init__(f"Orca lost the reply of request {request}")
+        self.request, self.query = request, query
+
+
+class OrcaRefused(ReadError):
+    """Orca answered that it did not do a durable call: it is safe to call it again with a new request."""
+
+
+def orca_caller():
+    """True in an Orca terminal. Outside one, Orca refuses the orchestration calls or can guess a wrong caller."""
+    return bool(os.environ.get("ORCA_AGENT_SESSION_ID") or os.environ.get("ORCA_TERMINAL_HANDLE"))
+
+
+def need_orca_caller(flag, cmd):
+    if not orca_caller():
+        die(f"{flag} needs an Orca terminal (ORCA_AGENT_SESSION_ID or ORCA_TERMINAL_HANDLE is not set): "
+            f"run wg {cmd} without {flag} to print the commands", 1)
+
+
+def orca_mutation(*args, retry=None, warnings=None):
+    """A durable Orca call. Its result; OrcaLost when Orca names a request id; OrcaRefused when Orca answered
+    that it did not do the call. Any other failure (no JSON, a timeout) leaves the outcome unknown: ReadError
+    or subprocess.SubprocessError."""
+    argv = [orca_cli(), *args, "--json"] + (["--retry-request", retry] if retry else [])
+    try:
+        result = command(*argv)
+    except OSError as e:
+        if retry:  # the replay did not run, but the first request may have: keep its id
+            raise ReadError(f"orca did not run: {e}") from e
+        raise OrcaRefused(f"orca did not run: {e}") from e
+    try:
+        answer = json.loads(result.stdout)
+    except ValueError:
+        answer = None
+    if not isinstance(answer, dict):
+        raise ReadError(f"orca gave no JSON answer (exit {result.returncode}): {command_error(result)}")
+    if result.returncode == 0 and answer.get("ok", True) and isinstance(answer.get("result"), dict):
+        if warnings is not None:
+            warnings += [line.strip() for line in result.stderr.splitlines() if line.strip()]
+        return answer["result"]
+    error = answer.get("error") if isinstance(answer.get("error"), dict) else {}
+    recovery = (error.get("data") or {}).get("recovery") if isinstance(error.get("data"), dict) else None
+    if isinstance(recovery, dict) and recovery.get("orchestrationRequestId"):
+        query = recovery.get("queryCommand") or ""
+        raise OrcaLost(recovery["orchestrationRequestId"], " ".join(query) if isinstance(query, list) else query)
+    if result.returncode and answer.get("ok") is False and error.get("code") and not retry:
+        # With --retry-request, an error can be a failed lookup or replay: it does not prove that the first
+        # request did nothing, so the request id stays (an unknown outcome below).
+        raise OrcaRefused(f"{error['code']}: {error.get('message', '')}".strip())
+    raise ReadError(f"orca gave no result (exit {result.returncode}): {command_error(result)}")
+
+
+def update_row(plan_dir, key, **fields):
+    """Write fields of a run row now (None removes a field), so that a later call continues from here."""
+    km = load_keymap(plan_dir)
+    row = run_rows(km)["nodes"].setdefault(key, {})
+    for field, value in fields.items():
+        if value is None:
+            row.pop(field, None)
+        else:
+            row[field] = value
+    save_keymap(plan_dir, km)
+    return row
+
+
+def tree_repo(tree):
+    """The Orca repository of a worktree: the `<repoId>` of its `<repoId>::<path>` id."""
+    return tree.get("repoId") or str(tree.get("id", "")).partition("::")[0]
+
+
+def find_tree(trees, branch=None, path=None):
+    for tree in trees.values():
+        if path and tree.get("path") and Path(tree["path"]).resolve() == Path(path).resolve():
+            return tree
+        if branch and short_branch(tree.get("branch")) == branch:
+            return tree
+    return None
+
+
+def created_tree(*args):
+    tree = orca_result("worktree", "create", *args)["worktree"]
+    if not tree.get("id") or not tree.get("path"):
+        raise ReadError("orca worktree create gave no worktree id or path")
+    return tree
+
+
+def git_common_dir(path):
+    """The shared .git directory of a checkout: one value for each worktree of one repository."""
+    return str((Path(path) / git_output("rev-parse", "--git-common-dir", cwd=path)).resolve())
+
+
+def checked_out(path):
+    return git_output("branch", "--show-current", cwd=path)
+
+
+def branch_problem(key, path, branch):
+    """Why the checkout at `path` is not on `branch` (None: it is)."""
+    try:
+        actual = checked_out(path)
+    except (ReadError, OSError) as e:
+        return f"{key}: {path}: {e}"
+    if actual != branch:
+        return f"{key}: {path} is on {actual or 'a detached HEAD'}, not {branch}"
+    return None
+
+
+def repo_problem(key, path, plan_dir):
+    """Why `path` is not a checkout of the coordinator's repository (None: it is one)."""
+    try:
+        if git_common_dir(path) != git_common_dir(plan_dir):
+            return f"{key}: {path} is not a checkout of the repository of {plan_dir}"
+    except (ReadError, OSError) as e:
+        return f"{key}: {path}: {e}"
+    return None
+
+
+def run_durable(plan_dir, key, step, args, retry, warnings):
+    """Run worker-start or send for `step`. Its result, or None after it printed why it stopped.
+
+    The request id stays in the run row until Orca gives a result or a refusal. With an unknown outcome and no
+    request id, `step` stays, and the next call refuses until the coordinator reconciles it (unknown_start)."""
+    update_row(plan_dir, key, step=step)
+    try:
+        return orca_mutation(*args, retry=retry, warnings=warnings)
+    except OrcaLost as e:
+        update_row(plan_dir, key, retry_request=e.request)
+        warnings.append(f"{key}: {e}; the next call retries it with --retry-request {e.request}"
+                        + (f"; check it with: orca {e.query}" if e.query else ""))
+    except OrcaRefused as e:
+        # Orca did not do the call: the next call writes the spec and tries again.
+        update_row(plan_dir, key, step="spec" if step == "start" else None, retry_request=None)
+        print_fail(step, e)
+    except (ReadError, subprocess.SubprocessError) as e:
+        print_fail(step, e)
+        warnings.append(f"{key}: the outcome is not known; " + (
+            f"the next call retries request {retry}" if retry else "the next call refuses until you look in Orca"))
+    return None
+
+
+def pending_start(key, row, plan_dir):
+    """Stop a printed dispatch while a worker-start of an earlier `--run` has no known result: a new start
+    could be a second worker."""
+    request = row.get("retry_request")
+    if request:
+        die(f"{key}: worker-start request {request} has no known result. Run wg dispatch {plan_dir} {key} --run "
+            f"(it retries with --retry-request {request}), or look with orca orchestration request-show --request "
+            f"{request} --json and record a started worker with wg started {plan_dir} {key} dispatch=<id> ...", 1)
+    if row.get("step") == "start":
+        unknown_start(key, "start", plan_dir)
+
+
+def unknown_start(key, step, plan_dir):
+    """A call of an earlier run stopped during `step` with no known outcome and no request id."""
+    die(f"{key}: an earlier {step} stopped with no known outcome from Orca, so a worker may run. Look for it "
+        f"(orca orchestration worker-list --json); record it with wg started {plan_dir} {key} dispatch=<id> ..., "
+        f"or start again with wg run set {plan_dir} {key} step=" + ("spec" if step == "start" else ""), 1)
+
+
+def record_started(plan_dir, plan, key, fields):
+    """The worker job started: record its Orca ids, then comment the claim. Returns the run row.
+
+    The ids are saved with `step=receipt` before the comment, so a failed comment is written by the next
+    `wg dispatch --run` or `wg claim --send`, with no second start (finish_receipt)."""
+    get_node(plan, key)
+    km = load_keymap(plan_dir)
+    km["nodes"].get(key) or die(f"{key}: not loaded")
+    run = run_rows(km)
+    row = run["nodes"].setdefault(key, {})
+    if row.get("state") == "running" and row.get("step") == "receipt" and fields.get("dispatch") == row.get("dispatch"):
+        return finish_receipt(plan_dir, plan, key)  # the ids are saved; only the claim comment is missing
+    if row.get("state") != "starting":
+        die(f"{key}: no job is starting (state={row.get('state', '-')}): use wg dispatch or wg claim first", 1)
+    if not fields.get("dispatch"):
+        die("wg started needs dispatch=<id>")
+    run_id = fields.pop("run_id", None)
+    if run_id:
+        run["effort"]["run_id"] = run_id
+    row.update({field: value for field, value in fields.items() if value})
+    row.pop("retry_request", None)
+    row.update(state="running", step="receipt", started_at=utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"))
+    save_keymap(plan_dir, km)
+    return finish_receipt(plan_dir, plan, key)
+
+
+def finish_receipt(plan_dir, plan, key):
+    km = load_keymap(plan_dir)
+    entry, row = km["nodes"][key], run_row(km, key)
+    where = row.get("path") or row.get("worktree", "-")
+    comment(entry["id"], f"Claimed: dispatch {row['dispatch']}, worktree {where}, job {row.get('job', 'dispatch')}")
+    row = update_row(plan_dir, key, step=None)
+    refresh_card(plan_dir, plan, key)
+    return row
+
+
+def receipt(result, row):
+    """The `wg started` fields of an Orca answer. A send to a finished worker gives a new dispatch and task."""
+    fields = {"dispatch": result.get("dispatchId") or row.get("dispatch"), "task": result.get("taskId") or row.get("task")}
+    if result.get("workspace"):
+        fields["worktree"] = result["workspace"]
+    if result.get("runId"):
+        fields["run_id"] = result["runId"]
+    if not fields["dispatch"]:
+        raise ReadError("Orca gave no dispatchId")
+    return fields
+
+
+def start_and_record(plan_dir, plan, key, step, args, row, warnings, old):
+    """The durable call of a job, then its receipt. The run row, or None after a FAIL line."""
+    result = run_durable(plan_dir, key, step, args, row.get("retry_request"), warnings)
+    if result is None:
+        return None
+    try:
+        fields = receipt(result, old)
+    except ReadError as e:
+        print_fail(step, e)
+        warnings.append(f"{key}: the outcome is not known; the next call refuses until you look in Orca")
+        return None
+    given = dict(fields)
+    try:
+        return record_started(plan_dir, plan, key, fields)
+    except (ReadError, OSError) as e:
+        print_fail("receipt", e)
+        saved = run_row(load_keymap(plan_dir), key)
+        if saved.get("step") == "receipt" and saved.get("dispatch") == given["dispatch"]:
+            warnings.append(f"{key}: the worker runs; the next call writes the claim comment")
+        else:  # the ids are not saved: give them to the coordinator
+            ids = " ".join(f"{field}={shlex.quote(value)}" for field, value in given.items() if value)
+            warnings.append(f"{key}: the worker runs, but its ids are not saved; record them with: "
+                            f"{wg_command()} started {shlex.quote(str(Path(plan_dir).resolve()))} {key} {ids}")
+        return None
+
+
+def flat_line(text):
+    """Diagnostic text on one line: command stderr can hold many."""
+    return " ".join(str(text).split())
+
+
+def print_fail(step, error):
+    """The one FAIL line of a one-command job."""
+    print(flat_line(f"FAIL {step}: {error}"))
+
+
+def print_warnings(warnings):
+    """The one warning line of a one-command job: the output of `--run` is at most 3 lines."""
+    if warnings:
+        print(flat_line("warning: " + "; ".join(warnings)), file=sys.stderr)
+
+
+def dispatch_run(plan_dir, plan, key, agent, model):
+    """`wg dispatch --run`: each step of a first job in one call. The run row records each step before it runs."""
+    need_orca_caller("--run", "dispatch")
+    warnings = []
+    try:
+        return first_job(plan_dir, plan, key, agent, model, warnings)
+    finally:
+        print_warnings(warnings)
+
+
+def first_job(plan_dir, plan, key, agent, model, warnings):
+    snap, node, entry, issue = dispatch_target(plan_dir, plan, key)
+    km, live, nodes, st, deps, rows = snap
+    row = rows[key]
+    here = shlex.quote(str(Path(plan_dir).resolve()))
+    receipt_due = row.get("state") == "running" and row.get("step") == "receipt"
+    mine = row.get("job") == "dispatch" and (row.get("state") in ("creating", "starting") or receipt_due)
+    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None)
+    continues = f"wg dispatch {here} {key} --run continues there"
+    claim_pending = mine and row.get("step") in ("claim", "status")
+    if mine and receipt_due:
+        try:
+            row = finish_receipt(plan_dir, plan, key)
+        except (ReadError, OSError) as e:
+            print_fail("receipt", e)
+            warnings.append(continues)
+            return 1
+        print(f"started {key} dispatch={row['dispatch']} worktree={row.get('path', '-')}")
+        return 0
+    try:
+        if not mine:
+            first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=True, warnings=warnings)
+        elif row.get("step") in ("claim", "status"):
+            claim_steps(plan_dir, plan, key, snap, quiet=True, warnings=warnings)
+    except (ReadError, OSError, subprocess.SubprocessError) as e:
+        print_fail(run_row(load_keymap(plan_dir), key).get('step', 'claim'), e)
+        warnings.append(continues)
+        return 1
+    row = run_row(load_keymap(plan_dir), key)
+    step = row.get("step") or "parent"
+    if step == "start" and not row.get("retry_request"):
+        unknown_start(key, step, here)
+    if mine and not claim_pending:
+        # A resume: before an Orca call that can start a worker, Linear must show this claim and In Progress.
+        held = {label["name"] for label in claim_labels(issue)}
+        if f"agent:{row['agent']}" not in held or st.get(key) != "In Progress":
+            try:
+                update_row(plan_dir, key, step="claim")
+                claim_steps(plan_dir, plan, key, snap, quiet=True, warnings=warnings)
+            except (ReadError, OSError, subprocess.SubprocessError) as e:
+                print_fail(run_row(load_keymap(plan_dir), key).get("step", "claim"), e)
+                warnings.append(continues)
+                return 1
+            update_row(plan_dir, key, step=step)
+    row = update_row(plan_dir, key, step=step)
+    try:
+        if RUN_STEPS.index(step) <= RUN_STEPS.index("child") or not (row.get("worktree") and row.get("path")):
+            row = first_worktree(plan_dir, plan, key, names, row)
+        path = Path(row["path"])
+        if not row.get("retry_request"):  # a lost start reply: the worktree steps are done
+            # Read-only checks of the checkout; only a call that has not passed `track` may change stax.
+            problem = repo_problem(key, path, plan_dir) or branch_problem(key, path, row["branch"])
+            if problem:
+                raise ReadError(problem)
+            if RUN_STEPS.index(row.get("step") or "track") <= RUN_STEPS.index("track"):
+                row = update_row(plan_dir, key, step="track")
+                if names["stax"] and (branch_metadata(path, row["branch"]) or {}).get("parentBranchName") != row["parent"]:
+                    tracked = command("st", "branch", "track", "--parent", row["parent"], cwd=path)
+                    if tracked.returncode:
+                        raise ReadError(f"st branch track: {command_error(tracked)}")
+                row = update_row(plan_dir, key, step="spec")
+    except (ReadError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
+        print_fail(run_row(load_keymap(plan_dir), key).get('step', step), e)
+        warnings.append(continues)
+        return 1
+    try:
+        if not row.get("retry_request"):
+            problems = worktree_problems(node, row, path, names["stax"], plan_dir)
+            if problems:
+                print_fail("spec", "; ".join(problems))
+                warnings.append(f"{entry['identifier']}: no worker spec; {continues}")
+                return 1
+            row = update_row(plan_dir, key, state="starting")
+        sent = Path(plan_dir).resolve() / "specs" / f"{key}.md"
+        if row.get("retry_request") and sent.is_file():  # the spec of an unresolved request stays as it was sent
+            spec = sent
+            title = f"{entry['identifier']}: {node.get('title') or issue.get('title', key)}"
+        else:
+            spec, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
+    except OSError as e:
+        print_fail("spec", e)
+        warnings.append(continues)
+        return 1
+    args = ["orchestration", "worker-start", "--spec-file", str(spec), "--task-title", title,
+            "--worktree", f"id:{row['worktree']}", "--agent", row.get("agent", agent), "--environment", "local"]
+    if row.get("model"):
+        args += ["--model", row["model"]]
+    row = start_and_record(plan_dir, plan, key, "start", args, row, warnings, {})
+    if row is None:
+        return 1
+    print(f"started {key} dispatch={row['dispatch']} worktree={row['path']}")
+    return 0
+
+
+def first_worktree(plan_dir, plan, key, names, row):
+    """The lane parent and the child worktree of a first job: found in Orca, else created.
+
+    Only worktrees of the coordinator's repository count, and each must sit under its parent in the effort's
+    tree (ordering.md "Branches and worktrees"); a wrong one stops the call before wg changes it."""
+    trees = orca_worktrees()
+    core = find_tree(trees, path=plan_dir)
+    if not core:
+        raise ReadError(f"{plan_dir} is not an Orca worktree")
+    repo = tree_repo(core)
+    trees = {i: t for i, t in trees.items() if tree_repo(t) == repo}
+    child = find_tree(trees, branch=row["branch"])
+    parent = core
+    if names["stack"] != f"{plan['effort']['slug']}-core":
+        row = update_row(plan_dir, key, step="parent")
+        parent = find_tree(trees, branch=f"{BRANCH_PREFIX}{names['stack']}")
+        if parent and parent.get("parentWorktreeId") != core["id"]:
+            raise ReadError(f"the lane parent {parent['path']} is not under the coordinator: orca worktree set "
+                            f"--worktree id:{parent['id']} --parent-worktree id:{core['id']} --json")
+        if not parent and child:
+            raise ReadError(f"the worktree {child['path']} on {row['branch']} has no lane parent {names['stack']}")
+        if not parent:
+            lane_base = names["lower"] if names["lower"].startswith("origin/") else f"origin/{phase_of(plan, get_node(plan, key))['target']}"
+            parent = created_tree("--name", names["stack"], "--branch", f"{BRANCH_PREFIX}{names['stack']}",
+                                  "--parent-worktree", f"id:{core['id']}", "--base-branch", lane_base, "--setup", "skip")
+    row = update_row(plan_dir, key, step="child")
+    if child and child.get("parentWorktreeId") != parent["id"]:
+        raise ReadError(f"the worktree {child['path']} on {row['branch']} is not under {parent['path']}")
+    if not child:
+        child = created_tree("--name", names["child"], "--branch", row["branch"], "--base-branch", row["lower"],
+                             "--parent-worktree", f"id:{parent['id']}", "--setup", "run")
+    if short_branch(child.get("branch")) != row["branch"]:
+        raise ReadError(f"Orca made {child['path']} on {short_branch(child.get('branch')) or 'no branch'}, not "
+                        f"{row['branch']} (Orca adds a number to a taken name): free the name, then run again")
+    path = str(Path(child["path"]).resolve())
+    problem = repo_problem(key, path, plan_dir) or branch_problem(key, path, row["branch"])
+    if problem:
+        raise ReadError(problem)
+    row = update_row(plan_dir, key, worktree=child["id"], path=path)
+    orca_result("worktree", "set", "--worktree", f"id:{child['id']}", "--display-name", names["display"])
+    return update_row(plan_dir, key, step="track")
+
+
+def worktree_problems(node, row, path, stax, plan_dir=None):
+    """Why a worker must not start in this new worktree yet (an empty list: start it).
+
+    `stax`: the branch plan's decision (branch_plan) that stax tracks this branch."""
     key, problems = node["key"], []
-    stax = node["kind"] == "task" and node.get("role") not in ("hotfix", "sync")
+    if plan_dir is not None:
+        problem = repo_problem(key, path, plan_dir)
+        if problem:
+            return [problem]
     try:
         branch = git_output("branch", "--show-current", cwd=path)
         head = git_output("rev-parse", "HEAD", cwd=path)
@@ -4332,11 +4812,22 @@ def restack_line(plan_dir, plan, node, row, nodes, deps, st):
     return f"target {pin} at {sha}; base: {kind}; parent merged: {'yes' if merged else 'no'}"
 
 
-def claim(plan_dir, plan, key, job, agent):
+def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
     """Start a follow-up job on a node: the checks, the claim, the job header.
 
     The job `dispatch` continues a node that has a branch and no PR: an adopted node, or a first job that failed.
+    `work_file`: its text goes at the end of the job spec. `send`: also start the job in Orca and record the receipt.
     """
+    if send:
+        need_orca_caller("--send", "claim")
+    work = ""
+    if work_file:
+        try:
+            work = Path(work_file).read_text().strip()
+        except OSError as e:
+            die(f"--work-file: {e}")
+        if not work:
+            die(f"--work-file {work_file} is empty")
     km, live, nodes, st, deps, rows = snapshot(plan_dir, plan)
     node = nodes.get(key) or die(f"unknown key {key}")
     entry = km["nodes"].get(key) or die(f"{key}: not loaded")
@@ -4344,46 +4835,98 @@ def claim(plan_dir, plan, key, job, agent):
     if node["kind"] != "task":
         die(f"{key}: wg claim is for a task")
     row = rows.setdefault(key, {})
+    here = shlex.quote(str(Path(plan_dir).resolve()))
+    same = send and row.get("job") == job and row.get("agent") == agent
+    if same and row.get("state") == "running" and row.get("step") == "receipt":
+        # The job runs; only its claim comment is missing.
+        try:
+            row = finish_receipt(plan_dir, plan, key)
+        except (ReadError, OSError) as e:
+            print_fail("receipt", e)
+            return 1
+        print(f"started {key} dispatch={row['dispatch']} job={job}")
+        return 0
+    # A second --send after a failed send continues the same claim: no second claim, no second job.
+    resume = same and row.get("state") == "starting"
+    if resume and row.get("step") == "send" and not row.get("retry_request"):
+        unknown_start(key, "send", here)
     problems = [f"{key}: missing run field {field}" for field in ("branch", "parent", "lower") if not row.get(field)]
     if job != "dispatch" and not row.get("pr"):
         problems.append(f"{key}: no pr in the run row")
     if job == "dispatch" and row.get("pr"):
         problems.append(f"{key}: it has a PR; send a follow-up job (review, ci, threads, restack)")
-    if row.get("state") in LIVE:
+    if row.get("state") in LIVE and not resume:
         problems.append(f"{key}: a job is live: state={row['state']} job={row.get('job', '-')}")
     running = live_jobs(rows, key)
     restacking = [k for k in running if rows[k].get("job") == "restack"]
     if job == "restack" and restacking:
         problems.append(f"one restack job at a time: {restacking[0]} is live")
+    fresh = not row.get("dispatch")
+    if send and fresh and not row.get("worktree") and not row.get("path"):
+        problems.append(f"{key}: no worktree in the run row for a new worker")
     if problems:
         refuse(ident, problems, "not claimed")
     restack = restack_line(plan_dir, plan, node, row, nodes, deps, st) if job == "restack" else ""
-    take_claim(plan, entry, issue, agent)
-    row.update(state="starting", job=job, agent=agent)
-    row.pop("started_at", None)
-    if job == "review":  # the fix job replaces the reviewer of this round
-        row.pop("review_dispatch", None)
-        row.pop("review_patch", None)
-    save_keymap(plan_dir, km)
+    if not resume:
+        held = claim_labels(issue)
+        if send and held:  # the same refusal as take_claim, before the run row changes
+            die(f"{ident}: {held[0]['name']} holds the claim; find its job with wg run show", 1)
+        if not send:
+            take_claim(plan, entry, issue, agent)
+        row.update(state="starting", job=job, agent=agent)
+        row.pop("started_at", None)
+        if job == "review":  # the fix job replaces the reviewer of this round
+            row.pop("review_dispatch", None)
+            row.pop("review_patch", None)
+        save_keymap(plan_dir, km)
+    if send and f"agent:{agent}" not in {label["name"] for label in claim_labels(issue)}:
+        # The row holds the job before the label, so a second --send adds a label that failed.
+        try:
+            take_claim(plan, entry, issue, agent)
+        except ReadError as e:
+            print_fail("claim", e)
+            return 1
     sections, values = spec_sections(), spec_values(plan_dir, plan, node, entry, issue, row)
     header = render(sections["job"], {"job": job, "restack": f"Restack: `{restack}`." if restack else ""} | values)
-    fresh = not row.get("dispatch")
     if fresh:  # a new worker has no contract in its context
         kind = node.get("role") if node.get("role") in ("hotfix", "sync") else "lane"
         header = render(sections["task"], {"submit": sections[f"submit {kind}"]} | values) + "\n\n" + header
-    spec = shlex.quote(str(write_spec(plan_dir, f"{key}-{job}", header)))
-    here = shlex.quote(str(Path(plan_dir).resolve()))
+    spec_path = Path(plan_dir).resolve() / "specs" / f"{key}-{job}.md"
+    if not (resume and row.get("retry_request") and spec_path.is_file()):  # a pending request keeps its spec
+        spec_path = write_spec(plan_dir, f"{key}-{job}", header + (f"\n\n{work}" if work else ""))
+    spec = shlex.quote(str(spec_path))
+    task_title = f"{ident}: {node.get('title') or issue.get('title', key)}"
+    subject = f"{job}: #{row['pr']}" if row.get("pr") else f"{job}: {row['branch']}"
     print(f"claimed {ident} agent:{agent} for job {job}")
     if restack:
         print(restack)
-    print(f"spec {spec}    # add the work of this job at its end, then:")
+    if send:
+        refresh_card(plan_dir, plan, key)
+        if fresh:
+            where = f"id:{row['worktree']}" if row.get("worktree") else f"path:{row['path']}"
+            args = ["orchestration", "worker-start", "--spec-file", str(spec_path), "--task-title", task_title,
+                    "--worktree", where, "--agent", agent, "--environment", "local"]
+            if row.get("model"):
+                args += ["--model", row["model"]]
+        else:
+            args = ["orchestration", "send", "--to", f"dispatch:{row['dispatch']}", "--subject", subject,
+                    "--body-file", str(spec_path)]
+        warnings = []
+        try:
+            row = start_and_record(plan_dir, plan, key, "send", args, row, warnings, row)
+        finally:
+            print_warnings(warnings)
+        if row is None:
+            return 1
+        print(f"started {key} dispatch={row['dispatch']} job={job}")
+        return 0
+    print(f"spec {spec}    # " + ("the work of this job is at its end; then:" if work else
+                                    "add the work of this job at its end, then:"))
     if fresh:
-        task_title = shlex.quote(f"{ident}: {node.get('title') or issue.get('title', key)}")
-        print(f"  orca orchestration worker-start --spec-file {spec} --task-title {task_title} "
+        print(f"  orca orchestration worker-start --spec-file {spec} --task-title {shlex.quote(task_title)} "
               f"--worktree id:<child-id> --agent {agent} --json")
     else:
-        subject = shlex.quote(f"{job}: #{row['pr']}" if row.get("pr") else f"{job}: {row['branch']}")
-        print(f"  orca orchestration send --to dispatch:{row['dispatch']} --subject {subject} --body \"$(cat {spec})\"")
+        print(f"  orca orchestration send --to dispatch:{row['dispatch']} --subject {shlex.quote(subject)} --body \"$(cat {spec})\"")
     print(f"  {wg_command()} started {here} {key} dispatch=<dispatch_id> task=<task_id>"
           + (" worktree=<worktree id> run_id=<run_id>" if fresh else ""))
     refresh_card(plan_dir, plan, key)
@@ -4402,25 +4945,7 @@ def parse_fields(assignments):
 
 def started(plan_dir, plan, key, assignments):
     """The worker job started: record its Orca ids and comment the claim."""
-    get_node(plan, key)
-    km = load_keymap(plan_dir)
-    entry = km["nodes"].get(key) or die(f"{key}: not loaded")
-    run = run_rows(km)
-    row = run["nodes"].setdefault(key, {})
-    if row.get("state") != "starting":
-        die(f"{key}: no job is starting (state={row.get('state', '-')}): use wg dispatch or wg claim first", 1)
-    fields = parse_fields(assignments)
-    if not fields.get("dispatch"):
-        die("wg started needs dispatch=<id>")
-    run_id = fields.pop("run_id", None)
-    if run_id:
-        run["effort"]["run_id"] = run_id
-    row.update({field: value for field, value in fields.items() if value})
-    row.update(state="running", started_at=utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"))
-    save_keymap(plan_dir, km)
-    where = row.get("path") or row.get("worktree", "-")
-    comment(entry["id"], f"Claimed: dispatch {row['dispatch']}, worktree {where}, job {row.get('job', 'dispatch')}")
-    refresh_card(plan_dir, plan, key)
+    row = record_started(plan_dir, plan, key, parse_fields(assignments))
     print(" ".join(pairs(row)))
     return 0
 
@@ -4648,11 +5173,16 @@ def cli_parser():
     d = add(sub, "dispatch")
     d.add_argument("key")
     d.add_argument("--agent", choices=("codex", "claude"), default="codex")
-    d.add_argument("--worktree")
+    d_mode = d.add_mutually_exclusive_group()
+    d_mode.add_argument("--worktree")
+    d_mode.add_argument("--run", action="store_true", help="do each Orca step in this call (an Orca terminal only)")
+    d.add_argument("--model", help="the provider model id that worker-start passes to the agent")
     c = add(sub, "claim")
     c.add_argument("key")
     c.add_argument("job", choices=JOBS)
     c.add_argument("--agent", choices=("codex", "claude"), default="codex")
+    c.add_argument("--send", action="store_true", help="send the job in Orca and record the receipt (an Orca terminal only)")
+    c.add_argument("--work-file", help="a file with the work of this job; its text goes at the end of the job spec")
     s = add(sub, "started")
     s.add_argument("key")
     s.add_argument("fields", nargs="+")
@@ -4737,9 +5267,13 @@ def run_command(ns, d, plan, given):
     if ns.cmd == "approve":
         return approve(d, plan, ns.keys, ns.quote)
     if ns.cmd == "dispatch":
-        return dispatch(d, plan, ns.key, ns.agent, ns.worktree)
+        if ns.run:
+            return dispatch_run(d, plan, ns.key, ns.agent, ns.model)
+        return dispatch(d, plan, ns.key, ns.agent, ns.worktree, ns.model)
     if ns.cmd == "claim":
-        return claim(d, plan, ns.key, ns.job, ns.agent)
+        if ns.send and not ns.work_file:
+            die("wg claim --send needs --work-file <file> with the work of the job")
+        return claim(d, plan, ns.key, ns.job, ns.agent, ns.send, ns.work_file)
     if ns.cmd == "started":
         return started(d, plan, ns.key, ns.fields)
     if ns.cmd == "done":

@@ -53,7 +53,9 @@ The run rows in `keymap.json` hold what Linear and GitHub cannot tell: the Orca 
 | Field | Written by |
 |---|---|
 | `branch`, `parent`, `lower`, `agent`, `job`, `state` (`creating`, `starting`, `running`, `failed`) | `wg dispatch`, `wg claim`, `wg started`, `wg done` |
-| `path`, `worktree`, `task`, `dispatch`; `@effort` `run_id` | `wg dispatch --worktree` (`path`), `wg started` |
+| `path`, `worktree`, `task`, `dispatch`; `@effort` `run_id` | `wg dispatch --worktree` (`path`), `wg dispatch --run`, `wg claim --send`, `wg started` |
+| `model` | `wg dispatch --model`: the model that `worker-start` passes to the agent |
+| `step` (`claim`, `status`, `parent`, `child`, `track`, `spec`, `start`, `send`, `receipt`), `retry_request` | `wg dispatch` and `wg claim --send`: the step that runs or failed, and the request id of a lost Orca reply. `wg started` removes `retry_request`, and `step` after the claim comment. `step=receipt` with `state=running`: the claim comment is missing (`wg next` prints `reconcile`). |
 | `pr`, `code_done_head`, `patch` | `wg done` |
 | `approved` | `wg approve` only. A record of the human's words; no step reads it. |
 | `review_patch`, `merge_review_patch`, `merge_review_seen`, `thorough_count`, `thorough_head` | `wg run set`, with the field that starts a review |
@@ -74,7 +76,7 @@ A new session starts here. So does each `reconcile` line.
 2. `orca orchestration run-list`, confirm the `run_id`, then `orca orchestration run-use --id <run_id>`.
 3. `orca orchestration task-list --run <run_id> --brief`, `orca orchestration worker-list --run <run_id> --include-remote`, and `orca orchestration inbox --terminal run:<run_id> --limit 50`. Handle unanswered questions and each unread `worker_done` (coordinator.md "Job end").
 4. Each `reconcile` line and each `wait worker` line:
-   - `state=creating` or `state=starting`: no receipt of the job is recorded, so the job can be live. Look for it in Orca first; with no `run_id` in `@effort`, `run-list` shows the runs. A matching dispatch: `wg started` with its ids. A matching worktree and no task: continue with `wg dispatch … --worktree`. Nothing: run `wg dispatch <plan-dir> <key>` again; it prints the commands again and takes no second claim. A follow-up job with no dispatch in Orca: send it, then `wg started`.
+   - `state=creating` or `state=starting`: no receipt of the job is recorded, so the job can be live. Look for it in Orca first; with no `run_id` in `@effort`, `run-list` shows the runs. A matching dispatch: `wg started` with its ids. A matching worktree and no task: continue with `wg dispatch … --run`, which continues at the recorded `step`, or with `wg dispatch … --worktree` when the row has no `retry_request` and no `step=start`. With `retry_request`: run `wg dispatch … --run`, which replays only that request, or read `orca orchestration request-show --request <id> --json` and record a started worker with `wg started`. With `step=start` and no `retry_request`: look for the worker in Orca; record it with `wg started`, or, when Orca shows no worker, `wg run set <plan-dir> <key> step=spec` and run `--run` again. Both dispatch forms refuse a new start in these two cases. Nothing: run `wg dispatch <plan-dir> <key>` (with or without `--run`) again; it takes no second claim. A follow-up job with no dispatch in Orca: send it, then `wg started`.
    - `wait worker`: the dispatch is live or unknown in Orca: wait for its message. Unknown is never "no live dispatch". It exited without `worker_done`: Failure, "Worker lost".
    - `agent:… with no job in the run row`: Failure, "A claim label with no running job".
    - `In Progress with no run row`, `In Review with no run row`, or `In Progress with no job in the run row`: the rows do not know this work. coordinator.md "Adopt an existing branch or PR"; for a spike, find its dispatch in Orca and record it with `wg run set <plan-dir> <key> state=running dispatch=<id>`.

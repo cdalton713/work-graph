@@ -2169,14 +2169,15 @@ BRANCH = {"branch": "wg/ex-one-00-a", "parent": "main", "lower": "origin/main"}
 
 
 class JobTests(LaneTests):
-    def job(self, fn, *args, live=None, rows=None, effort=None, code=0, linear=None):
+    def job(self, fn, *args, live=None, rows=None, effort=None, code=0, linear=None, update=None, comments=None):
         self.keymap(rows=rows or {})
         km = wg.load_keymap(self.d)
         wg.run_rows(km)["effort"].update(effort or {})
         wg.save_keymap(self.d, km)
         labels = {"agent:codex": "L-codex", "agent:claude": "L-claude"}
         with patch.object(wg, "fetch_nodes", return_value=self.issues(live)), \
-             patch.object(wg, "issue_update") as self.update, patch.object(wg, "comment") as self.comment, \
+             patch.object(wg, "issue_update", side_effect=update) as self.update, \
+             patch.object(wg, "comment", side_effect=comments) as self.comment, \
              patch.object(wg, "sync_card", return_value=False), patch.object(wg, "sync_ready"), \
              patch.object(wg, "workspace_labels", return_value=labels), patch.object(wg, "gql", return_value=STATES, side_effect=linear), \
              patch.object(wg, "start_project"):
@@ -2288,7 +2289,8 @@ class JobTests(LaneTests):
     def worktree(self, *, branch="wg/ex-one-00-a", dirty="", ancestor=True, parent="main", effort=None, code=0):
         rows = {"a": BRANCH | {"state": "creating", "job": "dispatch", "agent": "claude"}}
         (self.d / "specs" / "a.md").unlink(missing_ok=True)
-        values = {("branch", "--show-current"): branch, ("rev-parse", "HEAD"): SHA, ("status", "--porcelain"): dirty}
+        values = {("branch", "--show-current"): branch, ("rev-parse", "HEAD"): SHA, ("status", "--porcelain"): dirty,
+                  ("rev-parse", "--git-common-dir"): "/repo/.git"}
         with patch.object(wg, "git_output", side_effect=lambda *args, cwd=None: values[args]), \
              patch.object(wg, "command", return_value=subprocess.CompletedProcess([], 0 if ancestor else 1, "", "")), \
              patch.object(wg, "branch_metadata", return_value={"parentBranchName": parent} if parent else None):
@@ -2611,7 +2613,9 @@ class JobTests(LaneTests):
 ORCA_WORKTREES = wg.orca_worktrees
 
 # A fake `orca` and a fake `st` for the one-command jobs. The state file holds the worktrees, the calls, and the
-# failures to give: "fail" maps a call ("worktree create", or "worktree create:<name>") to "error" or "lost".
+# failures to give: "fail" maps a call ("worktree create", or "worktree create:<name>") to a mode:
+# "error" (a refusal), "lost" (a lost reply with a request id), "garbage" (it acts, then gives no JSON),
+# or "warn" (it acts, with two warning lines on stderr).
 FAKE_ORCA = r'''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -2626,7 +2630,7 @@ name = value("--name") or ""
 fail = state["fail"].pop(f"{verb}:{name}", None) or state["fail"].pop(verb, None)
 def out(code, answer, err=""):
     state_path.write_text(json.dumps(state))
-    print(json.dumps(answer))
+    print(answer if fail == "garbage" else json.dumps(answer))
     if err:
         print(err, file=sys.stderr)
     sys.exit(code)
@@ -2637,15 +2641,20 @@ if fail == "lost":
     out(1, {"ok": False, "error": {"code": "runtime_timeout", "message": "timeout", "data": {"recovery": {
         "orchestrationRequestId": request, "disposition": "outcome_unknown",
         "queryCommand": f"orchestration request-show --request {request} --json"}}}}, "error: runtime_timeout: timeout")
+if fail == "garbage":
+    out = (lambda out: lambda code, answer, err="": out(1, "socket closed", "error: socket closed"))(out)
+warn = "warning: one\nwarning: two" if fail == "warn" else ""
 if verb == "worktree list":
     out(0, {"ok": True, "result": {"worktrees": state["trees"]}})
 if verb == "worktree create":
     path = str(Path(state["root"]) / name)
     Path(path).mkdir(parents=True, exist_ok=True)
-    tree = {"id": f"repo::{path}", "path": path, "branch": "refs/heads/" + value("--branch")}
+    tree = {"id": f"repo::{path}", "path": path, "branch": "refs/heads/" + value("--branch"),
+            "parentWorktreeId": value("--parent-worktree")[3:]}
     state["trees"].append(tree)
     out(0, {"ok": True, "result": {"worktree": tree}})
 if verb == "worktree set":
+    state["names"][value("--worktree")[3:]] = value("--display-name")
     out(0, {"ok": True, "result": {"worktree": {"id": value("--worktree")[3:]}}})
 if verb in ("orchestration worker-start", "orchestration send"):
     state["jobs"] += 1
@@ -2653,7 +2662,7 @@ if verb in ("orchestration worker-start", "orchestration send"):
     answer = {"dispatchId": f"ctx_{n}", "taskId": f"task_{n}", "runId": "run_1", "state": "ready"}
     if verb.endswith("worker-start"):
         answer["workspace"] = value("--worktree")[3:]
-    out(0, {"ok": True, "result": answer})
+    out(0, {"ok": True, "result": answer}, warn)
 out(2, {"ok": False, "error": {"code": "unknown", "message": verb}}, "error: unknown")
 '''
 
@@ -2669,6 +2678,17 @@ if fail:
     print("st: not a stax repository", file=sys.stderr)
     sys.exit(1)
 '''
+
+
+def refuse_once(match):
+    """A side effect that fails the first call whose second argument contains `match`."""
+    seen = []
+
+    def effect(*args):
+        if not seen and match in json.dumps(args[1:]):
+            seen.append(args)
+            raise wg.ReadError("Linear is down")
+    return effect
 
 
 class OneCommandTests(LaneTests):
@@ -2688,46 +2708,71 @@ class OneCommandTests(LaneTests):
         self.fake(trees=[self.core])
         env = {"ORCA_CLI_COMMAND": str(self.bin / "orca"), "FAKE_STATE": str(self.state_path),
                "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}", "ORCA_TERMINAL_HANDLE": "term_1"}
+        self.problems = patch.object(wg, "worktree_problems", return_value=[])
         for patcher in (patch.dict(os.environ, env), patch.object(wg, "orca_worktrees", ORCA_WORKTREES),
                         patch.object(wg, "branch_metadata", return_value=None),
-                        patch.object(wg, "worktree_problems", return_value=[])):
+                        patch.object(wg, "git_common_dir", return_value="/repo/.git"), self.problems):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.child = str((self.d / "trees" / "ex-one-00-a").resolve())
+        self.lane_id = f"repo::{self.d / 'trees' / 'ex-one'}"
 
     def fake(self, trees=None, fail=None):
         state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {
-            "calls": [], "trees": [], "jobs": 0, "root": str(self.d / "trees"), "fail": {}}
+            "calls": [], "trees": [], "jobs": 0, "names": {}, "root": str(self.d / "trees"), "fail": {}}
         if trees is not None:
             state["trees"] = trees
         state["fail"] = fail or {}
         state["calls"] = []
         self.state_path.write_text(json.dumps(state))
 
-    def calls(self):
-        return [" ".join(call) for call in json.loads(self.state_path.read_text())["calls"]]
+    def state(self):
+        return json.loads(self.state_path.read_text())
 
-    def run_dispatch(self, code=0, fail=None, first=True, agent="claude", model="opus-x"):
+    def calls(self):
+        return [" ".join(call) for call in self.state()["calls"]]
+
+    def run_dispatch(self, code=0, fail=None, agent="claude", model="opus-x", key="a", **kwargs):
+        """One call of `wg dispatch --run`. The run row and the Linear status of the last call stay."""
         self.fake(fail=fail)
-        live = {"s": "Done"} if first else {"s": "Done", "a": ("In Progress", ["agent:claude"])}
-        rows = {"a": {"approved": "x"}} if first else {"a": self.row("a")}
-        return self.job(wg.dispatch_run, "a", agent, model, live=live, rows=rows, effort={"wave": "a"}, code=code)
+        row = self.row(key) if hasattr(self, "row") else {}
+        status = getattr(self, "status", ("Todo", []))
+        rows = {key: row or {"approved": "x"}}
+        return self.job(wg.dispatch_run, key, agent, model, live={"s": "Done", key: status}, rows=rows,
+                        effort={"wave": key}, code=code, **kwargs)
+
+    def linear_after(self, key="a", agent="claude"):
+        """The Linear status after the claim and the move that the last call made."""
+        labels = [f"agent:{agent}"] if any("addedLabelIds" in str(u) for u in self.updates) else self.status[1]
+        moved = any("stateId" in str(u) for u in self.updates)
+        self.status = ("In Progress" if moved else self.status[0], labels)
+
+    def run_again(self, code=0, fail=None, **kwargs):
+        self.linear_after()
+        return self.run_dispatch(code=code, fail=fail, **kwargs)
+
+    def assert_one_of_each(self):
+        state = self.state()
+        self.assertEqual(sorted(t["branch"] for t in state["trees"]),
+                         ["refs/heads/wg/ex-core", "refs/heads/wg/ex-one", "refs/heads/wg/ex-one-00-a"])
+        self.assertEqual(state["jobs"], 1)  # one worker
+        self.assertEqual(state["names"], {f"repo::{self.d / 'trees' / 'ex-one-00-a'}": "00 a"})
 
     def test_dispatch_run_does_every_step_and_prints_two_lines(self):
+        self.status = ("Todo", [])
         out, err = self.run_dispatch()
         self.assertEqual(out.splitlines(), ["claimed CD-1 agent:claude", f"started a dispatch=ctx_1 worktree={self.child}"])
         self.assertEqual(err, "")
         self.assertEqual(self.updates, [("a", {"addedLabelIds": ["L-claude"]}), ("a", {"stateId": "In Progress"})])
         calls = self.calls()
-        lane = str(self.d / "trees" / "ex-one")
         self.assertEqual([c.split(" --")[0] for c in calls], [
             "orca worktree list", "orca worktree create", "orca worktree create", "orca worktree set",
             "st branch track", "orca orchestration worker-start"])
         self.assertIn(f"--name ex-one --branch wg/ex-one --parent-worktree id:{self.core['id']} "
                       "--base-branch origin/main --setup skip --json", calls[1])
         self.assertIn(f"--name ex-one-00-a --branch wg/ex-one-00-a --base-branch origin/main "
-                      f"--parent-worktree id:repo::{lane} --setup run --json", calls[2])
-        self.assertIn(f"--display-name 00 a --json", calls[3])
+                      f"--parent-worktree id:{self.lane_id} --setup run --json", calls[2])
+        self.assertIn("--display-name 00 a --json", calls[3])
         self.assertEqual(calls[4], f"st branch track --parent main @{self.child}")
         spec = self.d.resolve() / "specs" / "a.md"
         self.assertIn(f"--spec-file {spec} --task-title CD-1: a --worktree id:repo::{self.d / 'trees' / 'ex-one-00-a'} "
@@ -2739,75 +2784,171 @@ class OneCommandTests(LaneTests):
         self.assertEqual(self.effort["run_id"], "run_1")
         self.assertEqual(self.comment.call_args.args, ("a", f"Claimed: dispatch ctx_1, worktree {self.child}, job dispatch"))
         self.assertIn("Linear issue `CD-1`", spec.read_text())
-
-    def test_dispatch_run_uses_a_lane_parent_that_exists_and_names_a_spike_worktree(self):
-        lane = {"id": "repo::lane", "path": str(self.d / "lane"), "branch": "refs/heads/wg/ex-one"}
-        self.fake(trees=[self.core, lane])
-        self.run_dispatch()
-        self.assertEqual(len([c for c in self.calls() if c.startswith("orca worktree create")]), 1)
-        self.assertIn("--parent-worktree id:repo::lane", self.calls()[1])
-        self.fake(trees=[self.core])
-        self.job(wg.dispatch_run, "s", "codex", None, rows={"s": {"approved": "x"}}, effort={"wave": "s"})
-        calls = self.calls()
-        self.assertIn(f"--name ex-spike-s --branch wg/ex-spike-s --base-branch origin/main "
-                      f"--parent-worktree id:{self.core['id']} --setup run", calls[1])
-        self.assertFalse(any(c.startswith("st ") for c in calls))
-        self.assertNotIn("--model", calls[-1])
+        self.assert_one_of_each()
 
     def test_a_failure_at_each_step_stops_and_the_next_run_continues_there(self):
-        cases = [("worktree list", "parent"), ("worktree create:ex-one", "parent"),
-                 ("worktree create:ex-one-00-a", "child"), ("worktree set", "child"), ("st", "track"),
-                 ("orchestration worker-start", "spec")]
-        for failing, step in cases:
-            with self.subTest(failing=failing):
+        # (what fails, the step in the row after the failure)
+        cases = [
+            ({"update": refuse_once("addedLabelIds")}, "claim"),
+            ({"update": refuse_once("stateId")}, "status"),
+            ({"fail": {"worktree list": "error"}}, "parent"),
+            ({"fail": {"worktree create:ex-one": "error"}}, "parent"),
+            ({"fail": {"worktree create:ex-one": "garbage"}}, "parent"),  # made, reply lost
+            ({"fail": {"worktree create:ex-one-00-a": "error"}}, "child"),
+            ({"fail": {"worktree create:ex-one-00-a": "garbage"}}, "child"),  # made, reply lost
+            ({"fail": {"worktree set": "error"}}, "child"),
+            ({"fail": {"st": "error"}}, "track"),
+            ({"spec": OSError("disk full")}, "spec"),
+            ({"fail": {"orchestration worker-start": "error"}}, "spec"),  # a refusal: start again
+            ({"comments": wg.ReadError("Linear is down")}, "receipt"),
+        ]
+        for failure, step in cases:
+            with self.subTest(failure=failure, step=step):
                 self.fake(trees=[self.core])
-                out, _ = self.run_dispatch(code=1, fail={failing: "error"})
-                self.assertEqual(out.splitlines()[0], "claimed CD-1 agent:claude")
-                self.assertTrue(out.splitlines()[1].startswith(f"FAIL {'start' if step == 'spec' else step}: "), out)
-                self.assertEqual((self.row("a")["state"], self.row("a")["step"]),
-                                 ("starting" if step == "spec" else "creating", step))
-                out, _ = self.run_dispatch(first=False)
-                self.assertEqual(out, f"started a dispatch=ctx_{self.row('a')['dispatch'][4:]} worktree={self.child}\n")
-                trees = json.loads(self.state_path.read_text())["trees"]
-                self.assertEqual(sorted(t["branch"] for t in trees),
-                                 ["refs/heads/wg/ex-core", "refs/heads/wg/ex-one", "refs/heads/wg/ex-one-00-a"])
-                if step == "child" and failing == "worktree set":
-                    self.assertIn("orca worktree set", " ".join(self.calls()))  # the display name is set at the resume
-                self.assertEqual(len([c for c in self.calls() if "worker-start" in c and "--retry-request" not in c]), 1)
-                self.update.assert_not_called()  # the resume claims nothing again
+                self.keymap(rows={})
+                self.status = ("Todo", [])
+                state = self.state()
+                state["jobs"], state["names"] = 0, {}
+                self.state_path.write_text(json.dumps(state))
+                kwargs = {k: v for k, v in failure.items() if k in ("update", "comments", "fail")}
+                spec = patch.object(wg, "write_spec", side_effect=failure["spec"]) if "spec" in failure else contextlib.nullcontext()
+                with spec:
+                    out, err = self.run_dispatch(code=1, **kwargs)
+                lines = out.splitlines()
+                self.assertLessEqual(len(lines) + len(err.splitlines()), 3, out + err)
+                self.assertTrue(lines[-1].startswith(f"FAIL {'start' if failure.get('fail', {}).get('orchestration worker-start') else step}: "), out)
+                self.assertEqual(self.row("a")["step"], step)
+                out, _ = self.run_again()
+                self.assertTrue(out.endswith(f"started a dispatch=ctx_1 worktree={self.child}\n"), out)
+                self.assert_one_of_each()
+                self.assertEqual(self.row("a")["state"], "running")
+                self.assertNotIn("step", self.row("a"))
+                self.assertEqual(self.comment.call_count, 1)
 
-    def test_a_check_of_the_new_worktree_stops_before_the_spec(self):
-        with patch.object(wg, "worktree_problems", return_value=["a: HEAD does not contain origin/main"]):
+    def test_resume_takes_no_second_claim_and_no_second_move(self):
+        self.status = ("Todo", [])
+        self.run_dispatch(code=1, fail={"worktree list": "error"})
+        self.run_again()
+        self.update.assert_not_called()
+        self.status = ("Todo", [])  # a claim whose move failed: the next call moves it, then starts
+        self.keymap(rows={})
+        self.fake(trees=[self.core])
+        self.run_dispatch(code=1, update=refuse_once("stateId"))
+        self.assertEqual(self.updates, [("a", {"addedLabelIds": ["L-claude"]}), ("a", {"stateId": "In Progress"})])
+        self.status = ("Todo", ["agent:claude"])
+        out, _ = self.run_dispatch()
+        self.assertEqual(self.updates, [("a", {"stateId": "In Progress"})])
+        self.assertIn("started a", out)
+
+    def test_existing_worktrees_of_the_effort_are_reused_and_others_are_not(self):
+        lane = {"id": "repo::lane", "path": str(self.d / "lane"), "branch": "refs/heads/wg/ex-one",
+                "parentWorktreeId": self.core["id"]}
+        other = {"id": "other::/x", "path": "/x", "branch": "refs/heads/wg/ex-one-00-a", "parentWorktreeId": "repo::lane"}
+        self.fake(trees=[self.core, lane, other])
+        self.status = ("Todo", [])
+        self.run_dispatch()
+        calls = self.calls()
+        self.assertEqual(len([c for c in calls if c.startswith("orca worktree create")]), 1)
+        self.assertIn("--name ex-one-00-a", calls[1])
+        self.assertIn("--parent-worktree id:repo::lane", calls[1])
+        self.assertNotIn("other::", " ".join(calls))
+
+    def test_a_worktree_in_the_wrong_place_stops_before_wg_changes_it(self):
+        lane = {"id": "repo::lane", "path": str(self.d / "lane"), "branch": "refs/heads/wg/ex-one", "parentWorktreeId": None}
+        child = {"id": "repo::c", "path": str(self.d / "c"), "branch": "refs/heads/wg/ex-one-00-a",
+                 "parentWorktreeId": "repo::elsewhere"}
+        cases = [([self.core, lane], "parent", "is not under the coordinator: orca worktree set --worktree id:repo::lane "
+                  f"--parent-worktree id:{self.core['id']} --json"),
+                 ([self.core, lane | {"parentWorktreeId": self.core["id"]}, child], "child", "is not under"),
+                 ([self.core, child], "parent", "has no lane parent ex-one")]
+        for trees, step, message in cases:
+            with self.subTest(message=message):
+                self.keymap(rows={})
+                self.fake(trees=trees)
+                self.status = ("Todo", [])
+                out, _ = self.run_dispatch(code=1)
+                self.assertIn(f"FAIL {step}: ", out)
+                self.assertIn(message, out)
+                self.assertEqual([c.split(" --")[0] for c in self.calls()], ["orca worktree list"])
+
+    def test_a_checkout_of_another_repository_gets_no_display_name_and_no_stax_change(self):
+        self.status = ("Todo", [])
+        with patch.object(wg, "git_common_dir", side_effect=lambda path: "/other/.git" if "trees" in str(path) else "/repo/.git"):
+            out, _ = self.run_dispatch(code=1)
+        self.assertIn(f"FAIL child: a: {self.child} is not a checkout of the repository of", out)
+        self.assertFalse(any(c.startswith(("orca worktree set", "st ")) for c in self.calls()))
+
+    def test_the_branch_plan_decides_stax_also_for_a_stacked_hotfix(self):
+        node = self.p["nodes"][0]
+        node["role"] = "hotfix"
+        for stacked, tracked in ((True, True), (False, False)):
+            with self.subTest(stacked=stacked):
+                self.p["effort"]["stacked_hotfix"] = stacked
+                self.keymap(rows={})
+                self.fake(trees=[self.core])
+                self.status = ("Todo", [])
+                self.run_dispatch()
+                self.assertEqual(any(c.startswith("st branch track") for c in self.calls()), tracked)
+                self.assertEqual(self.problems.target.worktree_problems.call_args.args[3], tracked)
+
+    def test_a_check_of_the_new_worktree_stops_before_the_spec_on_one_line(self):
+        self.status = ("Todo", [])
+        with patch.object(wg, "worktree_problems", return_value=["a: HEAD does not contain origin/main", "a: not clean"]):
             out, err = self.run_dispatch(code=1)
-        self.assertIn("FAIL a: HEAD does not contain origin/main", out)
+        self.assertEqual(out.splitlines()[1], "FAIL spec: a: HEAD does not contain origin/main; a: not clean")
+        self.assertEqual(len(err.splitlines()), 1)
         self.assertIn("CD-1: no worker spec", err)
         self.assertEqual((self.row("a")["state"], self.row("a")["step"]), ("creating", "spec"))
         self.assertFalse(any("worker-start" in c for c in self.calls()))
-        self.run_dispatch(first=False)
+        self.run_again()
         self.assertEqual([c.split(" --")[0] for c in self.calls()], ["st branch track", "orca orchestration worker-start"])
 
-    def test_a_lost_start_reply_is_retried_with_its_request_id_only(self):
+    def test_orca_warnings_are_one_line(self):
+        self.status = ("Todo", [])
+        out, err = self.run_dispatch(fail={"orchestration worker-start": "warn"})
+        self.assertEqual(err, "warning: warning: one; warning: two\n")
+        self.assertEqual(len(out.splitlines()), 2)
+
+    def test_a_lost_start_reply_is_retried_with_its_request_id_until_orca_answers(self):
+        self.status = ("Todo", [])
         _, err = self.run_dispatch(code=1, fail={"orchestration worker-start": "lost"})
         self.assertEqual(self.row("a")["retry_request"], "req_6")
         self.assertIn("orca orchestration request-show --request req_6 --json", err)
-        out, _ = self.run_dispatch(first=False)
-        self.assertEqual(out, f"started a dispatch=ctx_1 worktree={self.child}\n")
+        _, err = self.run_again(code=1, fail={"orchestration worker-start": "garbage"})
+        self.assertEqual((self.row("a")["retry_request"], self.row("a")["step"]), ("req_6", "start"))
+        self.assertIn("the next call retries request req_6", err)
+        out, _ = self.run_again()
+        self.assertTrue(out.startswith("started a dispatch=ctx_2 "), out)
         self.assertEqual(len(self.calls()), 1)
         self.assertTrue(self.calls()[0].endswith("--json --retry-request req_6"))
         self.assertNotIn("retry_request", self.row("a"))
 
-    def test_a_start_with_no_reply_and_no_request_id_is_not_started_again(self):
-        self.run_dispatch()
-        row = self.row("a") | {"state": "starting", "step": "start"}
-        for field in ("dispatch", "task", "started_at"):
-            row.pop(field)
-        self.fake()
-        _, err = self.job(wg.dispatch_run, "a", "claude", None, live={"s": "Done", "a": ("In Progress", ["agent:claude"])},
-                          rows={"a": row}, code=1)
-        self.assertIn("a: an earlier start stopped with no reply from Orca, so a worker may run", err)
-        self.assertEqual(self.calls(), [])
+    def test_an_unknown_start_outcome_with_no_request_id_is_not_started_again(self):
+        for failure in ("garbage", "timeout"):
+            with self.subTest(failure=failure):
+                self.keymap(rows={})
+                self.fake(trees=[self.core])
+                self.status = ("Todo", [])
+                real = wg.command
+
+                def command(*args, cwd=None):
+                    if "worker-start" in args:
+                        raise subprocess.TimeoutExpired(args, 1)
+                    return real(*args, cwd=cwd)
+                with patch.object(wg, "command", side_effect=command) if failure == "timeout" else contextlib.nullcontext():
+                    out, err = self.run_dispatch(code=1, fail={"orchestration worker-start": "garbage"} if failure == "garbage" else None)
+                self.assertIn("FAIL start: ", out)
+                self.assertIn("the next call refuses until you look in Orca", err)
+                self.assertEqual(self.row("a")["step"], "start")
+                self.assertNotIn("retry_request", self.row("a"))
+                jobs = self.state()["jobs"]
+                _, err = self.run_again(code=1)
+                self.assertIn("a: an earlier start stopped with no known outcome from Orca, so a worker may run", err)
+                self.assertEqual(self.calls(), [])
+                self.assertEqual(self.state()["jobs"], jobs)
 
     def test_run_and_send_refuse_outside_an_orca_terminal_before_the_claim(self):
+        self.status = ("Todo", [])
         with patch.dict(os.environ, {"ORCA_TERMINAL_HANDLE": "", "ORCA_AGENT_SESSION_ID": ""}):
             _, err = self.run_dispatch(code=1)
             self.assertIn("--run needs an Orca terminal", err)
@@ -2819,12 +2960,12 @@ class OneCommandTests(LaneTests):
         self.update.assert_not_called()
         self.assertEqual(self.calls(), [])
 
-    def send(self, row, code=0, fail=None, job="review", live=None):
+    def send(self, row, code=0, fail=None, job="review", live=None, **kwargs):
         self.fake(fail=fail)
         work = self.d / "work.md"
         work.write_text("Fix the two review findings.\n")
         return self.job(wg.claim, "a", job, "codex", True, str(work), live=live or {"a": "In Review", "s": "Done"},
-                        rows={"a": row}, code=code)
+                        rows={"a": row}, code=code, **kwargs)
 
     def test_claim_send_appends_the_work_sends_the_job_and_records_the_new_ids(self):
         out, _ = self.send(BRANCH | {"pr": "7", "dispatch": "d1", "task": "t1", "worktree": "repo::x", "path": "/w"})
@@ -2838,18 +2979,37 @@ class OneCommandTests(LaneTests):
 
     def test_claim_send_resumes_a_lost_send_and_starts_a_new_worker_in_the_recorded_worktree(self):
         row = BRANCH | {"pr": "7", "dispatch": "d1", "path": "/w"}
-        _, err = self.send(row, code=1, fail={"orchestration send": "lost"})
+        self.send(row, code=1, fail={"orchestration send": "lost"})
         self.assertEqual((self.row("a")["state"], self.row("a")["retry_request"]), ("starting", "req_1"))
+        self.send(self.row("a"), code=1, fail={"orchestration send": "garbage"},
+                  live={"a": ("In Review", ["agent:codex"]), "s": "Done"})
+        self.assertEqual(self.row("a")["retry_request"], "req_1")
         out, _ = self.send(self.row("a"), live={"a": ("In Review", ["agent:codex"]), "s": "Done"})
         self.update.assert_not_called()
         self.assertTrue(self.calls()[0].endswith("--json --retry-request req_1"))
-        self.assertIn("started a dispatch=ctx_1 job=review", out)
+        self.assertIn("started a dispatch=ctx_2 job=review", out)
         with patch.object(wg, "restack_line", return_value="target main at abc; base: frozen; parent merged: no"):
             out, _ = self.send(BRANCH | {"pr": "7", "worktree": "repo::w", "model": "m1"}, job="restack")
         self.assertIn("target main at abc; base: frozen; parent merged: no\n", out)
         self.assertIn("orca orchestration worker-start --spec-file ", self.calls()[0])
         self.assertIn("--worktree id:repo::w --agent codex --environment local --model m1 --json", self.calls()[0])
-        self.assertEqual((self.row("a")["dispatch"], self.row("a")["worktree"], self.effort["run_id"]), ("ctx_2", "repo::w", "run_1"))
+        self.assertEqual((self.row("a")["dispatch"], self.row("a")["worktree"], self.effort["run_id"]), ("ctx_3", "repo::w", "run_1"))
+
+    def test_claim_send_finishes_a_failed_label_and_a_failed_comment_without_a_second_send(self):
+        row = BRANCH | {"pr": "7", "dispatch": "d1", "path": "/w"}
+        self.send(row, code=1, update=refuse_once("addedLabelIds"))
+        self.assertEqual((self.row("a")["state"], self.row("a")["job"]), ("starting", "review"))
+        self.assertEqual(self.calls(), [])
+        self.send(self.row("a"))  # the label is added now, then the job is sent
+        self.assertEqual(self.updates, [("a", {"addedLabelIds": ["L-codex"]})])
+        self.assertEqual(self.state()["jobs"], 1)
+        self.send(BRANCH | {"pr": "7", "dispatch": "d1", "path": "/w"}, code=1, comments=wg.ReadError("Linear is down"))
+        self.assertEqual((self.row("a")["state"], self.row("a")["step"]), ("running", "receipt"))
+        out, _ = self.send(self.row("a"), live={"a": ("In Review", ["agent:codex"]), "s": "Done"})
+        self.assertEqual(out, "started a dispatch=ctx_2 job=review\n")
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.state()["jobs"], 2)
+        self.assertNotIn("step", self.row("a"))
 
     def test_claim_send_refusals(self):
         out, _ = self.send(BRANCH | {"pr": "7"}, job="ci", code=1)
@@ -2859,7 +3019,16 @@ class OneCommandTests(LaneTests):
         self.send(self.row("a"), live={"a": ("In Review", ["agent:codex"]), "s": "Done"})  # a refused send is sent again
         _, err = self.send(self.row("a") | {"state": "starting", "step": "send"}, code=1,
                            live={"a": ("In Review", ["agent:codex"]), "s": "Done"})
-        self.assertIn("a: an earlier send stopped with no reply from Orca", err)
+        self.assertIn("a: an earlier send stopped with no known outcome from Orca", err)
+
+    def test_next_reconciles_a_job_whose_claim_comment_is_missing(self):
+        self.send(BRANCH | {"pr": "7", "dispatch": "d1", "path": "/w"}, code=1, comments=wg.ReadError("Linear is down"))
+        rows = {"a": self.row("a")}
+        with patch.object(wg, "fetch_nodes", return_value=self.issues({"a": ("In Review", ["agent:codex"]), "s": "Done"})), \
+             patch.object(wg, "pr_view", return_value={"state": "OPEN"}), patch.object(wg, "project_entries", return_value=[]):
+            self.keymap(rows=rows)
+            _, lines = wg.next_lines(self.d, self.p)
+        self.assertTrue(any("its claim comment is not written" in line for _, line in lines), lines)
 
     def test_the_cli_needs_a_work_file_for_send_and_one_of_run_and_worktree(self):
         self.keymap()
@@ -2872,6 +3041,7 @@ class OneCommandTests(LaneTests):
     def test_printed_forms_keep_the_model_and_the_work_file(self):
         self.job(wg.dispatch, "a", "codex", None, "m2", live={"s": "Done"}, rows={"a": {"approved": "x"}}, effort={"wave": "a"})
         self.assertEqual(self.row("a")["model"], "m2")
+        self.assertNotIn("step", self.row("a"))
         out, _ = self.job(wg.dispatch, "a", "codex", str(self.d), live={"s": "Done", "a": "In Progress"}, rows={"a": self.row("a")})
         self.assertIn("--worktree id:<child-id> --agent codex --model m2 --json\n", out)
         work = self.d / "work.md"
@@ -2882,6 +3052,21 @@ class OneCommandTests(LaneTests):
         self.assertIn("--body \"$(cat ", out)
         self.assertTrue((self.d / "specs" / "a-review.md").read_text().endswith("\n\nRebase it.\n"))
         self.assertEqual(self.calls(), [])
+
+    def test_the_printed_form_finishes_a_claim_whose_move_failed(self):
+        with self.assertRaises(wg.ReadError):
+            self.job(wg.dispatch, "a", "codex", None, live={"s": "Done"}, rows={"a": {"approved": "x"}}, effort={"wave": "a"},
+                     update=refuse_once("stateId"))
+        self.assertEqual(wg.run_row(wg.load_keymap(self.d), "a")["step"], "status")
+        self.row = lambda key: wg.run_row(wg.load_keymap(self.d), key)
+        _, err = self.job(wg.dispatch, "a", "codex", str(self.d), live={"s": "Done", "a": ("Todo", ["agent:codex"])},
+                          rows={"a": self.row("a")}, code=1)
+        self.assertIn("the claim is not complete", err)
+        out, _ = self.job(wg.dispatch, "a", "codex", None, live={"s": "Done", "a": ("Todo", ["agent:codex"])},
+                          rows={"a": self.row("a")})
+        self.assertEqual(self.updates, [("a", {"stateId": "In Progress"})])
+        self.assertNotIn("step", self.row("a"))
+        self.assertIn("orca worktree create", out)
 
 
 class RehearsalTests(unittest.TestCase):

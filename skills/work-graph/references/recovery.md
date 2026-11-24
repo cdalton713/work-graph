@@ -55,7 +55,7 @@ The run rows in `keymap.json` hold what Linear and GitHub cannot tell: the Orca 
 | `branch`, `parent`, `lower`, `agent`, `job`, `state` (`creating`, `starting`, `running`, `failed`) | `wg dispatch`, `wg claim`, `wg started`, `wg done` |
 | `path`, `worktree`, `task`, `dispatch`; `@effort` `run_id` | `wg dispatch --worktree` (`path`), `wg dispatch --run`, `wg claim --send`, `wg started` |
 | `model` | `wg dispatch --model`: the model that `worker-start` passes to the agent |
-| `step` (`parent`, `child`, `track`, `spec`, `start`, `send`), `retry_request` | `wg dispatch --run` and `wg claim --send`, while `state` is `creating` or `starting`: the step that runs or failed, and the request id of a lost Orca reply. `wg started` removes both. |
+| `step` (`claim`, `status`, `parent`, `child`, `track`, `spec`, `start`, `send`, `receipt`), `retry_request` | `wg dispatch` and `wg claim --send`: the step that runs or failed, and the request id of a lost Orca reply. `wg started` removes `retry_request`, and `step` after the claim comment. `step=receipt` with `state=running`: the claim comment is missing (`wg next` prints `reconcile`). |
 | `pr`, `code_done_head`, `patch` | `wg done` |
 | `approved` | `wg approve` only. A record of the human's words; no step reads it. |
 | `review_patch`, `merge_review_patch`, `merge_review_seen`, `thorough_count`, `thorough_head` | `wg run set`, with the field that starts a review |

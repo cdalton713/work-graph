@@ -4454,35 +4454,46 @@ class FreePlanTests(DirTests):
 
 
 class PrBatchTests(unittest.TestCase):
-    REPO = json.dumps({"owner": {"login": "octo"}, "name": "repo"})
+    REPO = json.dumps({"owner": {"login": "octo"}, "name": "repo", "url": "https://git.example.com/octo/repo"})
+    DONE = {"hasNextPage": False}
 
-    def pr(self, contexts=(), **fields):
+    def pr(self, contexts=(), *, more=None, **fields):
+        """One PR of the answer; `more` names the connection that has a second page."""
+        def page(name, nodes):
+            return {"nodes": list(nodes), "pageInfo": {"hasNextPage": more == name}}
+        rollup = {"contexts": page("contexts", contexts)} if contexts or more == "contexts" else None
         return {"state": "OPEN", "headRefOid": SHA, "isDraft": True, "mergeCommit": None, "mergeable": "MERGEABLE",
-                "baseRefName": "main", "reviews": {"nodes": [{"body": "ok"}]}, "comments": {"nodes": []},
-                "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": list(contexts)}}
-                                                  if contexts else None}}]}, **fields}
+                "baseRefName": "main", "reviews": page("reviews", [{"body": "ok"}]),
+                "comments": page("comments", []),
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]}, **fields}
+
+    def check_run(self, run_name, contexts):
+        return {"__typename": "CheckRun", "name": run_name, **contexts}
 
     def run_batch(self, answers, numbers=("7",)):
         """PR_BATCH with `gh repo view` and then one `gh api graphql` answer (code, stdout, stderr) for each request."""
         results = [subprocess.CompletedProcess([], 0, self.REPO, "")]
-        results += [subprocess.CompletedProcess([], code, out, err) for code, out, err in answers]
+        results += [subprocess.CompletedProcess([], code, out if isinstance(out, str) else json.dumps(out), err)
+                    for code, out, err in answers]
         with patch.object(wg, "command", side_effect=results) as run:
             return PR_BATCH(list(numbers), cwd="/plan"), run
 
+    def data(self, **prs):
+        return {"data": {"repository": prs}}
+
     def test_one_request_maps_each_pr_to_the_shape_of_pr_view_and_pr_checks(self):
-        contexts = [{"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
-                    {"__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS", "conclusion": None},
+        contexts = [self.check_run("test", {"status": "COMPLETED", "conclusion": "FAILURE"}),
+                    self.check_run("lint", {"status": "IN_PROGRESS", "conclusion": None}),
                     {"__typename": "StatusContext", "context": "deploy", "state": "SUCCESS"}]
-        data = {"data": {"repository": {"pr7": self.pr(contexts), "pr12": self.pr(state="MERGED",
-                                                                                     mergeCommit={"oid": OTHER})}}}
-        out, run = self.run_batch([(0, json.dumps(data), "")], numbers=("12", "7", "7", None, "x"))
-        self.assertEqual(run.call_args_list[0].args, ("gh", "repo", "view", "--json", "owner,name"))
+        data = self.data(pr7=self.pr(contexts), pr12=self.pr(state="MERGED", mergeCommit={"oid": OTHER}))
+        out, run = self.run_batch([(0, data, "")], numbers=("12", "7", "7", None, "x"))
+        self.assertEqual(run.call_args_list[0].args, ("gh", "repo", "view", "--json", "owner,name,url"))
         args = run.call_args_list[1].args
-        self.assertEqual(args[:3], ("gh", "api", "graphql"))
+        self.assertEqual(args[:5], ("gh", "api", "graphql", "--hostname", "git.example.com"))
         self.assertIn("owner=octo", args)
         self.assertIn("name=repo", args)
-        self.assertIn("pr7: pullRequest(number: 7)", args[4])
-        self.assertIn("pr12: pullRequest(number: 12)", args[4])
+        self.assertIn("pr7: pullRequest(number: 7)", args[6])
+        self.assertIn("pr12: pullRequest(number: 12)", args[6])
         self.assertEqual(run.call_args_list[1].kwargs["cwd"], "/plan")
         info, checks = out["7"]
         self.assertEqual(set(info), set(wg.PR_FIELDS.split(",")))
@@ -4493,35 +4504,80 @@ class PrBatchTests(unittest.TestCase):
         self.assertEqual(out["12"], (dict(info, state="MERGED", mergeCommit={"oid": OTHER}), (True, "no checks")))
 
     def test_pending_and_passed_checks_pass(self):
-        contexts = [{"__typename": "CheckRun", "name": "lint", "status": "QUEUED", "conclusion": None},
-                    {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SKIPPED"},
+        contexts = [self.check_run("lint", {"status": "QUEUED", "conclusion": None}),
+                    self.check_run("test", {"status": "COMPLETED", "conclusion": "SKIPPED"}),
                     {"__typename": "StatusContext", "context": "ci", "state": "PENDING"}]
-        self.assertEqual(wg.rollup_checks(self.pr(contexts)), (True, "no failed checks (2 pending)"))
+        self.assertEqual(wg.rollup_checks(contexts), (True, "no failed checks (2 pending)"))
         failed = [{"__typename": "StatusContext", "context": "ci", "state": "ERROR"}]
-        self.assertEqual(wg.rollup_checks(self.pr(failed)), (False, "ci"))
+        self.assertEqual(wg.rollup_checks(failed), (False, "ci"))
 
-    def test_fifty_prs_go_in_each_request(self):
-        numbers = [str(n) for n in range(1, 52)]
-        first = {"data": {"repository": {f"pr{n}": self.pr() for n in range(1, 51)}}}
-        second = {"data": {"repository": {"pr51": self.pr()}}}
-        out, run = self.run_batch([(0, json.dumps(first), ""), (0, json.dumps(second), "")], numbers=numbers)
-        self.assertEqual(len(run.call_args_list), 3)
-        self.assertEqual(sorted(out, key=int), numbers)
+    def test_a_rerun_that_passed_replaces_the_failed_run(self):
+        suite = {"checkSuite": {"workflowRun": {"event": "pull_request", "workflow": {"name": "CI"}}}}
+        failed = self.check_run("test", {"status": "COMPLETED", "conclusion": "FAILURE",
+                                   "startedAt": "2026-11-20T10:00:00Z", **suite})
+        rerun = self.check_run("test", {"status": "COMPLETED", "conclusion": "SUCCESS",
+                                  "startedAt": "2026-11-20T11:00:00Z", **suite})
+        self.assertEqual(wg.rollup_checks([failed, rerun]), (True, "no failed checks"))
+        self.assertEqual(wg.rollup_checks([rerun, dict(failed, startedAt="2026-11-20T12:00:00Z")]), (False, "test"))
+        # Another workflow or event is another check, as in `gh pr checks`.
+        push = dict(failed, checkSuite={"workflowRun": {"event": "push", "workflow": {"name": "CI"}}})
+        self.assertEqual(wg.rollup_checks([push, rerun]), (False, "test"))
+
+    def test_a_list_with_a_second_page_is_read_alone(self):
+        for more in ("reviews", "comments", "contexts"):
+            with self.subTest(more=more):
+                out, _ = self.run_batch([(0, self.data(pr7=self.pr(more=more), pr8=self.pr()), "")],
+                                        numbers=("7", "8"))
+                self.assertEqual(list(out), ["8"])
+        self.assertIn("pageInfo { hasNextPage }", PR_BATCH.__globals__["PR_BATCH_FIELDS"])
+
+    def test_an_error_on_a_field_of_a_pr_sends_that_pr_to_the_single_reads(self):
+        broken = self.pr(commits={"nodes": [{"commit": {"statusCheckRollup": None}}]})
+        data = dict(self.data(pr7=broken, pr8=self.pr()),
+                    errors=[{"message": "timeout", "path": ["repository", "pr7", "commits", "nodes", 0, "commit",
+                                                            "statusCheckRollup"]}])
+        out, _ = self.run_batch([(1, data, "gh: timeout")], numbers=("7", "8"))
+        self.assertEqual(list(out), ["8"])
+        # A null list is a failed read, not an empty list.
+        for field in ("reviews", "comments"):
+            with self.subTest(field=field):
+                out, _ = self.run_batch([(0, self.data(pr7=self.pr(**{field: None})), "")])
+                self.assertEqual(out, {})
+        # An error that names no PR can touch each PR of the request.
+        data = dict(self.data(pr7=self.pr()), errors=[{"message": "something failed"}])
+        with self.assertRaisesRegex(wg.ReadError, "gh: failed"):
+            self.run_batch([(1, data, "gh: failed")])
 
     def test_a_pr_that_github_does_not_return_is_left_out(self):
-        data = {"data": {"repository": {"pr7": self.pr(), "pr8": None}},
-                "errors": [{"message": "Could not resolve to a PullRequest with the number of 8."}]}
-        out, _ = self.run_batch([(1, json.dumps(data), "gh: Could not resolve")], numbers=("7", "8"))
+        data = dict(self.data(pr7=self.pr(), pr8=None),
+                    errors=[{"message": "Could not resolve to a PullRequest with the number of 8.",
+                             "path": ["repository", "pr8"]}])
+        out, _ = self.run_batch([(1, data, "gh: Could not resolve")], numbers=("7", "8"))
         self.assertEqual(list(out), ["7"])
 
+    def test_fifty_prs_go_in_each_request_and_a_failed_request_keeps_the_others(self):
+        numbers = [str(n) for n in range(1, 52)]
+        first = self.data(**{f"pr{n}": self.pr() for n in range(1, 51)})
+        second = self.data(pr51=self.pr())
+        out, run = self.run_batch([(0, first, ""), (0, second, "")], numbers=numbers)
+        self.assertEqual(len(run.call_args_list), 3)
+        self.assertEqual(sorted(out, key=int), numbers)
+        out, _ = self.run_batch([(0, first, ""), (1, "", "HTTP 502")], numbers=numbers)
+        self.assertEqual(sorted(out, key=int), numbers[:50])
+        out, _ = self.run_batch([(1, "", "HTTP 502"), (0, second, "")], numbers=numbers)
+        self.assertEqual(list(out), ["51"])
+
     def test_a_failed_request_is_a_read_error(self):
-        for answer in [(1, "", "HTTP 502"), (1, json.dumps({"data": {"repository": {"pr7": None}}}), "HTTP 502"),
-                       (0, "not json", "")]:
+        for answer in [(1, "", "HTTP 502"), (1, self.data(pr7=None), "HTTP 502"), (0, "not json", "")]:
             with self.subTest(answer=answer):
                 with self.assertRaises(wg.ReadError):
                     self.run_batch([answer])
         with patch.object(wg, "command", return_value=subprocess.CompletedProcess([], 1, "", "no repo")):
             with self.assertRaisesRegex(wg.ReadError, "no repo"):
+                PR_BATCH(["7"])
+        with patch.object(wg, "command", return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps({"owner": {"login": "octo"}, "name": "repo"}), "")):
+            with self.assertRaisesRegex(wg.ReadError, "host"):
                 PR_BATCH(["7"])
 
     def test_no_pr_needs_no_request(self):

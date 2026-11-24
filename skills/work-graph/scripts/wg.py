@@ -2464,29 +2464,43 @@ def pr_view(pr, fields, cwd=None):
 
 
 PR_BATCH_SIZE = 50  # PRs in one GraphQL request
-PR_BATCH_FIELDS = """
-  state headRefOid isDraft mergeCommit { oid } mergeable baseRefName
-  reviews(first: 100) { nodes { body } }
-  comments(first: 100) { nodes { body } }
-  commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+PAGE = "pageInfo { hasNextPage }"
+PR_BATCH_FIELDS = f"""
+  state headRefOid isDraft mergeCommit {{ oid }} mergeable baseRefName
+  reviews(first: 100) {{ nodes {{ body }} {PAGE} }}
+  comments(first: 100) {{ nodes {{ body }} {PAGE} }}
+  commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{ nodes {{
     __typename
-    ... on CheckRun { name status conclusion }
-    ... on StatusContext { context state }
-  } } } } } }"""
+    ... on CheckRun {{ name status conclusion startedAt checkSuite {{ workflowRun {{ event workflow {{ name }} }} }} }}
+    ... on StatusContext {{ context state }}
+  }} {PAGE} }} }} }} }} }}"""
 # The bucket of each check state, as `gh pr checks` sorts them.
 CHECK_BUCKETS = {"SUCCESS": "pass", "SKIPPED": "skipping", "NEUTRAL": "skipping", "CANCELLED": "cancel",
                  "ERROR": "fail", "FAILURE": "fail", "TIMED_OUT": "fail", "ACTION_REQUIRED": "fail"}
 
 
-def rollup_checks(pr):
-    """The (passed, detail) pair of `pr_checks` from the status check rollup of the PR's head commit."""
-    commits = ((pr.get("commits") or {}).get("nodes") or [{}])
-    rollup = ((commits[-1] or {}).get("commit") or {}).get("statusCheckRollup") or {}
-    contexts = (rollup.get("contexts") or {}).get("nodes") or []
+def latest_checks(contexts):
+    """The contexts that `gh pr checks` keeps: the latest start of each status name, and of each check run name,
+    workflow name, and event. A failed run and its rerun that passed give one check, the rerun."""
+    seen, out = set(), []
+    for c in sorted(contexts, key=lambda c: c.get("startedAt") or "", reverse=True):
+        if c.get("__typename") == "StatusContext":
+            key = ("status", c.get("context"))
+        else:
+            run = ((c.get("checkSuite") or {}).get("workflowRun") or {})
+            key = ("check", c.get("name"), (run.get("workflow") or {}).get("name"), run.get("event"))
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
+
+
+def rollup_checks(contexts):
+    """The (passed, detail) pair of `pr_checks` from the status check contexts of the PR's head commit."""
     if not contexts:
         return True, "no checks"
     checks = []
-    for c in contexts:
+    for c in latest_checks(contexts):
         if c.get("__typename") == "StatusContext":
             name, state = c.get("context"), c.get("state")
         else:
@@ -2498,44 +2512,88 @@ def rollup_checks(pr):
     return not failures, ", ".join(failures) or "no failed checks" + (f" ({pending} pending)" if pending else "")
 
 
+def batch_entry(pr):
+    """(info, checks) of one PR in the batch answer, or None when the answer is not complete for it."""
+    if not isinstance(pr, dict) or pr.get("state") not in {"OPEN", "CLOSED", "MERGED"}:
+        return None
+    lists = {}
+    for field in ("reviews", "comments"):
+        connection = pr.get(field)
+        if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list) \
+                or (connection.get("pageInfo") or {}).get("hasNextPage") is not False:
+            return None  # a failed read or a second page: pr_view reads the whole list
+        lists[field] = connection["nodes"]
+    commits = (pr.get("commits") or {}).get("nodes")
+    if not isinstance(commits, list) or len(commits) != 1 or not isinstance(commits[0], dict) \
+            or not isinstance(commits[0].get("commit"), dict):
+        return None
+    rollup = commits[0]["commit"].get("statusCheckRollup")
+    if rollup is None:
+        contexts = []  # no check and no status on the head commit
+    else:
+        connection = rollup.get("contexts") if isinstance(rollup, dict) else None
+        if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list) \
+                or (connection.get("pageInfo") or {}).get("hasNextPage") is not False \
+                or not all(isinstance(c, dict) for c in connection["nodes"]):
+            return None  # a failed read or a second page: pr_checks reads every context
+        contexts = connection["nodes"]
+    info = {field: pr.get(field) for field in PR_FIELDS.split(",")}
+    info.update(lists)
+    return info, rollup_checks(contexts)
+
+
 def pr_batch(numbers, cwd=None):
-    """{number: (info, checks)} for each PR that GitHub returns, with one `gh api graphql` request for each 50 PRs.
+    """{number: (info, checks)} for each PR that GitHub returns in full, with one `gh api graphql` request for each
+    50 PRs on the host of the repository.
 
     `info` has the shape of `pr_view` with PR_FIELDS, and `checks` the (passed, detail) pair of `pr_checks`.
-    A PR that the answer does not hold is not in the result; the caller reads it with `pr_view`.
+    A PR that is not in the result (a failed request, an error on the PR, or a list longer than one page) is
+    for the caller to read with `pr_view` and `pr_checks`. ReadError: no request returned a PR.
     """
     numbers = sorted({n for n in numbers if isinstance(n, str) and re.fullmatch(r"[1-9][0-9]*", n)}, key=int)
     if not numbers:
         return {}
-    result = command("gh", "repo", "view", "--json", "owner,name", cwd=cwd)
+    result = command("gh", "repo", "view", "--json", "owner,name,url", cwd=cwd)
     if result.returncode:
         raise ReadError(command_error(result))
     repo = json.loads(result.stdout)
     owner, name = (repo.get("owner") or {}).get("login"), repo.get("name")
-    if not owner or not name:
-        raise ReadError("gh repo view: no owner or name")
-    out = {}
+    host = urllib.parse.urlsplit(repo.get("url") or "").hostname
+    if not owner or not name or not host:
+        raise ReadError("gh repo view: no owner, name, or host")
+    out, failures = {}, []
     for start in range(0, len(numbers), PR_BATCH_SIZE):
         chunk = numbers[start:start + PR_BATCH_SIZE]
         query = ("query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {"
                  + "".join(f" pr{n}: pullRequest(number: {n}) {{{PR_BATCH_FIELDS} }}" for n in chunk) + " } }")
-        result = command("gh", "api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}",
-                         "-f", f"name={name}", cwd=cwd)
+        result = command("gh", "api", "graphql", "--hostname", host, "-f", f"query={query}",
+                         "-f", f"owner={owner}", "-f", f"name={name}", cwd=cwd)
         try:
-            # A PR that GitHub cannot resolve is null in the data, and gh exits 1: keep the PRs that it returns.
-            repository = (json.loads(result.stdout).get("data") or {}).get("repository") or {}
+            answer = json.loads(result.stdout)
+            repository = (answer.get("data") or {}).get("repository") or {}
+            errors = answer.get("errors") or []
         except (ValueError, AttributeError):
-            raise ReadError(command_error(result)) from None
-        if result.returncode and not any(repository.values()):
-            raise ReadError(command_error(result))
+            failures.append(command_error(result))
+            continue  # this chunk only: its PRs are read alone
+        # An error names the PR alias in its path; an error without one can touch every PR of the chunk.
+        failed = set()
+        for error in errors:
+            path = error.get("path") if isinstance(error, dict) else None
+            alias = path[1] if isinstance(path, list) and len(path) > 1 and path[0] == "repository" else None
+            if not isinstance(alias, str) or not alias.startswith("pr"):
+                failed = set(chunk)
+                break
+            failed.add(alias[2:])
+        if result.returncode and not errors:
+            failed = set(chunk)
         for n in chunk:
-            pr = repository.get(f"pr{n}")
-            if not isinstance(pr, dict):
-                continue
-            info = {field: pr.get(field) for field in PR_FIELDS.split(",")}
-            info["reviews"] = (pr.get("reviews") or {}).get("nodes") or []
-            info["comments"] = (pr.get("comments") or {}).get("nodes") or []
-            out[n] = (info, rollup_checks(pr))
+            entry = None if n in failed else batch_entry(repository.get(f"pr{n}"))
+            if entry:
+                out[n] = entry
+        if failed == set(chunk):
+            failures.append(command_error(result))
+    if failures and not out:
+        raise ReadError(failures[0])
     return out
 
 

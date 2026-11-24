@@ -786,7 +786,10 @@ class GuardTests(DirTests):
             ("thorough", {"review": "clean"}, 'b: no merge review of this patch: review-and-merge.md "Merge point" step 2'),
             ("thorough", {"merge_review": "accepted"}, None),
             ("standard", {"review": "accepted"}, None),
-            ("standard", {"merge_review": "clean"}, "b: no review of this patch at review effort standard"),
+            ("standard", {}, "b: no review of this patch at review effort standard"),
+            # A gate that passed at another level stays passed for its patch.
+            ("standard", {"merge_review": "clean"}, None),
+            ("thorough", {"review": "clean", "gate": "light"}, None),
             ("light", {"review": "clean"}, None),
             ("light", {}, "b: no review of this patch at review effort light: review-and-merge.md \"Review effort\""),
         ]
@@ -1963,6 +1966,8 @@ class NextTests(LaneTests):
             ("light", done, "do review a CD-1: #7: read the diff yourself"),
             ("light", done | {"review_round": "1"}, "do review a CD-1: #7: read the diff yourself"),
             ("light", done | {"review": "clean"}, "do undraft a CD-1: #7"),
+            # A blocking round that started before wg kept the reviewed head: a new reviewer round, never "since -".
+            ("standard", done | {"review_round": "1"}, "do review a CD-1: #7 round 2"),
         ]
         for level, row, expected in cases:
             with self.subTest(level=level, expected=expected):
@@ -1970,6 +1975,42 @@ class NextTests(LaneTests):
                                       rows={"a": row}, prs={"7": open_pr},
                                       effort={"review_seen": level} if level else None)
                 self.assertEqual(lines, [expected])
+
+    def test_standard_starts_a_reviewer_for_an_open_pr_with_no_review(self):
+        # An adopted PR that left draft, or a level change while it waited for its merge review.
+        ready = {"isDraft": False}
+        for row in ({"review": None}, {"review": None, "merge_review": "requested"}):
+            with self.subTest(row=row):
+                lines = self.merge_stage(row, ready, effort={"review_seen": "standard"})
+                self.assertIn("do review a CD-1: #7 round 1", lines)
+                self.assertFalse([line for line in lines if "read the diff yourself" in line or "ask-merge" in line])
+        lines = self.merge_stage({"review": None, "review_round": "1", "review_dispatch": "r1"}, ready,
+                                 effort={"review_seen": "standard"})
+        self.assertIn("wait reviewer a CD-1: #7 round 1", lines)
+
+    def test_a_passed_gate_stays_across_a_level_change(self):
+        ready = {"isDraft": False}
+        # Passed at light, then the effort changes to thorough: no new thorough review of the same patch.
+        lines = self.merge_stage({"gate": "light"}, ready, effort={"review_seen": "thorough"})
+        self.assertIn("do ask-merge a CD-1: #7", lines)
+        # A thorough merge review after a thread fix cleared the wave result, then the effort changes to light.
+        lines = self.merge_stage({"review": None, "merge_review": "clean"}, ready, effort={"review_seen": "light"})
+        self.assertIn("do ask-merge a CD-1: #7", lines)
+
+    def test_run_set_records_the_gate_at_standard_and_light_and_a_new_patch_clears_it(self):
+        pr = {"headRefOid": SHA}
+        for level, gate in (("thorough", None), ("standard", "standard"), ("light", "light")):
+            with self.subTest(level=level):
+                km = self.keymap(rows={"a": {"pr": "7", "patch": "p1", "code_done_head": SHA}})
+                wg.run_rows(km)["effort"]["review_seen"] = level
+                wg.save_keymap(self.d, km)
+                with patch.object(wg, "sync_card", return_value=False), patch.object(wg, "sync_ready"), \
+                     patch.object(wg, "pr_view", return_value=pr):
+                    self.call(wg.run_set, self.d, self.p, "a", ["review=clean"])
+                self.assertEqual(wg.run_row(wg.load_keymap(self.d), "a").get("gate"), gate)
+        with contextlib.redirect_stdout(io.StringIO()):
+            wg.track_patch(self.d, "a", OTHER, "p2")
+        self.assertNotIn("gate", wg.run_row(wg.load_keymap(self.d), "a"))
 
     def test_no_merge_review_line_at_standard_and_light(self):
         ready = {"isDraft": False}
@@ -5775,6 +5816,12 @@ class ExplainTests(unittest.TestCase):
         for other in ("`full-suite <ship key>`", "`ask <decision key>`", "`ops <ops key>`"):
             self.assertNotIn(other, verifying)
         self.assertEqual(verifying.count("(references/review-and-merge.md)"), 1)
+
+    def test_the_merge_request_checks_the_threads_at_each_review_effort(self):
+        text = wg.explain_text("ask-merge")
+        self.assertIn("at each review effort, read the PR's review threads", text)
+        self.assertIn("**Threads.**", text)
+        self.assertIn("**Merge request**", text)
 
     def test_the_coordinator_text_names_wg_explain(self):
         text = (Path(wg.__file__).resolve().parent.parent / "references" / "coordinator.md").read_text()

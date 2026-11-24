@@ -1667,10 +1667,11 @@ def review_level(km):
 
 def review_gate(row, head, issue=None, level=REVIEW_DEFAULT):
     """The PR passed the review gate of its merge request. At `thorough` it is the merge review; at `standard` and
-    `light` it is the wave review result (`review=clean` or `accepted`), which a new patch clears."""
-    if level == "thorough":
-        return merge_reviewed(row, head, issue)
-    return row.get("review") in REVIEW_OK or marked_reviewed(issue)
+    `light` it is the wave review result (`review=clean` or `accepted`). A gate that passed at any level stays
+    passed for its patch (`gate`, the merge review) after a level change; a new patch clears both."""
+    if merge_reviewed(row, head, issue) or row.get("gate") in REVIEW_LEVELS:
+        return True
+    return level != "thorough" and row.get("review") in REVIEW_OK
 
 
 def merge_reviewed(row, head, issue=None):
@@ -2025,6 +2026,9 @@ def run_set(plan_dir, plan, key, assignments):
                         "then record a review of that head", 1)
             for stale in (patch_field, started, *extra):
                 row.pop(stale, None)
+            if field == "review" and review_level(km) != "thorough":
+                # This result is the gate of the merge request at this level: it stays one after a level change.
+                row["gate"] = review_level(km)
     save_keymap(plan_dir, km)
     print(" ".join(pairs(row)))
     if key != "@effort":
@@ -2826,7 +2830,7 @@ def verify(plan_dir, plan, key, cwd=None):
     return 0
 
 
-REVIEW_FIELDS = ("review", "merge_review", "merge_review_seen", "merge_review_patch", "verified_head")
+REVIEW_FIELDS = ("review", "merge_review", "merge_review_seen", "merge_review_patch", "verified_head", "gate")
 
 
 def track_patch(plan_dir, key, sha, patch):
@@ -2948,6 +2952,19 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
         return (rows[k].get("review") in REVIEW_OK or info.get("isDraft") is False
                 or marked_reviewed(issue(k)))
 
+    def level_review(k, number, row):
+        """The review line at review effort `standard` or `light`, also for a PR that left draft."""
+        rounds = int(row.get("review_round") or 0)
+        if row.get("review_dispatch"):
+            add("wait", "reviewer", k, f"#{number} round {rounds or 1}")
+        elif level == "light":
+            add("do", "review", k, f"#{number}: read the diff yourself")
+        elif row.get("review_head"):
+            add("do", "review", k, f"#{number}: check the fix since {row['review_head'][:10]}")
+        else:
+            # No independent review ran, or it started before wg kept the head it read: a reviewer round.
+            add("do", "review", k, f"#{number} round {rounds + 1}")
+
     def startable(k):
         """The same gates as wg dispatch, so each dispatch line can be done."""
         below = lane_below(k, nodes, deps) if nodes[k]["kind"] == "task" else None
@@ -2971,11 +2988,9 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
                 add("do", "undraft" if effort.get("merge_prep", "coordinator") == "coordinator" else "ask-ready", k,
                     f"#{number}")
         elif level != "thorough" and not review_gate(row, info.get("headRefOid"), issue(k), level):
-            # A push after the review (a thread fix) changed the patch: the level's own check, no merge review.
-            add("do", "review", k, f"#{number}: " + (f"check the fix since {row['review_head'][:10]}"
-                                                   if level == "standard" and row.get("review_head")
-                                                   else "read the diff yourself"))
-        elif level == "thorough" and not merge_reviewed(row, info.get("headRefOid"), issue(k)):
+            # No review of this patch (an adopted PR, a level change, a thread fix): the level's own review.
+            level_review(k, number, row)
+        elif not review_gate(row, info.get("headRefOid"), issue(k), level):
             if row.get("merge_review") != "requested" and row.get("thorough_head"):
                 add("do", "merge-review", k, f"#{number}: check the fix since {row['thorough_head'][:10]}, "
                     "no new thorough review")
@@ -3031,12 +3046,10 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
             add("do", "verify", k, f"#{number} head {str(info.get('headRefOid'))[:10]} is not code done")
         elif row.get("review") not in REVIEW_OK and info.get("isDraft") and not marked_reviewed(issue(k)):
             rounds = int(row.get("review_round") or 0)
-            if row.get("review_dispatch"):
+            if level != "thorough":
+                level_review(k, number, row)
+            elif row.get("review_dispatch"):
                 add("wait", "reviewer", k, f"#{number} round {rounds or 1}")
-            elif level == "light":
-                add("do", "review", k, f"#{number}: read the diff yourself")
-            elif level == "standard" and rounds >= 1:
-                add("do", "review", k, f"#{number}: check the fix since {(row.get('review_head') or '')[:10] or '-'}")
             elif rounds >= 2:
                 add("wait", "human", k, f"#{number}: 2 review rounds had blocking findings; only this PR is held "
                     f"(label {REVIEWED_LABEL!r} accepts them, or ask for one more fix)")

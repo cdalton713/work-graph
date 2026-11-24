@@ -64,6 +64,7 @@ The run rows in `keymap.json` hold what Linear and GitHub cannot tell: the Orca 
 | `review_round`, `review_dispatch`, `review`, `draft`, `merge_review`, `tests_accepted`, `soak_until`, `state` (`blocked`, `unknown`) | The coordinator, with `wg run set`, where a step names the field |
 | `@effort` `wave`, `baseline` | The coordinator, with `wg run set` |
 | `@effort` `autonomy_seen` | `wg autonomy` and `wg next`: the last autonomy level that the coordinator saw. The level itself is the project label (autonomy.md). An old `@effort` `autonomy` field moves to the label at the next `wg next`. |
+| `gate` | `wg run set … review=clean` (or `accepted`) at review effort `standard` or `light`: the review gate passed for this patch, also after a level change. A new patch clears it. |
 | `@effort` `review_seen` | `wg review-effort` and `wg next`: the last review effort that the coordinator saw. `wg next` and `wg move` follow it. The level itself is the project label (review-and-merge.md "Review effort"). |
 | `@effort` `merge_prep` | Absent: the coordinator undrafts each PR. `human`: only on their word, they mark PRs ready themselves. |
 

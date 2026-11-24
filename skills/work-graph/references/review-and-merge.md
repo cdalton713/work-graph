@@ -4,6 +4,7 @@ Agents review, undraft, restack, and push feature branches. The human merges PRs
 
 A review covers a **patch** (SKILL.md "Terms"). `wg done` clears `review` and `merge_review` when the patch changes, and keeps them through a restack with no conflict.
 
+<!-- explain: review -->
 ## Wave review
 
 `wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. The reviewer is a different agent from the writer (Claude reviews Codex). Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review (SKILL.md "Mark a PR reviewed").
@@ -20,7 +21,9 @@ A review covers a **patch** (SKILL.md "Terms"). `wg done` clears `review` and `m
 3. After a review fix, only the branch directly above it in the lane gets a restack job, and only if that branch exists. Higher branches wait for their turn at the merge point.
 
 Done when: the node's run row has `review=clean` or `review=accepted`, or the issue has the `reviewed` label. Then this PR goes on to "Merge point".
+<!-- /explain -->
 
+<!-- explain: ask-ready,undraft,merge-review,ask-merge,merged,close -->
 ## Merge point
 
 Each PR starts these steps as soon as its own wave review passes; it does not wait for the other PRs of the phase. `wg next` prints the lines below. A PR that left draft is at the merge point; from then on its gate is the merge review, and the wave review does not run again. Each time you wait for the human, follow coordinator.md "Wait".
@@ -44,7 +47,9 @@ Each PR starts these steps as soon as its own wave review passes; it does not wa
 6. **Close** (`close <merge point>`). `wg move <plan-dir> <merge point> Done`. `wg` proves that every pre-merge task is `Merged` and that `origin/<target>` holds each merge commit, and comments it. A node that is `Canceled` is skipped. A closed unmerged PR is not `Merged`: follow recovery.md "Failure".
 
 Native GitHub stacks are off for work-graph efforts: every submit passes `--no-native-stack`, and `wg done` fails `stack` when a PR is in one (`st stack unlink <n>`, then check each PR base). If `st submit` or `st branch submit` fails with 422 "part of a stack": stop. Give the human the stack number (`gh api repos/{owner}/{repo}/pulls/<n> --jq .stack.number`) and ask them to unstack it. After they confirm, run `st submit --native-stack --no-prompt --yes`. GitHub's retarget of a stacked PR is not verified: after each submit, `gh pr view <n> --json baseRefName` must show the expected base, or stop and tell the human.
+<!-- /explain -->
 
+<!-- explain: restack -->
 ## Restack job
 
 The only way a branch is refreshed onto a moved base. The coordinator never starts a restack in a worker-owned worktree. One job at a time, across the whole effort, bottom of a lane first.
@@ -65,7 +70,9 @@ Coordinator: `wg done <plan-dir> <key> --dispatch <id>`. For "parent merged: yes
 `st restack --dry-run` can predict "no conflicts" for a restack that then conflicts. Do not plan on it.
 
 Done when: `wg done` passed, and the restacked branch does not show "needs restack" in `st ls` (branches above it may).
+<!-- /explain -->
 
+<!-- explain: full-suite,ops,ask,verifying,ship -->
 ## Ship point
 
 The `ops` chain can start as soon as the merge point is `Done`; post-merge tasks (SYNC, integration) run at the same time. The ship point waits for both. The human does each `ops` node; you never run a deploy, a backfill, or a flag change, unless the node has `"by": "coordinator"`.
@@ -81,3 +88,4 @@ The `ops` chain can start as soon as the merge point is `Done`; post-merge tasks
 5. `verifying <ship key>`: `wg move <plan-dir> <ship key> Verifying`. `wg next` then prints `wait soak … until <time>`, and `ship <ship key>` when the soak passed or the phase has none (`wait blockers` when a blocker opened again). On `ship`: check the `ops` evidence again and that no regression is open, then `wg move <plan-dir> <ship key> Done`. `wg` checks the blockers and the soak, and moves each `Merged` task of the phase to `Done`. Start the next phase from the updated target (SKILL.md step 3). After the last phase: SKILL.md step 7.
 
 Done when: the repo-wide test run of the phase passed, each `ops` node of the phase is `Done` with passing evidence, the soak deadline passed (when the phase has a soak), and the ship point is `Done`.
+<!-- /explain -->

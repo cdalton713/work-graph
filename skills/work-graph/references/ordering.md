@@ -92,6 +92,7 @@ Exception, only on the human's word: `"stacked_hotfix": true` in `effort` lets o
 - **SYNC** (post-merge `task`, `"role": "sync"`): one per phase, on `sync/<slug>-p<P>` from `origin/main`. The worker merges `origin/<release>` into it and opens a draft PR to `main`. The human merges it with a merge commit.
 - If two hotfixes depend on each other, put them in two phases.
 
+<!-- explain: integration -->
 ### `effort/<slug>`: integration branch
 
 The coordinator creates its worktree once, as the child `00 integration` of the parent `<slug>-integration`, which nests under `<slug>-core`, and owns it:
@@ -107,6 +108,7 @@ cd <child-path> && git push -u origin effort/<slug> && st branch track --parent 
 - Lanes use `--base-branch effort/<slug>` and `st branch track --parent effort/<slug>`. Child PRs target it. Refresh it once per wave (table below).
 - The **integration** node (post-merge `task`, `"role": "integration"`) is coordinator-owned; no worker runs it, and `wg next` prints `integration <key>` when the merge point is `Done`. Then: `wg move <plan-dir> <key> "In Progress"`; refresh `effort/<slug>`; `wg run set <plan-dir> <key> lower=origin/main`; run the push checks in its worktree (`wg evidence <plan-dir> <key>`); `gh pr create --draft --base main --head effort/<slug> --title "<effort>: phase <P>" --body-file <body>`; `wg run set <plan-dir> <key> branch=effort/<slug> parent=main lower=origin/main path=<child-path> pr=<n>`; then `wg done <plan-dir> <key>` (it attaches the PR and skips the owns check for role `integration`), and review-and-merge.md "Merge point" steps 1–5.
 - Never run `st trunk`: it checks out the trunk. Never use this target for `<release>` work, or for a phase longer than about one week.
+<!-- /explain -->
 
 ### Move a lane to another base
 

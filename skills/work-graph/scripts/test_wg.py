@@ -3401,7 +3401,15 @@ class RehearsalTests(unittest.TestCase):
         if lines == [wg.COMPLETE]:
             return lines
         self.assertTrue(lines[-1].startswith("note page https://wg.example.com/?project="), lines[-1])
-        return lines[:-1]
+        # A `do` line that one `wg` command does ends with that command; the lines below compare the rest.
+        here, out = wg.shlex.quote(str(Path(self.d).resolve())), []
+        for line in lines[:-1]:
+            text, arrow, command = line.partition(" -> ")
+            if arrow:
+                _, verb, key = text.split(" ", 3)[:3]
+                self.assertEqual(command, "wg " + wg.DO_COMMANDS[verb.rstrip(":")].format(dir=here, key=key))
+            out.append(text)
+        return out
 
     def orca_worktree(self, key, parent):
         """The printed `orca worktree create` and `st branch track` commands."""
@@ -3488,8 +3496,7 @@ class RehearsalTests(unittest.TestCase):
         self.assertEqual(self.next()[1:], ["do ask-ready a CD-1: #1", "do ask-ready b CD-2: #2"])
         for key in ("a", "b"):
             self.wg("run", "set", key, "draft=yes")
-        self.assertEqual(self.next()[1:], ["wait human a CD-1: mark PR #1 ready for review",
-                                           "wait human b CD-2: mark PR #2 ready for review"])
+        self.assertEqual(self.next()[1:], ["wait human: a (mark PR #1 ready for review), b (mark PR #2 ready for review)"])
         for number in ("1", "2"):
             self.prs[number]["isDraft"] = False
         self.assertEqual(self.next()[1:], ["do merge-review a CD-1: #1: request the thorough review",
@@ -5264,3 +5271,190 @@ class PrBatchTests(unittest.TestCase):
         with patch.object(wg, "command") as run:
             self.assertEqual(PR_BATCH([None, "", "0"]), {})
         self.assertFalse(run.called)
+
+
+class TerminalTests(unittest.TestCase):
+    """`wg next` on the terminal: the command of each action, one line for the waits of one verb, few notes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = self.tmp.name
+        self.here = str(Path(self.d).resolve())
+
+    def test_each_do_line_that_one_command_does_ends_with_that_command(self):
+        cases = {
+            "verify a CD-1: #7 head abc is not code done": f"wg done {self.here} a",
+            "dispatch a CD-1": f"wg dispatch {self.here} a --run",
+            "merged a CD-1: #7 bbbbbbbbbb": f"wg move {self.here} a Merged",
+            "close m1 CD-5": f"wg move {self.here} m1 Done",
+            "verifying s1 CD-6": f"wg move {self.here} s1 Verifying",
+            "ship s1 CD-6: the soak passed at 2026-01-01T00:00:00Z": f"wg move {self.here} s1 Done",
+            "load z -: not in keymap.json": f"wg load {self.here}",
+        }
+        for text, command in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(wg.terminal_lines(self.d, [("do", text)]), [f"do {text} -> {command}"])
+        # A verb that needs more than one command, or a choice, gets no command.
+        for text in ("review a CD-1: #7 round 1", "wave: pick the next wave from a,b", "restack a CD-1: #7"):
+            self.assertEqual(wg.terminal_lines(self.d, [("do", text)]), [f"do {text}"])
+
+    def test_a_plan_dir_with_a_space_is_quoted(self):
+        spaced = Path(self.d) / "my plan"
+        spaced.mkdir()
+        line = wg.terminal_lines(str(spaced), [("do", "dispatch a CD-1")])[0]
+        self.assertTrue(line.endswith(f"-> wg dispatch '{spaced.resolve()}' a --run"))
+
+    def test_waits_of_one_verb_are_one_line_and_other_notes_are_counted(self):
+        lines = [("do", "review a CD-1: #7 round 1"),
+                 ("wait", "worker b CD-2: job=dispatch dispatch=ctx_1"),
+                 ("wait", "human c CD-3: merge PR #9"),
+                 ("wait", "worker d CD-4: job=review dispatch=ctx_2"),
+                 ("wait", "below e CD-5: d has a push that is not code done"),
+                 ("wait", "soak s CD-6: until 2026-01-02T00:00:00Z"),
+                 ("wait", "soak t CD-7: until 2026-01-03T00:00:00Z"),
+                 ("note", "autonomy @effort -: standard"),
+                 ("note", "triage CD-9: Found"),
+                 ("note", "replied b CD-2: yes"),
+                 ("note", "resumed @effort -: on the page")]
+        self.assertEqual(wg.terminal_lines(self.d, lines), [
+            "do review a CD-1: #7 round 1",
+            "wait worker: b (dispatch), d (review)",
+            "wait human c CD-3: merge PR #9",
+            "wait below e CD-5: d has a push that is not code done",
+            "wait soak: s (until 2026-01-02T00:00:00Z), t (until 2026-01-03T00:00:00Z)",
+            "note autonomy @effort -: standard",
+            "note triage CD-9: Found",
+            f"note other: 2 more note lines; wg next {self.here} --all prints them"])
+        self.assertEqual(wg.terminal_lines(self.d, lines, everything=True), [f"{level} {text}" for level, text in lines])
+
+    def run_next(self, lines, *args):
+        published, sent = [], []
+        km = {"project": {"id": "proj"}, "milestones": {}, "nodes": {"a": {"id": "ia", "identifier": "CD-1"}}}
+        wg.save_keymap(self.d, km)
+        p = {"effort": {"name": "Example"}, "phases": [{"key": "1", "target": "main"}],
+             "nodes": [node("a", lane="x", title="A")], "edges": []}
+        link = Mock()
+        link.take.return_value = []
+        link.send.side_effect = lambda kind, payload: sent.append((kind, payload))
+        with patch.object(wg.Link, "open", return_value=link), \
+             patch.object(wg, "next_lines", return_value=("phase 1: 1 task", list(lines))), \
+             patch.object(wg, "answer_lines", return_value=[]), \
+             patch.object(wg, "autonomy_lines", return_value=[("note", "autonomy @effort -: standard")]), \
+             patch.object(wg, "effort_paused", return_value=False), \
+             patch.object(wg, "flush_writes"), patch.object(wg, "open_asks", return_value=[]), \
+             patch.object(wg, "progress_nodes", return_value=[]), \
+             patch.object(wg, "publish", side_effect=lambda d, plan, head, got, **kw: published.append(got)), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(wg.next_command(self.d, p, False, 1, True, *args), 0)
+        return out.getvalue().splitlines(), published, [payload for kind, payload in sent if kind == "state"]
+
+    def test_the_page_and_the_status_document_get_every_full_line(self):
+        lines = [("do", "dispatch a CD-1"), ("wait", "worker b CD-2: job=ci dispatch=x"),
+                 ("wait", "worker c CD-3: job=review dispatch=y"), ("note", "replied b CD-2: ok")]
+        full = [("note", "autonomy @effort -: standard")] + lines
+        out, published, states = self.run_next(lines)
+        self.assertEqual(out[1:], ["note autonomy @effort -: standard", f"do dispatch a CD-1 -> wg dispatch {self.here} a --run",
+                                   "wait worker: b (ci), c (review)",
+                                   f"note other: 1 more note line; wg next {self.here} --all prints them",
+                                   out[-1]])
+        self.assertTrue(out[-1].startswith("note page "))
+        self.assertEqual(published, [full])
+        self.assertEqual(states[0]["lines"], [{"level": level, "text": text} for level, text in full])
+        out, _, _ = self.run_next(lines, True)
+        self.assertEqual(out[1:-1], ["note autonomy @effort -: standard",
+                                     f"do dispatch a CD-1 -> wg dispatch {self.here} a --run",
+                                     "wait worker b CD-2: job=ci dispatch=x", "wait worker c CD-3: job=review dispatch=y",
+                                     "note replied b CD-2: ok"])
+
+    def test_the_all_flag_reaches_next(self):
+        self.assertTrue(wg.cli_parser().parse_args(["next", self.d, "--all"]).all)
+        self.assertFalse(wg.cli_parser().parse_args(["next", self.d]).all)
+
+
+def printed_verbs(*functions):
+    """Each verb that the functions can print as the first word of a line: `add("do", "<verb>", …)`, and the
+    first word of the text of a `(level, text)` tuple. A choice (`"a" if … else "b"`) gives both verbs."""
+    import ast
+    import inspect
+    import textwrap
+
+    def words(value):
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return {value.value.split(" ", 1)[0].rstrip(":")}
+        if isinstance(value, ast.BinOp):  # "wave: pick … " + ",".join(idle)
+            return words(value.left)
+        if isinstance(value, ast.IfExp):
+            return words(value.body) | words(value.orelse)
+        if isinstance(value, ast.FormattedValue):
+            return words(value.value)
+        if isinstance(value, ast.JoinedStr) and value.values:
+            first = value.values[0]
+            if isinstance(first, ast.Constant):
+                return {first.value.split(" ", 1)[0].rstrip(":")} if " " in first.value else set()
+            return words(first)
+        return set()
+
+    found = {}
+    for function in functions:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+        for item in ast.walk(tree):
+            level = None
+            if isinstance(item, ast.Call) and getattr(item.func, "id", None) == "add" and len(item.args) >= 2:
+                level, text = item.args[0], item.args[1]
+            elif isinstance(item, ast.Tuple) and len(item.elts) == 2:
+                level, text = item.elts
+            if isinstance(level, ast.Constant) and level.value in ("do", "wait", "note"):
+                for verb in words(text):
+                    found.setdefault(verb, set()).add(function.__name__)
+    return found
+
+
+class ExplainTests(unittest.TestCase):
+    """`wg explain <verb>`: the part of the skill text for one verb of `wg next`."""
+
+    def test_every_verb_that_next_can_print_has_an_entry(self):
+        verbs = printed_verbs(wg.next_lines, wg.link_lines, AUTONOMY_LINES, wg.paused_lines, ANSWER_LINES,
+                              wg.relay_reply)
+        # The scan must see the verbs of each function, or it proves nothing.
+        for verb in ("dispatch", "undraft", "ask-ready", "worker", "wave", "load", "triage", "answer", "paused",
+                     "resumed", "autonomy", "relay", "replied", "human", "soak"):
+            self.assertIn(verb, verbs)
+        missing = {verb: sorted(where) for verb, where in verbs.items() if verb not in wg.EXPLAIN}
+        self.assertEqual(missing, {})
+
+    def test_each_entry_has_marked_text_of_at_most_60_lines(self):
+        sections = wg.explain_sections()
+        self.assertEqual(sorted(set(sections) - set(wg.EXPLAIN)), [])
+        for verb in wg.EXPLAIN:
+            with self.subTest(verb=verb):
+                text = wg.explain_text(verb)
+                self.assertTrue(text.strip(), "no marked text")
+                self.assertLessEqual(len(text.splitlines()), wg.EXPLAIN_MAX_LINES)
+                self.assertNotIn("<!--", text)
+
+    def test_the_text_is_the_marked_part_only(self):
+        text = wg.explain_text("dispatch")
+        self.assertTrue(text.startswith("(references/coordinator.md)\n## Dispatch\n"))
+        self.assertIn("Done when: `wg run show <plan-dir> <key>` shows `state=running`", text)
+        self.assertNotIn("## Adopt", text)
+        both = wg.explain_text("review")
+        self.assertIn("(references/review-and-merge.md)\n## Wave review", both)
+        self.assertIn("(references/coordinator.md)\n## Follow-up jobs", both)
+
+    def test_the_command_lists_explains_and_refuses_an_unknown_verb(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(wg.main(["wg", "explain"]), 0)
+        listed = out.getvalue().splitlines()
+        self.assertEqual([line.split()[0] for line in listed], list(wg.EXPLAIN))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(wg.main(["wg", "explain", "merged"]), 0)
+        self.assertIn("## Merge point", out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(wg.main(["wg", "explain", "nothing"]), 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("unknown verb 'nothing'", err.getvalue())
+
+    def test_the_coordinator_text_names_wg_explain(self):
+        text = (Path(wg.__file__).resolve().parent.parent / "references" / "coordinator.md").read_text()
+        self.assertIn("wg explain <verb>", text)

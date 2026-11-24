@@ -8,7 +8,9 @@
 
 **Diff leaves owns and shares** (`OUT` lines from `wg done`). Send the worker the paths. It reverts its own hunks, or asks you to extend `owns` in `plan.json`. Never edit a branch while its worker is live.
 
+<!-- explain: closed -->
 **PR closed without a merge** (`closed <key>`). `gh pr view <n> --json state,closedAt`, then ask the human why. On their word: **reopen** (they reopen the PR; `wg done` checks it again), **redesign**, or **drop**. Redesign and drop go through Replan. `wg` refuses `Merged` for a closed unmerged PR: list the PR under "Dropped" in `PLAN.md` `## Notes` with their reason.
+<!-- /explain -->
 
 **Worker escalates.** Read the `escalation` (`orca orchestration worker-show --dispatch <id>`) and steer it with `send`, or ask the human. If it needs the human, the issue is in `Needs <human>`; `wg move <plan-dir> <key> "In Progress"` after their answer.
 
@@ -68,6 +70,7 @@ The run rows in `keymap.json` hold what Linear and GitHub cannot tell: the Orca 
 
 `PLAN.md` `## Notes` holds only "Dropped" PRs with the reason, deferred decisions, and open regressions. History goes to Linear comments. Never append a checkpoint log to `PLAN.md`.
 
+<!-- explain: reconcile -->
 ## Resume
 
 A new session starts here. So does each `reconcile` line.
@@ -87,3 +90,4 @@ A new session starts here. So does each `reconcile` line.
 6. Continue with the coordinator loop.
 
 Done when: `wg next` prints no `reconcile` line, and each `wait worker` line maps to a live dispatch.
+<!-- /explain -->

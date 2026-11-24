@@ -3474,10 +3474,150 @@ def one_line(text, limit=300):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def next_command(plan_dir, plan, wait, interval, copy=False):
+# The `do` verbs that one `wg` command does. The terminal adds ` -> <command>` to their lines.
+DO_COMMANDS = {
+    "verify": "done {dir} {key}",
+    "dispatch": "dispatch {dir} {key} --run",
+    "merged": "move {dir} {key} Merged",
+    "close": "move {dir} {key} Done",
+    "verifying": "move {dir} {key} Verifying",
+    "ship": "move {dir} {key} Done",
+    "load": "load {dir}",
+}
+# The `note` lines that the terminal prints in full. It counts the other notes in one line.
+NOTES_SHOWN = ("autonomy", "triage", "page")
+
+
+def line_verb(text):
+    return text.split(" ", 1)[0].rstrip(":")
+
+
+def terminal_lines(plan_dir, lines, everything=False):
+    """The lines of `wg next` as the terminal prints them. Each `do` line that one `wg` command does ends with
+    ` -> <command>`. Without `everything`, the `wait` lines with the same verb are one line, and the notes that
+    are not in NOTES_SHOWN are counted in one line. The status document, the node cards, and the link get the
+    full lines: this is a print step only."""
+    here = shlex.quote(str(Path(plan_dir).resolve()))
+    out, waits, hidden = [], {}, 0
+    for level, text in lines:
+        verb, words = line_verb(text), text.split(" ", 2)
+        if level == "do" and verb in DO_COMMANDS and len(words) > 1:
+            out.append(f"do {text} -> wg " + DO_COMMANDS[verb].format(dir=here, key=shlex.quote(words[1])))
+        elif everything or level == "do" or (level == "note" and verb in NOTES_SHOWN):
+            out.append(f"{level} {text}")
+        elif level == "wait":
+            if verb not in waits:
+                out.append(("wait", verb))  # the place of the group: its first line
+            waits.setdefault(verb, []).append(text)
+        else:
+            hidden += 1
+    printed = []
+    for line in out:
+        if isinstance(line, str):
+            printed.append(line)
+        elif len(group := waits[line[1]]) == 1:
+            printed.append(f"wait {group[0]}")
+        else:
+            items = []
+            for text in group:
+                m = re.match(r"\S+ (\S+) \S+(?:: (.*))?$", text, re.S)
+                key, detail = (m.group(1), m.group(2)) if m else (text, None)
+                if detail and (job := re.search(r"\bjob=(\S+)", detail)):
+                    detail = job.group(1)
+                items.append(f"{key} ({detail})" if detail else key)
+            printed.append(f"wait {line[1]}: " + ", ".join(items))
+    if hidden:
+        printed.append(f"note other: {hidden} more note line{'' if hidden == 1 else 's'}; "
+                       f"wg next {here} --all prints them")
+    return printed
+
+
+# `wg explain <verb>` prints the parts of the skill text that say what to do for a verb of `wg next`.
+# The reference files mark each part: `<!-- explain: verb,verb -->` … `<!-- /explain -->`.
+EXPLAIN = {
+    "load": "a node of plan.json is not in keymap.json: load the graph",
+    "wave": "each node of the last wave is code done: pick the next wave",
+    "dispatch": "start the first worker job of a ready node",
+    "adopt": "a node whose branch or PR exists: adopt it, no dispatch",
+    "integration": "the coordinator's own integration branch",
+    "verify": "check code done: wg done",
+    "review": "the wave review of a draft PR, or the thorough review that runs",
+    "ask-ready": "ask the human to mark PRs ready (merge_prep=human)",
+    "undraft": "mark the PR ready for review yourself",
+    "merge-review": "request, read, or check the thorough merge review",
+    "ask-merge": "the PR can merge: move it to Ready to Merge and ask for the merge",
+    "merged": "the PR merged: move the task to Merged",
+    "close": "every pre-merge task merged: close the merge point",
+    "restack": "send a restack job",
+    "full-suite": "the repo-wide test run of the phase",
+    "ops": "an ops node that the coordinator does",
+    "ask": "an ops or decision node: ask the human",
+    "verifying": "move the ship point to Verifying",
+    "ship": "the soak passed: close the ship point",
+    "triage": "an issue in the project that is not a node",
+    "closed": "the PR closed without a merge",
+    "reconcile": "the run rows and Linear do not agree: resume",
+    "answer": "the human answered on the page",
+    "relay": "send the human's reply to the worker yourself",
+    "replied": "wg next sent the human's reply to the worker",
+    "autonomy": "the autonomy level, or a change of it",
+    "paused": "the human paused the effort",
+    "resumed": "the human resumed the effort",
+    "below": "wait: the node below in the lane comes first",
+    "blockers": "wait: a blocker of the ship point opened again",
+    "soak": "wait: the soak runs",
+    "worker": "wait: a worker job runs",
+    "reviewer": "wait: a reviewer job runs",
+    "coordinator": "wait: an ops node that you run",
+    "human": "wait: the human must act",
+}
+EXPLAIN_MAX_LINES = 60
+
+
+def explain_sections():
+    """Each verb's marked parts of SKILL.md and the references, in file order, with the file of each."""
+    root = Path(__file__).resolve().parent.parent
+    sections = {}
+    for path in [root / "SKILL.md", *sorted((root / "references").glob("*.md"))]:
+        verbs, part = None, []
+        for line in path.read_text().splitlines():
+            if m := re.fullmatch(r"<!-- explain: ([a-z,-]+) -->", line.strip()):
+                verbs, part = m.group(1).split(","), []
+            elif line.strip() == "<!-- /explain -->" and verbs:
+                for verb in verbs:
+                    sections.setdefault(verb, []).append((str(path.relative_to(root)), part))
+                verbs = None
+            elif verbs:
+                part.append(line)
+    return sections
+
+
+def explain_text(verb):
+    lines = []
+    for name, part in explain_sections().get(verb, []):
+        lines += ([""] if lines else []) + [f"({name})", *part]
+    return "\n".join(lines)
+
+
+def explain_command(verb):
+    """`wg explain [verb]`: what to do for a verb of `wg next`, or the list of the verbs. Exit 2: unknown verb."""
+    if not verb:
+        width = max(map(len, EXPLAIN))
+        for name, summary in EXPLAIN.items():
+            print(f"{name.ljust(width)}  {summary}")
+        return 0
+    if verb not in EXPLAIN:
+        print(f"unknown verb {verb!r}; wg explain lists the verbs", file=sys.stderr)
+        return 2
+    print(explain_text(verb))
+    return 0
+
+
+def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
     """Print the next actions. With wait: return only when the coordinator has something to do.
 
-    With copy: also copy each result to Linear for the page, also while it waits (`publish`)."""
+    With copy: also copy each result to Linear for the page, also while it waits (`publish`). With everything:
+    print each `wait` and `note` line in full (terminal_lines)."""
     link = Link.open(plan_dir, plan)
     messages = link.take() if link else []
     try:
@@ -3504,8 +3644,8 @@ def next_command(plan_dir, plan, wait, interval, copy=False):
                     publish(plan_dir, plan, head, lines, wait_interval=interval if wait else None)
                 if done:
                     print(head)
-                    for level, text in lines:
-                        print(f"{level} {text}", flush=True)
+                    for line in terminal_lines(plan_dir, lines, everything):
+                        print(line, flush=True)
                     if head != COMPLETE:
                         print(f"note page {page_link(plan)}", flush=True)
                     # A message is settled once its line is on the terminal. Before that, the server keeps it.
@@ -5162,6 +5302,7 @@ def cli_parser():
         n.add_argument("--wait", action="store_true")
         n.add_argument("--interval", type=float, default=300)
         n.add_argument("--no-publish", action="store_true", help="do not copy the result to Linear for the page")
+        n.add_argument("--all", action="store_true", help="print each wait and note line in full")
     add(sub, "wake")
     auto = add(sub, "autostart")
     auto_mode = auto.add_mutually_exclusive_group()
@@ -5215,6 +5356,8 @@ def cli_parser():
     o_diff = add(o, "diff")
     o_diff.add_argument("key")
     o_diff.add_argument("base")
+    e = sub.add_parser("explain", help="print what to do for a verb of wg next; with no verb, list the verbs")
+    e.add_argument("verb", nargs="?")
     sub.add_parser("config", help="print the config of this machine (no keys) and the local rules file")
     c = sub.add_parser("contract", help="print what the page must agree with; --write updates contract.json")
     c.add_argument("--write", action="store_true")
@@ -5259,7 +5402,7 @@ def run_command(ns, d, plan, given):
         if ns.cmd == "watch":
             print("wg watch is now wg next: load the work-graph skill again and read coordinator.md \"Loop\"",
                   file=sys.stderr)
-        return next_command(d, plan, ns.wait, ns.interval, copy=not ns.no_publish)
+        return next_command(d, plan, ns.wait, ns.interval, copy=not ns.no_publish, everything=ns.all)
     if ns.cmd == "wake":
         return wake_command(d, plan)
     if ns.cmd == "autostart":
@@ -5316,6 +5459,8 @@ def main(argv):
     try:
         if ns.cmd == "config":
             return show_config()
+        if ns.cmd == "explain":
+            return explain_command(ns.verb)
         if ns.cmd == "contract":
             if ns.write:
                 (Path(__file__).resolve().parent.parent / "contract.json").write_text(contract_text())

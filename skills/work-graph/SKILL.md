@@ -11,7 +11,7 @@ Use this skill when the effort has two or more lanes that can run at the same ti
 
 `scripts/wg.py` (written `wg` below) holds the rules that must not slip. Run it as `wg`: the command uses `uv run --script`, which supplies the `websockets` package for the link to the page (see [references/page.md](references/page.md) "Link"). `python3 -I <skill-dir>/scripts/wg.py` also works; without `websockets` in that Python, `wg next` polls Linear. It validates the graph, syncs it to Linear, takes and releases claims, checks code done, guards each status change, and derives the next action. `wg` is also a command on PATH: `~/.local/bin/wg` is a link to the script. If a shell says `command not found`, make the link again: `ln -s <skill-dir>/scripts/wg.py ~/.local/bin/wg`.
 
-**At the start of each run, ask the human for the autonomy level** ("Autonomy level" below) before any other step. **`wg next <plan-dir>` is the first command of each session and of each turn.** It prints one status line, then what to do (`do`), what you wait for (`wait`), and what you must know (`note`). It reads Linear, GitHub, and the run rows: one GitHub request for each 50 PRs of the run rows, and one `gh pr view` only for a PR that the request does not return. It changes no status, no claim, and no run field. It copies its result to Linear for the page ("See the graph"): the wave and the next action on each node card, and every line in the project document `work-graph status`; `--no-publish` skips the copy.
+**At the start of each run, ask the human for the autonomy level** ("Autonomy level" below) before any other step. **`wg next <plan-dir>` is the first command of each session and of each turn.** It prints one status line, then what to do (`do`), what you wait for (`wait`), and what you must know (`note`). `wg explain <verb>` prints what to do for one verb of these lines. It reads Linear, GitHub, and the run rows: one GitHub request for each 50 PRs of the run rows, and one `gh pr view` only for a PR that the request does not return. It changes no status, no claim, and no run field. It copies its result to Linear for the page ("See the graph"): the wave and the next action on each node card, and every line in the project document `work-graph status`; `--no-publish` skips the copy.
 
 Load `stax` and `orchestration` when a step names their commands. Read `<cmd> --help` for flags. The references hold only what help does not say.
 
@@ -81,6 +81,7 @@ An initiative groups related projects, for example each effort on one tool. It i
 - `wg load --apply` creates the group and the initiative label when they are missing, and sets the label on the project. It replaces another initiative label on the project. Without `effort.initiative`, `wg load` leaves the project's labels as they are.
 - The page groups the overview by initiative ("See the graph"). `?initiative=<URL-encoded name>` opens the overview with only that initiative.
 
+<!-- explain: autonomy -->
 ## Autonomy level
 
 The level is a label of the Linear project: one child of the single-select project label group `autonomy` (`full`, `standard`, or `supervised`). No label means `standard`. `wg autonomy <plan-dir>` prints the level; `wg autonomy <plan-dir> <level>` sets it.
@@ -105,6 +106,7 @@ Level `full`:
 - Report each choice in the status line, so the human can undo it.
 
 Level `supervised`: show the gate's content (the flowchart and phase table, the wave keys with each node's acceptance, or the PR) and wait (coordinator.md "Wait"). Record their approval with `wg approve` when they give words to keep.
+<!-- /explain -->
 
 ## Autostart
 
@@ -132,6 +134,7 @@ Show the human the flowchart and the phase table, and continue to step 2 without
 
 Done when: every phase has a target, a merge point, and a ship point, every `task` has a lane, and no edge joins two lanes inside one phase.
 
+<!-- explain: load -->
 ### 2. Load the graph
 
 Convert the flowchart to `<plan-dir>/plan.json` ([references/graph.md](references/graph.md#planjson)). Then:
@@ -147,7 +150,9 @@ wg ready <plan-dir> --apply         # first nodes move to Ready
 On `FAIL base`: the frozen base's PR targets another branch than its stax parent, carries foreign commits, or sits in a native stack. Stop and ask the human which base is right; never pick one. On `FAIL trunk`: stop and ask the human to do what the `FAIL trunk` lines say: set up the base (setup.md "Stax trunk and targets"), set the trunk with `st init`, or freeze the integration branch. Never run `st trunk`: it checks out the trunk.
 
 Done when: `wg check` and `wg preflight <plan-dir>` exit 0, a second `wg load <plan-dir>` prints `no changes to nodes`, no `missing` or `not in plan.json` relation, and no `orphan` line (remove stale ones with `wg load <plan-dir> --apply --prune`), and the project link is in `PLAN.md`.
+<!-- /explain -->
 
+<!-- explain: wave -->
 ### 3. Pick and refine the next wave
 
 `wg next` prints `wave: pick the next wave from <keys>` when each node of the last wave is code done; their reviews can still run. Pick the wave: the keys of the next nodes to run, all pre-merge or all post-merge. Record them with `wg run set <plan-dir> @effort wave=<k1,k2>`. Refine only these nodes.
@@ -157,6 +162,7 @@ Done when: `wg check` and `wg preflight <plan-dir>` exit 0, a second `wg load <p
 3. Write `acceptance`, `owns`, and `shares` in `plan.json` ([references/ordering.md](references/ordering.md#file-ownership)), and the design in the issue description. Run `wg load <plan-dir> --apply` again: it updates the issue's node card comment (acceptance, owns, shares). Then dispatch; do not ask the human to approve the design (at level `supervised`, wait for their approval of the wave first).
 
 Done when: every `task` of the wave fits one PR and has acceptance and `owns`, `wg owns overlap <plan-dir> <wave keys>` exits 0, and `wg next` prints `dispatch` for each wave node that has no blocker inside the wave.
+<!-- /explain -->
 
 ### 4. Run and review the wave
 

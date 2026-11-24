@@ -69,6 +69,8 @@ The config lists the Linear workspaces. Set `effort.workspace` to the id of the 
 
 `wg` selects the key for every command from the plan: `LINEAR_<ID>_API_KEY`, then the workspace's `key_env` names, then the private file `~/.config/work-graph/<id>-linear-api-key` (mode 600). A missing key stops the command; it never uses the key of another workspace. Keep keys out of plans, comments, and command arguments.
 
+`wg` tries a Linear request again when it failed for a short time, at most 4 tries, with a longer delay each time. It tries a query again after a network error, a timeout, HTTP 429, HTTP 5xx, or a `RATELIMITED` error. It tries a mutation again only when Linear refused it before it ran (HTTP 429 or `RATELIMITED`), because after a timeout or a 5xx Linear can have applied it. At a rate limit, `wg` waits for Linear's reset time when it is at most 60 s away, and stops at once when it is farther. Each new try prints one `warn linear:` line to stderr. After a failed mutation, read the issue before you run the command again.
+
 Linear's Free plan holds 250 issues in a workspace; archived issues do not count. In a workspace with no paid plan, `wg` archives every completed and canceled issue of the workspace, not only the nodes of the plan: at each `wg move` to `Done` or `Canceled`, and at each `wg tick`. `wg archive <plan-dir>` shows what it would archive; `--apply` archives it. An archived node stays in the graph, on the page, and in `wg next`. A `wg move` of an archived node to an open status restores it first. Do not archive or restore issues by hand.
 
 ## Initiatives

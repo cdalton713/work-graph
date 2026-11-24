@@ -52,6 +52,7 @@ import json
 import math
 import os
 import plistlib
+import random
 import re
 import shlex
 import shutil
@@ -510,26 +511,114 @@ class ReadError(Exception):
     pass
 
 
+# The retry of `gql`. Tests replace the sleep, the clock, and the jitter, so that no test waits.
+GQL_TRIES = 4
+GQL_DELAY = 1.0          # seconds before the second try; each later try waits two times longer
+GQL_RESET_WAIT = 60      # wait for Linear's reset time only when it is at most this many seconds away
+gql_sleep = time.sleep
+gql_clock = time.time
+gql_jitter = random.random
+# The last rate limit headers that Linear sent: header name (lower case) -> value.
+LINEAR_RATE = {}
+
+
+class _GqlFailure(Exception):
+    """One failed try. `kind` is "refused" (Linear did not run the request: HTTP 429 or RATELIMITED),
+    "transient" (a network error, a timeout, or HTTP 5xx: Linear can have run it), or "final"."""
+
+    def __init__(self, message, kind, cause=None):
+        super().__init__(message)
+        self.kind = kind
+        self.cause = cause
+
+
+def _note_rate(headers):
+    if headers is None:
+        return
+    for name in ("Requests-Limit", "Requests-Remaining", "Requests-Reset",
+                 "Complexity-Limit", "Complexity-Remaining", "Complexity-Reset"):
+        value = headers.get("X-RateLimit-" + name)
+        if value is not None:
+            LINEAR_RATE[name.lower()] = value
+
+
+def _rate_limited(errors):
+    return any(isinstance(e, dict) and (e.get("extensions") or {}).get("code") == "RATELIMITED"
+               for e in errors or [])
+
+
+def _reset_wait():
+    """Seconds until the limit that is used up resets, or None when Linear sent no reset time."""
+    reset = None
+    for name in ("requests", "complexity"):
+        if LINEAR_RATE.get(name + "-remaining") == "0" and LINEAR_RATE.get(name + "-reset"):
+            reset = LINEAR_RATE[name + "-reset"]
+            break
+    reset = reset or LINEAR_RATE.get("requests-reset")
+    try:
+        at = float(reset)
+    except (TypeError, ValueError):
+        return None
+    if at > 1e11:  # Linear gives the reset time in milliseconds since the epoch
+        at /= 1000
+    return max(0.0, at - gql_clock())
+
+
+def _gql_try(req):
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            _note_rate(getattr(response, "headers", None))
+            body = json.load(response)
+    except urllib.error.HTTPError as e:
+        _note_rate(e.headers)
+        try:
+            detail = e.read(500).decode(errors="replace")
+        except http.client.HTTPException as read_error:
+            detail = str(read_error)
+        message = f"Linear HTTP {e.code}: {detail}"
+        if e.code == 429 or "RATELIMITED" in detail:
+            raise _GqlFailure(message, "refused", e) from e
+        raise _GqlFailure(message, "transient" if e.code >= 500 else "final", e) from e
+    except (urllib.error.URLError, TimeoutError, http.client.HTTPException, ConnectionError) as e:
+        raise _GqlFailure(f"Linear request failed: {e}", "transient", e) from e
+    if body.get("errors"):
+        message = "Linear error: " + json.dumps(body["errors"])[:800]
+        raise _GqlFailure(message, "refused" if _rate_limited(body["errors"]) else "final")
+    return body
+
+
 def gql(query, variables=None):
+    """Send one GraphQL request to Linear. A failure for a short time is tried again, at most GQL_TRIES
+    tries: a query after a network error, a timeout, HTTP 429, HTTP 5xx, or RATELIMITED; a mutation only
+    after HTTP 429 or RATELIMITED, because after a timeout or a 5xx Linear can have applied it."""
     key = linear_key()
     req = urllib.request.Request(
         "https://api.linear.app/graphql",
         data=json.dumps({"query": query, "variables": variables or {}}).encode(),
         headers={"Authorization": key, "Content-Type": "application/json"},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            body = json.load(response)
-    except urllib.error.HTTPError as e:
+    mutation = re.match(r"\s*mutation\b", query) is not None
+    for attempt in range(1, GQL_TRIES + 1):
         try:
-            detail = e.read(500).decode(errors="replace")
-        except http.client.HTTPException as read_error:
-            detail = str(read_error)
-        raise ReadError(f"Linear HTTP {e.code}: {detail}") from e
-    except (urllib.error.URLError, TimeoutError, http.client.HTTPException) as e:
-        raise ReadError(f"Linear request failed: {e}") from e
-    if body.get("errors"):
-        raise ReadError("Linear error: " + json.dumps(body["errors"])[:800])
+            body = _gql_try(req)
+            break
+        except _GqlFailure as failure:
+            retry = failure.kind == "refused" or (failure.kind == "transient" and not mutation)
+            tries = f"{attempt} {'try' if attempt == 1 else 'tries'}"
+            if not retry:
+                raise ReadError(str(failure) if attempt == 1 else f"{failure} (after {tries})") from failure.cause
+            delay = GQL_DELAY * 2 ** (attempt - 1) * (0.5 + gql_jitter())
+            if failure.kind == "refused":
+                wait = _reset_wait()
+                if wait is not None and wait > GQL_RESET_WAIT:
+                    raise ReadError(f"{failure} (after {tries}; the limit resets in {wait:.0f} s)") from failure.cause
+                if wait is not None:
+                    delay = wait + gql_jitter()
+            if attempt == GQL_TRIES:
+                raise ReadError(f"{failure} (after {tries})") from failure.cause
+            print(f"warn linear: {str(failure)[:200]}; try {attempt + 1} of {GQL_TRIES} in {delay:.1f} s",
+                  file=sys.stderr, flush=True)
+            gql_sleep(delay)
     note_write(query, variables or {}, body.get("data") or {})
     return body["data"]
 

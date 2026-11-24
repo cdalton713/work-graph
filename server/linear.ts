@@ -205,8 +205,9 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         body = await response.json();
       } catch (error) {
         // Text that is not JSON is Linear's answer. A timeout or a dropped connection while the body
-        // arrives is a failed transport, the same as one before the headers.
-        if (!(error instanceof SyntaxError)) return transportFailure(error);
+        // arrives is a failed transport, the same as one before the headers. HTTP 429 is known from the
+        // headers already: it stays a rate limit, so a mutation tries again after its Retry-After.
+        if (!(error instanceof SyntaxError) && response.status !== 429) return transportFailure(error);
         body = null;
       }
       if (response.ok && body && !body.errors) return { data: body.data };

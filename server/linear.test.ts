@@ -211,6 +211,14 @@ describe("gql retry and limit", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("sends a mutation again after HTTP 429 whose body times out, after the delay that Retry-After asks", async () => {
+    const limited = new Response(new ReadableStream({ start(c) { c.error(timeout()); } }), { status: 429, headers: { "retry-after": "3" } });
+    const fetch = answers(limited, ok());
+    expect(await gql("mutation{ a }")).toEqual({ viewer: { id: "me" } });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([3000]);
+  });
+
   it("does not try again after an answer that is not JSON", async () => {
     const fetch = answers(new Response("<html>", { status: 200 }), ok());
     await expect(gql("query{ viewer{id} }")).rejects.toThrow("Linear: HTTP 200");

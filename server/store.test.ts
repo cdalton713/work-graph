@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Envelope } from "../src/lib/link.ts";
 import { createApp } from "./app.ts";
-import { LinkHub, type Peer, QUEUE_MAX } from "./link.ts";
+import { LinkHub, type Peer, QUEUE_MAX, stopOnSignals } from "./link.ts";
 import { fileStore, SAVE_MS, STATE_FILE, STATE_VERSION } from "./store.ts";
 
 const A = { workspace: "work", id: "p1" };
@@ -140,6 +140,89 @@ describe("fileStore", () => {
     const after = new LinkHub(undefined, undefined, undefined, store());
     expect(after.ask(A, "ask-0")).toBeNull();
     expect(after.ask(A, "ask-1")).toEqual(asks[1]);
+  });
+
+  it("writes at an acknowledgment of a message that a full queue dropped, so a restart does not send it again", () => {
+    const dir = tempDir(), timer = fakeAfter();
+    const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: () => {} });
+    const hub = new LinkHub(undefined, undefined, undefined, store());
+    const oldest = hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
+    timer.run(); // the file holds the oldest message
+    for (let i = 0; i < QUEUE_MAX; i++) hub.publish(A, "command", { name: "next", key: null, issue: null });
+    expect(hub.presence(A).queued).toBe(QUEUE_MAX); // the queue dropped the oldest; the write waits
+    const c = hub.joinCoordinator(peer(), A);
+    c.receive(hello("s1"));
+    c.receive(msg("ack", { ids: [oldest.id] }));
+    // No timer runs: the process stops here.
+    const again = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
+    c2.receive(hello("s2"));
+    expect(again.sent).toHaveLength(QUEUE_MAX);
+    expect(again.sent.map((m) => m.id)).not.toContain(oldest.id);
+  });
+
+  it("gives false from shutdown when the last write failed, and true when the next try at the stop succeeds", async () => {
+    if (process.getuid?.() === 0) return; // a read-only directory does not stop root
+    const dir = tempDir(), timer = fakeAfter(), logs: string[] = [];
+    const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: (l) => logs.push(l) });
+    const hub = new LinkHub(undefined, undefined, undefined, store());
+    const sent = hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
+    timer.run();
+    const c = hub.joinCoordinator(peer(), A);
+    c.receive(hello("s1"));
+    chmodSync(dir, 0o500); // the temporary file cannot be made
+    try {
+      c.receive(msg("ack", { ids: [sent.id] }));
+      expect(logs.filter((l) => l.includes("cannot write"))).toHaveLength(1);
+      c.closed();
+      expect(await hub.shutdown()).toBe(false);
+      // A restart now sends the acknowledged message again: the stop knows it.
+      const lost = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(lost, A);
+      c2.receive(hello("s2"));
+      expect(lost.sent.map((m) => m.id)).toEqual([sent.id]);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+
+    const second = new LinkHub(undefined, undefined, undefined, store());
+    const d = second.joinCoordinator(peer(), A);
+    d.receive(hello("s3"));
+    chmodSync(dir, 0o500);
+    try {
+      d.receive(msg("ack", { ids: [sent.id] })); // fails
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    d.closed();
+    expect(await second.shutdown()).toBe(true); // the try at the stop succeeds
+    const again = peer(), c3 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
+    c3.receive(hello("s4"));
+    expect(again.sent).toEqual([]);
+  });
+
+  it("exits with 1 when the stop did not write the link state", async () => {
+    const exits: number[] = [];
+    for (const saved of [false, true]) {
+      const handlers = new Map<string, () => void>();
+      stopOnSignals(() => Promise.resolve(saved), (signal, fn) => handlers.set(signal, fn), (code) => exits.push(code));
+      handlers.get("SIGTERM")!();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect(exits).toEqual([1, 0]);
+  });
+
+  it("writes the file with mode 600 also when an old temporary file of mode 644 is in the directory", () => {
+    const dir = tempDir();
+    for (const name of [`${STATE_FILE}.${process.pid}.tmp`, STATE_FILE]) {
+      writeFileSync(join(dir, name), "old", { mode: 0o644 });
+      chmodSync(join(dir, name), 0o644);
+    }
+    const store = fileStore(dir, { queueMax: QUEUE_MAX, after: fakeAfter().after, log: () => {} });
+    store.save(() => ({ rooms: [{ ref: A, queue: [], asks: [ask] }] }));
+    expect(store.flush()).toBe(true);
+    expect(statSync(join(dir, STATE_FILE)).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8")).rooms[0].asks).toEqual([ask]);
+    // Only the old temporary file stays: each write makes and renames its own.
+    expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([`${STATE_FILE}.${process.pid}.tmp`]);
   });
 
   it("starts empty with one log line when the file is unreadable or of another version", () => {

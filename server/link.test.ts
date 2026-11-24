@@ -361,7 +361,7 @@ describe("LinkHub heartbeat, prune, and shutdown", () => {
     expect(done).toBe(false);
     time.advance(1);
     await stopped;
-    expect(await new LinkHub().shutdown()).toBeUndefined(); // no socket: at once
+    expect(await new LinkHub().shutdown()).toBe(true); // no socket: at once; no store: nothing to write
   });
 
   it("on a signal runs shutdown once, then exits with 0", async () => {

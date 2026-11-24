@@ -48,15 +48,19 @@ const KNOWN = new Set<string>(Object.keys(KNOWN_TYPES));
 const logField = (v: string) => JSON.stringify(v).replace(/[\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16)}`);
 
 /**
- * On each of the signals, run `shutdown` once, then `exit(0)`. `on` and `exit` are those of `process` in the server.
+ * On each of the signals, run `shutdown` once, then `exit(0)`, or `exit(1)` when `shutdown` gives false (the link
+ * state was not written). `on` and `exit` are those of `process` in the server.
  */
-export function stopOnSignals(shutdown: () => Promise<void>, on: (signal: NodeJS.Signals, fn: () => void) => void, exit: (code: number) => void) {
+export function stopOnSignals(shutdown: () => Promise<boolean | void>, on: (signal: NodeJS.Signals, fn: () => void) => void, exit: (code: number) => void) {
   let stopping = false;
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     on(signal, () => {
       if (stopping) return;
       stopping = true;
-      void shutdown().finally(() => exit(0));
+      shutdown().then((saved) => {
+        if (saved === false) console.log("link state: not written at the stop; a restart can send acknowledged messages again");
+        exit(saved === false ? 1 : 0);
+      }, () => exit(1));
     });
   }
 }
@@ -82,7 +86,7 @@ export class LinkHub {
   private sockets = new Map<Peer, Socket>();
   private stopBeat: (() => void) | null = null;
   /** Set at `shutdown`: the hub takes no new socket, and `drained` runs when the last socket closed. */
-  private stopping: { drained: () => void; done: Promise<void> } | null = null;
+  private stopping: { drained: () => void; done: Promise<boolean> } | null = null;
   /** Where the queue and the asks of each room survive a restart (`WG_STATE_DIR`). None: they live in memory only. */
   private store: Store | null;
   constructor(now: () => Date = () => new Date(), onWrote: (ref: ProjectRef) => void = () => {}, timers: Timers = realTimers, store: Store | null = null) {
@@ -141,19 +145,18 @@ export class LinkHub {
   /**
    * The server stops: stop the heartbeat and close each socket with `RESTART_CODE`. The promise resolves when
    * all sockets closed, or after `SHUTDOWN_MS`. Then the store writes what still waits: an acknowledgment can
-   * arrive while the sockets close.
+   * arrive while the sockets close. The promise gives false when that write failed.
    */
-  shutdown(): Promise<void> {
+  shutdown(): Promise<boolean> {
     if (this.stopping) return this.stopping.done;
     this.stop();
     let finish = () => {};
-    const done = new Promise<void>((ok) => {
+    const done = new Promise<boolean>((ok) => {
       let finished = false;
       finish = () => {
         if (finished) return;
         finished = true;
-        this.store?.flush();
-        ok();
+        ok(this.store?.flush() ?? true);
       };
     });
     const cancel = this.timers.after(() => finish(), SHUTDOWN_MS);
@@ -377,7 +380,9 @@ export class LinkHub {
           const before = room.queue.length;
           room.queue = room.queue.filter((m) => !ids.has(m.id));
           // At once, not after the debounce: a process that stops before it must not send the message again.
-          if (room.queue.length !== before) { this.changed(); this.store?.flush(); }
+          // Also when the queue no longer holds the message: a full queue dropped it, but the file can still hold it.
+          if (room.queue.length !== before) this.changed();
+          this.store?.flush();
           this.announce(room);
         } else if (type === "asks") {
           room.asks = (Array.isArray(payload.asks) ? payload.asks.filter(isObject) : []).slice(0, ASKS_MAX).map((a) => ({

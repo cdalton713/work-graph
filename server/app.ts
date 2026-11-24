@@ -64,8 +64,8 @@ export type App = Hono & {
   injectWebSocket: (server: Server) => void;
   link: {
     hub: LinkHub; check: () => Promise<void>; stop: () => void;
-    /** The server stops: stop the timers and close each link socket (`LinkHub.shutdown`). */
-    shutdown: () => Promise<void>;
+    /** The server stops: stop the timers and close each link socket (`LinkHub.shutdown`). False: the link state was not written. */
+    shutdown: () => Promise<boolean>;
   };
 };
 

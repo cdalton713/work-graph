@@ -1,6 +1,7 @@
 // The state of the link that must survive a server restart: the queue and the open asks of each room.
 // Presence and progress are not here: they come back with the next `hello` and report of a coordinator.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Ask, Envelope, ProjectRef } from "../src/lib/link.ts";
 
@@ -21,8 +22,11 @@ export interface Store {
   load: () => LinkState;
   /** A change: write the state at most `SAVE_MS` later. */
   save: (state: () => LinkState) => void;
-  /** Write a change that waits now (the server stops). */
-  flush: () => void;
+  /**
+   * Write a change that waits now. True: the file holds the current state (also when nothing waited). False: the
+   * write failed, and the change still waits for the next try.
+   */
+  flush: () => boolean;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -60,24 +64,29 @@ export function fileStore(
   let pending: (() => LinkState) | null = null;
   let cancel: (() => void) | null = null;
   // `pending` stays until the rename succeeds, so that a failed write is tried again.
-  const write = () => {
+  const write = (): boolean => {
     cancel = null;
     const state = pending;
-    if (!state) return;
+    if (!state) return true;
     const { rooms } = state();
     const text = JSON.stringify({
       version: STATE_VERSION,
       rooms: rooms.filter((r) => r.queue.length || r.asks.length).map((r) => ({ ref: r.ref, queue: r.queue.slice(-queueMax), asks: r.asks.slice(0, ASKS_MAX) })),
     });
+    // A new temporary file for each write (`wx`): the mode 600 applies only to a file that the write creates, so
+    // an old file of the same name must not get the state.
+    const temp = `${file}.${randomUUID()}.tmp`;
     try {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const temp = `${file}.${process.pid}.tmp`;
-      writeFileSync(temp, text, { mode: 0o600 });
+      writeFileSync(temp, text, { mode: 0o600, flag: "wx" });
       renameSync(temp, file);
       if (pending === state) pending = null;
+      return true;
     } catch (error) {
+      try { rmSync(temp, { force: true }); } catch { /* no directory: no temporary file */ }
       log(`link state: cannot write ${file}: ${(error as Error).message}; the next try is in ${SAVE_MS} ms`);
       cancel ??= after(write, SAVE_MS);
+      return false;
     }
   };
   return {
@@ -103,7 +112,7 @@ export function fileStore(
     },
     flush: () => {
       cancel?.();
-      write();
+      return write();
     },
   };
 }

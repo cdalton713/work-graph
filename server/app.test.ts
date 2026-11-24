@@ -1,10 +1,15 @@
+import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { serve } from "@hono/node-server";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import WebSocket from "ws";
 import type { Rules } from "./access.ts";
 import { createApp } from "./app.ts";
 import { setTransport } from "./linear.ts";
+import { DEAD_MS, PING_MS, RESTART_CODE, stopOnSignals, type Timers } from "./link.ts";
 
 const rules: Rules = { port: 4747, tailnet: null };
 const local = { host: "127.0.0.1:4747" };
@@ -714,5 +719,92 @@ describe("graph cache of the server", () => {
     expect(asked.many).toEqual([["p1", "p2"], ["p1", "p2"]]);
     expect(asked.one).toBe(0);
     expect(asked.loads).toHaveLength(3);
+  });
+});
+
+
+describe("link sockets of the server", () => {
+  const closers: (() => void)[] = [];
+  afterEach(() => { closers.splice(0).forEach((close) => close()); });
+  const settle = () => new Promise((ok) => setTimeout(ok, 30));
+
+  /** A server with a clock and link timers that move only when the test says so. */
+  async function start() {
+    const clock = { at: Date.parse("2026-11-20T00:00:00Z") };
+    const jobs: { fn: () => void; at: number; every: number | null; off: boolean }[] = [];
+    const add = (fn: () => void, ms: number, every: boolean) => {
+      const job = { fn, at: clock.at + ms, every: every ? ms : null, off: false };
+      jobs.push(job);
+      return () => { job.off = true; };
+    };
+    const timers: Timers = { every: (fn, ms) => add(fn, ms, true), after: (fn, ms) => add(fn, ms, false) };
+    /** Move the clock by `ms` and run each timer that falls due, in time order. */
+    const advance = (ms: number) => {
+      const end = clock.at + ms;
+      for (;;) {
+        const due = jobs.filter((j) => !j.off && j.at <= end).sort((a, b) => a.at - b.at)[0];
+        if (!due) break;
+        clock.at = due.at;
+        if (due.every) due.at += due.every; else due.off = true;
+        due.fn();
+      }
+      clock.at = end;
+    };
+    const portRules: Rules = { port: 0, tailnet: null };
+    const server = createApp(portRules, { team: "CD", dist, workspaces: [workWorkspace()], watchMs: 0, now: () => clock.at, linkTimers: timers });
+    const http = serve({ fetch: server.fetch, port: 0, hostname: "127.0.0.1" });
+    server.injectWebSocket(http as never);
+    await new Promise<void>((ok) => http.once("listening", () => ok()));
+    portRules.port = (http.address() as AddressInfo).port;
+    closers.push(() => { server.link.stop(); http.close(); });
+    return { server, port: portRules.port, advance, running: () => jobs.filter((j) => !j.off).length };
+  }
+  /** An overview page socket. `autoPong: false` is a client that went away without a close. */
+  async function page(port: number, autoPong = true) {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=page`, { headers: { origin: `http://127.0.0.1:${port}` }, autoPong });
+    let pings = 0;
+    ws.on("ping", () => { pings++; });
+    const closed = new Promise<number>((ok) => ws.once("close", (code) => ok(code)));
+    await new Promise((ok) => ws.once("open", ok));
+    closers.push(() => ws.terminate());
+    return { ws, closed, pings: () => pings };
+  }
+
+  it("terminates a socket 45 s after its last pong, also one that sends messages, and keeps one that sends pongs", async () => {
+    const { port, advance } = await start();
+    const live = await page(port), silent = await page(port, false), talker = await page(port, false);
+    for (let t = 10_000; t < DEAD_MS; t += 10_000) {
+      talker.ws.send("still here");
+      advance(10_000);
+      if (t % PING_MS === 0) await vi.waitFor(() => expect(live.pings()).toBe(t / PING_MS));
+      await settle(); // the pong of the live socket reaches the server
+    }
+    expect(silent.pings()).toBe(Math.floor(DEAD_MS / PING_MS));
+    advance(DEAD_MS - 40_000 - 1); // 1 ms before the deadline
+    await settle();
+    expect([silent.ws.readyState, talker.ws.readyState]).toEqual([WebSocket.OPEN, WebSocket.OPEN]);
+    advance(1);
+    expect(await silent.closed).toBe(1006); // terminated: no close frame
+    expect(await talker.closed).toBe(1006);
+    expect(live.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it.each(["SIGTERM", "SIGINT"] as const)("on %s closes each socket with 1012, refuses a new one with 503, and then exits", async (signal) => {
+    const { server, port, running } = await start();
+    const a = await page(port), b = await page(port);
+    const signals = new EventEmitter();
+    const exit = vi.fn();
+    stopOnSignals(() => server.link.shutdown(), (signal, fn) => signals.on(signal, fn), exit);
+    signals.emit(signal);
+    const status = await new Promise<number>((ok) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=page`, { headers: { origin: `http://127.0.0.1:${port}` } });
+      ws.on("unexpected-response", (_req, res) => ok(res.statusCode ?? 0));
+      ws.on("open", () => { ws.close(); ok(101); });
+    });
+    expect(status).toBe(503);
+    expect(await a.closed).toBe(RESTART_CODE);
+    expect(await b.closed).toBe(RESTART_CODE);
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    expect(running()).toBe(0);
   });
 });

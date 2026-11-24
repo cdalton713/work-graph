@@ -15,7 +15,7 @@ import { type Rules, linkRefusal, refusal } from "./access.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { LinearError, addComment, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, updateIssue } from "./linear.ts";
-import { type Connection, LinkHub } from "./link.ts";
+import { type Connection, LinkHub, type Timers } from "./link.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
 import { configureSite, site } from "../src/lib/site.ts";
 
@@ -46,28 +46,35 @@ export interface AppOptions {
   dist: string;
   /** How often the server checks Linear for each project that has a connected coordinator. 0: never (tests). */
   watchMs?: number;
-  /** The clock of the graph caches (tests). */
+  /** The clock of the graph caches and of the link (tests). */
   now?: () => number;
+  /** The timers of the link heartbeat (tests). */
+  linkTimers?: Timers;
 }
 
 /** The app, and what the server process needs besides `fetch`. */
 export type App = Hono & {
   /** Lets the HTTP server take WebSocket upgrades (`/api/link`). */
   injectWebSocket: (server: Server) => void;
-  link: { hub: LinkHub; check: () => Promise<void>; stop: () => void };
+  link: {
+    hub: LinkHub; check: () => Promise<void>; stop: () => void;
+    /** The server stops: stop the timers and close each link socket (`LinkHub.shutdown`). */
+    shutdown: () => Promise<void>;
+  };
 };
 
 /**
  * The app for `rules`. `rules` is read on each request, so a change of `rules.tailnet` takes
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
-export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, human, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
+export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, human, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   // The overview and the graph rules on the server use the same names as the page.
   configureSite({ human, defaultWorkspace: workspaces[0].id });
   const app = new Hono();
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   // `wrote` from wg: forget the cached graph of that project, so the pages that load again see the change.
-  const hub = new LinkHub(undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined));
+  const hub = new LinkHub(now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers);
+  hub.start();
   app.use(async (c, next) => {
     await next();
     // Vite puts a hash of the content in each name under assets/, so such a file never changes.
@@ -304,12 +311,16 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     const role = c.req.query("role") ?? "";
     const reason = linkRefusal(role, (name) => c.req.header(name), rules);
     if (reason) return c.json({ error: reason }, 403);
+    // The server stops: it takes no new link socket (also below, for an upgrade that waited for the project).
+    const restarting = () => c.json({ error: "the server restarts" }, 503);
+    if (hub.closing) return restarting();
     const workspace = c.req.query("workspace") || site.defaultWorkspace;
     if (!workspaces.some((w) => w.id === workspace)) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
     const wanted = c.req.query("project");
     if (!wanted && role === "coordinator") return c.json({ error: "a coordinator names its project" }, 400);
     const project = wanted ? await resolve(workspace, wanted) : null;
     if (wanted && !project) return c.json({ error: `no project "${wanted}" in ${workspace}` }, 404);
+    if (hub.closing) return restarting();
     c.set("linkRef" as never, (project ? { workspace, id: project.id } : null) as never);
     return next();
   }, upgradeWebSocket((c) => {
@@ -318,8 +329,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     let connection: Connection | null = null;
     return {
       onOpen: (_event, ws) => {
-        const peer = { send: (text: string) => ws.send(text), close: (code?: number, reason?: string) => ws.close(code, reason) };
+        // The raw socket of `ws` has the ping frames of the heartbeat, which WSContext does not have.
+        const raw = ws.raw as import("ws").WebSocket;
+        const peer = {
+          send: (text: string) => ws.send(text), close: (code?: number, reason?: string) => ws.close(code, reason),
+          ping: () => raw.ping(), terminate: () => raw.terminate(),
+        };
         connection = role === "coordinator" ? hub.joinCoordinator(peer, ref!) : hub.joinPage(peer, ref);
+        raw.on("pong", () => connection?.pong());
       },
       onMessage: (event) => connection?.receive(typeof event.data === "string" ? event.data : String(event.data)),
       onClose: () => connection?.closed(),
@@ -355,6 +372,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     for (const ref of active) {
       const workspace = workspaces.find((w) => w.id === ref.workspace);
       if (!workspace) continue;
+      // The coordinator can go away while the check of all projects waits for Linear: then no load for it.
+      if (!hub.active().some((r) => projectKey(r) === projectKey(ref))) {
+        seen.delete(projectKey(ref));
+        continue;
+      }
       try {
         const { data } = await linearWorkspace.run(workspace, () => caches.get(workspace.id)!.get(ref.id));
         const now = fingerprint(data), before = seen.get(projectKey(ref));
@@ -377,6 +399,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
 
   return Object.assign(app, {
     injectWebSocket: (server: Server) => injectWebSocket(server),
-    link: { hub, check, stop: () => { if (timer) clearInterval(timer); } },
+    link: {
+      hub, check,
+      stop: () => { if (timer) clearInterval(timer); hub.stop(); },
+      shutdown: () => { if (timer) clearInterval(timer); return hub.shutdown(); },
+    },
   });
 }

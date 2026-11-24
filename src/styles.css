@@ -532,6 +532,10 @@ button.copy.is-copied { color: var(--lamp-done); }
 /* The autonomy level: full (the agent does more) is amber, supervised (the human approves more) is blue. */
 .bar-autonomy { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--ink-3); }
 .bar-autonomy b { font-weight: 600; color: var(--ink-1); }
+/* The review effort: light (less review) is amber. */
+.bar-review { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--ink-3); }
+.bar-review b { font-weight: 600; color: var(--ink-1); }
+.bar-review.review-light b { color: var(--lamp-running); }
 .bar-autonomy.auto-full b, .ov-auto.auto-full { color: var(--lamp-running); }
 .bar-autonomy.auto-supervised b, .ov-auto.auto-supervised { color: var(--lamp-review); }
 .ov-auto { font-size: 11px; color: var(--ink-3); border: 1px solid currentColor; border-radius: 3px; padding: 0 4px; line-height: 16px; }

@@ -1,4 +1,5 @@
 import type { AutonomyLevel } from "./autonomy";
+import type { ReviewEffort } from "./review";
 
 export type StateType = "triage" | "backlog" | "unstarted" | "started" | "completed" | "canceled" | "duplicate";
 export interface State { id: string; name: string; type: StateType; color: string; position?: number }
@@ -37,6 +38,8 @@ export interface Project {
   initiative?: string | null;
   /** The child of the project label group `autonomy` on the project; null: none, so the level is `standard`. */
   autonomy?: AutonomyLevel | null;
+  /** The child of the project label group `review` on the project; null: none, so the review effort is `thorough`. */
+  review?: ReviewEffort | null;
   /** The project has the plain label `paused`: the coordinator holds each action until Resume. */
   paused?: boolean;
 }

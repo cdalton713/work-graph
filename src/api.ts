@@ -1,4 +1,5 @@
 import type { AutonomyLevel } from "./lib/autonomy";
+import type { ReviewEffort } from "./lib/review";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
 import type { Comment, GraphData, Issue, IssuePatch, ProjectList, ServerStatus } from "./lib/types";
@@ -32,6 +33,9 @@ export const api = {
   /** Set the autonomy level of the project; the coordinator gets it at once. */
   autonomy: (projectId: string, level: AutonomyLevel, workspace?: string) =>
     call<{ ok: boolean; level: AutonomyLevel; queued: number }>(`projects/${projectId}/autonomy`, { method: "POST", body: JSON.stringify({ level }) }, workspace),
+  /** Set the review effort of the project; the coordinator gets it at once. */
+  reviewEffort: (projectId: string, level: ReviewEffort, workspace?: string) =>
+    call<{ ok: boolean; level: ReviewEffort; queued: number }>(`projects/${projectId}/review-effort`, { method: "POST", body: JSON.stringify({ level }) }, workspace),
   /** The human's reply to a worker's question; the coordinator sends it to the worker. */
   reply: (projectId: string, askId: string, body: string, workspace?: string) => call<{ ok: boolean; recorded: boolean }>(`projects/${projectId}/asks/${encodeURIComponent(askId)}/reply`, { method: "POST", body: JSON.stringify({ body }) }, workspace),
   update: (issueId: string, patch: IssuePatch, workspace?: string) => call<Issue>(`issues/${issueId}`, { method: "PATCH", body: JSON.stringify(patch) }, workspace),

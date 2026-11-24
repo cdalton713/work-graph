@@ -44,6 +44,14 @@
       "supervised"
     ],
     "autonomy_default": "standard",
+    "review_group": "review",
+    "review_prefix": "review:",
+    "review_levels": [
+      "thorough",
+      "standard",
+      "light"
+    ],
+    "review_default": "thorough",
     "paused": "paused"
   },
   "card": {

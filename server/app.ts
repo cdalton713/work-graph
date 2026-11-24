@@ -16,7 +16,8 @@ import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteCon
 import { type Rules, linkRefusal, refusal } from "./access.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
-import { LinearError, addComment, linearBudget, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, updateIssue } from "./linear.ts";
+import { isReviewEffort } from "../src/lib/review.ts";
+import { LinearError, addComment, linearBudget, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, updateIssue } from "./linear.ts";
 import { type Connection, LinkHub, QUEUE_MAX, realTimers as realLinkTimers, type Timers } from "./link.ts";
 import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
@@ -312,6 +313,19 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     names.at = 0;
     wrote(null, ref.id);
     hub.publish(ref, "command", { name: "autonomy", key: null, issue: null, level });
+    return c.json({ ok: true, level, queued: hub.presence(ref).queued });
+  });
+  // The review effort of the effort (work-graph review-and-merge.md "Review effort"). The project label is the
+  // record; the command `next` wakes the coordinator, whose `wg next` reads the label and prints `do review`.
+  api.post("/projects/:id/review-effort", async (c) => {
+    const { level } = await json(c.req.json<{ level?: unknown }>());
+    if (!isReviewEffort(level)) throw new LinearError("level must be thorough, standard, or light", 400);
+    const workspace = linearWorkspace.getStore()!;
+    const ref = { workspace: workspace.id, id: c.req.param("id") };
+    await setReviewEffort(ref.id, level, workspace.team, workspace.teamLabels);
+    names.at = 0;
+    wrote(null, ref.id);
+    hub.publish(ref, "command", { name: "next", key: null, issue: null });
     return c.json({ ok: true, level, queued: hub.presence(ref).queued });
   });
   // The human's reply to a worker's question (an Orca ask that the coordinator reported). The reply is a

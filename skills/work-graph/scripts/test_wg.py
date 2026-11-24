@@ -4896,9 +4896,12 @@ class ReviewEffortTests(DirTests):
         names = {label["id"]: label["name"] for label in labels}
         self.assertEqual(sorted(names[l] for l in on_project), ["full", "review:light"])
 
-    def test_the_contract_does_not_change(self):
-        # A page menu for the level is later work: the contract between wg and the page has no review group.
-        self.assertNotIn("thorough", wg.contract_text())
+    def test_the_contract_gives_the_page_the_review_group(self):
+        # The page has a menu for the level: it must use the same group, child label names, levels, and default.
+        labels = json.loads(wg.contract_text())["project_labels"]
+        self.assertEqual({k: v for k, v in labels.items() if k.startswith("review_")},
+                         {"review_group": "review", "review_prefix": "review:",
+                          "review_levels": ["thorough", "standard", "light"], "review_default": "thorough"})
 
 
 if __name__ == "__main__":

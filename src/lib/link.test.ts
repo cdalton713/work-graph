@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import contract from "../../skills/work-graph/contract.json";
 import { ANSWERED_LABEL, AUTONOMY_DEFAULT, AUTONOMY_GROUP, AUTONOMY_LEVELS, autonomyOf, PAUSED_LABEL, pausedOf } from "./autonomy";
+import { REVIEW_DEFAULT, REVIEW_GROUP, REVIEW_LEVELS, REVIEW_PREFIX, reviewOf } from "./review";
 import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, liveJob, presenceText } from "./link";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
@@ -42,6 +43,18 @@ describe("the link agrees with wg (contract.json)", () => {
       version: LINK_VERSION, path: "/api/link", to_coordinator: [...LINK_TO_COORDINATOR],
       from_coordinator: [...LINK_FROM_COORDINATOR], commands: [...LINK_COMMANDS],
     });
+  });
+});
+
+describe("the review effort label agrees with wg (contract.json)", () => {
+  it("has the same group, prefix, levels, and default", () => {
+    expect(contract.project_labels).toMatchObject({ review_group: REVIEW_GROUP, review_prefix: REVIEW_PREFIX, review_levels: [...REVIEW_LEVELS], review_default: REVIEW_DEFAULT });
+  });
+  it("reads the level from the label group, with the prefix or as an old label without it", () => {
+    expect(reviewOf([{ name: "standard", parent: { name: "autonomy" } }, { name: "review:standard", parent: { name: "Review" } }])).toBe("standard");
+    expect(reviewOf([{ name: "light", parent: { name: "review" } }])).toBe("light");
+    expect(reviewOf([{ name: "review:light", parent: null }, { name: "review:other", parent: { name: "review" } }])).toBeNull();
+    expect(reviewOf(undefined)).toBeNull();
   });
 });
 

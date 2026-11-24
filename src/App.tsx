@@ -7,6 +7,7 @@ import { Panel } from "./components/Panel";
 import { CopyButton, Lamp, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
+import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
 import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./lib/health";
 import { liveJob, presenceText } from "./lib/link";
 import { type OverviewData, PROJECT_LAMP, movesWithAsks, summaryKey } from "./lib/overview";
@@ -206,6 +207,25 @@ export function App() {
     }
   };
   const autonomy = project?.autonomy ?? AUTONOMY_DEFAULT;
+  // The review effort is a label of the project too. A change goes to Linear, then wakes the coordinator.
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const setReviewEffort = async (level: ReviewEffort) => {
+    if (!project || reviewBusy) return;
+    const target = project;
+    setReviewBusy(true);
+    try {
+      const result = await api.reviewEffort(target.id, level, target.workspace);
+      setDirectory((list) => list && { ...list, projects: list.projects.map((p) => p.id === target.id && p.workspace === target.workspace ? { ...p, review: level } : p) });
+      setCommandNote(coordinator?.state === "listening" ? `Review effort ${level}: the coordinator was told.`
+        : `Review effort ${level}. The coordinator gets it at its next wg next${result.queued ? ` (queue: ${result.queued})` : ""}.`);
+      setTimeout(() => setCommandNote(null), 6000);
+    } catch (e) {
+      setError(`review effort: ${(e as Error).message}`);
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+  const review = project?.review ?? REVIEW_DEFAULT;
 
   const closeProject = async () => {
     if (!project || closing || pending.current) return;
@@ -391,6 +411,13 @@ export function App() {
             title={`Autonomy level: what the coordinator may do without you.${project.autonomy ? "" : " No label on the project: standard."} A change tells the coordinator at once.`}
             options={AUTONOMY_LEVELS.map((level) => ({ id: level, label: level, hint: AUTONOMY_HINTS[level] }))}>
             <span className={`bar-autonomy auto-${autonomy}`}>{autonomyBusy ? "Autonomy…" : <>Autonomy <b>{autonomy}</b></>}</span><span className="caret">▾</span>
+          </Picker>
+        )}
+        {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
+          <Picker wide value={[review]} onChange={([level]) => void setReviewEffort(level as ReviewEffort)} disabled={reviewBusy}
+            title={`Review effort: how much review each PR gets.${project.review ? "" : " No label on the project: thorough."} A change tells the coordinator at once.`}
+            options={REVIEW_LEVELS.map((level) => ({ id: level, label: level, hint: REVIEW_HINTS[level] }))}>
+            <span className={`bar-review review-${review}`}>{reviewBusy ? "Review…" : <>Review <b>{review}</b></>}</span><span className="caret">▾</span>
           </Picker>
         )}
         <span className="station-fill" />

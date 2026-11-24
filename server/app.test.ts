@@ -88,14 +88,14 @@ describe("api", () => {
     expect(await response.json()).toEqual({ error: "bad host" });
   });
   it("lists the projects of the team", async () => {
-    const labels = { nodes: [{ name: "AI", parent: null }, { name: "Tooling", parent: { name: "Initiative" } }, { name: "full", parent: { name: "Autonomy" } }, { name: "paused", parent: null }] };
+    const labels = { nodes: [{ name: "AI", parent: null }, { name: "Tooling", parent: { name: "Initiative" } }, { name: "full", parent: { name: "Autonomy" } }, { name: "review:light", parent: { name: "Review" } }, { name: "paused", parent: null }] };
     linear({ teams: { nodes: [{ projects: { nodes: [{ id: "p2", name: "B", url: "u", status: null }, { id: "p1", name: "A", url: "u", status: { name: "Started", type: "started" }, labels }], pageInfo: { hasNextPage: false, endCursor: null } } }] } });
     const response = await app().request("/api/projects", { headers: local });
     expect(await response.json()).toEqual({
       workspaces: [{ id: "work", name: "Work" }],
       projects: [
-        { id: "p1", name: "A", url: "u", status: "Started", statusType: "started", initiative: "Tooling", autonomy: "full", paused: true, workspace: "work", workspaceName: "Work" },
-        { id: "p2", name: "B", url: "u", status: "", statusType: "", initiative: null, autonomy: null, paused: false, workspace: "work", workspaceName: "Work" },
+        { id: "p1", name: "A", url: "u", status: "Started", statusType: "started", initiative: "Tooling", autonomy: "full", review: "light", paused: true, workspace: "work", workspaceName: "Work" },
+        { id: "p2", name: "B", url: "u", status: "", statusType: "", initiative: null, autonomy: null, review: null, paused: false, workspace: "work", workspaceName: "Work" },
       ],
     });
   });
@@ -162,7 +162,7 @@ describe("api", () => {
         { id: "work", name: "Work" },
         { id: "home", name: "Home", error: "Home is unavailable. Reload to try again." },
       ],
-      projects: [{ id: "work-project", name: "Work", url: "u", status: "", statusType: "", initiative: null, autonomy: null, paused: false, workspace: "work", workspaceName: "Work" }],
+      projects: [{ id: "work-project", name: "Work", url: "u", status: "", statusType: "", initiative: null, autonomy: null, review: null, paused: false, workspace: "work", workspaceName: "Work" }],
     });
   });
   it("loads project issues across pages without mixing workspace graph caches", async () => {
@@ -493,6 +493,54 @@ describe("close project safety", () => {
     expect((await close("p1", true, { ...write, origin: "https://evil.example" })).status).toBe(403);
     expect((await close("p1", true, { ...write, "x-workspace": "unknown" } as typeof write)).status).toBe(400);
     expect(writes).toEqual([]);
+  });
+});
+
+describe("review effort", () => {
+  /** A Linear stub for the label calls: the group `review` exists with the old child `light`, which the project has. */
+  function labelLinear() {
+    const calls: { query: string; variables: Record<string, any> }[] = [];
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      calls.push({ query, variables });
+      let data: unknown = { ok: { success: true } };
+      if (query.includes("project(id")) {
+        data = { project: { id: "p1", teams: { nodes: [{ key: "CD" }] }, labels: { nodes: [{ id: "old-light", parent: { id: "r" } }, { id: "standard-id", parent: { id: "g" } }] } }, teams: { nodes: [{ id: "team-cd" }] } };
+      } else if (query.includes("projectLabels(")) {
+        data = { projectLabels: { nodes: [{ id: "g", name: "autonomy", isGroup: true, retiredAt: null, parent: null },
+          { id: "standard-id", name: "standard", isGroup: false, retiredAt: null, parent: { id: "g" } },
+          { id: "r", name: "Review", isGroup: true, retiredAt: null, parent: null },
+          { id: "old-light", name: "light", isGroup: false, retiredAt: null, parent: { id: "r" } }] } };
+      } else if (query.includes("projectLabelCreate")) {
+        data = { projectLabelCreate: { projectLabel: { id: `new-${variables.i.name}` } } };
+      }
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    return calls;
+  }
+  const post = (a: ReturnType<typeof app>, level: unknown) =>
+    a.request("/api/projects/p1/review-effort", { method: "POST", headers: write, body: JSON.stringify({ level }) });
+
+  it("sets the label review:<level>, removes the old one, keeps the autonomy label, and wakes the coordinator", async () => {
+    const calls = labelLinear();
+    const a = app();
+    const response = await post(a, "standard");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, level: "standard", queued: 1 });
+    expect(calls.find((c) => c.query.includes("projectLabelCreate"))?.variables.i).toEqual({ name: "review:standard", teamId: "team-cd", parentId: "r" });
+    expect(calls.filter((c) => c.query.includes("projectRemoveLabel")).map((c) => c.variables)).toEqual([{ id: "p1", l: "old-light" }]);
+    expect(calls.find((c) => c.query.includes("projectAddLabel"))?.variables).toEqual({ id: "p1", l: "new-review:standard" });
+    const sent: string[] = [];
+    const connection = a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
+    connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
+    expect(JSON.parse(sent[0])).toMatchObject({ type: "command", payload: { name: "next", key: null, issue: null } });
+  });
+  it("refuses a level that is not a review effort", async () => {
+    const calls = labelLinear();
+    const response = await post(app(), "full");
+    expect(response.status).toBe(400);
+    expect(calls).toEqual([]);
   });
 });
 

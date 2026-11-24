@@ -1985,6 +1985,8 @@ def contract():
                    "claim_prefix": "agent:", "answered": ANSWERED_LABEL},
         "project_labels": {"initiative_group": INITIATIVE_GROUP, "autonomy_group": AUTONOMY_GROUP,
                            "autonomy_levels": list(AUTONOMY_LEVELS), "autonomy_default": AUTONOMY_DEFAULT,
+                           "review_group": REVIEW_GROUP, "review_prefix": REVIEW_PREFIX,
+                           "review_levels": list(REVIEW_LEVELS), "review_default": REVIEW_DEFAULT,
                            "paused": PAUSED_LABEL},
         "card": {"prefix": "**work-graph node card**", "footers": [CARD_FOOTER, EMPTY_CARD],
                  "fields": [*CARD_PLAN_FIELDS, *CARD_RUN_FIELDS], "samples": cards},

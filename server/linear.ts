@@ -2,6 +2,7 @@
 import type { Comment, GraphData, Issue, IssuePatch, IssueRef, Label, Milestone, Person, Project, PullRequest, State, Team } from "../src/lib/types.ts";
 import { site } from "../src/lib/site.ts";
 import { ANSWERED_LABEL, AUTONOMY_GROUP, type AutonomyLevel, autonomyOf, PAUSED_LABEL, pausedOf } from "../src/lib/autonomy.ts";
+import { REVIEW_GROUP, type ReviewEffort, reviewLabel, reviewOf } from "../src/lib/review.ts";
 import { linearWorkspace } from "./workspaces.ts";
 
 const ENDPOINT = "https://api.linear.app/graphql";
@@ -378,7 +379,7 @@ export async function listProjects(teamKey: string): Promise<Project[]> {
     },
   );
   return projects
-    .map((p) => ({ id: p.id, name: p.name, url: p.url, status: p.status?.name ?? "", statusType: p.status?.type ?? "", initiative: initiativeOf(p.labels?.nodes), autonomy: autonomyOf(p.labels?.nodes), paused: pausedOf(p.labels?.nodes) }))
+    .map((p) => ({ id: p.id, name: p.name, url: p.url, status: p.status?.name ?? "", statusType: p.status?.type ?? "", initiative: initiativeOf(p.labels?.nodes), autonomy: autonomyOf(p.labels?.nodes), review: reviewOf(p.labels?.nodes), paused: pausedOf(p.labels?.nodes) }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -387,7 +388,22 @@ export async function listProjects(teamKey: string): Promise<Project[]> {
  * `autonomy`, made when it is missing, as `wg autonomy` does. Team labels with `teamScoped`; else workspace
  * labels (the personal workspace: team project labels need Linear's Business plan).
  */
-export async function setAutonomy(projectId: string, level: AutonomyLevel, teamKey: string, teamScoped: boolean): Promise<void> {
+export function setAutonomy(projectId: string, level: AutonomyLevel, teamKey: string, teamScoped: boolean): Promise<void> {
+  return setGroupLabel(projectId, teamKey, teamScoped, { group: AUTONOMY_GROUP, child: level, noun: "autonomy label",
+    description: "work-graph: the autonomy level of each effort (full, standard, supervised). The coordinator follows it; change it on the work-graph page at any time." });
+}
+
+/**
+ * Give the project the review effort `level`: the child `review:<level>` of the single-select project label group
+ * `review`, as `wg review-effort` does. It replaces an old child without the prefix. Same scope rule as `setAutonomy`.
+ */
+export function setReviewEffort(projectId: string, level: ReviewEffort, teamKey: string, teamScoped: boolean): Promise<void> {
+  return setGroupLabel(projectId, teamKey, teamScoped, { group: REVIEW_GROUP, child: reviewLabel(level), noun: "review effort label",
+    description: "work-graph: the review effort of each effort (thorough, standard, light). The coordinator follows it; change it on the work-graph page at any time." });
+}
+
+/** Give the project the child `child` of the single-select project label group `group`, and no other child of it. Group and child are made when missing. */
+async function setGroupLabel(projectId: string, teamKey: string, teamScoped: boolean, label: { group: string; child: string; noun: string; description: string }): Promise<void> {
   type RawProjectLabel = { id: string; name: string; isGroup: boolean; retiredAt: string | null; parent: { id: string } | null };
   const info = await gql(`query($id:String!,$k:String!){ project(id:$id){ id teams(first:10){nodes{key}} labels(first:50){nodes{id parent{id}}} }
     teams(first:1,filter:{key:{eq:$k}}){ nodes{id} } }`, { id: projectId, k: teamKey });
@@ -402,13 +418,12 @@ export async function setAutonomy(projectId: string, level: AutonomyLevel, teamK
     { f: scope })).projectLabels.nodes as RawProjectLabel[];
   const create = async (input: Record<string, unknown>) =>
     (await gql(`mutation($i:ProjectLabelCreateInput!){ projectLabelCreate(input:$i){ projectLabel{id} } }`, { i: input })).projectLabelCreate.projectLabel.id as string;
-  const found = labels.find((l) => l.isGroup && l.name.toLowerCase() === AUTONOMY_GROUP);
-  if (found?.retiredAt) throw new LinearError(`the project label group ${AUTONOMY_GROUP} is retired; restore it in Linear`, 409);
-  const group = found?.id ?? await create({ name: AUTONOMY_GROUP, ...owner, isGroup: true, groupType: "singleSelect",
-    description: "work-graph: the autonomy level of each effort (full, standard, supervised). The coordinator follows it; change it on the work-graph page at any time." });
-  const child = labels.find((l) => l.parent?.id === group && l.name === level);
-  if (child?.retiredAt) throw new LinearError(`the autonomy label ${level} is retired; restore it in Linear`, 409);
-  const childId = child?.id ?? await create({ name: level, ...owner, parentId: group });
+  const found = labels.find((l) => l.isGroup && l.name.toLowerCase() === label.group);
+  if (found?.retiredAt) throw new LinearError(`the project label group ${label.group} is retired; restore it in Linear`, 409);
+  const group = found?.id ?? await create({ name: label.group, ...owner, isGroup: true, groupType: "singleSelect", description: label.description });
+  const child = labels.find((l) => l.parent?.id === group && l.name === label.child);
+  if (child?.retiredAt) throw new LinearError(`the ${label.noun} ${label.child} is retired; restore it in Linear`, 409);
+  const childId = child?.id ?? await create({ name: label.child, ...owner, parentId: group });
   for (const label of project.labels.nodes) {
     if (label.parent?.id === group && label.id !== childId) {
       await gql(`mutation($id:String!,$l:String!){ projectRemoveLabel(id:$id, labelId:$l){ success } }`, { id: projectId, l: label.id });

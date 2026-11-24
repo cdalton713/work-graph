@@ -291,6 +291,16 @@ describe("api", () => {
     connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
     expect(sent.map((t) => JSON.parse(t))).toContainEqual(expect.objectContaining({ type: "answer", payload: { issue: `${team}-1`, key: null, body: "yes" } }));
   });
+  it.each([["data: null", { data: null }], ["no data", {}]])("answers 502 when Linear gives %s for the new comment", async (_name, answer) => {
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query } = JSON.parse(init.body as string);
+      return { ok: true, json: async () => (query.includes("commentCreate") ? answer : { data: { issue: mine } }) };
+    }));
+    const response = await app().request("/api/issues/i1/comments", { method: "POST", headers: write, body: JSON.stringify({ body: "hi" }) });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "Linear did not save the comment" });
+  });
   it("refuses a write to an issue of another team", async () => {
     for (const issue of [{ ...mine, team: { key: "ENG" } }]) {
       const calls = linear({ issue });

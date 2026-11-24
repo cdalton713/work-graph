@@ -235,6 +235,21 @@ describe("gql retry and limit", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("knows a mutation that comes after a fragment, and does not send it again after a timeout", async () => {
+    const query = "fragment F on Issue { id }\nmutation($i:X){ issueUpdate(input:$i){ issue{ ...F } } }";
+    expect(isMutation(query)).toBe(true);
+    expect(isMutation("query Q { a }\nmutation { b }")).toBe(true);
+    const fetch = answers(timeout, ok());
+    await expect(gql(query)).rejects.toThrow("Linear request failed");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not take a fragment, a name, a variable, or a string that is called mutation for a mutation", () => {
+    expect(isMutation("fragment mutation on Mutation { id }\nquery { a { ...mutation } }")).toBe(false);
+    expect(isMutation("query mutation($mutation: String = \"mutation\") @mutation { a }")).toBe(false);
+    expect(isMutation('query { a(t: """\nmutation\n""") }')).toBe(false);
+  });
+
   it("does not take a query that names a mutation in a comment or a field for a mutation", () => {
     expect(isMutation("# mutation\nquery{ a }")).toBe(false);
     expect(isMutation("{ mutationLog }")).toBe(false);

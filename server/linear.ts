@@ -147,10 +147,24 @@ function keepBudget(headers: Headers | undefined): void {
 type Failure = "network" | "timeout" | "rate" | "server" | "final";
 
 /**
- * Is the operation of a GraphQL document a mutation? GraphQL ignores whitespace, commas, a byte order
- * mark, and `#` comments before the first token, so they are skipped before the keyword is read.
+ * Does a GraphQL document hold a mutation operation? The operation can come after fragments, so each
+ * definition at the top level is read, not only the first. Strings and `#` comments are removed first.
+ * A word at the top level that follows `fragment`, `query`, or `subscription` is a name, not a keyword.
  */
-export const isMutation = (query: string) => /^mutation\b/.test(query.replace(/^(?:[\s,\uFEFF]+|#[^\n\r]*)*/, ""));
+export function isMutation(document: string): boolean {
+  const text = document.replace(/"""[\s\S]*?"""|"(?:\\.|[^"\\\n\r])*"|#[^\n\r]*/g, " ");
+  let depth = 0;
+  let previous = "";
+  for (const [token] of text.matchAll(/[{}()[\]]|[$@]?[_A-Za-z][_0-9A-Za-z]*/g)) {
+    if (token === "{" || token === "(" || token === "[") depth++;
+    else if (token === "}" || token === ")" || token === "]") depth--;
+    else if (depth === 0) {
+      if (token === "mutation" && !["fragment", "query", "subscription"].includes(previous)) return true;
+      previous = token;
+    }
+  }
+  return false;
+}
 /**
  * A query is safe to send again. A mutation is sent again only when Linear refused it before it did
  * anything (HTTP 429 or RATELIMITED): after a timeout or a 5xx, Linear can have applied it.
@@ -696,6 +710,6 @@ export async function addComment(issueId: string, body: unknown, team: string): 
     `mutation($i:CommentCreateInput!){ commentCreate(input:$i){ success comment{${COMMENT}} } }`,
     { i: { issueId, body } },
   );
-  if (!data.commentCreate?.success || !data.commentCreate.comment) throw new LinearError("Linear did not save the comment");
+  if (!data?.commentCreate?.success || !data.commentCreate.comment) throw new LinearError("Linear did not save the comment");
   return comment(data.commentCreate.comment);
 }

@@ -1,20 +1,22 @@
 // The Hono app of the work-graph UI: static files from dist/ and a small JSON API over Linear.
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import type { Server } from "node:http";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { compress } from "hono/compress";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { type OverviewData, type ProjectSummary, summarize } from "../src/lib/overview.ts";
 import { parseCard, statusName } from "../src/lib/graph.ts";
 import { type Changed, type ProjectRef, projectKey } from "../src/lib/link.ts";
-import type { GraphData, IssuePatch, Project, ProjectList } from "../src/lib/types.ts";
+import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal } from "./access.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
-import { LinearError, addComment, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, updateIssue } from "./linear.ts";
+import { LinearError, addComment, linearBudget, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, updateIssue } from "./linear.ts";
 import { type Connection, LinkHub, QUEUE_MAX, realTimers as realLinkTimers, type Timers } from "./link.ts";
 import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
@@ -22,6 +24,20 @@ import { configureSite, site } from "../src/lib/site.ts";
 
 /** How many project graphs the overview loads at the same time. */
 const OVERVIEW_LOADS = 4;
+/** An API request that takes longer than this writes a log line. */
+export const SLOW_MS = 5_000;
+
+/**
+ * The hash of the page contract, as `wg` computes it: the first 12 hex characters of the SHA-256 of
+ * `contract.json`. Null when the file is missing.
+ */
+export function contractHash(file: URL | string = new URL("../skills/work-graph/contract.json", import.meta.url)): string | null {
+  try {
+    return createHash("sha256").update(readFileSync(file)).digest("hex").slice(0, 12);
+  } catch {
+    return null;
+  }
+}
 
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css",
@@ -56,6 +72,10 @@ export interface AppOptions {
    * None: the link keeps them in memory only.
    */
   stateDir?: string;
+  /** The commit of the build. Default: `WG_VERSION`, else `dev`. */
+  version?: string;
+  /** The page contract file whose hash `/api/config` gives. Default: the `contract.json` of the skill. */
+  contractFile?: URL | string;
 }
 
 /** The app, and what the server process needs besides `fetch`. */
@@ -96,9 +116,13 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  * The app for `rules`. `rules` is read on each request, so a change of `rules.tailnet` takes
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
-export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, human, stateDir = process.env.WG_STATE_DIR || undefined, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
+export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, human, stateDir = process.env.WG_STATE_DIR || undefined,
+  version = process.env.WG_VERSION || "dev", contractFile, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   // The overview and the graph rules on the server use the same names as the page.
   configureSite({ human, defaultWorkspace: workspaces[0].id });
+  const clock = now ?? Date.now;
+  const started = clock();
+  const contract = contractHash(contractFile);
   const app = new Hono();
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   // `wrote` from wg: forget the cached graph of that project, so the pages that load again see the change.
@@ -110,6 +134,18 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // Vite puts a hash of the content in each name under assets/, so such a file never changes.
     const fixed = c.req.path.startsWith("/assets/") && c.res.status === 200;
     c.header("Cache-Control", fixed ? "public, max-age=31536000, immutable" : "no-store");
+  });
+  // Static files and JSON answers of any size, when the client accepts gzip. Every client that accepts Brotli
+  // or deflate accepts gzip too. The 1 KiB minimum of `compress` applies only to a reply with a Content-Length,
+  // and these replies have none.
+  app.use(compress({ encoding: "gzip" }));
+  // A slow API request or a server error writes one log line. The line has no body and no query. The path is
+  // the encoded path of the URL: `c.req.path` is decoded, so `%0A` in it would start a second line.
+  app.use("/api/*", async (c, next) => {
+    const start = clock();
+    await next();
+    const ms = clock() - start;
+    if (ms > SLOW_MS || c.res.status >= 500) console.warn(`wg api: ${c.req.method} ${new URL(c.req.url).pathname} ${c.res.status} ${Math.round(ms)}ms`);
   });
   app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -157,7 +193,20 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await next();
   });
   // The human's name and the default workspace, for the page before its first render (src/main.tsx).
-  api.get("/config", (c) => c.json({ human: site.human, defaultWorkspace: site.defaultWorkspace }));
+  // `contract` and `version` let a deploy check see which commit and which page contract run.
+  api.get("/config", (c) => c.json<SiteConfig>({ human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version }));
+  // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
+  api.get("/status", (c) => c.json<ServerStatus>({
+    version, contract, uptime: Math.floor((clock() - started) / 1000),
+    workspaces: workspaces.map(({ id, name }) => {
+      const budget = linearBudget(id);
+      return { id, name, requestsRemaining: budget?.requestsRemaining ?? null, requestsLimit: budget?.requestsLimit ?? null,
+        requestsReset: budget?.requestsReset ?? null, complexityRemaining: budget?.complexityRemaining ?? null,
+        complexityReset: budget?.complexityReset ?? null, at: budget?.at ?? null };
+    }),
+    cache: [...caches.values()].reduce((sum, cache) => sum + cache.size(), 0),
+    rooms: hub.counts(),
+  }));
   api.use(bodyLimit({ maxSize: 2_000_000, onError: (c) => c.json({ error: "request body too large" }, 413) }));
   const projectList = async (): Promise<ProjectList> => {
     const results = await Promise.allSettled(workspaces.map((workspace) =>
@@ -381,12 +430,21 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // Unknown paths get the app, so a reloaded deep link works.
     const body = await readFile(type ? file : join(dist, "index.html")).catch(() => null);
     if (!body) return c.text("not found (run `pnpm build`)", 404);
-    return c.body(body, 200, { "Content-Type": type ?? TYPES[".html"] });
+    const contentType = type ?? TYPES[".html"];
+    if (contentType !== TYPES[".html"]) return c.body(body, 200, { "Content-Type": contentType });
+    // The page has `no-store`; the ETag lets a client that has it skip the body. The tag is weak, so that the
+    // gzip and the plain reply have the same validator, and the 304 has the same ETag and Vary as the 200.
+    const tag = `W/"${createHash("sha1").update(body).digest("hex")}"`;
+    const vary = { ETag: tag, Vary: "Accept-Encoding" };
+    const have = c.req.header("if-none-match")?.split(",").map((t) => t.trim().replace(/^W\//, ""));
+    if (have?.includes(tag.slice(2)) || have?.includes("*")) return c.body(null, 304, vary);
+    return c.body(body, 200, { "Content-Type": contentType, ...vary });
   });
 
   app.onError((error, c) => {
     const status = (error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;
-    if (status === 500) console.error(error);
+    // An API request writes its one log line in the request log above. Another route writes the error here.
+    if (status === 500 && !c.req.path.startsWith("/api/")) console.error(error);
     return c.json({ error: error.message }, status);
   });
   // Linear edits that did not come through this page: for each project with a connected coordinator,

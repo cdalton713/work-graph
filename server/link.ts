@@ -7,6 +7,7 @@ import {
   type Presence, type Progress, type ProjectRef, type ToCoordinator, type ToPage, projectKey,
 } from "../src/lib/link.ts";
 import { ASKS_MAX, type LinkState, type Store } from "./store.ts";
+import type { RoomCounts } from "../src/lib/types.ts";
 
 /**
  * One open WebSocket, as the hub uses it. A peer with `ping` takes part in the heartbeat: the hub pings it and
@@ -245,6 +246,15 @@ export class LinkHub {
       }))
       .sort((a, b) => Number(b.connected) - Number(a.connected) || b.lastSeen.localeCompare(a.lastSeen));
     return { coordinators, queued: room.queue.length };
+  }
+
+  /** For each room: the counts of connected coordinators, pages, queued messages, and asks (`/api/status`). No text. */
+  counts(): RoomCounts[] {
+    return [...this.rooms.values()].map((r) => ({
+      workspace: r.ref.workspace, project: r.ref.id,
+      coordinators: [...r.coordinators.values()].filter((c) => c.peer).length,
+      pages: r.pages.size, queued: r.queue.length, asks: r.asks.length,
+    }));
   }
 
   /** The queued messages that only a coordinator can act on (answer, reply, command): `wg wake` starts one for them. */

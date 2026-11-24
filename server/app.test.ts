@@ -1,13 +1,16 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { serve } from "@hono/node-server";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { Rules } from "./access.ts";
-import { createApp } from "./app.ts";
+import { SLOW_MS, contractHash, createApp } from "./app.ts";
 import { setTransport } from "./linear.ts";
 import { DEAD_MS, PING_MS, RESTART_CODE, stopOnSignals, type Timers } from "./link.ts";
 
@@ -806,5 +809,151 @@ describe("link sockets of the server", () => {
     expect(await b.closed).toBe(RESTART_CODE);
     await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
     expect(running()).toBe(0);
+  });
+});
+
+describe("server status", () => {
+  const sink = () => ({ send: () => {}, close: () => {} });
+  const msg = (type: string, payload: unknown) => JSON.stringify({ v: 1, type, id: "x", project: { workspace: "work", id: "p1" }, at: "", payload });
+
+  it("gives the contract hash as wg computes it, and the version", async () => {
+    const contract = readFileSync(new URL("../skills/work-graph/contract.json", import.meta.url));
+    const body = await (await createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], version: "abc1234" })
+      .request("/api/config", { headers: local })).json();
+    expect(body.contract).toBe(createHash("sha256").update(contract).digest("hex").slice(0, 12));
+    expect(body.contract).toBe(contractHash());
+    expect(body.version).toBe("abc1234");
+    vi.stubEnv("WG_VERSION", "");
+    expect((await (await app().request("/api/config", { headers: local })).json()).version).toBe("dev");
+    vi.stubEnv("WG_VERSION", "def5678");
+    expect((await (await app().request("/api/config", { headers: local })).json()).version).toBe("def5678");
+    vi.unstubAllEnvs();
+    expect(contractHash(join(dist, "missing.json"))).toBeNull();
+  });
+
+  it("gives the uptime, the Linear budget, the cache size, and the room counts, and no secret", async () => {
+    const clock = { at: 1_000_000 };
+    graphLinear();
+    vi.stubEnv("LINEAR_API_KEY", "secret-key-0123");
+    // The graph stub, with the rate-limit headers of Linear and a project name that must not show.
+    const stub = globalThis.fetch as unknown as (url: string, init: RequestInit) => Promise<{ json: () => Promise<{ data: Record<string, { name?: string }> }> }>;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      const body = await (await stub(url, init)).json();
+      if (body.data.project?.name) body.data.project.name = "Secret project name";
+      return { ok: true, json: async () => body, headers: new Headers({
+        "x-ratelimit-requests-remaining": "4321", "x-ratelimit-requests-limit": "5000", "x-ratelimit-requests-reset": "1700000000000",
+      }) };
+    }));
+    const server = createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], watchMs: 0, now: () => clock.at, version: "v1" });
+    expect((await server.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+    const coordinator = server.link.hub.joinCoordinator(sink(), { workspace: "work", id: "p1" });
+    coordinator.receive(msg("hello", { plan: "/plans/a", session: "s1", host: "mac", wg: "1" }));
+    coordinator.receive(msg("asks", { asks: [{ id: "q1", issue: "CD-1", from: "w", body: "Secret question body", at: "" }] }));
+    server.link.hub.joinPage(sink(), { workspace: "work", id: "p1" });
+    server.link.hub.publish({ workspace: "work", id: "p1" }, "reply", { ask: "q1", issue: "CD-1", key: "a", body: "Secret reply body" });
+    clock.at += 61_000;
+    const response = await server.request("/api/status", { headers: local });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    const status = JSON.parse(text);
+    expect(status).toMatchObject({ version: "v1", uptime: 61, cache: 1 });
+    expect(status.workspaces).toEqual([{ id: "work", name: "Work", requestsRemaining: 4321, requestsLimit: 5000, requestsReset: 1700000000000,
+      complexityRemaining: null, complexityReset: null, at: expect.any(Number) }]);
+    expect(status.rooms).toEqual([{ workspace: "work", project: "p1", coordinators: 1, pages: 1, queued: expect.any(Number), asks: 1 }]);
+    expect(status.rooms[0].queued).toBeGreaterThan(0);
+    for (const secret of ["secret-key-0123", "Secret project name", "Secret question body", "Secret reply body", "CD-1"]) expect(text).not.toContain(secret);
+    server.link.stop();
+  });
+
+  it("answers /api/status only behind the host check, and /healthz stays ok", async () => {
+    expect((await app().request("/api/status", { headers: { host: "evil.example.com" } })).status).toBe(403);
+    expect(await (await app().request("/healthz")).json()).toEqual({ ok: true });
+  });
+
+  it("writes one log line for a slow request and for a server error", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const clock = { at: 0 };
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      clock.at += SLOW_MS + 1;
+      return { ok: true, json: async () => ({ data: { teams: { nodes: [{ projects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } }] } } }) };
+    }));
+    const server = createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], watchMs: 0, now: () => clock.at });
+    expect((await server.request("/api/projects?x=secret", { headers: local })).status).toBe(200);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/^wg api: GET \/api\/projects 200 \d+ms$/);
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("down"); }));
+    vi.stubEnv("LINEAR_API_KEY", "");
+    const broken = createApp(rules, { team: "CD", dist, workspaces: [{ ...workWorkspace(), key: "" }], watchMs: 0 });
+    expect((await broken.request("/api/issues/i1/comments", { headers: local })).status).toBe(500);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn.mock.calls[1][0]).toMatch(/^wg api: GET \/api\/issues\/i1\/comments 500 \d+ms$/);
+    // The 500 has its request line only: no error stack besides it.
+    expect(error).not.toHaveBeenCalled();
+    expect((await app().request("/api/config", { headers: local })).status).toBe(200);
+    expect(warn).toHaveBeenCalledTimes(2);
+    // A path with an encoded line break stays one physical line: the log has the encoded path.
+    expect((await broken.request("/api/issues/a%0Dwg%20api:%20GET%20%2Ffake%0Ab/comments", { headers: local })).status).toBe(500);
+    expect(warn).toHaveBeenCalledTimes(3);
+    const line = warn.mock.calls[2][0] as string;
+    expect(line.split(/[\r\n]/)).toHaveLength(1);
+    expect(line).toMatch(/^wg api: GET \/api\/issues\/a%0Dwg%20api:%20GET%20%2Ffake%0Ab\/comments 500 \d+ms$/);
+    expect(error).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("compresses the page and JSON for a client that accepts it, and gives index.html an ETag", async () => {
+    const big = join(dist, "assets", "big.js");
+    await writeFile(big, "console.log('work graph');\n".repeat(200));
+    const js = await app().request("/assets/big.js", { headers: { ...local, "accept-encoding": "gzip" } });
+    expect(js.headers.get("content-encoding")).toBe("gzip");
+    expect(js.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(gunzipSync(Buffer.from(await js.arrayBuffer())).toString()).toBe("console.log('work graph');\n".repeat(200));
+    const plain = await app().request("/assets/big.js", { headers: local });
+    expect(plain.headers.get("content-encoding")).toBeNull();
+    // Only gzip: a client that accepts deflate or Brotli alone gets the plain file.
+    for (const accepted of ["deflate", "br", "br, deflate"]) {
+      const other = await app().request("/assets/big.js", { headers: { ...local, "accept-encoding": accepted } });
+      expect(other.headers.get("content-encoding")).toBeNull();
+      expect(await other.text()).toBe("console.log('work graph');\n".repeat(200));
+    }
+    const both = await app().request("/assets/big.js", { headers: { ...local, "accept-encoding": "deflate, gzip;q=0.5" } });
+    expect(both.headers.get("content-encoding")).toBe("gzip");
+
+    linear({ teams: { nodes: [{ projects: { nodes: Array.from({ length: 30 }, (_, at) => ({ id: `p${at}`, name: `Project ${at}`, url: "u", status: { name: "Started", type: "started" } })),
+      pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+    const list = await app().request("/api/projects", { headers: { ...local, "accept-encoding": "gzip" } });
+    expect(list.headers.get("content-encoding")).toBe("gzip");
+    expect(JSON.parse(gunzipSync(Buffer.from(await list.arrayBuffer())).toString()).projects).toHaveLength(30);
+
+    // A small reply is compressed too: the 1 KiB minimum of `compress` needs a Content-Length (README).
+    const health = await app().request("/healthz", { headers: { "accept-encoding": "gzip" } });
+    expect(health.headers.get("content-encoding")).toBe("gzip");
+    expect(JSON.parse(gunzipSync(Buffer.from(await health.arrayBuffer())).toString())).toEqual({ ok: true });
+
+    // The plain and the gzip reply of index.html have the same weak ETag and Vary, and so has each 304.
+    const page = await app().request("/", { headers: local });
+    const tag = page.headers.get("etag");
+    expect(tag).toMatch(/^W\/"[0-9a-f]{40}"$/);
+    expect(page.headers.get("cache-control")).toBe("no-store");
+    expect(page.headers.get("vary")).toBe("Accept-Encoding");
+    expect(page.headers.get("content-encoding")).toBeNull();
+    const zipped = await app().request("/", { headers: { ...local, "accept-encoding": "gzip" } });
+    expect(zipped.headers.get("content-encoding")).toBe("gzip");
+    expect(zipped.headers.get("etag")).toBe(tag);
+    expect(zipped.headers.get("vary")).toBe("Accept-Encoding");
+    for (const encoding of [{}, { "accept-encoding": "gzip" }] as Record<string, string>[]) {
+      for (const sent of [tag!, tag!.slice(2)]) {
+        const again = await app().request("/", { headers: { ...local, ...encoding, "if-none-match": sent } });
+        expect(again.status).toBe(304);
+        expect(await again.text()).toBe("");
+        expect(again.headers.get("etag")).toBe(tag);
+        expect(again.headers.get("vary")).toBe("Accept-Encoding");
+        expect(again.headers.get("content-encoding")).toBeNull();
+      }
+    }
+    expect((await app().request("/", { headers: { ...local, "if-none-match": '"other"' } })).status).toBe(200);
   });
 });

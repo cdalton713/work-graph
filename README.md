@@ -111,6 +111,24 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
   memory only. If the server cannot write the file, it logs the error and exits with code 1 at a stop, and after
   the restart a coordinator can get a message again that it acknowledged.
 
+- `WG_VERSION` (optional): the commit of the build. The `Dockerfile` takes it as a build argument
+  (`--build-arg WG_VERSION=<commit>`). Without it, the server gives `dev`.
+
+Checks of a running server:
+
+- `GET /healthz` gives `{"ok":true}` while the process runs, under any host name.
+- `GET /api/config` gives `version` and `contract`: the first 12 hex characters of the SHA-256 of
+  `skills/work-graph/contract.json`, the same hash that `wg` computes. A deploy check compares both with the
+  commit that it deployed and with `wg`.
+- `GET /api/status` gives the uptime in seconds, for each workspace the remaining Linear requests and complexity
+  with their reset times (from the last Linear response), the count of cached project graphs, and for each link
+  room the count of connected coordinators, pages, queued messages, and open asks. It gives no key, no issue
+  text, and no message body. The same host check as the other API routes applies.
+
+Each API request that takes more than 5 s or ends with status 500 or more writes one log line with the method, the
+path, the status, and the duration. The server compresses static files and JSON answers of any size with gzip when
+the client accepts it. `index.html` has a weak `ETag` and `Vary: Accept-Encoding`, also on a 304.
+
 The server listens on `127.0.0.1:4747`. It does not check who the user is: keep it on a private network, such as a
 tailnet, or put an authenticating proxy in front of it. Then set `page_url` in the config of each machine that
 runs `wg`.

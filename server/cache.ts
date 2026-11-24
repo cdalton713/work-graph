@@ -67,6 +67,8 @@ export interface GraphCache {
   check: (projectIds: string[]) => Promise<void>;
   /** A write of this server changed Linear: forget the graph of that project, or of all projects. */
   clear: (projectId?: string) => void;
+  /** How many project graphs the cache holds now (`/api/status`). */
+  size: () => number;
 }
 
 export function createGraphCache({ load, changed, changedMany, now = Date.now }: Loaders): GraphCache {
@@ -182,6 +184,7 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
       generations.set(projectId, (generations.get(projectId) ?? 0) + 1);
       entries.delete(projectId);
     },
+    size: () => entries.size,
   };
 
   /** The graph from memory, from the failure of the last check of all projects, or from a refresh. */

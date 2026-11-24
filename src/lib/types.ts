@@ -77,3 +77,26 @@ export interface Card {
   /** What `wg next` last said about the node, for example `do ask-merge: #7` or `wait human: …`: one line for each thing said. */
   next?: string;
 }
+
+/** `GET /api/config`: what the page needs before its first render, and what a deploy check compares. */
+export interface SiteConfig {
+  human: string; defaultWorkspace: string;
+  /** The first 12 hex characters of the SHA-256 of `skills/work-graph/contract.json`, as `wg` computes it. Null: the file is missing. */
+  contract: string | null;
+  /** The commit of the build (`WG_VERSION`), or `dev`. */
+  version: string;
+}
+/** The counts of one link room. No message text. */
+export interface RoomCounts { workspace: string; project: string; coordinators: number; pages: number; queued: number; asks: number }
+/** `GET /api/status`: the state of the server. It holds no key, no issue text, and no message body. */
+export interface ServerStatus {
+  version: string; contract: string | null;
+  /** Seconds since the server started. */
+  uptime: number;
+  /** For each workspace, the values of its last Linear response; null before the first response. Times are epoch ms. */
+  workspaces: { id: string; name: string; requestsRemaining: number | null; requestsLimit: number | null; requestsReset: number | null;
+    complexityRemaining: number | null; complexityReset: number | null; at: number | null }[];
+  /** How many project graphs the caches hold. */
+  cache: number;
+  rooms: RoomCounts[];
+}

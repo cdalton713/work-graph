@@ -3482,7 +3482,7 @@ DO_COMMANDS = {
     "close": "move {dir} {key} Done",
     "verifying": "move {dir} {key} Verifying",
     "ship": "move {dir} {key} Done",
-    "load": "load {dir}",
+    "load": "load {dir} --apply",  # coordinator.md: the dry run `wg load <plan-dir>` comes first
 }
 # The `note` lines that the terminal prints in full. It counts the other notes in one line.
 NOTES_SHOWN = ("autonomy", "triage", "page")
@@ -3492,17 +3492,30 @@ def line_verb(text):
     return text.split(" ", 1)[0].rstrip(":")
 
 
-def terminal_lines(plan_dir, lines, everything=False):
+def line_key(text, keys):
+    """The node key of a line `<verb> <key> <identifier>[: <detail>]`, and the rest after the key. A key can hold
+    a space, so the longest of `keys` that the line names wins. A line that names no known key gives None."""
+    verb = text.split(" ", 1)[0]
+    found = [k for k in keys if text.startswith(f"{verb} {k} ") or text == f"{verb} {k}"]
+    if not found:
+        return None, None
+    key = max(found, key=len)
+    return key, text[len(verb) + len(key) + 2:]
+
+
+def terminal_lines(plan_dir, lines, everything=False, keys=()):
     """The lines of `wg next` as the terminal prints them. Each `do` line that one `wg` command does ends with
     ` -> <command>`. Without `everything`, the `wait` lines with the same verb are one line, and the notes that
     are not in NOTES_SHOWN are counted in one line. The status document, the node cards, and the link get the
-    full lines: this is a print step only."""
+    full lines: this is a print step only. `keys` are the node keys of the plan (and `@effort`): a command names
+    only a key from them, quoted."""
+    keys = {*keys, "@effort"}
     here = shlex.quote(str(Path(plan_dir).resolve()))
     out, waits, hidden = [], {}, 0
     for level, text in lines:
-        verb, words = line_verb(text), text.split(" ", 2)
-        if level == "do" and verb in DO_COMMANDS and len(words) > 1:
-            out.append(f"do {text} -> wg " + DO_COMMANDS[verb].format(dir=here, key=shlex.quote(words[1])))
+        verb, (key, _) = line_verb(text), line_key(text, keys)
+        if level == "do" and verb in DO_COMMANDS and key and key != "@effort":
+            out.append(f"do {text} -> wg " + DO_COMMANDS[verb].format(dir=here, key=shlex.quote(key)))
         elif everything or level == "do" or (level == "note" and verb in NOTES_SHOWN):
             out.append(f"{level} {text}")
         elif level == "wait":
@@ -3520,8 +3533,9 @@ def terminal_lines(plan_dir, lines, everything=False):
         else:
             items = []
             for text in group:
-                m = re.match(r"\S+ (\S+) \S+(?:: (.*))?$", text, re.S)
-                key, detail = (m.group(1), m.group(2)) if m else (text, None)
+                key, rest = line_key(text, keys)
+                m = re.match(r"\S+(?:: (.*))?$", rest or "", re.S)
+                key, detail = (key, m.group(1)) if key and m else (text, None)
                 if detail and (job := re.search(r"\bjob=(\S+)", detail)):
                     detail = job.group(1)
                 items.append(f"{key} ({detail})" if detail else key)
@@ -3593,9 +3607,10 @@ def explain_sections():
 
 
 def explain_text(verb):
-    lines = []
+    lines, last = [], None
     for name, part in explain_sections().get(verb, []):
-        lines += ([""] if lines else []) + [f"({name})", *part]
+        lines += ([""] if lines else []) + ([f"({name})"] if name != last else []) + part
+        last = name
     return "\n".join(lines)
 
 
@@ -3644,7 +3659,7 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                     publish(plan_dir, plan, head, lines, wait_interval=interval if wait else None)
                 if done:
                     print(head)
-                    for line in terminal_lines(plan_dir, lines, everything):
+                    for line in terminal_lines(plan_dir, lines, everything, [n["key"] for n in plan["nodes"]]):
                         print(line, flush=True)
                     if head != COMPLETE:
                         print(f"note page {page_link(plan)}", flush=True)

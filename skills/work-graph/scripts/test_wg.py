@@ -5281,6 +5281,7 @@ class TerminalTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.d = self.tmp.name
         self.here = str(Path(self.d).resolve())
+        self.keys = ("a", "b", "c", "d", "e", "m1", "s", "s1", "t", "z")
 
     def test_each_do_line_that_one_command_does_ends_with_that_command(self):
         cases = {
@@ -5290,20 +5291,41 @@ class TerminalTests(unittest.TestCase):
             "close m1 CD-5": f"wg move {self.here} m1 Done",
             "verifying s1 CD-6": f"wg move {self.here} s1 Verifying",
             "ship s1 CD-6: the soak passed at 2026-01-01T00:00:00Z": f"wg move {self.here} s1 Done",
-            "load z -: not in keymap.json": f"wg load {self.here}",
+            "load z -: not in keymap.json": f"wg load {self.here} --apply",
         }
         for text, command in cases.items():
             with self.subTest(text=text):
-                self.assertEqual(wg.terminal_lines(self.d, [("do", text)]), [f"do {text} -> {command}"])
+                self.assertEqual(wg.terminal_lines(self.d, [("do", text)], keys=self.keys), [f"do {text} -> {command}"])
         # A verb that needs more than one command, or a choice, gets no command.
         for text in ("review a CD-1: #7 round 1", "wave: pick the next wave from a,b", "restack a CD-1: #7"):
-            self.assertEqual(wg.terminal_lines(self.d, [("do", text)]), [f"do {text}"])
+            self.assertEqual(wg.terminal_lines(self.d, [("do", text)], keys=self.keys), [f"do {text}"])
 
     def test_a_plan_dir_with_a_space_is_quoted(self):
         spaced = Path(self.d) / "my plan"
         spaced.mkdir()
-        line = wg.terminal_lines(str(spaced), [("do", "dispatch a CD-1")])[0]
+        line = wg.terminal_lines(str(spaced), [("do", "dispatch a CD-1")], keys=self.keys)[0]
         self.assertTrue(line.endswith(f"-> wg dispatch '{spaced.resolve()}' a --run"))
+
+    def test_the_load_command_applies_the_load(self):
+        line = wg.terminal_lines(self.d, [("do", "load z -: not in keymap.json")], keys=self.keys)[0]
+        command = wg.shlex.split(line.split(" -> ", 1)[1])
+        self.assertEqual(command[:3], ["wg", "load", self.here])
+        self.assertIn("--apply", command)
+        ns = wg.cli_parser().parse_args(command[1:])
+        self.assertTrue(ns.apply)
+
+    def test_a_key_with_a_space_is_named_in_full(self):
+        keys = ("api", "api cleanup")
+        lines = [("do", "dispatch api cleanup EX-1"), ("do", "verify api EX-2: #3 head abc is not code done"),
+                 ("wait", "worker api cleanup EX-1: job=ci dispatch=x"), ("wait", "worker api EX-2: job=review dispatch=y")]
+        self.assertEqual(wg.terminal_lines(self.d, lines, keys=keys), [
+            f"do dispatch api cleanup EX-1 -> wg dispatch {self.here} 'api cleanup' --run",
+            f"do verify api EX-2: #3 head abc is not code done -> wg done {self.here} api",
+            "wait worker: api cleanup (ci), api (review)"])
+        command = wg.shlex.split(wg.terminal_lines(self.d, lines[:1], keys=keys)[0].split(" -> ", 1)[1])
+        self.assertEqual(wg.cli_parser().parse_args(command[1:]).key, "api cleanup")
+        # A line that names no key of the plan gets no command: a wrong node is worse than none.
+        self.assertEqual(wg.terminal_lines(self.d, [("do", "dispatch other EX-9")], keys=keys), ["do dispatch other EX-9"])
 
     def test_waits_of_one_verb_are_one_line_and_other_notes_are_counted(self):
         lines = [("do", "review a CD-1: #7 round 1"),
@@ -5317,7 +5339,7 @@ class TerminalTests(unittest.TestCase):
                  ("note", "triage CD-9: Found"),
                  ("note", "replied b CD-2: yes"),
                  ("note", "resumed @effort -: on the page")]
-        self.assertEqual(wg.terminal_lines(self.d, lines), [
+        self.assertEqual(wg.terminal_lines(self.d, lines, keys=self.keys), [
             "do review a CD-1: #7 round 1",
             "wait worker: b (dispatch), d (review)",
             "wait human c CD-3: merge PR #9",
@@ -5326,14 +5348,14 @@ class TerminalTests(unittest.TestCase):
             "note autonomy @effort -: standard",
             "note triage CD-9: Found",
             f"note other: 2 more note lines; wg next {self.here} --all prints them"])
-        self.assertEqual(wg.terminal_lines(self.d, lines, everything=True), [f"{level} {text}" for level, text in lines])
+        self.assertEqual(wg.terminal_lines(self.d, lines, everything=True, keys=self.keys), [f"{level} {text}" for level, text in lines])
 
     def run_next(self, lines, *args):
         published, sent = [], []
         km = {"project": {"id": "proj"}, "milestones": {}, "nodes": {"a": {"id": "ia", "identifier": "CD-1"}}}
         wg.save_keymap(self.d, km)
         p = {"effort": {"name": "Example"}, "phases": [{"key": "1", "target": "main"}],
-             "nodes": [node("a", lane="x", title="A")], "edges": []}
+             "nodes": [node(k, lane="x", title=k) for k in ("a", "b", "c")], "edges": []}
         link = Mock()
         link.take.return_value = []
         link.send.side_effect = lambda kind, payload: sent.append((kind, payload))
@@ -5440,7 +5462,8 @@ class ExplainTests(unittest.TestCase):
         self.assertNotIn("## Adopt", text)
         both = wg.explain_text("review")
         self.assertIn("(references/review-and-merge.md)\n## Wave review", both)
-        self.assertIn("(references/coordinator.md)\n## Follow-up jobs", both)
+        self.assertIn("\n\n## Follow-up jobs", both)
+        self.assertEqual(both.count("(references/coordinator.md)"), 1)
 
     def test_the_command_lists_explains_and_refuses_an_unknown_verb(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -5454,6 +5477,23 @@ class ExplainTests(unittest.TestCase):
             self.assertEqual(wg.main(["wg", "explain", "nothing"]), 2)
         self.assertEqual(out.getvalue(), "")
         self.assertIn("unknown verb 'nothing'", err.getvalue())
+
+    def test_a_verb_gets_only_its_own_step(self):
+        merged, undraft = wg.explain_text("merged"), wg.explain_text("undraft")
+        self.assertNotEqual(merged, undraft)
+        self.assertIn("**After each merge**", merged)
+        for other in ("st undraft", "@claude-thorough", "**Threads.**", "**Merge request**", "**Close**"):
+            self.assertNotIn(other, merged)
+        self.assertIn("st undraft", undraft)
+        self.assertNotIn("**After each merge**", undraft)
+        # The shared text of the section stays: its heading and the paragraph before the steps.
+        for text in (merged, undraft):
+            self.assertIn("## Merge point", text)
+        verifying = wg.explain_text("verifying")
+        self.assertIn("`verifying <ship key>`", verifying)
+        for other in ("`full-suite <ship key>`", "`ask <decision key>`", "`ops <ops key>`"):
+            self.assertNotIn(other, verifying)
+        self.assertEqual(verifying.count("(references/review-and-merge.md)"), 1)
 
     def test_the_coordinator_text_names_wg_explain(self):
         text = (Path(wg.__file__).resolve().parent.parent / "references" / "coordinator.md").read_text()

@@ -658,4 +658,3 @@ describe("graph cache of the server", () => {
     expect(asked.loads).toHaveLength(3);
   });
 });
-

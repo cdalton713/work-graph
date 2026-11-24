@@ -34,7 +34,11 @@ export interface Versioned {
   /** The refresh failed: this is the last graph that loaded, and `error` says why the refresh failed. */
   stale?: boolean; error?: string;
 }
-interface Entry extends Versioned { loadedAt: number; checkedAt: number; changed?: boolean }
+interface Entry extends Versioned {
+  loadedAt: number; checkedAt: number; changed?: boolean;
+  /** The check of all projects failed at `failedAt`: until the next check is due, a read gives this error with no request of its own. */
+  failure?: Error; failedAt?: number;
+}
 
 export interface GraphCache {
   /**
@@ -72,15 +76,25 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
     if (old && !old.changed && at - old.loadedAt < FULL_MS) {
       if (!(await changed(projectId, since(old)))) {
         old.checkedAt = at;
+        old.failure = undefined;
         return old;
       }
     }
     const data = await load(projectId);
     const entry: Entry = { data, version: createHash("sha1").update(JSON.stringify(data)).digest("hex"), loadedAt: at, checkedAt: at };
-    last.set(projectId, entry);
-    // A write that came while this load ran can be missing from it. Do not keep such a load.
-    if (mine === generation(projectId)) entries.set(projectId, entry);
+    // A write that came while this load ran can be missing from it. Do not keep such a load, also not as the fallback.
+    if (mine === generation(projectId)) {
+      entries.set(projectId, entry);
+      last.set(projectId, entry);
+    }
     return entry;
+  }
+
+  /** The last graph with `stale` and the error, while the graph is at most `STALE_MS` old (from its load). */
+  function fallback(projectId: string, error: unknown): Versioned {
+    const old = last.get(projectId);
+    if (!old || now() - old.loadedAt > STALE_MS) throw error;
+    return { data: old.data, version: old.version, stale: true, error: (error as Error).message };
   }
 
   async function guarded(projectId: string): Promise<Versioned> {
@@ -88,9 +102,7 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
       const { data, version } = await refresh(projectId);
       return { data, version };
     } catch (error) {
-      const old = last.get(projectId);
-      if (!old || now() - old.checkedAt > STALE_MS) throw error;
-      return { data: old.data, version: old.version, stale: true, error: (error as Error).message };
+      return fallback(projectId, error);
     }
   }
 
@@ -103,12 +115,19 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
     let found: Map<string, string> | null;
     try {
       found = await changedMany(ids, new Date(from - SKEW_MS).toISOString());
-    } catch {
-      return; // each `get` checks for itself
+    } catch (error) {
+      // The reads after this check give the error (or the stale graph), with no check of their own for each project.
+      for (const [id, entry, mine] of checked) {
+        if (entries.get(id) !== entry || mine !== generation(id)) continue;
+        entry.failure = error instanceof Error ? error : new Error(String(error));
+        entry.failedAt = at;
+      }
+      return;
     }
     for (const [id, entry, mine] of checked) {
       // A write or a new load during the check: that entry is not the one the check saw.
       if (entries.get(id) !== entry || mine !== generation(id)) continue;
+      entry.failure = undefined;
       const latest = found === null ? "" : found.get(id);
       if (latest === undefined || (latest && latest <= since(entry))) entry.checkedAt = at;
       else entry.changed = true;
@@ -119,6 +138,10 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
     get(projectId) {
       const entry = entries.get(projectId);
       if (entry && !entry.changed && now() - entry.checkedAt < FRESH_MS) return Promise.resolve({ data: entry.data, version: entry.version });
+      if (entry?.failure && now() - entry.failedAt! < FRESH_MS) {
+        const failure = entry.failure;
+        return new Promise<Versioned>((resolve) => resolve(fallback(projectId, failure)));
+      }
       let job = running.get(projectId);
       if (!job) {
         job = guarded(projectId).finally(() => running.delete(projectId));

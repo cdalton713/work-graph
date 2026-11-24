@@ -144,4 +144,56 @@ describe("graph cache", () => {
     await Promise.all(["a", "b", "c"].map((id) => cache.get(id)));
     expect(loads).toEqual(["a", "b", "c", "b", "a", "b", "c"]);
   });
+  it("measures the 15 minutes of a stale graph from its load, also after successful checks", async () => {
+    const clock = { at: 1_000_000 }, linear = { down: false };
+    const cache = createGraphCache({
+      load: async () => { if (linear.down) throw new Error("Linear: HTTP 500"); return graph(1); },
+      changed: async () => { if (linear.down) throw new Error("Linear: HTTP 500"); return false; },
+      now: () => clock.at,
+    });
+    await cache.get("p");
+    clock.at += 4 * 60_000;
+    expect((await cache.get("p")).stale).toBeUndefined(); // a successful check at minute four, with no load
+    linear.down = true;
+    clock.at = 1_000_000 + STALE_MS;
+    expect((await cache.get("p")).stale).toBe(true);
+    clock.at = 1_000_000 + STALE_MS + 1;
+    await expect(cache.get("p")).rejects.toThrow("Linear: HTTP 500");
+  });
+  it("gives the error of a failed check of all projects to the reads after it, with no check for each project", async () => {
+    const clock = { at: 1_000_000 }, count = { load: 0, changed: 0, many: 0 };
+    const cache = createGraphCache({
+      load: async () => graph(++count.load),
+      changed: async () => { count.changed++; return false; },
+      changedMany: async () => { count.many++; throw new Error("Linear: HTTP 500"); },
+      now: () => clock.at,
+    });
+    const first = await cache.get("a");
+    await cache.get("b");
+    clock.at += FRESH_MS;
+    await cache.check(["a", "b"]);
+    const [a, b] = await Promise.all([cache.get("a"), cache.get("b")]);
+    expect(a).toEqual({ data: first.data, version: first.version, stale: true, error: "Linear: HTTP 500" });
+    expect(b.stale).toBe(true);
+    expect(count).toEqual({ load: 2, changed: 0, many: 1 });
+  });
+  it("does not keep a load that a write overtook as the fallback for a failed refresh", async () => {
+    const linear = { down: false };
+    let release = () => {};
+    const cache = createGraphCache({
+      load: async () => {
+        if (linear.down) throw new Error("Linear: HTTP 500");
+        await new Promise<void>((resolve) => { release = resolve; });
+        return graph(1);
+      },
+      changed: async () => false,
+      now: () => 1_000_000,
+    });
+    const slow = cache.get("p");
+    cache.clear("p"); // a write while the first load runs
+    release();
+    await slow;
+    linear.down = true;
+    await expect(cache.get("p")).rejects.toThrow("Linear: HTTP 500");
+  });
 });

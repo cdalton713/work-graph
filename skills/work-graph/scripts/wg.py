@@ -287,7 +287,14 @@ def load_keymap(plan_dir):
 
 
 def save_keymap(plan_dir, km):
-    save_json(keymap_path(plan_dir), km)
+    p = keymap_path(plan_dir)
+    try:
+        before = json.loads(p.read_text()) if p.exists() and p.stat().st_size else {}
+    except (OSError, ValueError):
+        before = None  # a damaged file: its rows are not known, so no change can be journaled
+    save_json(p, km)
+    if before is not None:
+        journal_keymap(plan_dir, before, km)
 
 
 _HELD_LOCKS = contextvars.ContextVar("wg_held_locks", default=frozenset())
@@ -331,6 +338,260 @@ def save_json(path, value, mode=None):
             tmp.replace(path)
         finally:
             tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------- journal
+
+JOURNAL = "journal.jsonl"
+JOURNAL_OLD = "journal.1.jsonl"
+JOURNAL_LIMIT = 5 * 1024 * 1024  # bytes; a full journal becomes journal.1.jsonl
+JOURNAL_KINDS = ("run", "status", "claim", "issue")
+SECRET_FIELD = re.compile(r"key|token|secret|password", re.I)
+_JOURNAL_COMMAND = contextvars.ContextVar("wg_journal_command", default=None)
+
+
+def journaled(command):
+    """Name the command that the journal records for each change in this call. The outermost command wins:
+    a `move` inside `wg dispatch` is journaled as `dispatch`."""
+    def wrap(fn):
+        def inner(*args, **kwargs):
+            if _JOURNAL_COMMAND.get():
+                return fn(*args, **kwargs)
+            token = _JOURNAL_COMMAND.set(command)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _JOURNAL_COMMAND.reset(token)
+        inner.__name__, inner.__doc__, inner.__wrapped__ = fn.__name__, fn.__doc__, fn
+        return inner
+    return wrap
+
+
+def journal(plan_dir, command, key, changes, kind="run"):
+    """Append one line to <plan-dir>/journal.jsonl: the UTC time, the command, the node key, and each changed
+    field as [old, new] (null: no value). A field with a secret name is left out, and no comment body is given.
+
+    A journal failure is a warning: the change that it records is already done."""
+    changes = {f: [old, new] for f, (old, new) in changes.items() if old != new and not SECRET_FIELD.search(f)}
+    if not changes:
+        return
+    entry = {"time": f"{utc_now():%Y-%m-%dT%H:%M:%SZ}", "command": command or "wg", "key": key, "kind": kind,
+             "changes": changes}
+    try:
+        line = json.dumps(entry, sort_keys=True) + "\n"
+        with plan_lock(plan_dir):
+            path = Path(plan_dir) / JOURNAL
+            if path.exists() and path.stat().st_size + len(line) > JOURNAL_LIMIT:
+                path.replace(path.with_name(JOURNAL_OLD))
+            with path.open("a", encoding="utf-8") as f:
+                f.write(line)
+    except (OSError, TypeError, ValueError) as e:
+        print(f"warn: journal not written ({e})", file=sys.stderr)
+
+
+def journal_command(fallback):
+    return _JOURNAL_COMMAND.get() or fallback
+
+
+def journal_keymap(plan_dir, before, after):
+    """Journal each run row field and each node issue that a save of keymap.json changes."""
+    command = journal_command("wg")
+    try:
+        old_run, new_run = before.get("run") or {}, after.get("run") or {}
+        for scope, prefix in (("effort", None), ("nodes", "")):
+            old_rows, new_rows = old_run.get(scope) or {}, new_run.get(scope) or {}
+            if prefix is None:
+                old_rows, new_rows = {"@effort": old_rows}, {"@effort": new_rows}
+            for key in sorted(set(old_rows) | set(new_rows)):
+                old, new = old_rows.get(key) or {}, new_rows.get(key) or {}
+                journal(plan_dir, command, key, {f: (old.get(f), new.get(f)) for f in sorted(set(old) | set(new))})
+        old_nodes, new_nodes = before.get("nodes") or {}, after.get("nodes") or {}
+        for key in sorted(set(old_nodes) | set(new_nodes)):
+            old, new = (old_nodes.get(key) or {}).get("identifier"), (new_nodes.get(key) or {}).get("identifier")
+            journal(plan_dir, command, key, {"issue": (old, new)}, kind="issue")
+    except (AttributeError, TypeError) as e:
+        print(f"warn: journal not written ({e})", file=sys.stderr)
+
+
+def journal_entries(plan_dir):
+    """The journal, oldest first: journal.1.jsonl, then journal.jsonl. A damaged line is skipped with a warning."""
+    entries, bad = [], 0
+    for name in (JOURNAL_OLD, JOURNAL):
+        path = Path(plan_dir) / name
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                parse_utc(entry["time"])
+                if not isinstance(entry.get("changes"), dict):
+                    raise ValueError("no changes")
+            except (ValueError, KeyError, TypeError):
+                bad += 1
+                continue
+            entries.append(entry)
+    if bad:
+        print(f"warn: {bad} damaged journal line(s) skipped", file=sys.stderr)
+    return entries
+
+
+def parse_utc(text):
+    value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+DURATION = re.compile(r"(\d+)([smhdw])")
+DURATION_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def since_time(text):
+    """--since: a duration back from now (90m, 2h, 3d, 1w, 1d12h) or an ISO time (UTC when it has no offset)."""
+    text = text.strip()
+    if re.fullmatch(r"(\d+[smhdw])+", text):
+        seconds = sum(int(n) * DURATION_SECONDS[unit] for n, unit in DURATION.findall(text))
+        return utc_now().timestamp() - seconds
+    try:
+        return parse_utc(text).timestamp()
+    except ValueError:
+        die(f"invalid --since {text!r}: give a duration such as 2h or 3d, or a time such as 2026-01-01T09:00:00Z")
+
+
+def short_value(value, width=24):
+    text = "-" if value is None else str(value)
+    return text if len(text) <= width else text[:width - 1] + "…"
+
+
+def log_line(entry):
+    changes = ", ".join(f"{field} {short_value(old)} -> {short_value(new)}"
+                        for field, (old, new) in entry["changes"].items())
+    return short_value(flat_line(f"{entry['time']} {entry.get('command', 'wg')} {entry.get('key', '-')} {changes}"), 200)
+
+
+def duration_text(seconds):
+    if seconds is None:
+        return "-"
+    minutes = int(seconds // 60)
+    days, hours, minutes = minutes // 1440, minutes % 1440 // 60, minutes % 60
+    if days:
+        return f"{days}d{hours:02d}h"
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m"
+
+
+def task_times(plan, entries):
+    """Per task: dispatch to code done, code done to merged, and the time in the wait status or in Ready to Merge."""
+    waits = {WAIT_STATUS, "Ready to Merge"}
+    tasks = [n["key"] for n in plan["nodes"] if n["kind"] == "task"]
+    out = []
+    now = utc_now().timestamp()
+    for key in tasks:
+        dispatched = code_done = merged = wait_from = None
+        waited = 0.0
+        seen = False
+        for entry in entries:
+            if entry.get("key") != key:
+                continue
+            seen = True
+            at = parse_utc(entry["time"]).timestamp()
+            changes = entry["changes"]
+            if entry.get("kind", "run") == "run":
+                if dispatched is None and (changes.get("job", [None, None])[1] == "dispatch"
+                                           or changes.get("dispatch", [None, None])[1]):
+                    dispatched = at
+                if code_done is None and changes.get("code_done_head", [None, None])[1]:
+                    code_done = at
+            elif entry.get("kind") == "status" and "status" in changes:
+                new = changes["status"][1]
+                if wait_from is not None and new not in waits:
+                    waited += at - wait_from
+                    wait_from = None
+                if wait_from is None and new in waits:
+                    wait_from = at
+                if merged is None and new in MERGED:
+                    merged = at
+        if not seen:
+            continue
+        if wait_from is not None:
+            waited += now - wait_from
+        to_code = code_done - dispatched if dispatched is not None and code_done is not None else None
+        to_merge = merged - code_done if code_done is not None and merged is not None else None
+        out.append((key, to_code, to_merge, waited))
+    return out
+
+
+def log_command(plan_dir, plan, key, since, count, times):
+    if key and key != "@effort":
+        get_node(plan, key)
+    if count < 1:
+        die("-n needs a positive number")
+    entries = journal_entries(plan_dir)
+    if key:
+        entries = [e for e in entries if e.get("key") == key]
+    if since:
+        start = since_time(since)
+        entries = [e for e in entries if parse_utc(e["time"]).timestamp() >= start]
+    if times:
+        rows = task_times(plan, entries)
+        if not rows:
+            print("no task in the journal")
+        for task, to_code, to_merge, waited in rows:
+            print(f"{task}\tdispatch->code done {duration_text(to_code)}\tcode done->merged "
+                  f"{duration_text(to_merge)}\twait on {HUMAN} {duration_text(waited)}")
+        return 0
+    if not entries:
+        print("no journal entry")
+    for entry in entries[-count:]:
+        print(log_line(entry))
+    return 0
+
+
+def rebuilt_rows(plan, entries):
+    """The run rows that the journal gives: each run row change, replayed from the oldest entry."""
+    run = {"effort": {}, "nodes": {}}
+    keys = {n["key"] for n in plan["nodes"]}
+    for entry in entries:
+        if entry.get("kind", "run") != "run":
+            continue
+        key = entry.get("key")
+        if key == "@effort":
+            row = run["effort"]
+        elif key in keys:
+            row = run["nodes"].setdefault(key, {})
+        else:
+            continue  # a node that the plan no longer has
+        for field, (_, new) in entry["changes"].items():
+            if new is None:
+                row.pop(field, None)
+            else:
+                row[field] = new
+    run["nodes"] = {k: row for k, row in run["nodes"].items() if row}
+    return run
+
+
+def run_rebuild(plan_dir, plan, apply):
+    entries = journal_entries(plan_dir)
+    if not entries:
+        die(f"no journal in {plan_dir}: the run rows cannot be rebuilt (recovery.md)", 1)
+    run = rebuilt_rows(plan, entries)
+    kept = [n["key"] for n in plan["nodes"] if n["key"] in run["nodes"]]
+    print(f"from {len(entries)} journal entries since {entries[0]['time']}")
+    if run["effort"]:
+        print(f"@effort\t{' '.join(pairs(run['effort']))}")
+    for key in kept:
+        print(f"{key}\t{' '.join(pairs(run['nodes'][key]))}")
+    if not apply:
+        print("dry run: add --apply to write these run rows to keymap.json")
+        return 0
+    km = load_keymap(plan_dir)
+    if not km["nodes"]:
+        die("keymap.json maps no node: run wg load --adopt first (recovery.md)", 1)
+    km["run"] = run
+    save_keymap(plan_dir, km)
+    print(f"wrote the run rows of {len(kept)} node(s) to keymap.json")
+    return 0
 
 
 def post_merge(n):
@@ -1356,6 +1617,7 @@ def adopt_project(plan_dir, plan, km, project, team_id):
     return 0
 
 
+@journaled("load")
 def load(plan_dir, plan, apply, prune, adopt=False):
     errs = check(plan)
     if errs:
@@ -1711,6 +1973,7 @@ def lane_below(k, nodes, deps):
     return None
 
 
+@journaled("ready")
 def ready(plan_dir, plan, apply, quiet=False):
     km, _, nodes, st, deps, rows = snapshot(plan_dir, plan)
     states = team_info(plan_team(plan))[1] if apply else {}
@@ -1728,6 +1991,7 @@ def ready(plan_dir, plan, apply, quiet=False):
         if apply and s != want and not n.get("eng"):
             gql("""mutation($id:String!,$s:String!){ issueUpdate(id:$id, input:{stateId:$s}){ success } }""",
                 {"id": km["nodes"][k]["id"], "s": states[want]})
+            journal(plan_dir, journal_command("ready"), k, {"status": (s, want)}, kind="status")
             print(f"  moved {km['nodes'][k]['identifier']} {s} -> {want}", file=sys.stderr)
     return 0
 
@@ -1905,6 +2169,7 @@ def move_guard(plan_dir, plan, km, node, status_name, note, issue=None):
     return problems, notes
 
 
+@journaled("move")
 def move(plan_dir, plan, key, status_name, note=None, force=None, keep_worktree=False):
     if status_name not in CD_STATUSES:
         die(f"unknown status {status_name}")
@@ -1945,6 +2210,8 @@ def move(plan_dir, plan, key, status_name, note=None, force=None, keep_worktree=
         gql("mutation($id:String!){ issueUnarchive(id:$id){ success } }", {"id": entry["id"]})
     if fields:
         issue_update(entry["id"], fields)
+    journal(plan_dir, journal_command("move"), key, {"status": (norm(issue["state"], issue_labels(issue)), status_name)},
+            kind="status")
     before = next((status for status, name in ENG_LABELS.items() if name in markers), old)
     print(f"{ident}: {before} -> {' + '.join(filter(None, [want, marker])) or status_name}")
     if status_name == WAIT_STATUS:
@@ -1997,6 +2264,7 @@ def pairs(row):
     return [f"{f}={v}" for f, v in row.items()]
 
 
+@journaled("run set")
 def run_set(plan_dir, plan, key, assignments):
     if key != "@effort":
         get_node(plan, key)
@@ -2057,6 +2325,7 @@ def run_set(plan_dir, plan, key, assignments):
     return 0
 
 
+@journaled("run reset")
 def run_reset(plan_dir, plan, key):
     """Forget the node's branch, jobs, approval, and reviews: its work starts again from nothing."""
     get_node(plan, key)
@@ -2759,6 +3028,7 @@ def pr_stack(pr, cwd=None):
     return True, "stack", f"PR #{pr} is in no native stack"
 
 
+@journaled("verify")
 def verify(plan_dir, plan, key, cwd=None):
     """Code done on the PR's current head. `cwd` is the node's worktree; the default is the current directory."""
     node = get_node(plan, key)
@@ -4334,7 +4604,7 @@ def claim_labels(issue):
     return [label for label in issue_labels(issue) if label["name"].startswith("agent:")]
 
 
-def take_claim(plan, entry, issue, agent):
+def take_claim(plan_dir, plan, key, entry, issue, agent):
     """The only writer of a claim label. An issue holds one claim: one worker job that is not over."""
     held = claim_labels(issue)
     if held:
@@ -4342,6 +4612,7 @@ def take_claim(plan, entry, issue, agent):
     name = f"agent:{agent}"
     label_id = workspace_labels({name}).get(name) or team_info(plan_team(plan))[2].get(name)
     issue_update(entry["id"], {"addedLabelIds": [label_id or die(f"label {name} not found (wg preflight)")]})
+    journal(plan_dir, journal_command("claim"), key, {"claim": (None, name)}, kind="claim")
 
 
 def live_jobs(rows, key):
@@ -4622,7 +4893,7 @@ def claim_steps(plan_dir, plan, key, snap, quiet=False, warnings=None):
     agent = row["agent"]
     if row.get("step") == "claim":
         if f"agent:{agent}" not in {label["name"] for label in claim_labels(issue)}:
-            take_claim(plan, entry, issue, agent)
+            take_claim(plan_dir, plan, key, entry, issue, agent)
         update_row(plan_dir, key, step="status")
     print(f"claimed {entry['identifier']} agent:{agent}")
     out, err = io.StringIO(), io.StringIO()
@@ -4675,6 +4946,7 @@ def dispatch_target(plan_dir, plan, key):
     return snap, node, entry, issue
 
 
+@journaled("dispatch")
 def dispatch(plan_dir, plan, key, agent, worktree, model=None):
     """Start a node's first worker. First call: the claim and the Orca commands. With --worktree: the checks and the spec."""
     snap, node, entry, issue = dispatch_target(plan_dir, plan, key)
@@ -4993,6 +5265,7 @@ def print_warnings(warnings):
         print(flat_line("warning: " + "; ".join(warnings)), file=sys.stderr)
 
 
+@journaled("dispatch")
 def dispatch_run(plan_dir, plan, key, agent, model):
     """`wg dispatch --run`: each step of a first job in one call. The run row records each step before it runs."""
     need_orca_caller("--run", "dispatch")
@@ -5201,6 +5474,7 @@ def restack_line(plan_dir, plan, node, row, nodes, deps, st):
     return f"{line}; refresh: git rebase --onto origin/{pin} {old}, then st branch reparent --parent {pin}"
 
 
+@journaled("claim")
 def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
     """Start a follow-up job on a node: the checks, the claim, the job header.
 
@@ -5265,7 +5539,7 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
         if send and held:  # the same refusal as take_claim, before the run row changes
             die(f"{ident}: {held[0]['name']} holds the claim; find its job with wg run show", 1)
         if not send:
-            take_claim(plan, entry, issue, agent)
+            take_claim(plan_dir, plan, key, entry, issue, agent)
         row.update(state="starting", job=job, agent=agent)
         row.pop("started_at", None)
         if job == "review":  # the fix job replaces the reviewer of this round
@@ -5275,7 +5549,7 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
     if send and f"agent:{agent}" not in {label["name"] for label in claim_labels(issue)}:
         # The row holds the job before the label, so a second --send adds a label that failed.
         try:
-            take_claim(plan, entry, issue, agent)
+            take_claim(plan_dir, plan, key, entry, issue, agent)
         except ReadError as e:
             print_fail("claim", e)
             return 1
@@ -5338,6 +5612,7 @@ def parse_fields(assignments):
     return fields
 
 
+@journaled("started")
 def started(plan_dir, plan, key, assignments):
     """The worker job started: record its Orca ids and comment the claim."""
     row = record_started(plan_dir, plan, key, parse_fields(assignments))
@@ -5373,6 +5648,7 @@ def attach_pr(issue_id, pr, cwd):
         raise ReadError("Linear did not create the attachment")
 
 
+@journaled("done")
 def done(plan_dir, plan, key, failed=None, worktree=None, dispatch_id=None):
     """A worker job on this node is over, or its PR head moved: release the claim, then check code done."""
     km, live, nodes, st, deps, rows = snapshot(plan_dir, plan)
@@ -5395,6 +5671,7 @@ def done(plan_dir, plan, key, failed=None, worktree=None, dispatch_id=None):
             "pass --dispatch <id> of the worker_done, or --failed")
     if held:
         issue_update(entry["id"], {"removedLabelIds": [label["id"] for label in held]})
+        journal(plan_dir, journal_command("done"), key, {"claim": (held[0]["name"], None)}, kind="claim")
         print(f"released {held[0]['name']}")
     if failed is not None:
         row["state"] = "failed"
@@ -5450,6 +5727,7 @@ def done(plan_dir, plan, key, failed=None, worktree=None, dispatch_id=None):
     return result
 
 
+@journaled("approve")
 def approve(plan_dir, plan, keys, quote):
     """Record the human's approval with their own words. A goal, a hook, or silence is never an approval."""
     quote = " ".join(quote.split())
@@ -5604,6 +5882,12 @@ def cli_parser():
     r_show.add_argument("key", nargs="?")
     r_show.add_argument("--json", action="store_true")
     add(r, "reset").add_argument("key")
+    add(r, "rebuild").add_argument("--apply", action="store_true", help="write the rebuilt run rows to keymap.json")
+    lg = add(sub, "log")
+    lg.add_argument("key", nargs="?")
+    lg.add_argument("--since", help="a duration back from now (2h, 3d) or an ISO time")
+    lg.add_argument("-n", type=int, default=30, help="the number of entries, newest last (default 30)")
+    lg.add_argument("--times", action="store_true", help="per task: dispatch to code done, code done to merged, wait")
     add(sub, "evidence").add_argument("key")
     add(sub, "autonomy").add_argument("level", nargs="?", choices=AUTONOMY_LEVELS)
     add(sub, "review-effort").add_argument("level", nargs="?", choices=REVIEW_LEVELS)
@@ -5694,7 +5978,11 @@ def run_command(ns, d, plan, given):
             return run_set(d, plan, ns.key, ns.fields)
         if ns.mode == "reset":
             return run_reset(d, plan, ns.key)
+        if ns.mode == "rebuild":
+            return run_rebuild(d, plan, ns.apply)
         return run_show(d, plan, ns.key, ns.json)
+    if ns.cmd == "log":
+        return log_command(d, plan, ns.key, ns.since, ns.n, ns.times)
     if ns.cmd == "evidence":
         return evidence(d, plan, ns.key, given)
     if ns.cmd == "autonomy":
@@ -5706,6 +5994,12 @@ def run_command(ns, d, plan, given):
     if ns.mode == "overlap":
         return owns(plan, ["overlap", *ns.keys])
     return owns(plan, ["diff", ns.key, ns.base])
+
+
+def command_name(ns):
+    """The command as the journal records it, such as `run set` or `load --apply`."""
+    words = [ns.cmd] + ([ns.mode] if ns.cmd in ("run", "owns") else [])
+    return " ".join(words + ["--apply"] * bool(getattr(ns, "apply", False)))
 
 
 def main(argv):
@@ -5731,13 +6025,15 @@ def main(argv):
         if ns.cmd == "ui":
             return ui(ns.port, ns.project, ns.no_open, ns.no_tailnet, ns.workspace)
         plan = load_plan(ns.dir)
-        writes = ns.cmd in KEYMAP_WRITERS or (ns.cmd == "run" and ns.mode in ("set", "reset"))
+        writes = ns.cmd in KEYMAP_WRITERS or (ns.cmd == "run" and ns.mode in ("set", "reset", "rebuild"))
         token = LINEAR_WORKSPACE.set(plan_workspace(plan))
+        named = _JOURNAL_COMMAND.set(command_name(ns))
         try:
             with plan_lock(ns.dir) if writes else contextlib.nullcontext():
                 return run_command(ns, ns.dir, plan, given)
         finally:
             flush_writes(ns.dir, plan)
+            _JOURNAL_COMMAND.reset(named)
             LINEAR_WORKSPACE.reset(token)
     except (ReadError, OSError, ValueError, subprocess.SubprocessError) as e:
         die(str(e))

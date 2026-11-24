@@ -388,6 +388,11 @@ Generated from plan.json by `wg load`. Change plan.json, not this comment."""
         self.assertEqual(km["milestones"], {"1": "p1"})
         self.assertEqual(set(km["nodes"]), {"a", "mp", "sp"})
         self.assertEqual(km["nodes"]["a"]["card"], {"id": "card", "sha": SHA})
+        journal = [json.loads(line) for line in (self.d / "journal.jsonl").read_text().splitlines()]
+        self.assertEqual([(e["command"], e["key"], e["kind"], e["changes"]) for e in journal],
+                         [("load", "a", "issue", {"issue": [None, "ENG-42"]}),
+                          ("load", "mp", "issue", {"issue": [None, "CD-50"]}),
+                          ("load", "sp", "issue", {"issue": [None, "CD-3"]})])
 
     def test_adopt_uses_only_unique_unmapped_titles_after_reserving_markers(self):
         project = {"id": "project", "url": "https://example.test/project"}
@@ -2842,6 +2847,46 @@ class JobTests(LaneTests):
         self.comment.assert_not_called()
         _, err = self.job(wg.approve, ["a", "zz"], "ok", code=2)
         self.assertIn("unknown key zz", err)
+
+    def journaled(self, kind=None):
+        """The journal entries of the command under test: the set-up writes of the test are command `wg`."""
+        path = self.d / "journal.jsonl"
+        entries = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        path.unlink(missing_ok=True)
+        return [(e["command"], e["key"], e["changes"]) for e in entries
+                if e["command"] != "wg" and (kind is None or e["kind"] == kind)]
+
+    def test_dispatch_journals_the_run_row_the_claim_and_the_status(self):
+        self.keymap()
+        self.journaled()
+        self.job(wg.dispatch, "a", "codex", None, live={"s": "Done"}, rows={"a": {"approved": "x"}}, effort={"wave": "a"})
+        entries = [e for e in self.journaled() if e[0] == "dispatch"]
+        kinds = [list(e[2]) for e in entries]
+        self.assertIn(("dispatch", "a", {"claim": [None, "agent:codex"]}), entries)
+        self.assertIn(("dispatch", "a", {"status": ["Todo", "In Progress"]}), entries)
+        self.assertTrue(any("state" in k and "branch" in k for k in kinds), entries)
+        run = next(e[2] for e in entries if "state" in e[2])
+        self.assertEqual((run["state"], run["job"]), ([None, "creating"], [None, "dispatch"]))
+
+    def test_claim_started_done_approve_and_move_each_journal_their_change(self):
+        self.job(wg.claim, "a", "review", "codex", live={"a": "In Review", "s": "Done"},
+                 rows={"a": BRANCH | {"pr": "7", "dispatch": "d1"}})
+        self.assertIn(("claim", "a", {"claim": [None, "agent:codex"]}), self.journaled())
+        self.job(wg.started, "a", ["dispatch=d2"], rows={"a": BRANCH | {"state": "starting", "job": "review", "dispatch": "d1"}})
+        started = self.journaled()
+        self.assertEqual(started[0][:2], ("started", "a"))
+        self.assertEqual((started[0][2]["dispatch"], started[0][2]["state"]), (["d1", "d2"], ["starting", "running"]))
+        self.done()
+        entries = self.journaled()
+        self.assertIn(("done", "a", {"claim": ["agent:codex", None]}), entries)
+        self.assertIn(("done", "a", {"status": ["In Progress", "In Review"]}), entries)
+        self.assertIn(("done", "a", {"state": ["running", None]}), entries)
+        today = f"{wg.utc_now():%Y-%m-%d}"
+        self.job(wg.approve, ["a"], "go ahead", live={"a": "Needs Human"})
+        self.assertEqual(self.journaled(), [("approve", "a", {"approved": [None, f"{today}: go ahead"]}),
+                                            ("approve", "a", {"status": ["Needs Human", "Todo"]})])
+        self.job(wg.move, "c", "In Progress", "a note that the journal does not hold")
+        self.assertEqual(self.journaled(), [("move", "c", {"status": ["Todo", "In Progress"]})])
 
     def test_job_commands_run_from_the_command_line(self):
         self.keymap(rows={"a": BRANCH | {"state": "starting", "job": "ci"}})
@@ -5919,3 +5964,119 @@ class ExplainTests(unittest.TestCase):
         self.assertIn('references/coordinator.md "Wait"', prompt)
         self.assertIn("`wg explain human`", prompt)
         self.assertIn("## Wait", wg.explain_text("human"))
+
+
+class JournalTests(DirTests):
+    def entry(self, at, key, changes, kind="run", command="wg"):
+        with patch.object(wg, "utc_now", return_value=datetime.fromisoformat(at).replace(tzinfo=timezone.utc)):
+            wg.journal(self.d, command, key, changes, kind=kind)
+
+    def lines(self):
+        return [json.loads(line) for line in (self.d / "journal.jsonl").read_text().splitlines()]
+
+    def test_run_set_journals_each_changed_field_but_no_secret_and_no_same_value(self):
+        self.keymap(rows={"a": {"pr": "7", "review": "requested"}})
+        (self.d / "journal.jsonl").unlink()
+        with patch.object(wg, "sync_card", return_value=False):
+            self.call(wg.main, ["wg", "run", "set", str(self.d), "a", "pr=7", "review=", "api_key=s3cret", "round=2"])
+        self.assertEqual([(e["command"], e["key"], e["kind"], e["changes"]) for e in self.lines()],
+                         [("run set", "a", "run", {"review": ["requested", None], "round": [None, "2"]})])
+        self.assertNotIn("s3cret", (self.d / "journal.jsonl").read_text())
+        self.assertRegex(self.lines()[0]["time"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_a_journal_failure_is_a_warning_and_the_command_succeeds(self):
+        self.keymap(rows={"a": {}})
+        (self.d / "journal.jsonl").unlink()
+        (self.d / "journal.jsonl").mkdir()
+        with patch.object(wg, "sync_card", return_value=False):
+            out, err = self.call(wg.run_set, self.d, self.p, "a", ["pr=9"])
+        self.assertEqual(out, "pr=9\n")
+        self.assertIn("warn: journal not written", err)
+        self.assertEqual(wg.run_row(wg.load_keymap(self.d), "a"), {"pr": "9"})
+
+    def test_the_journal_rotates_at_the_limit(self):
+        self.keymap(rows={})
+        with patch.object(wg, "JOURNAL_LIMIT", 400):
+            for n in range(6):
+                self.entry(f"2026-01-01T00:0{n}:00", "a", {"pr": [None, str(n)]})
+        old = [json.loads(line) for line in (self.d / "journal.1.jsonl").read_text().splitlines()]
+        self.assertTrue(old and self.lines())
+        self.assertLessEqual((self.d / "journal.jsonl").stat().st_size, 400)
+        self.assertEqual([e["changes"]["pr"][1] for e in wg.journal_entries(self.d)][-len(self.lines()):],
+                         [e["changes"]["pr"][1] for e in self.lines()])
+
+    def test_log_prints_one_line_per_entry_newest_last_with_key_since_and_count(self):
+        self.keymap(rows={})
+        (self.d / "journal.jsonl").unlink()
+        for n in range(35):
+            self.entry(f"2026-01-01T{n // 60:02d}:{n % 60:02d}:00", "a" if n % 2 else "mp", {"pr": [None, str(n)]})
+        self.entry("2026-01-02T00:00:00", "a", {"status": ["Todo", "In Progress"]}, kind="status", command="move")
+        out, _ = self.call(wg.log_command, self.d, self.p, None, None, 30, False)
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 30)
+        self.assertEqual(lines[-1], "2026-01-02T00:00:00Z move a status Todo -> In Progress")
+        self.assertEqual(lines[-2], "2026-01-01T00:34:00Z wg mp pr - -> 34")
+        out, _ = self.call(wg.log_command, self.d, self.p, "a", None, 3, False)
+        self.assertEqual([line.split()[2] for line in out.splitlines()], ["a"] * 3)
+        out, _ = self.call(wg.log_command, self.d, self.p, None, "2026-01-01T00:33:00Z", 30, False)
+        self.assertEqual(len(out.splitlines()), 3)
+        with patch.object(wg, "utc_now", return_value=datetime(2026, 1, 2, 1, tzinfo=timezone.utc)):
+            out, _ = self.call(wg.log_command, self.d, self.p, None, "2h", 30, False)
+        self.assertEqual(out.splitlines(), [lines[-1]])
+        _, err = self.call(wg.log_command, self.d, self.p, None, "yesterday", 30, False, code=2)
+        self.assertIn("invalid --since 'yesterday'", err)
+        with (self.d / "journal.jsonl").open("a") as f:
+            f.write("not json\n")
+        out, err = self.call(wg.main, ["wg", "log", str(self.d), "-n", "1"])
+        self.assertEqual(out.splitlines(), [lines[-1]])
+        self.assertIn("1 damaged journal line(s) skipped", err)
+
+    def test_log_times_gives_each_task_its_spans_and_the_human_wait(self):
+        self.p["nodes"].append(node("b"))
+        self.p["edges"].append(edge("mp", "b"))
+        self.write_plan()
+        self.keymap(rows={})
+        (self.d / "journal.jsonl").unlink()
+        self.entry("2026-01-01T10:00:00", "a", {"job": [None, "dispatch"], "state": [None, "creating"]})
+        self.entry("2026-01-01T12:30:00", "a", {"code_done_head": [None, SHA]})
+        self.entry("2026-01-01T12:30:00", "a", {"status": ["In Progress", "In Review"]}, kind="status")
+        self.entry("2026-01-01T13:00:00", "a", {"status": ["In Review", "Needs Human"]}, kind="status")
+        self.entry("2026-01-01T14:00:00", "a", {"status": ["Needs Human", "Ready to Merge"]}, kind="status")
+        self.entry("2026-01-02T15:00:00", "a", {"status": ["Ready to Merge", "Merged"]}, kind="status")
+        self.entry("2026-01-02T00:00:00", "b", {"dispatch": [None, "d1"]})
+        self.entry("2026-01-02T01:00:00", "b", {"status": ["In Progress", "Needs Human"]}, kind="status")
+        with patch.object(wg, "utc_now", return_value=datetime(2026, 1, 2, 1, 30, tzinfo=timezone.utc)):
+            out, _ = self.call(wg.main, ["wg", "log", str(self.d), "--times"])
+        self.assertEqual(out.splitlines(), [
+            "a\tdispatch->code done 2h30m\tcode done->merged 1d02h\twait on Human 1d02h",
+            "b\tdispatch->code done -\tcode done->merged -\twait on Human 30m",
+        ])
+
+    def test_run_rebuild_replays_the_run_rows_and_apply_needs_the_node_map(self):
+        self.keymap(rows={})
+        (self.d / "journal.jsonl").unlink()
+        self.entry("2026-01-01T10:00:00", "@effort", {"wave": [None, "a"]})
+        self.entry("2026-01-01T10:01:00", "a", {"state": [None, "creating"], "branch": [None, "wg/a"]})
+        self.entry("2026-01-01T10:02:00", "a", {"status": ["Todo", "In Progress"]}, kind="status")
+        self.entry("2026-01-01T10:03:00", "a", {"claim": [None, "agent:codex"]}, kind="claim")
+        self.entry("2026-01-01T10:04:00", "a", {"state": ["creating", None], "pr": [None, "7"]})
+        self.entry("2026-01-01T10:05:00", "gone", {"pr": [None, "8"]})
+        self.entry("2026-01-01T10:06:00", "mp", {"note": [None, "x"]})
+        self.entry("2026-01-01T10:07:00", "mp", {"note": ["x", None]})
+        out, _ = self.call(wg.main, ["wg", "run", "rebuild", str(self.d)])
+        self.assertEqual(out.splitlines(), ["from 8 journal entries since 2026-01-01T10:00:00Z", "@effort\twave=a",
+                                            "a\tbranch=wg/a pr=7",
+                                            "dry run: add --apply to write these run rows to keymap.json"])
+        self.assertEqual(wg.load_keymap(self.d).get("run"), {"effort": {}, "nodes": {}})
+        wg.save_json(self.d / "keymap.json", {"nodes": {}})
+        _, err = self.call(wg.main, ["wg", "run", "rebuild", str(self.d), "--apply"], code=1)
+        self.assertIn("run wg load --adopt first", err)
+        self.keymap()
+        out, _ = self.call(wg.main, ["wg", "run", "rebuild", str(self.d), "--apply"])
+        self.assertIn("wrote the run rows of 1 node(s) to keymap.json", out)
+        self.assertEqual(wg.load_keymap(self.d)["run"], {"effort": {"wave": "a"}, "nodes": {"a": {"branch": "wg/a", "pr": "7"}}})
+        self.assertEqual(self.lines()[-1]["command"], "run rebuild --apply")
+        (self.d / "journal.jsonl").unlink()
+        (self.d / "journal.1.jsonl").unlink(missing_ok=True)
+        _, err = self.call(wg.main, ["wg", "run", "rebuild", str(self.d)], code=1)
+        self.assertIn("no journal in", err)

@@ -6,6 +6,7 @@
 | `PLAN.md` | Flowchart, phase table, project link, `## Notes` (recovery.md "Run state") |
 | `plan.json` | The graph: effort, phases, nodes, edges ([graph.md](graph.md#planjson)) |
 | `keymap.json` | Written by `wg` only: project, phase milestones, key → issue id, identifier, node card, and what `wg next` last published for the page; the id of the `work-graph status` document; the run rows |
+| `journal.jsonl` | Written by `wg` only: one JSON line for each change of a status, a claim, or a run row; `journal.1.jsonl` holds the older lines after 5 MB (recovery.md "Run state") |
 | `evidence/` | Written by `wg evidence`: the last test run of each node, and the repo-wide run of each phase |
 | `specs/` | Written by `wg dispatch` and `wg claim`: the worker spec of each job |
 | Linear | The plan's team. One project per effort; one project milestone per phase. |

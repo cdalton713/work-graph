@@ -2463,6 +2463,82 @@ def pr_view(pr, fields, cwd=None):
     return json.loads(result.stdout)
 
 
+PR_BATCH_SIZE = 50  # PRs in one GraphQL request
+PR_BATCH_FIELDS = """
+  state headRefOid isDraft mergeCommit { oid } mergeable baseRefName
+  reviews(first: 100) { nodes { body } }
+  comments(first: 100) { nodes { body } }
+  commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+    __typename
+    ... on CheckRun { name status conclusion }
+    ... on StatusContext { context state }
+  } } } } } }"""
+# The bucket of each check state, as `gh pr checks` sorts them.
+CHECK_BUCKETS = {"SUCCESS": "pass", "SKIPPED": "skipping", "NEUTRAL": "skipping", "CANCELLED": "cancel",
+                 "ERROR": "fail", "FAILURE": "fail", "TIMED_OUT": "fail", "ACTION_REQUIRED": "fail"}
+
+
+def rollup_checks(pr):
+    """The (passed, detail) pair of `pr_checks` from the status check rollup of the PR's head commit."""
+    commits = ((pr.get("commits") or {}).get("nodes") or [{}])
+    rollup = ((commits[-1] or {}).get("commit") or {}).get("statusCheckRollup") or {}
+    contexts = (rollup.get("contexts") or {}).get("nodes") or []
+    if not contexts:
+        return True, "no checks"
+    checks = []
+    for c in contexts:
+        if c.get("__typename") == "StatusContext":
+            name, state = c.get("context"), c.get("state")
+        else:
+            name = c.get("name")
+            state = c.get("conclusion") if c.get("status") == "COMPLETED" else c.get("status")
+        checks.append((name, CHECK_BUCKETS.get(state, "pending")))
+    failures = [name for name, bucket in checks if bucket == "fail"]
+    pending = sum(bucket == "pending" for _, bucket in checks)
+    return not failures, ", ".join(failures) or "no failed checks" + (f" ({pending} pending)" if pending else "")
+
+
+def pr_batch(numbers, cwd=None):
+    """{number: (info, checks)} for each PR that GitHub returns, with one `gh api graphql` request for each 50 PRs.
+
+    `info` has the shape of `pr_view` with PR_FIELDS, and `checks` the (passed, detail) pair of `pr_checks`.
+    A PR that the answer does not hold is not in the result; the caller reads it with `pr_view`.
+    """
+    numbers = sorted({n for n in numbers if isinstance(n, str) and re.fullmatch(r"[1-9][0-9]*", n)}, key=int)
+    if not numbers:
+        return {}
+    result = command("gh", "repo", "view", "--json", "owner,name", cwd=cwd)
+    if result.returncode:
+        raise ReadError(command_error(result))
+    repo = json.loads(result.stdout)
+    owner, name = (repo.get("owner") or {}).get("login"), repo.get("name")
+    if not owner or not name:
+        raise ReadError("gh repo view: no owner or name")
+    out = {}
+    for start in range(0, len(numbers), PR_BATCH_SIZE):
+        chunk = numbers[start:start + PR_BATCH_SIZE]
+        query = ("query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {"
+                 + "".join(f" pr{n}: pullRequest(number: {n}) {{{PR_BATCH_FIELDS} }}" for n in chunk) + " } }")
+        result = command("gh", "api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}",
+                         "-f", f"name={name}", cwd=cwd)
+        try:
+            # A PR that GitHub cannot resolve is null in the data, and gh exits 1: keep the PRs that it returns.
+            repository = (json.loads(result.stdout).get("data") or {}).get("repository") or {}
+        except (ValueError, AttributeError):
+            raise ReadError(command_error(result)) from None
+        if result.returncode and not any(repository.values()):
+            raise ReadError(command_error(result))
+        for n in chunk:
+            pr = repository.get(f"pr{n}")
+            if not isinstance(pr, dict):
+                continue
+            info = {field: pr.get(field) for field in PR_FIELDS.split(",")}
+            info["reviews"] = (pr.get("reviews") or {}).get("nodes") or []
+            info["comments"] = (pr.get("comments") or {}).get("nodes") or []
+            out[n] = (info, rollup_checks(pr))
+    return out
+
+
 def pr_scope(pr, lower, cwd=None):
     """(ok, name, detail): the PR carries exactly the branch's own commits over `lower`.
 
@@ -2646,13 +2722,19 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
         return nodes[k].get("title") or live[km["nodes"][k]["id"]].get("title", "")
 
     infos = {}
+    try:
+        # One request reads every PR of the run rows. A PR that it does not return is read alone below.
+        batch = pr_batch([row.get("pr") for row in rows.values() if isinstance(row, dict)], cwd=plan_dir)
+    except (ReadError, OSError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
+        warn(f"the request for all PRs failed, so each PR is read alone: {e}")
+        batch = {}
 
     def pr_info(k, number, optional=False):
         if k not in infos:
             if not isinstance(number, str) or not re.fullmatch(r"[1-9][0-9]*", number):
                 raise ReadError(f"{k}: invalid PR number {number!r}")
             try:
-                result = pr_view(number, PR_FIELDS, cwd=plan_dir)
+                result = batch[number][0] if number in batch else pr_view(number, PR_FIELDS, cwd=plan_dir)
                 if not isinstance(result, dict) or result.get("state") not in {"OPEN", "CLOSED", "MERGED"}:
                     raise ReadError(f"{k} #{number}: invalid PR response")
                 infos[k] = result
@@ -2664,6 +2746,8 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
         return infos[k]
 
     def checks_pass(k, number):
+        if number in batch:
+            return batch[number][1][0]
         try:
             return pr_checks(number, plan_dir, **({"strict": True} if inputs is not None else {}))[0]
         except (OSError, ValueError) as e:

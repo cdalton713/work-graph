@@ -2286,7 +2286,8 @@ class JobTests(LaneTests):
         self.assertEqual((sync["branch"], sync["lower"], sync["parent"], sync["stack"], sync["child"]),
                          ("sync/z-p1", "origin/main", "main", "z-p1-sync", "z-p1-sync-00-sync"))
 
-    def worktree(self, *, branch="wg/ex-one-00-a", dirty="", ancestor=True, parent="main", effort=None, code=0):
+    def worktree(self, *, branch="wg/ex-one-00-a", dirty="", ancestor=True, parent="main", effort=None, code=0,
+                 linear=None):
         rows = {"a": BRANCH | {"state": "creating", "job": "dispatch", "agent": "claude"}}
         (self.d / "specs" / "a.md").unlink(missing_ok=True)
         values = {("branch", "--show-current"): branch, ("rev-parse", "HEAD"): SHA, ("status", "--porcelain"): dirty,
@@ -2295,7 +2296,7 @@ class JobTests(LaneTests):
              patch.object(wg, "command", return_value=subprocess.CompletedProcess([], 0 if ancestor else 1, "", "")), \
              patch.object(wg, "branch_metadata", return_value={"parentBranchName": parent} if parent else None):
             return self.job(wg.dispatch, "a", "codex", str(self.d / "child"), live={"a": "In Progress", "s": "Done"},
-                            rows=rows, effort={"wave": "a"} | (effort or {}), code=code)
+                            rows=rows, effort={"wave": "a"} | (effort or {}), code=code, linear=linear)
 
     def test_dispatch_checks_the_new_worktree_before_it_writes_the_spec(self):
         cases = [
@@ -2332,6 +2333,58 @@ class JobTests(LaneTests):
         _, err = self.job(wg.dispatch, "a", "codex", "child", code=1, rows={"a": BRANCH})
         self.assertIn("a: run 'wg dispatch", err)
 
+    def test_the_dispatch_spec_holds_the_design_the_node_card_and_the_rules(self):
+        reads = []
+
+        def linear(query, variables=None):
+            if "description" not in query:
+                return STATES
+            reads.append(variables["id"])
+            return {"issue": {"description": "Do {this} first.\n\n+++ Agent notes\n\nwork-graph node `a`\n\n+++"}}
+
+        self.p["nodes"][0]["acceptance"] = "The spec has a design."
+        self.worktree(linear=linear)
+        text = (self.d / "specs" / "a.md").read_text()
+        first, rest = text.split("\n", 1)
+        self.assertRegex(first, r"^Written by `wg dispatch` at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: a copy of Linear "
+                                r"issue `CD-1` and of the node `a` of plan\.json\. The issue stays the record\.$")
+        self.assertEqual(reads, ["a"])  # one read, for this issue only
+        self.assertIn("\n\n## Design\n\nDo {this} first.\n\n## Node card\n\n**Acceptance**\n\nThe spec has a design."
+                      "\n\n**Files**\n\n- owns `a/*`\n- shares `shared` (additive only)\n", rest)
+        self.assertNotIn("Agent notes", text)
+        self.assertNotIn("\n\n## Repository rules", text)
+        self.assertIn(f"2. Your dispatch spec {wg.shlex.quote(str(self.d.resolve() / 'specs' / 'a.md'))} holds the design",
+                      text)
+        self.assertNotIn("get_issue", text)
+        self.assertNotIn("moon run", text)  # no lint command in the config or the plan: no lint step
+        self.assertIn("in this order: with a clean tree, `", text)
+
+        self.p["effort"] |= {"lint": ["moon", "run", ":lint", "--base", "{lower}"], "rules": "Run no moon.\n"}
+        self.worktree(linear=linear)
+        text = (self.d / "specs" / "a.md").read_text()
+        self.assertIn("in this order: one lint of what your diff affects, `moon run :lint --base origin/main`; "
+                      "commit, also what the lint fixed; then, with a clean tree, `", text)
+        self.assertTrue(text.endswith("\n\n## Repository rules\n\nRun no moon.\n"))
+
+    def test_the_lint_step_comes_from_the_plan_or_the_config(self):
+        runner = wg.TEST_RUNNER | {"lint": ["lint", "--base={lower}"]}
+        with patch.object(wg, "TEST_RUNNER", runner):
+            self.assertIn("`lint --base=wg/x`", wg.lint_step({"effort": {}}, "wg/x"))
+            self.assertEqual(wg.lint_step({"effort": {"test": ["pnpm", "test"]}}, "wg/x"), "")  # another repository
+            self.assertEqual(wg.lint_step({"effort": {"lint": []}}, "wg/x"), "")
+            self.assertIn("`ruff check`", wg.lint_step({"effort": {"lint": ["ruff", "check"], "test": ["t"]}}, "wg/x"))
+        self.assertEqual(wg.lint_step({"effort": {}}, "wg/x"), "")
+        _, err = self.call(wg.lint_step, {"effort": {"lint": "moon run"}}, "wg/x", code=2)
+        self.assertIn("the lint command must be a list of strings", err)
+
+    def test_check_takes_the_lint_and_the_rules_of_the_effort(self):
+        p = plan()
+        p["effort"] |= {"lint": ["moon", "run", ":lint"], "rules": "Run no moon."}
+        self.assertEqual(wg.check(p), [])
+        p["effort"] |= {"lint": "moon run :lint", "rules": ["Run no moon."]}
+        self.assertEqual([e for e in wg.check(p) if e.startswith("effort.")],
+                         ["effort.lint: a list of strings", "effort.rules: a text"])
+
     def test_render_stops_on_a_name_with_no_value(self):
         _, err = self.call(wg.render, "a {key} and {other_name}", {"key": "k"}, code=2)
         self.assertIn("worker-spec.md: no value for {other_name}", err)
@@ -2351,6 +2404,8 @@ class JobTests(LaneTests):
         self.assertTrue(text.startswith("**Job `review`:** Linear issue `CD-1`, node `a`."))
         self.assertIn("PR #7", text)
         self.assertNotIn("**Task:**", text)
+        for part in ("## Design", "## Node card", "## Repository rules", "Written by"):
+            self.assertNotIn(part, text)  # a job spec is one header and the work
 
     def test_claim_gives_a_new_worker_the_task_contract_and_pins_a_restack(self):
         with patch.object(wg, "restack_line", return_value="target main at abc; base: frozen; parent merged: yes"):
@@ -2388,6 +2443,89 @@ class JobTests(LaneTests):
                 self.assertIn("CD-1: not claimed", err)
                 self.update.assert_not_called()
 
+    def test_a_squash_restack_uses_the_old_parent_tip_and_the_new_target(self):
+        repo, origin = self.d / "repo", self.d / "origin.git"
+
+        def git(*args, cwd=repo):
+            return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+        def commit(name):
+            (repo / name).write_text(name)
+            git("add", name)
+            git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", name)
+
+        git("init", "-q", "--bare", str(origin), cwd=self.d)
+        git("init", "-q", "-b", "main", str(repo), cwd=self.d)
+        git("remote", "add", "origin", str(origin))
+        git("config", "user.name", "t")  # the rebase commits: no global identity on a CI runner
+        git("config", "user.email", "t@t")
+        commit("base")
+        git("checkout", "-qb", "wg/ex-one-00-a")
+        commit("parent")
+        git("checkout", "-qb", "wg/ex-one-01-b")
+        commit("child")
+        git("checkout", "-q", "main")
+        git("merge", "-q", "--squash", "wg/ex-one-00-a")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "squash a")
+        git("push", "-q", "origin", "main")
+        git("branch", "keep", "wg/ex-one-01-b")
+        nodes = {n["key"]: n for n in self.p["nodes"]}
+        row = {"branch": "wg/ex-one-01-b", "parent": "wg/ex-one-00-a"}
+        with patch.object(wg, "stax_trunk", return_value="main"):
+            line = wg.restack_line(repo, self.p, nodes["b"], row, nodes, {"b": ["a"]}, {"a": "Merged"})
+        rebase = line.split("refresh: ")[1].split(", then")[0]
+        git("checkout", "-q", "wg/ex-one-01-b")
+        git(*rebase.split()[1:])
+        self.assertEqual(git("rev-list", "--count", "origin/main..HEAD"), "1")  # only the child's own commit
+        self.assertEqual(git("diff", "--name-only", "origin/main...HEAD"), "child")
+        # A rewritten parent whose ref is gone: the merge base of the branch and the parent's last head.
+        git("checkout", "-q", "wg/ex-one-00-a")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--amend", "-m", "parent 2")
+        last = git("rev-parse", "HEAD")
+        git("checkout", "-q", "main")
+        git("branch", "-qD", "wg/ex-one-00-a")
+        self.keymap(rows={"a": {"code_done_head": last}})
+        km = wg.load_keymap(self.d)
+        with patch.object(wg, "stax_trunk", return_value="main"), patch.object(wg, "load_keymap", return_value=km):
+            line = wg.restack_line(repo, self.p, nodes["b"], row | {"branch": "keep"}, nodes, {"b": ["a"]},
+                                   {"a": "Merged"})
+        fork = git("merge-base", "keep", last)
+        self.assertNotEqual(fork, last)
+        self.assertIn(f"git rebase --onto origin/main {fork},", line)
+
+    def test_a_restack_after_a_merged_parent_checks_from_the_new_target(self):
+        rows = {"a": {"code_done_head": SHA}, "b": {"branch": "wg/ex-one-01-b", "parent": "wg/ex-one-00-a",
+                                                    "lower": "wg/ex-one-00-a", "pr": "8", "dispatch": "d2"}}
+        line = "target main at abc; base: trunk; parent merged: yes; refresh: git rebase --onto origin/main x, then y"
+        with patch.object(wg, "restack_line", return_value=line):
+            self.job(wg.claim, "b", "restack", "codex", live={"a": "Merged", "b": "In Review", "s": "Done"}, rows=rows)
+        self.assertEqual((self.row("b")["lower"], self.row("b")["parent"]), ("origin/main", "wg/ex-one-00-a"))
+        text = (self.d / "specs" / "b-restack.md").read_text()
+        self.assertIn("diff base `origin/main`", text)
+
+    def test_a_first_claim_of_an_adopted_node_writes_its_dispatch_spec(self):
+        self.p["nodes"][0]["acceptance"] = "Adopted work."
+        self.job(wg.claim, "a", "dispatch", "codex", live={"a": "In Progress", "s": "Done"}, rows={"a": BRANCH})
+        dispatch = (self.d / "specs" / "a.md").read_text()
+        self.assertIn("## Node card\n\n**Acceptance**\n\nAdopted work.\n\n**Files**\n\n- owns `a/*`", dispatch)
+        text = (self.d / "specs" / "a-dispatch.md").read_text()
+        self.assertTrue(text.startswith("**Task:**"))
+        self.assertIn(f"Your dispatch spec {wg.shlex.quote(str(self.d.resolve() / 'specs' / 'a.md'))}", text)
+        self.assertIn("**Job `dispatch`:**", text)
+        self.assertNotIn("\n\n## Design", text)  # the job spec stays the contract, one header, and the work
+
+    def test_the_design_keeps_the_text_around_the_notes_block(self):
+        text = ("First.\n\n+++ Agent notes\n\nwork-graph node `a` · kind `task`\n\nThe graph lives in plan.json.\n\n+++"
+                "\n\nA later line.\n\n+++ Agent notes\n\nOther notes.\n\n+++")
+        self.assertEqual(wg.issue_design({}, {"description": text}),
+                         "First.\n\nA later line.\n\n+++ Agent notes\n\nOther notes.\n\n+++")
+
+    def test_a_lint_command_keeps_braces_as_text(self):
+        values = {"lint": wg.Literal(wg.lint_step({"effort": {"lint": ["sh", "-c", 'lint "${file}"']}}, "x")), "key": "k"}
+        self.assertIn("""`sh -c 'lint "${file}"'`""", wg.render("{key}: {lint}", values))
+        _, err = self.call(wg.render, "{key} {lint} {other}", values, code=2)
+        self.assertIn("no value for {other}", err)
+
     def test_restack_line_pins_the_target_and_refreshes_a_frozen_base(self):
         nodes = {n["key"]: n for n in self.p["nodes"]}
         deps = {"b": ["a"], "a": ["s"]}
@@ -2396,7 +2534,12 @@ class JobTests(LaneTests):
              patch.object(wg, "git_output", return_value=SHA) as git:
             line = wg.restack_line(self.d, self.p, nodes["b"], row, nodes, deps, {"a": "Merged"})
             refresh.assert_called_once_with(self.d, "main")
-            self.assertEqual(line, f"target main at {SHA}; base: frozen; parent merged: yes")
+            self.assertEqual(line, f"target main at {SHA}; base: frozen; parent merged: yes; refresh: "
+                                   f"git rebase --onto origin/main {SHA}, then st branch reparent --parent main")
+            self.assertEqual(git.call_args_list[-1].args, ("rev-parse", "wg/ex-one-00-a"))
+            git.reset_mock()
+            wg.restack_line(self.d, self.p, nodes["b"], row | {"branch": "wg/ex-one-01-b"}, nodes, deps, {"a": "Merged"})
+            self.assertEqual(git.call_args_list[-1].args, ("merge-base", "wg/ex-one-01-b", "wg/ex-one-00-a"))
             git.side_effect = [SHA, OTHER]
             with self.assertRaises(wg.ReadError):
                 wg.restack_line(self.d, self.p, nodes["b"], row, nodes, deps, {"a": "Merged"})
@@ -3374,6 +3517,8 @@ class RehearsalTests(unittest.TestCase):
         if "projectStatuses" in query:
             return {"project": {"status": {"id": "started", "type": "started", "createdAt": "t"}},
                     "projectStatuses": {"nodes": []}}
+        if "issue(id:$id){ description }" in query:
+            return {"issue": {"description": f"The design of {variables['id']}."}}
         raise AssertionError(query)
 
     # --- the people and the tools

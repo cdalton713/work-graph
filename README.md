@@ -44,6 +44,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
     "run": ["./node_modules/.bin/test-runner", "run", "--"],
     "suite": [":test"],
     "options": ["--concurrency", "7"],
+    "lint": ["moon", "run", ":lint", "--affected", "--base", "{lower}"],
     "commit_marker": "testing ([0-9a-f]{10})"
   },
   "workspaces": [
@@ -62,7 +63,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | `rules` | A Markdown file of your own rules: your workspaces, the repositories where agents may merge, freeze rules. The skill tells the agent to read it. |
 | `github_user` | The `gh` login that `wg tick --install` requires for the scheduled job. |
 | `tick_label`, `tick_roots` | The launchd label of `wg tick --install`, and the folders where `wg tick` looks for `*-core/plan.json`. |
-| `test_runner` | The default test command of `wg evidence`. A node runs the moon test tasks that its diff affects; `@full-<phase>` runs `suite`. `commit_marker` is a regular expression for the line where the runner prints the commit it tests; without it, the exit code is the proof. |
+| `test_runner` | The default test command of `wg evidence`. A node runs the moon test tasks that its diff affects; `@full-<phase>` runs `suite`. `commit_marker` is a regular expression for the line where the runner prints the commit it tests; without it, the exit code is the proof. `lint` is the lint command of the worker spec's push checks, as a list of arguments; each `{lower}` is the node's diff base. Without it, the spec has no lint step. A plan's `effort.lint` replaces it, and a plan with `effort.test` does not use it (`skills/work-graph/references/graph.md`). |
 | `workspaces` | The Linear workspaces. The first is the default. `team` is the default team of a plan; `teams` limits a workspace to those teams; `team_labels: false` makes project labels workspace labels (Linear's team project labels need the Business plan). |
 
 A workspace's key comes from `LINEAR_<ID>_API_KEY`, then the `key_env` names, then the private file

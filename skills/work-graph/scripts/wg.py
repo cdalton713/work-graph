@@ -340,6 +340,11 @@ def check(plan):
     initiative = plan.get("effort", {}).get("initiative")
     if initiative is not None and (not isinstance(initiative, str) or not initiative.strip() or len(initiative) > 80):
         errs.append("effort.initiative: a name of 1 to 80 characters")
+    effort = plan.get("effort", {})
+    if "lint" in effort and not (isinstance(effort["lint"], list) and all(isinstance(a, str) for a in effort["lint"])):
+        errs.append("effort.lint: a list of strings")
+    if "rules" in effort and not isinstance(effort["rules"], str):
+        errs.append("effort.rules: a text")
     nodes, issue_keys = {}, {}
     for n in plan.get("nodes", []):
         k = n.get("key")
@@ -4097,12 +4102,21 @@ def spec_sections():
     return {name: "\n".join(body).strip() for name, body in sections.items()}
 
 
+class Literal(str):
+    """A spec value that `render` puts in after its check: a `{name}` in it is text, not a missing value."""
+
+
 def render(text, values):
     for name, value in values.items():
-        text = text.replace("{" + name + "}", str(value))
-    missing = sorted(set(re.findall(r"\{[a-z_]+\}", text)))
+        if not isinstance(value, Literal):
+            text = text.replace("{" + name + "}", str(value))
+    missing = sorted(set(re.findall(r"\{[a-z_]+\}", text)) - {"{" + n + "}" for n, v in values.items()
+                                                                if isinstance(v, Literal)})
     if missing:
         die("worker-spec.md: no value for " + ", ".join(missing))
+    for name, value in values.items():
+        if isinstance(value, Literal):
+            text = text.replace("{" + name + "}", value)
     return text
 
 
@@ -4113,11 +4127,63 @@ def write_spec(plan_dir, name, text):
     return path
 
 
+def lint_step(plan, lower):
+    """The lint part of push check step 4, or "" for no lint step.
+
+    `effort.lint` replaces the config `test_runner.lint`; a plan with its own `effort.test` is for another
+    repository, so the config lint does not apply to it. Each `{lower}` in an argument is the diff base."""
+    effort = plan["effort"]
+    if "lint" in effort:
+        args = effort["lint"]
+    elif "test" in effort or not TEST_RUNNER:
+        args = []
+    else:
+        args = TEST_RUNNER.get("lint") or []
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        die(f"the lint command must be a list of strings (effort.lint, or test_runner.lint in {CONFIG_PATH})")
+    if not args:
+        return ""
+    lint = shlex.join(a.replace("{lower}", lower) for a in args)
+    return f"one lint of what your diff affects, `{lint}`; commit, also what the lint fixed; then, "
+
+
 def spec_values(plan_dir, plan, node, entry, issue, row):
+    plan_path = Path(plan_dir).resolve()
     return {"identifier": entry["identifier"], "url": issue.get("url") or "no URL", "key": node["key"],
             "path": row.get("path", "-"), "branch": row["branch"], "parent": row["parent"], "lower": row["lower"],
-            "pr": row.get("pr", "-"), "wg": wg_command(), "plan_dir": shlex.quote(str(Path(plan_dir).resolve())),
-            "project": plan["effort"]["name"], "skill": str(Path(__file__).resolve().parent.parent)}
+            "pr": row.get("pr", "-"), "wg": wg_command(), "plan_dir": shlex.quote(str(plan_path)),
+            "project": plan["effort"]["name"], "skill": str(Path(__file__).resolve().parent.parent),
+            "lint": Literal(lint_step(plan, row["lower"])),
+            "dispatch_spec": shlex.quote(str(plan_path / "specs" / f"{node['key']}.md"))}
+
+
+# The Agent notes block that `wg load` adds to each issue description (node_body). A worker spec drops it,
+# and keeps the text before and after it.
+NOTES_BLOCK = re.compile(r"\+\+\+ Agent notes\n\nwork-graph node .*?\n\+\+\+[ \t]*(?=\n|$)", re.S)
+
+
+def issue_design(entry, issue):
+    """The issue description, read from Linear for this one issue, without the notes block of `wg load`."""
+    text = issue.get("description")
+    if text is None:
+        text = (gql("query($id:String!){ issue(id:$id){ description } }", {"id": entry["id"]}).get("issue") or {}
+                ).get("description")
+    text = re.sub(r"\n{3,}", "\n\n", NOTES_BLOCK.sub("", text or "")).strip()
+    return text or "The issue has no description."
+
+
+def spec_context(plan, node, entry, issue):
+    """The parts of a dispatch spec after the task contract: the design, the node card, the repository rules."""
+    files = [f"- owns `{g}`" for g in node.get("owns", [])]
+    files += [f"- shares `{g}` (additive only)" for g in node.get("shares", [])]
+    card = [f"**Acceptance**\n\n{node['acceptance']}"] if node.get("acceptance") else []
+    card += ["**Files**\n\n" + "\n".join(files)] if files else []
+    parts = ["## Design\n\n" + issue_design(entry, issue),
+             "## Node card\n\n" + ("\n\n".join(card) or EMPTY_CARD)]
+    rules = (plan["effort"].get("rules") or "").strip()
+    if rules:
+        parts.append("## Repository rules\n\n" + rules)
+    return "\n\n".join(parts)
 
 
 def claim_labels(issue):
@@ -4433,13 +4499,23 @@ def claim_steps(plan_dir, plan, key, snap, quiet=False, warnings=None):
 
 def dispatch_spec(plan_dir, plan, node, entry, issue, row):
     """Write the worker spec of a node's first job. Returns the spec path and the task title."""
+    text = dispatch_text(plan_dir, plan, node, entry, issue, row)
+    return write_spec(plan_dir, node["key"], text), f"{entry['identifier']}: {node.get('title') or issue.get('title', node['key'])}"
+
+
+def dispatch_text(plan_dir, plan, node, entry, issue, row):
+    """The dispatch spec: the time line, the task or spike section, the design, the node card, the rules."""
     sections, values = spec_sections(), spec_values(plan_dir, plan, node, entry, issue, row)
     if node["kind"] == "spike":
         text = render(sections["spike"], values)
     else:
         kind = node.get("role") if node.get("role") in ("hotfix", "sync") else "lane"
         text = render(sections["task"], {"submit": sections[f"submit {kind}"]} | values)
-    return write_spec(plan_dir, node["key"], text), f"{entry['identifier']}: {node.get('title') or issue.get('title', node['key'])}"
+    # The text of the issue and plan.json is not rendered: a `{name}` in it is not a spec value.
+    when = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    first = (f"Written by `wg dispatch` at {when}: a copy of Linear issue `{entry['identifier']}` and of the node "
+             f"`{node['key']}` of plan.json. The issue stays the record.")
+    return "\n\n".join([first, text, spec_context(plan, node, entry, issue)])
 
 
 def dispatch_target(plan_dir, plan, key):
@@ -4862,7 +4938,7 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
             title = f"{entry['identifier']}: {node.get('title') or issue.get('title', key)}"
         else:
             spec, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
-    except OSError as e:
+    except (ReadError, OSError) as e:
         print_fail("spec", e)
         warnings.append(continues)
         return 1
@@ -4964,7 +5040,21 @@ def restack_line(plan_dir, plan, node, row, nodes, deps, st):
         sha = git_output("rev-parse", f"origin/{pin}", cwd=plan_dir)
     below = lane_below(node["key"], nodes, deps)
     merged = bool(below) and st.get(below) in MERGED and row["parent"] != bottom_base(node, target)
-    return f"target {pin} at {sha}; base: {kind}; parent merged: {'yes' if merged else 'no'}"
+    line = f"target {pin} at {sha}; base: {kind}; parent merged: {'yes' if merged else 'no'}"
+    if not merged:
+        return line
+    # After a squash merge, `st restack` replays the parent's commits. The branch's own commits are the ones
+    # after the old tip of the parent: where the branch left it.
+    try:
+        old = (git_output("merge-base", row["branch"], row["parent"], cwd=plan_dir) if row.get("branch")
+               else git_output("rev-parse", row["parent"], cwd=plan_dir))
+    except ReadError:
+        old = run_row(load_keymap(plan_dir), below).get("code_done_head") or ""
+        if not old:
+            raise ReadError(f"no old tip of the merged parent {row['parent']}: ask {HUMAN}")
+        if row.get("branch"):  # a rewritten parent: its last head can be off the branch's history
+            old = git_output("merge-base", row["branch"], old, cwd=plan_dir)
+    return f"{line}; refresh: git rebase --onto origin/{pin} {old}, then st branch reparent --parent {pin}"
 
 
 def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
@@ -5022,6 +5112,10 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
     if problems:
         refuse(ident, problems, "not claimed")
     restack = restack_line(plan_dir, plan, node, row, nodes, deps, st) if job == "restack" else ""
+    if "parent merged: yes" in restack:
+        # The worker's push checks and `wg evidence` count from the new target, not the merged parent.
+        # `wg done` sets the parent when the PR's base is the target.
+        row["lower"] = f"origin/{bottom_base(node, phase_of(plan, node)['target'])}"
     if not resume:
         held = claim_labels(issue)
         if send and held:  # the same refusal as take_claim, before the run row changes
@@ -5048,6 +5142,8 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
         header = render(sections["task"], {"submit": sections[f"submit {kind}"]} | values) + "\n\n" + header
     spec_path = Path(plan_dir).resolve() / "specs" / f"{key}-{job}.md"
     if not (resume and row.get("retry_request") and spec_path.is_file()):  # a pending request keeps its spec
+        if fresh:  # step 2 names the dispatch spec: an adopted node has none, so write it (design, card, rules)
+            write_spec(plan_dir, key, dispatch_text(plan_dir, plan, node, entry, issue, row))
         spec_path = write_spec(plan_dir, f"{key}-{job}", header + (f"\n\n{work}" if work else ""))
     spec = shlex.quote(str(spec_path))
     task_title = f"{ident}: {node.get('title') or issue.get('title', key)}"

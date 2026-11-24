@@ -39,7 +39,11 @@ export interface ProjectList {
   workspaces: WorkspaceSummary[];
   projects: (Project & { workspace: string; workspaceName: string })[];
 }
-export interface Comment { id: string; body: string; createdAt: string; author: string; parentId: string | null }
+export interface Comment {
+  id: string; body: string; createdAt: string; author: string; parentId: string | null;
+  /** Only in the answer to a new comment on an issue that waits on the human: false when the `answered` label failed. */
+  answered?: boolean;
+}
 export interface IssuePatch {
   title?: string; description?: string; stateId?: string; priority?: number; assigneeId?: string | null; labelIds?: string[];
   /** With `description`: the text that the edit started from. The server refuses the save when Linear has another text now. */

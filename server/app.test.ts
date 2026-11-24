@@ -4,6 +4,7 @@ import { join, sep } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Rules } from "./access.ts";
 import { createApp } from "./app.ts";
+import { setTransport } from "./linear.ts";
 
 const rules: Rules = { port: 4747, tailnet: null };
 const local = { host: "127.0.0.1:4747" };
@@ -15,6 +16,8 @@ beforeAll(async () => {
   await mkdir(join(dist, "assets"));
   await writeFile(join(dist, "index.html"), "<html>wg</html>");
   await writeFile(join(dist, "assets", "app.js"), "console.log(1)");
+  // gql tries a failed query again after a delay: the tests do not wait for it.
+  setTransport({ sleep: async () => {} });
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -246,6 +249,40 @@ describe("api", () => {
     const response = await app().request("/api/issues/i1/comments", { method: "POST", headers: write, body: JSON.stringify({ body: "hi" }) });
     expect(await response.json()).toEqual({ id: "c1", body: "hi", createdAt: "2026-11-20", parentId: null, author: "cd" });
     expect(calls).toEqual([{ id: "i1" }, { i: { issueId: "i1", body: "hi" } }]);
+  });
+  it("answers 200 with answered:false and still tells the coordinator when the answered label fails", async () => {
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    const empty = { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+    const mutations: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query } = JSON.parse(init.body as string);
+      if (query.includes("mutation")) mutations.push(query.match(/\{\s*(\w+)/)![1]);
+      let data;
+      if (query.includes("viewer{")) data = { viewer: { id: "me" }, project: { id: "p1", name: "P", url: "u", projectMilestones: { nodes: [] } } };
+      else if (query.includes("issues(first:25")) data = { project: { issues: { nodes: [{
+        id: "i1", identifier: "CD-1", title: "Ask", description: null, priority: 0, url: "https://linear.app/work/issue/CD-1", sortOrder: 0, updatedAt: "today",
+        team: { id: "team", key: "CD" }, state: { id: "s", name: "Needs Human", type: "started", color: "" }, assignee: null,
+        labels: { nodes: [] }, projectMilestone: null, relations: empty, inverseRelations: empty,
+        comments: { nodes: [] }, attachments: { nodes: [] }, project: { id: "p1" },
+      }], pageInfo: { hasNextPage: false, endCursor: null } } } };
+      else if (query.includes("members(first")) data = { teams: { nodes: [] } };
+      else if (query.includes("commentCreate")) data = { commentCreate: { success: true, comment: { id: "c1", body: "yes", createdAt: "today", parent: null, user: { name: "C", displayName: "cd" }, botActor: null } } };
+      else if (query.includes("issueLabels(first:10")) data = { issueLabels: { nodes: [{ id: "answered-id" }] } };
+      else if (query.includes("addedLabelIds")) return { ok: false, status: 500, json: async () => null };
+      else if (query.includes("issue(id:")) data = { issue: mine };
+      else data = { issueLabels: empty };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const a = app();
+    const response = await a.request("/api/issues/i1/comments", { method: "POST", headers: { ...write, "x-project": "p1" }, body: JSON.stringify({ body: "yes" }) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ id: "c1", body: "yes", createdAt: "today", parentId: null, author: "cd", answered: false });
+    expect(mutations).toEqual(["commentCreate", "issueUpdate"]); // one comment; the label mutation is not sent again
+    const sent: string[] = [];
+    const connection = a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
+    connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
+    expect(sent.map((t) => JSON.parse(t))).toContainEqual(expect.objectContaining({ type: "answer", payload: { issue: "CD-1", key: null, body: "yes" } }));
   });
   it("refuses a write to an issue of another team", async () => {
     for (const issue of [{ ...mine, team: { key: "ENG" } }]) {

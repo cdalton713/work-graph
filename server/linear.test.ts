@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { INITIATIVE_GROUP, addReviewUrls, changedSince, initiativeOf, loadGraph, pullRequestsOf } from "./linear.ts";
+import {
+  INITIATIVE_GROUP, LinearError, MAX_PARALLEL, addComment, addReviewUrls, changedSince, gql, initiativeOf, linearBudget, loadGraph,
+  mapLimit, pullRequestsOf, setTransport,
+} from "./linear.ts";
 
 const pr = (n: number, extra: Record<string, unknown> = {}) => ({ url: `https://github.com/o/r/pull/${n}`, title: `PR ${n}`, sourceType: "github", metadata: { title: `t${n}`, status: "draft", ...extra } });
 
@@ -119,5 +122,146 @@ describe("initiativeOf", () => {
     expect(initiativeOf([{ name: "AI", parent: null }, { name: "Tooling", parent: { name: "Initiative" } }])).toBe("Tooling");
     expect(initiativeOf([{ name: "AI", parent: null }])).toBeNull();
     expect(initiativeOf(undefined)).toBeNull();
+  });
+});
+
+describe("gql retry and limit", () => {
+  const sleeps: number[] = [];
+  const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+  const timeout = () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+  /** A transport whose fetch gives the answers in order; a function answer is thrown. */
+  const answers = (...list: (Response | (() => Error))[]) => {
+    const fetch = vi.fn(async () => {
+      const next = list.shift();
+      if (!next) throw new Error("no more answers");
+      if (typeof next === "function") throw next();
+      return next;
+    });
+    setTransport({ fetch, sleep: async (ms) => { sleeps.push(ms); }, random: () => 0.5, now: () => 1000 });
+    return fetch;
+  };
+  const ok = () => json({ data: { viewer: { id: "me" } } });
+  const rateLimited = () => json({ errors: [{ message: "Rate limit exceeded", extensions: { code: "RATELIMITED" } }] }, 400);
+  beforeEach(() => { vi.stubEnv("LINEAR_API_KEY", "test-key"); sleeps.length = 0; });
+  afterEach(() => setTransport());
+
+  it.each([
+    ["a network error", () => new TypeError("fetch failed")],
+    ["a timeout", timeout],
+    ["HTTP 429", () => json({ errors: [{ message: "Too many requests" }] }, 429)],
+    ["HTTP 503", () => json(null, 503)],
+    ["RATELIMITED", rateLimited],
+  ] as const)("tries a query again after %s, with a longer delay each time", async (_name, failure) => {
+    const make = (): Response | (() => Error) => { const f = failure(); return f instanceof Response ? f : () => f; };
+    const fetch = answers(make(), make(), ok());
+    expect(await gql("query{ viewer{id} }")).toEqual({ viewer: { id: "me" } });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([500, 1000]); // random 0.5: the exponential delay itself
+  });
+
+  it("stops after three tries and gives the last error", async () => {
+    const fetch = answers(json(null, 502), json(null, 502), json(null, 502), ok());
+    await expect(gql("query{ viewer{id} }")).rejects.toThrow("Linear: HTTP 502");
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not try a query again after a GraphQL error that is not a rate limit", async () => {
+    const fetch = answers(json({ errors: [{ message: "Entity not found" }] }, 400), ok());
+    await expect(gql("query{ viewer{id} }")).rejects.toThrow("Linear: Entity not found");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["a timeout", timeout],
+    ["a network error", () => new TypeError("fetch failed")],
+  ])("does not send a mutation again after %s: Linear can have applied it", async (_name, failure) => {
+    const fetch = answers(failure, ok());
+    await expect(gql("mutation{ issueUpdate(id:\"i\",input:{}){ success } }")).rejects.toThrow("Linear request failed");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send a mutation again after HTTP 500", async () => {
+    const fetch = answers(json(null, 500), ok());
+    await expect(gql("  mutation($i:X){ a }")).rejects.toThrow("HTTP 500");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a mutation again after HTTP 429 or RATELIMITED, and waits as long as Retry-After asks", async () => {
+    const fetch = answers(json(null, 429, { "retry-after": "3" }), rateLimited(), ok());
+    expect(await gql("mutation{ a }")).toEqual({ viewer: { id: "me" } });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([3000, 1000]);
+  });
+
+  it("runs at most six requests at the same time, also while 20 are asked for", async () => {
+    let active = 0;
+    let most = 0;
+    const release: (() => void)[] = [];
+    setTransport({
+      fetch: async () => {
+        active++;
+        most = Math.max(most, active);
+        await new Promise<void>((go) => release.push(go));
+        active--;
+        return ok();
+      },
+    });
+    let done = false;
+    const all = Promise.all(Array.from({ length: 20 }, () => gql("query{ viewer{id} }"))).finally(() => { done = true; });
+    // Each round lets the waiting requests start, then ends the ones that run.
+    for (let round = 0; round < 50 && !done; round++) {
+      await new Promise((r) => setTimeout(r, 0));
+      release.splice(0).forEach((go) => go());
+    }
+    const results = await all;
+    expect(results).toHaveLength(20);
+    expect(MAX_PARALLEL).toBe(6);
+    expect(most).toBe(6);
+  });
+
+  it("keeps the rate-limit values of the last response", async () => {
+    answers(json({ data: {} }, 200, {
+      "x-ratelimit-requests-remaining": "4990", "x-ratelimit-requests-limit": "5000", "x-ratelimit-requests-reset": "1700000000000",
+      "x-ratelimit-complexity-remaining": "2999000", "x-ratelimit-complexity-limit": "3000000",
+    }));
+    await gql("query{ viewer{id} }");
+    expect(linearBudget("default")).toEqual({
+      requestsRemaining: 4990, requestsLimit: 5000, requestsReset: 1700000000000,
+      complexityRemaining: 2999000, complexityLimit: 3000000, complexityReset: null, at: 1000,
+    });
+  });
+});
+
+describe("mapLimit", () => {
+  it("keeps the order and runs at most the given number at the same time", async () => {
+    let active = 0;
+    let most = 0;
+    const out = await mapLimit([5, 1, 3, 2, 4, 0, 6], 3, async (n) => {
+      active++;
+      most = Math.max(most, active);
+      await new Promise((r) => setTimeout(r, n));
+      active--;
+      return n * 2;
+    });
+    expect(out).toEqual([10, 2, 6, 4, 8, 0, 12]);
+    expect(most).toBe(3);
+  });
+});
+
+describe("addComment", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("refuses with 502 when Linear saves no comment", async () => {
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query } = JSON.parse(init.body as string);
+      const data = query.includes("commentCreate")
+        ? { commentCreate: { success: false, comment: null } }
+        : { issue: { team: { key: "CD" }, project: null, description: "", labels: { nodes: [] }, comments: { nodes: [] } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const error = await addComment("i1", "hi", "CD").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(LinearError);
+    expect(error).toMatchObject({ status: 502, message: "Linear did not save the comment" });
   });
 });

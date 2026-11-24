@@ -45,26 +45,158 @@ interface RawComment {
 // The GraphQL answers are not checked against a schema: each caller names the shape it reads.
 type Data = any;
 
+/** At most this many Linear requests of this process run at the same time. */
+export const MAX_PARALLEL = 6;
+/** The tries of one request, the first one included. */
+export const MAX_TRIES = 3;
+const BASE_DELAY_MS = 500;
+const MAX_DELAY_MS = 10_000;
+const TIMEOUT_MS = 30_000;
+
+/** What `gql` uses to reach Linear. Tests replace it with `setTransport`. */
+export interface Transport {
+  fetch: (url: string, init: RequestInit) => Promise<Response>;
+  sleep: (ms: number) => Promise<void>;
+  /** A number in [0, 1), for the jitter of the delay. */
+  random: () => number;
+  now: () => number;
+}
+const defaultTransport: Transport = {
+  // globalThis.fetch is read at each call, so a test that stubs it still works.
+  fetch: (url, init) => globalThis.fetch(url, init),
+  sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
+  random: Math.random,
+  now: Date.now,
+};
+let transport = defaultTransport;
+/** Replaces parts of the transport; no argument puts the default back. */
+export function setTransport(parts: Partial<Transport> = {}): void {
+  transport = { ...defaultTransport, ...parts };
+}
+
+/** A counting semaphore: `run` waits until fewer than `size` calls are active. */
+export function limiter(size: number) {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    if (active >= size) await new Promise<void>((go) => waiting.push(go));
+    else active++;
+    try {
+      return await task();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+}
+const slot = limiter(MAX_PARALLEL);
+
+/** Maps the items with at most `size` calls of `fn` active at the same time; the order of the items stays. */
+export async function mapLimit<T, U>(items: T[], size: number, fn: (item: T) => Promise<U>): Promise<U[]> {
+  const out: U[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const at = next++;
+      out[at] = await fn(items[at]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, worker));
+  return out;
+}
+
+/** The rate-limit values of the last Linear response of a workspace (Linear's `X-RateLimit-*` headers). */
+export interface LinearBudget {
+  requestsRemaining: number | null;
+  requestsLimit: number | null;
+  /** When the request budget is full again, epoch ms. */
+  requestsReset: number | null;
+  complexityRemaining: number | null;
+  complexityLimit: number | null;
+  complexityReset: number | null;
+  /** When the server read these values, epoch ms. */
+  at: number;
+}
+const budgets = new Map<string, LinearBudget>();
+const workspaceId = () => linearWorkspace.getStore()?.id ?? "default";
+
+/** The last rate-limit values of a workspace (default: the workspace of this request), or null before the first response. */
+export function linearBudget(workspace: string = workspaceId()): LinearBudget | null {
+  return budgets.get(workspace) ?? null;
+}
+
+function keepBudget(headers: Headers | undefined): void {
+  if (!headers || typeof headers.get !== "function") return;
+  const number = (name: string) => {
+    const text = headers.get(`x-ratelimit-${name}`);
+    const value = text === null ? NaN : Number(text);
+    return Number.isFinite(value) ? value : null;
+  };
+  const budget: LinearBudget = {
+    requestsRemaining: number("requests-remaining"), requestsLimit: number("requests-limit"),
+    requestsReset: number("requests-reset"),
+    complexityRemaining: number("complexity-remaining"), complexityLimit: number("complexity-limit"),
+    complexityReset: number("complexity-reset"),
+    at: transport.now(),
+  };
+  if (Object.entries(budget).some(([k, v]) => k !== "at" && v !== null)) budgets.set(workspaceId(), budget);
+}
+
+/** Why a try failed, as far as the retry rule needs it. */
+type Failure = "network" | "timeout" | "rate" | "server" | "final";
+
+const isMutation = (query: string) => /^\s*mutation\b/.test(query);
+/**
+ * A query is safe to send again. A mutation is sent again only when Linear refused it before it did
+ * anything (HTTP 429 or RATELIMITED): after a timeout or a 5xx, Linear can have applied it.
+ */
+const retryable = (failure: Failure, mutation: boolean) =>
+  failure === "rate" || (!mutation && failure !== "final");
+
+function delay(tryNumber: number, retryAfter: string | null): number {
+  const exponential = BASE_DELAY_MS * 2 ** (tryNumber - 1);
+  const jittered = exponential / 2 + transport.random() * exponential;
+  const asked = retryAfter !== null && Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : 0;
+  return Math.min(MAX_DELAY_MS, Math.max(jittered, asked));
+}
+
+interface GraphQLError { message: string; extensions?: { code?: string } }
+
 export async function gql(query: string, variables: Record<string, unknown> = {}): Promise<Data> {
   const key = linearWorkspace.getStore()?.key ?? process.env.LINEAR_API_KEY;
   if (!key) throw new LinearError("LINEAR_API_KEY is not set", 500);
-  let response: Response;
-  try {
-    response = await fetch(ENDPOINT, {
-      method: "POST",
-      headers: { Authorization: key, "Content-Type": "application/json" },
-      body: JSON.stringify({ query, variables }),
-      signal: AbortSignal.timeout(30_000),
+  const mutation = isMutation(query);
+  const init = (): RequestInit => ({
+    method: "POST",
+    headers: { Authorization: key, "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  for (let tryNumber = 1; ; tryNumber++) {
+    // The slot is held for one try only, not during the delay before the next try.
+    const result = await slot(async (): Promise<{ data: Data } | { failure: Failure; error: LinearError; retryAfter: string | null }> => {
+      let response: Response;
+      try {
+        response = await transport.fetch(ENDPOINT, init());
+      } catch (error) {
+        const name = (error as Error).name;
+        const failure: Failure = name === "TimeoutError" || name === "AbortError" ? "timeout" : "network";
+        return { failure, error: new LinearError(`Linear request failed: ${(error as Error).message}`), retryAfter: null };
+      }
+      keepBudget(response.headers);
+      const body = (await response.json().catch(() => null)) as { data?: Data; errors?: GraphQLError[] } | null;
+      if (response.ok && body && !body.errors) return { data: body.data };
+      const detail = body?.errors?.map((e) => e.message).join("; ") ?? `HTTP ${response.status}`;
+      const rated = response.status === 429 || !!body?.errors?.some((e) => e.extensions?.code === "RATELIMITED");
+      const failure: Failure = rated ? "rate" : response.status >= 500 ? "server" : "final";
+      const retryAfter = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;
+      return { failure, error: new LinearError(rated ? `Linear rate limit: ${detail}` : `Linear: ${detail}`, rated ? 429 : 502), retryAfter };
     });
-  } catch (error) {
-    throw new LinearError(`Linear request failed: ${(error as Error).message}`);
+    if ("data" in result) return result.data;
+    if (tryNumber >= MAX_TRIES || !retryable(result.failure, mutation)) throw result.error;
+    await transport.sleep(delay(tryNumber, result.retryAfter));
   }
-  const body = (await response.json().catch(() => null)) as { data?: Data; errors?: { message: string }[] } | null;
-  if (!response.ok || !body || body.errors) {
-    const detail = body?.errors?.map((e) => e.message).join("; ") ?? `HTTP ${response.status}`;
-    throw new LinearError(`Linear: ${detail}`);
-  }
-  return body.data;
 }
 
 async function pages<T>(query: string, variables: Record<string, unknown>, pick: (data: Data) => Connection<T>): Promise<T[]> {
@@ -374,7 +506,7 @@ export async function loadGraph(projectId: string): Promise<GraphData> {
     { id: projectId },
     (data) => data.project.issues,
   );
-  const issues = await Promise.all(raw.map((i) => completeIssue(i, projectId)));
+  const issues = await mapLimit(raw, MAX_PARALLEL, (i) => completeIssue(i, projectId));
   const teamIds = [...new Set(issues.map((i) => i.teamId))];
   // Issues outside the project that are linked to it by blocks relations (for example, ENG
   // tickets that wg maps as nodes). They are read-only here. Their own relations give the edges
@@ -389,7 +521,7 @@ export async function loadGraph(projectId: string): Promise<GraphData> {
     const found: Issue[] = [];
     for (let at = 0; at < outside.length; at += 25) {
       const data = await gql(`query($ids:[ID!]){ issues(first:25,filter:{id:{in:$ids}}){ nodes{${ISSUE}} } }`, { ids: outside.slice(at, at + 25) });
-      const linked = await Promise.all((data.issues.nodes as RawIssue[]).map((i) => completeIssue(i, projectId)));
+      const linked = await mapLimit(data.issues.nodes as RawIssue[], MAX_PARALLEL, (i) => completeIssue(i, projectId));
       found.push(...linked.map((i) => ({ ...i, external: true })));
     }
     issues.push(...found);
@@ -537,5 +669,6 @@ export async function addComment(issueId: string, body: unknown, team: string): 
     `mutation($i:CommentCreateInput!){ commentCreate(input:$i){ success comment{${COMMENT}} } }`,
     { i: { issueId, body } },
   );
+  if (!data.commentCreate?.success || !data.commentCreate.comment) throw new LinearError("Linear did not save the comment");
   return comment(data.commentCreate.comment);
 }

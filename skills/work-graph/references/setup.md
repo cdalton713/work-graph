@@ -6,7 +6,7 @@
 | `PLAN.md` | Flowchart, phase table, project link, `## Notes` (recovery.md "Run state") |
 | `plan.json` | The graph: effort, phases, nodes, edges ([graph.md](graph.md#planjson)) |
 | `keymap.json` | Written by `wg` only: project, phase milestones, key → issue id, identifier, node card, and what `wg next` last published for the page; the id of the `work-graph status` document; the run rows |
-| `journal.jsonl` | Written by `wg` only: one JSON line for each change of a status, a claim, or a run row; `journal.1.jsonl` holds the older lines after 5 MB (recovery.md "Run state") |
+| `journal.jsonl` | Written by `wg` only, mode 600: a baseline line with the run rows, then one JSON line for each change of a status, a claim, or a run row; `journal.1.jsonl` holds the older lines after 5 MB (recovery.md "Run state") |
 | `evidence/` | Written by `wg evidence`: the last test run of each node, and the repo-wide run of each phase |
 | `specs/` | Written by `wg dispatch` and `wg claim`: the worker spec of each job |
 | Linear | The plan's team. One project per effort; one project milestone per phase. |
@@ -17,7 +17,7 @@ Run `scripts/wg.py` as `wg`: the command uses `uv run --script`, which supplies 
 
 ## Plan location
 
-Select or create the `<slug>-core` coordinator worktree through Orca before writing the plan: `orca worktree list --json`, else `orca worktree create --name <slug>-core --branch <prefix><slug>-core --no-parent --base-branch origin/<target> --setup skip --json`. It is the only top-level workspace of the effort; every lane parent, spike, and integration workspace nests under it. Reuse it for the core lane parent when the names match. Keep `PLAN.md`, `plan.json`, `keymap.json`, `evidence/`, and `specs/` together at its root. Do not commit them unless the human asks. If `keymap.json` is lost, follow recovery.md "Failure" before any `wg load --apply`.
+Select or create the `<slug>-core` coordinator worktree through Orca before writing the plan: `orca worktree list --json`, else `orca worktree create --name <slug>-core --branch <prefix><slug>-core --no-parent --base-branch origin/<target> --setup skip --json`. It is the only top-level workspace of the effort; every lane parent, spike, and integration workspace nests under it. Reuse it for the core lane parent when the names match. Keep `PLAN.md`, `plan.json`, `keymap.json`, `journal.jsonl`, `journal.1.jsonl`, `evidence/`, and `specs/` together at its root. Do not commit them unless the human asks; never commit the journal files. If `keymap.json` is lost, follow recovery.md "Failure" before any `wg load --apply`.
 
 When moving an existing setup, copy all of them, check that `wg status <new-dir>` prints the same issues, then delete the old copies.
 

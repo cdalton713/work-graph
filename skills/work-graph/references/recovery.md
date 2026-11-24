@@ -52,11 +52,11 @@ Done when: every check in step 2 passes and a new `wg load <plan-dir>` reports n
 
 The run rows in `keymap.json` hold what Linear and GitHub cannot tell: the Orca and Git ids of each node, and the results that only the coordinator knows. `wg next` derives each next action from Linear, GitHub, and these rows, so no step and no stage is stored. Read the rows with `wg run show <plan-dir> [<key>|@effort]`. One `wg` command writes `keymap.json` at a time.
 
-Each `wg` command that changes a status, a claim, or a run row also appends one JSON line to `<plan-dir>/journal.jsonl` under the same lock: the UTC time, the command, the node key, the kind (`run`, `status`, `claim`, or `issue`), and each changed field as `[old, new]`. It holds no field with a secret name and no comment body. At 5 MB the file moves to `journal.1.jsonl`, which replaces the older one. A journal failure prints `warn: journal not written` and does not fail the command.
+Each `wg` command that changes a status, a claim, or a run row also appends one JSON line to `<plan-dir>/journal.jsonl` under the same lock: the UTC time, the command, the node key, the kind (`run`, `status`, `claim`, or `issue`), and each changed field as `[old, new]`. It holds no field with a secret name and no comment body: for `approved` it holds only the date, and the human's words stay in the Linear comment. Each new file (the first one, and the one after the rotation at 5 MB, when the file moves to `journal.1.jsonl`) starts with a baseline line: the run rows at that time. Both files have mode 600. A journal failure prints `warn: journal not written` and does not fail the command; an append waits at most 5 seconds for the plan lock.
 
 - `wg log <plan-dir> [<key>] [--since <2h|3d|UTC time>] [-n N]`: one short line for each entry, newest last, 30 by default. Read it first after a context loss or in a new session.
-- `wg log <plan-dir> --times`: for each task, the time from dispatch to code done, from code done to merged, and the time it waited on the human (in `Needs <human>` or `Ready to Merge`).
-- `wg run rebuild <plan-dir> [--apply]`: the run rows that the journal gives ("Failure", "`keymap.json` lost or empty").
+- `wg log <plan-dir> --times`: for each task, the time from the start of the dispatch job (`started_at`, the worker's receipt) to code done, from code done to merged, and the time it waited on the human (in `Needs <human>` or `Ready to Merge`).
+- `wg run rebuild <plan-dir> [--apply]`: the run rows that the journal gives: the last baseline, then each change after it ("Failure", "`keymap.json` lost or empty"). With no baseline line it changes nothing. `--apply` copies the run rows that it replaces to `keymap.run-before-rebuild.json`. A rebuilt `approved` holds the date only.
 
 | Field | Written by |
 |---|---|

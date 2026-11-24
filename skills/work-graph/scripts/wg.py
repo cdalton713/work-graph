@@ -301,10 +301,11 @@ _HELD_LOCKS = contextvars.ContextVar("wg_held_locks", default=frozenset())
 
 
 @contextlib.contextmanager
-def plan_lock(plan_dir):
+def plan_lock(plan_dir, wait=None):
     """One writer of keymap.json at a time. Without it, two parallel commands lose a run row.
 
-    Reentrant in one context: `wg done` holds it and calls `move`, which cleans up the worktree under it."""
+    Reentrant in one context: `wg done` holds it and calls `move`, which cleans up the worktree under it.
+    With `wait` (seconds), a lock that another process holds longer raises TimeoutError."""
     key = os.path.realpath(plan_dir)
     held = _HELD_LOCKS.get()
     if key in held:
@@ -313,7 +314,18 @@ def plan_lock(plan_dir):
     fd = os.open(plan_dir, os.O_RDONLY)
     token = None
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if wait is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            end = time.monotonic() + wait
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= end:
+                        raise TimeoutError(f"the plan lock is held for more than {wait:g}s")
+                    time.sleep(0.05)
         token = _HELD_LOCKS.set(held | {key})
         yield
     finally:
@@ -345,8 +357,9 @@ def save_json(path, value, mode=None):
 JOURNAL = "journal.jsonl"
 JOURNAL_OLD = "journal.1.jsonl"
 JOURNAL_LIMIT = 5 * 1024 * 1024  # bytes; a full journal becomes journal.1.jsonl
-JOURNAL_KINDS = ("run", "status", "claim", "issue")
+JOURNAL_KINDS = ("run", "status", "claim", "issue", "baseline")
 SECRET_FIELD = re.compile(r"key|token|secret|password", re.I)
+JOURNAL_WAIT = 5  # seconds that an append waits for the plan lock before it warns
 _JOURNAL_COMMAND = contextvars.ContextVar("wg_journal_command", default=None)
 
 
@@ -367,23 +380,57 @@ def journaled(command):
     return wrap
 
 
+def journal_value(field, value):
+    """The journal copy of a run-row value. The approval keeps its date: the human's words stay in Linear."""
+    if field == "approved" and isinstance(value, str) and value:
+        return f"{value[:10]}: approved; the words are in the Linear comment"
+    return value
+
+
+def journal_baseline(plan_dir):
+    """The run rows of keymap.json now, as the first line of a new journal file: a rebuild starts from it."""
+    try:
+        run = load_keymap(plan_dir).get("run") or {}
+    except (OSError, ValueError) as e:
+        print(f"warn: journal has no baseline ({e}); wg run rebuild needs one", file=sys.stderr)
+        return None
+    rows = {"effort": dict(run.get("effort") or {}), "nodes": {k: dict(r) for k, r in (run.get("nodes") or {}).items()}}
+    for row in [rows["effort"], *rows["nodes"].values()]:
+        for field in list(row):
+            if SECRET_FIELD.search(field):
+                row.pop(field)
+            else:
+                row[field] = journal_value(field, row[field])
+    return {"time": f"{utc_now():%Y-%m-%dT%H:%M:%SZ}", "command": journal_command("wg"), "key": "@baseline",
+            "kind": "baseline", "changes": {}, "run": rows}
+
+
 def journal(plan_dir, command, key, changes, kind="run"):
     """Append one line to <plan-dir>/journal.jsonl: the UTC time, the command, the node key, and each changed
     field as [old, new] (null: no value). A field with a secret name is left out, and no comment body is given.
+    A new file (also after the rotation) starts with a baseline line: the run rows at that time.
 
-    A journal failure is a warning: the change that it records is already done."""
-    changes = {f: [old, new] for f, (old, new) in changes.items() if old != new and not SECRET_FIELD.search(f)}
+    A journal failure is a warning: the change that it records is already done. The append waits at most
+    JOURNAL_WAIT seconds for the plan lock, so a long command of another process cannot hold this one."""
+    changes = {f: [journal_value(f, old), journal_value(f, new)] for f, (old, new) in changes.items()
+               if old != new and not SECRET_FIELD.search(f)}
     if not changes:
         return
     entry = {"time": f"{utc_now():%Y-%m-%dT%H:%M:%SZ}", "command": command or "wg", "key": key, "kind": kind,
              "changes": changes}
     try:
         line = json.dumps(entry, sort_keys=True) + "\n"
-        with plan_lock(plan_dir):
+        with plan_lock(plan_dir, wait=JOURNAL_WAIT):
             path = Path(plan_dir) / JOURNAL
             if path.exists() and path.stat().st_size + len(line) > JOURNAL_LIMIT:
                 path.replace(path.with_name(JOURNAL_OLD))
-            with path.open("a", encoding="utf-8") as f:
+            if not path.exists():
+                baseline = journal_baseline(plan_dir)
+                if baseline:
+                    line = json.dumps(baseline, sort_keys=True) + "\n" + line
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
+                os.fchmod(fd, 0o600)
                 f.write(line)
     except (OSError, TypeError, ValueError) as e:
         print(f"warn: journal not written ({e})", file=sys.stderr)
@@ -426,9 +473,12 @@ def journal_entries(plan_dir):
             try:
                 entry = json.loads(line)
                 parse_utc(entry["time"])
-                if not isinstance(entry.get("changes"), dict):
-                    raise ValueError("no changes")
-            except (ValueError, KeyError, TypeError):
+                changes = entry.get("changes")
+                if (entry.get("kind", "run") not in JOURNAL_KINDS or not isinstance(changes, dict)
+                        or not all(isinstance(v, list) and len(v) == 2 for v in changes.values())
+                        or (entry.get("kind") == "baseline" and not isinstance(entry.get("run"), dict))):
+                    raise ValueError("not a journal entry")
+            except (ValueError, KeyError, TypeError, AttributeError):
                 bad += 1
                 continue
             entries.append(entry)
@@ -464,6 +514,8 @@ def short_value(value, width=24):
 
 
 def log_line(entry):
+    if entry.get("kind") == "baseline":
+        return f"{entry['time']} {entry.get('command', 'wg')} baseline: the run rows of {len(entry['run'].get('nodes') or {})} node(s)"
     changes = ", ".join(f"{field} {short_value(old)} -> {short_value(new)}"
                         for field, (old, new) in entry["changes"].items())
     return short_value(flat_line(f"{entry['time']} {entry.get('command', 'wg')} {entry.get('key', '-')} {changes}"), 200)
@@ -488,18 +540,22 @@ def task_times(plan, entries):
     out = []
     now = utc_now().timestamp()
     for key in tasks:
-        dispatched = code_done = merged = wait_from = None
+        dispatched = code_done = merged = wait_from = job = None
         waited = 0.0
         seen = False
         for entry in entries:
+            if entry.get("kind") == "baseline":
+                job = ((entry["run"].get("nodes") or {}).get(key) or {}).get("job")
+                continue
             if entry.get("key") != key:
                 continue
             seen = True
             at = parse_utc(entry["time"]).timestamp()
             changes = entry["changes"]
             if entry.get("kind", "run") == "run":
-                if dispatched is None and (changes.get("job", [None, None])[1] == "dispatch"
-                                           or changes.get("dispatch", [None, None])[1]):
+                job = changes.get("job", [None, job])[1]
+                # The worker starts at the receipt of the dispatch job (started_at), not at the claim.
+                if dispatched is None and job == "dispatch" and changes.get("started_at", [None, None])[1]:
                     dispatched = at
                 if code_done is None and changes.get("code_done_head", [None, None])[1]:
                     code_done = at
@@ -549,25 +605,28 @@ def log_command(plan_dir, plan, key, since, count, times):
 
 
 def rebuilt_rows(plan, entries):
-    """The run rows that the journal gives: each run row change, replayed from the oldest entry."""
-    run = {"effort": {}, "nodes": {}}
+    """The run rows that the journal gives: the last baseline, then each run row change after it.
+    None when the journal has no baseline: without it, the rows are not complete."""
+    start = next((i for i in range(len(entries) - 1, -1, -1) if entries[i].get("kind") == "baseline"), None)
+    if start is None:
+        return None
+    base = entries[start]["run"]
+    run = {"effort": dict(base.get("effort") or {}), "nodes": {k: dict(r) for k, r in (base.get("nodes") or {}).items()}}
     keys = {n["key"] for n in plan["nodes"]}
-    for entry in entries:
+    for entry in entries[start + 1:]:
         if entry.get("kind", "run") != "run":
             continue
         key = entry.get("key")
         if key == "@effort":
             row = run["effort"]
-        elif key in keys:
-            row = run["nodes"].setdefault(key, {})
         else:
-            continue  # a node that the plan no longer has
+            row = run["nodes"].setdefault(key, {})
         for field, (_, new) in entry["changes"].items():
             if new is None:
                 row.pop(field, None)
             else:
                 row[field] = new
-    run["nodes"] = {k: row for k, row in run["nodes"].items() if row}
+    run["nodes"] = {k: row for k, row in run["nodes"].items() if row and k in keys}  # the plan's nodes only
     return run
 
 
@@ -576,8 +635,12 @@ def run_rebuild(plan_dir, plan, apply):
     if not entries:
         die(f"no journal in {plan_dir}: the run rows cannot be rebuilt (recovery.md)", 1)
     run = rebuilt_rows(plan, entries)
+    if run is None:
+        die("the journal has no baseline line, so it cannot give complete run rows; nothing is changed "
+            "(recovery.md)", 1)
     kept = [n["key"] for n in plan["nodes"] if n["key"] in run["nodes"]]
-    print(f"from {len(entries)} journal entries since {entries[0]['time']}")
+    first = next(e for e in reversed(entries) if e.get("kind") == "baseline")
+    print(f"from the baseline of {first['time']} and the changes after it")
     if run["effort"]:
         print(f"@effort\t{' '.join(pairs(run['effort']))}")
     for key in kept:
@@ -588,6 +651,10 @@ def run_rebuild(plan_dir, plan, apply):
     km = load_keymap(plan_dir)
     if not km["nodes"]:
         die("keymap.json maps no node: run wg load --adopt first (recovery.md)", 1)
+    if km.get("run"):
+        backup = Path(plan_dir) / "keymap.run-before-rebuild.json"
+        save_json(backup, km["run"], mode=0o600)
+        print(f"the replaced run rows are in {backup}")
     km["run"] = run
     save_keymap(plan_dir, km)
     print(f"wrote the run rows of {len(kept)} node(s) to keymap.json")
@@ -1989,9 +2056,10 @@ def ready(plan_dir, plan, apply, quiet=False):
             print(f"{k}\t{km['nodes'][k]['identifier']}\t{n['kind']}\t{n.get('lane', '-')}")
         want = "Ready" if ok else "Todo"
         if apply and s != want and not n.get("eng"):
-            gql("""mutation($id:String!,$s:String!){ issueUpdate(id:$id, input:{stateId:$s}){ success } }""",
-                {"id": km["nodes"][k]["id"], "s": states[want]})
-            journal(plan_dir, journal_command("ready"), k, {"status": (s, want)}, kind="status")
+            result = gql("""mutation($id:String!,$s:String!){ issueUpdate(id:$id, input:{stateId:$s}){ success } }""",
+                         {"id": km["nodes"][k]["id"], "s": states[want]})
+            if (result or {}).get("issueUpdate", {}).get("success"):  # journal only a confirmed move
+                journal(plan_dir, journal_command("ready"), k, {"status": (s, want)}, kind="status")
             print(f"  moved {km['nodes'][k]['identifier']} {s} -> {want}", file=sys.stderr)
     return 0
 

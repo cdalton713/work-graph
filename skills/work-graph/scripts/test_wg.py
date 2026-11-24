@@ -390,7 +390,8 @@ Generated from plan.json by `wg load`. Change plan.json, not this comment."""
         self.assertEqual(km["nodes"]["a"]["card"], {"id": "card", "sha": SHA})
         journal = [json.loads(line) for line in (self.d / "journal.jsonl").read_text().splitlines()]
         self.assertEqual([(e["command"], e["key"], e["kind"], e["changes"]) for e in journal],
-                         [("load", "a", "issue", {"issue": [None, "ENG-42"]}),
+                         [("load", "@baseline", "baseline", {}),
+                          ("load", "a", "issue", {"issue": [None, "ENG-42"]}),
                           ("load", "mp", "issue", {"issue": [None, "CD-50"]}),
                           ("load", "sp", "issue", {"issue": [None, "CD-3"]})])
 
@@ -506,8 +507,13 @@ Generated from plan.json by `wg load`. Change plan.json, not this comment."""
         live = {"a": live_issue("Todo"), "eng": live_issue("Ready for Eng"),
                 "mp": live_issue("Ready"), "sp": live_issue("Todo")}
         with patch.object(wg, "team_info", return_value=("cd", {"Todo": "todo", "Ready": "ready"}, {})), \
-             patch.object(wg, "fetch_nodes", return_value=live), patch.object(wg, "gql") as request:
+             patch.object(wg, "fetch_nodes", return_value=live), \
+             patch.object(wg, "gql", side_effect=lambda q, v: {"issueUpdate": {"success": v["id"] == "a"}}) as request:
+            (self.d / "journal.jsonl").unlink()
             out, err = self.call(wg.ready, self.d, self.p, True)
+        journal = [json.loads(line) for line in (self.d / "journal.jsonl").read_text().splitlines()]
+        self.assertEqual([(e["command"], e["key"], e["changes"]) for e in journal if e["kind"] == "status"],
+                         [("ready", "a", {"status": ["Todo", "Ready"]})])  # the move of mp was not confirmed
         self.assertIn("eng\t", out)
         self.assertIn("Todo -> Ready", err)
         self.assertIn("Ready -> Todo", err)
@@ -644,6 +650,8 @@ Generated from plan.json by `wg load`. Change plan.json, not this comment."""
             update.assert_called_once_with("existing", {"projectId": "project", "title": "a", "projectMilestoneId": "p1"})
             self.assertEqual(wg.load_keymap(self.d)["nodes"]["a"]["identifier"], "CD-50")
             self.assertEqual(gql.call_count, 1)
+        journal = [json.loads(line) for line in (self.d / "journal.jsonl").read_text().splitlines()]
+        self.assertIn(("load", "a", {"issue": [None, "CD-50"]}), [(e["command"], e["key"], e["changes"]) for e in journal])
 
     def test_orphans_reported_and_pruned_after_relations(self):
         self.keymap(keys=["a", "mp", "sp", "old"], rows={"old": {"pr": "7"}, "run_only": {"pr": "8"}})
@@ -2854,7 +2862,7 @@ class JobTests(LaneTests):
         entries = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
         path.unlink(missing_ok=True)
         return [(e["command"], e["key"], e["changes"]) for e in entries
-                if e["command"] != "wg" and (kind is None or e["kind"] == kind)]
+                if e["command"] != "wg" and e["kind"] != "baseline" and (kind is None or e["kind"] == kind)]
 
     def test_dispatch_journals_the_run_row_the_claim_and_the_status(self):
         self.keymap()
@@ -2883,8 +2891,9 @@ class JobTests(LaneTests):
         self.assertIn(("done", "a", {"state": ["running", None]}), entries)
         today = f"{wg.utc_now():%Y-%m-%d}"
         self.job(wg.approve, ["a"], "go ahead", live={"a": "Needs Human"})
-        self.assertEqual(self.journaled(), [("approve", "a", {"approved": [None, f"{today}: go ahead"]}),
+        self.assertEqual(self.journaled(), [("approve", "a", {"approved": [None, f"{today}: approved; the words are in the Linear comment"]}),
                                             ("approve", "a", {"status": ["Needs Human", "Todo"]})])
+        self.assertEqual(self.row("a")["approved"], f"{today}: go ahead")  # the run row keeps the words
         self.job(wg.move, "c", "In Progress", "a note that the journal does not hold")
         self.assertEqual(self.journaled(), [("move", "c", {"status": ["Todo", "In Progress"]})])
 
@@ -5971,8 +5980,9 @@ class JournalTests(DirTests):
         with patch.object(wg, "utc_now", return_value=datetime.fromisoformat(at).replace(tzinfo=timezone.utc)):
             wg.journal(self.d, command, key, changes, kind=kind)
 
-    def lines(self):
-        return [json.loads(line) for line in (self.d / "journal.jsonl").read_text().splitlines()]
+    def lines(self, baseline=False):
+        entries = [json.loads(line) for line in (self.d / "journal.jsonl").read_text().splitlines()]
+        return [e for e in entries if baseline or e["kind"] != "baseline"]
 
     def test_run_set_journals_each_changed_field_but_no_secret_and_no_same_value(self):
         self.keymap(rows={"a": {"pr": "7", "review": "requested"}})
@@ -6002,7 +6012,8 @@ class JournalTests(DirTests):
         old = [json.loads(line) for line in (self.d / "journal.1.jsonl").read_text().splitlines()]
         self.assertTrue(old and self.lines())
         self.assertLessEqual((self.d / "journal.jsonl").stat().st_size, 400)
-        self.assertEqual([e["changes"]["pr"][1] for e in wg.journal_entries(self.d)][-len(self.lines()):],
+        self.assertEqual(self.lines(baseline=True)[0]["kind"], "baseline")  # the new file starts with a baseline
+        self.assertEqual([e["changes"]["pr"][1] for e in wg.journal_entries(self.d) if e["kind"] == "run"][-len(self.lines()):],
                          [e["changes"]["pr"][1] for e in self.lines()])
 
     def test_log_prints_one_line_per_entry_newest_last_with_key_since_and_count(self):
@@ -6031,52 +6042,95 @@ class JournalTests(DirTests):
         self.assertEqual(out.splitlines(), [lines[-1]])
         self.assertIn("1 damaged journal line(s) skipped", err)
 
-    def test_log_times_gives_each_task_its_spans_and_the_human_wait(self):
+    def test_log_times_starts_at_the_receipt_of_the_dispatch_job(self):
         self.p["nodes"].append(node("b"))
         self.p["edges"].append(edge("mp", "b"))
         self.write_plan()
         self.keymap(rows={})
         (self.d / "journal.jsonl").unlink()
-        self.entry("2026-01-01T10:00:00", "a", {"job": [None, "dispatch"], "state": [None, "creating"]})
+        # a: the claim at 08:00, the worker starts at 10:00 (a split dispatch: setup resumed later).
+        self.entry("2026-01-01T08:00:00", "a", {"job": [None, "dispatch"], "state": [None, "creating"]})
+        self.entry("2026-01-01T10:00:00", "a", {"state": ["creating", "running"], "started_at": [None, "x"]})
         self.entry("2026-01-01T12:30:00", "a", {"code_done_head": [None, SHA]})
         self.entry("2026-01-01T12:30:00", "a", {"status": ["In Progress", "In Review"]}, kind="status")
         self.entry("2026-01-01T13:00:00", "a", {"status": ["In Review", "Needs Human"]}, kind="status")
         self.entry("2026-01-01T14:00:00", "a", {"status": ["Needs Human", "Ready to Merge"]}, kind="status")
         self.entry("2026-01-02T15:00:00", "a", {"status": ["Ready to Merge", "Merged"]}, kind="status")
-        self.entry("2026-01-02T00:00:00", "b", {"dispatch": [None, "d1"]})
-        self.entry("2026-01-02T01:00:00", "b", {"status": ["In Progress", "Needs Human"]}, kind="status")
-        with patch.object(wg, "utc_now", return_value=datetime(2026, 1, 2, 1, 30, tzinfo=timezone.utc)):
+        # b: a failed launch at 00:00, the retry starts the worker at 03:00.
+        self.entry("2026-01-02T00:00:00", "b", {"job": [None, "dispatch"], "state": [None, "creating"]})
+        self.entry("2026-01-02T00:05:00", "b", {"state": ["creating", "failed"]})
+        self.entry("2026-01-02T03:00:00", "b", {"state": ["failed", "running"], "started_at": [None, "y"]})
+        self.entry("2026-01-02T04:00:00", "b", {"code_done_head": [None, SHA]})
+        self.entry("2026-01-02T04:00:00", "b", {"status": ["In Progress", "Needs Human"]}, kind="status")
+        with patch.object(wg, "utc_now", return_value=datetime(2026, 1, 2, 4, 30, tzinfo=timezone.utc)):
             out, _ = self.call(wg.main, ["wg", "log", str(self.d), "--times"])
         self.assertEqual(out.splitlines(), [
             "a\tdispatch->code done 2h30m\tcode done->merged 1d02h\twait on Human 1d02h",
-            "b\tdispatch->code done -\tcode done->merged -\twait on Human 30m",
+            "b\tdispatch->code done 1h00m\tcode done->merged -\twait on Human 30m",
         ])
 
-    def test_run_rebuild_replays_the_run_rows_and_apply_needs_the_node_map(self):
-        self.keymap(rows={})
+    def test_run_rebuild_starts_from_the_baseline_and_keeps_rows_the_journal_cannot_give(self):
+        rows = {"a": {"branch": "wg/a", "dispatch": "d1", "state": "running"}}
+        self.keymap(rows=rows)
         (self.d / "journal.jsonl").unlink()
-        self.entry("2026-01-01T10:00:00", "@effort", {"wave": [None, "a"]})
-        self.entry("2026-01-01T10:01:00", "a", {"state": [None, "creating"], "branch": [None, "wg/a"]})
-        self.entry("2026-01-01T10:02:00", "a", {"status": ["Todo", "In Progress"]}, kind="status")
-        self.entry("2026-01-01T10:03:00", "a", {"claim": [None, "agent:codex"]}, kind="claim")
-        self.entry("2026-01-01T10:04:00", "a", {"state": ["creating", None], "pr": [None, "7"]})
-        self.entry("2026-01-01T10:05:00", "gone", {"pr": [None, "8"]})
-        self.entry("2026-01-01T10:06:00", "mp", {"note": [None, "x"]})
-        self.entry("2026-01-01T10:07:00", "mp", {"note": ["x", None]})
+        # A journal with no baseline cannot give complete rows: nothing is changed.
+        (self.d / "journal.jsonl").write_text(json.dumps({"time": "2026-01-01T00:00:00Z", "command": "move", "key": "a",
+                                                          "kind": "status", "changes": {"status": ["Todo", "Ready"]}}) + "\n")
+        _, err = self.call(wg.main, ["wg", "run", "rebuild", str(self.d), "--apply"], code=1)
+        self.assertIn("the journal has no baseline line", err)
+        self.assertEqual(wg.load_keymap(self.d)["run"]["nodes"], rows)
+        # The first append of an effort that starts to use the journal writes the rows of that time.
+        (self.d / "journal.jsonl").unlink()
+        self.entry("2026-01-01T10:00:00", "a", {"status": ["Todo", "In Progress"]}, kind="status")
+        self.entry("2026-01-01T10:01:00", "@effort", {"wave": [None, "a"]})
+        self.entry("2026-01-01T10:02:00", "a", {"review": [None, "clean"]})
+        self.entry("2026-01-01T10:03:00", "a", {"state": ["running", None]})
+        self.entry("2026-01-01T10:04:00", "gone", {"pr": [None, "8"]})
+        self.assertEqual(self.lines(baseline=True)[0]["run"]["nodes"], rows)
         out, _ = self.call(wg.main, ["wg", "run", "rebuild", str(self.d)])
-        self.assertEqual(out.splitlines(), ["from 8 journal entries since 2026-01-01T10:00:00Z", "@effort\twave=a",
-                                            "a\tbranch=wg/a pr=7",
+        self.assertEqual(out.splitlines(), ["from the baseline of 2026-01-01T10:00:00Z and the changes after it",
+                                            "@effort\twave=a", "a\tbranch=wg/a dispatch=d1 review=clean",
                                             "dry run: add --apply to write these run rows to keymap.json"])
-        self.assertEqual(wg.load_keymap(self.d).get("run"), {"effort": {}, "nodes": {}})
         wg.save_json(self.d / "keymap.json", {"nodes": {}})
         _, err = self.call(wg.main, ["wg", "run", "rebuild", str(self.d), "--apply"], code=1)
         self.assertIn("run wg load --adopt first", err)
-        self.keymap()
+        km = self.keymap()
+        km["run"] = {"nodes": {"a": {"pr": "damaged"}}}
+        wg.save_json(self.d / "keymap.json", km)  # damaged outside wg: no journal line
         out, _ = self.call(wg.main, ["wg", "run", "rebuild", str(self.d), "--apply"])
         self.assertIn("wrote the run rows of 1 node(s) to keymap.json", out)
-        self.assertEqual(wg.load_keymap(self.d)["run"], {"effort": {"wave": "a"}, "nodes": {"a": {"branch": "wg/a", "pr": "7"}}})
+        self.assertEqual(wg.load_keymap(self.d)["run"],
+                         {"effort": {"wave": "a"}, "nodes": {"a": {"branch": "wg/a", "dispatch": "d1", "review": "clean"}}})
+        self.assertEqual(json.loads((self.d / "keymap.run-before-rebuild.json").read_text())["nodes"], {"a": {"pr": "damaged"}})
         self.assertEqual(self.lines()[-1]["command"], "run rebuild --apply")
+
+    def test_the_journal_files_are_private_and_a_held_lock_only_delays_an_append(self):
+        self.keymap(rows={})
         (self.d / "journal.jsonl").unlink()
-        (self.d / "journal.1.jsonl").unlink(missing_ok=True)
-        _, err = self.call(wg.main, ["wg", "run", "rebuild", str(self.d)], code=1)
-        self.assertIn("no journal in", err)
+        self.entry("2026-01-01T00:00:00", "a", {"pr": [None, "1"]})
+        self.assertEqual(wg.stat.S_IMODE((self.d / "journal.jsonl").stat().st_mode), 0o600)
+        fd = wg.os.open(self.d, wg.os.O_RDONLY)  # another process that holds the plan lock
+        try:
+            wg.fcntl.flock(fd, wg.fcntl.LOCK_EX)
+            started = time.monotonic()
+            with patch.object(wg, "JOURNAL_WAIT", 0.2), patch("sys.stderr", new_callable=io.StringIO) as err:
+                wg.journal(self.d, "move", "a", {"status": ["Todo", "Ready"]}, kind="status")
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertIn("warn: journal not written (the plan lock is held for more than 0.2s)", err.getvalue())
+        finally:
+            wg.os.close(fd)
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_run_reset_journals_the_removed_row_and_a_damaged_record_is_skipped(self):
+        self.keymap(rows={"a": {"pr": "7"}})
+        (self.d / "journal.jsonl").unlink()
+        with patch.object(wg, "sync_card", return_value=False):
+            self.call(wg.main, ["wg", "run", "reset", str(self.d), "a"])
+        self.assertEqual([(e["command"], e["key"], e["changes"]) for e in self.lines()], [("run reset", "a", {"pr": ["7", None]})])
+        with (self.d / "journal.jsonl").open("a") as f:
+            for bad in ({"time": 5, "key": "a", "changes": {}}, {"time": "2026-01-01T00:00:00Z", "changes": {"pr": "7"}},
+                        {"time": "2026-01-01T00:00:00Z", "kind": "baseline", "changes": {}}):
+                f.write(json.dumps(bad) + "\n")
+        out, err = self.call(wg.main, ["wg", "run", "rebuild", str(self.d)])
+        self.assertIn("3 damaged journal line(s) skipped", err)
+        self.assertNotIn("a\t", out)

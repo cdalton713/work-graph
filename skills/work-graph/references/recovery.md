@@ -83,6 +83,7 @@ Each `wg` command that changes a status, a claim, or a run row also appends one 
 
 A new session starts here. So does each `reconcile` line.
 
+0. `wg doctor <plan-dir>`. It changes nothing. Repair each `FAIL` line first: a page that runs an old contract (`FAIL page contract: deploy the page`: tell the human), a skill checkout that is behind `origin/main`, a key file that is not mode 600, a claim label with no live job, a job start that is stuck (`state=creating` or `state=starting` for more than 30 minutes; step 4), or a worktree path that does not exist. `wg next` prints `note doctor @effort -: page contract differs; run wg doctor` when the page server runs another contract.
 1. `wg next <plan-dir>`, `wg run show <plan-dir>`, and `wg log <plan-dir>` (the last changes). Read `PLAN.md` `## Notes`.
 2. `orca orchestration run-list`, confirm the `run_id`, then `orca orchestration run-use --id <run_id>`.
 3. `orca orchestration task-list --run <run_id> --brief`, `orca orchestration worker-list --run <run_id> --include-remote`, and `orca orchestration inbox --terminal run:<run_id> --limit 50`. Handle unanswered questions and each unread `worker_done` (jobs.md "Job end").

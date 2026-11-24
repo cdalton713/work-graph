@@ -51,6 +51,9 @@ wg.project_paused = lambda project_id: False
 # PrBatchTests use the real pr_batch.
 PR_BATCH = wg.pr_batch
 wg.pr_batch = lambda numbers, cwd=None: {}
+# No test may read the page server's contract; DoctorTests use the real page_contract_note.
+PAGE_CONTRACT_NOTE = wg.page_contract_note
+wg.page_contract_note = lambda plan_dir: []
 
 SHA = "a" * 40
 OTHER = "b" * 40
@@ -6384,3 +6387,255 @@ class JournalTests(DirTests):
         out, err = self.call(wg.main, ["wg", "run", "rebuild", str(self.d)])
         self.assertIn("3 damaged journal line(s) skipped", err)
         self.assertNotIn("a\t", out)
+
+
+def done_proc(stdout="", code=0, stderr=""):
+    return subprocess.CompletedProcess([], code, stdout, stderr)
+
+
+class FakeSocket:
+    """A websockets.sync.client connection: records what it sends; `closed` makes recv raise as a refused hello."""
+
+    def __init__(self, closed=None):
+        self.sent, self.closed = [], closed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def send(self, text):
+        self.sent.append(json.loads(text))
+
+    def recv(self, timeout=None):
+        if self.closed:
+            raise self.closed
+        raise TimeoutError
+
+
+class DoctorTests(DirTests):
+    """`wg doctor`: each check with fakes, and the `note doctor` line of `wg next`."""
+
+    def lines(self, check):
+        return wg.doctor_run("x", check)
+
+    def test_a_check_that_raises_is_one_fail_line(self):
+        def boom():
+            raise wg.ReadError("Linear HTTP 401:\n bad key")
+        self.assertEqual(self.lines(boom), [("FAIL", "x: Linear HTTP 401: / bad key")])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.lines(lambda: wg.die("no", 2)), [("FAIL", "x: stopped with exit code 2")])
+        self.assertEqual(self.lines(lambda: [("ok", "a"), ("warn", "b")]), [("ok", "a"), ("warn", "b")])
+
+    def test_python_and_websockets(self):
+        from collections import namedtuple
+        version = namedtuple("V", "major minor micro")
+        with patch.object(wg.sys, "version_info", version(3, 10, 2)):
+            self.assertEqual(wg.doctor_python()[0], "FAIL")
+        with patch.object(wg.sys, "version_info", version(3, 12, 1)):
+            self.assertEqual(wg.doctor_python(), ("ok", "python: 3.12.1"))
+        with patch.dict(sys.modules, {"websockets": None}):
+            self.assertEqual(wg.doctor_websockets()[0], "warn")
+
+    def checkout(self, tops, remote="", head=SHA, ancestor=1, which="/bin/wg"):
+        links = []
+        for i in range(len(tops) - 1):
+            link = self.d / f"link{i}"
+            link.mkdir(exist_ok=True)
+            links.append(str(link))
+        names = [Path(which).resolve().parent] + [Path(link).resolve() for link in links] if which else []
+        by_path = dict(zip(map(str, names), tops))
+
+        def run(*args, cwd=None):
+            if "ls-remote" in args:
+                return done_proc(remote, 0 if remote else 128, "fatal: no remote")
+            return done_proc(code=0 if ancestor == 0 else 1)
+        with patch.object(wg, "SKILL_LINKS", tuple(links)), patch.object(wg.shutil, "which", return_value=which), \
+                patch.object(wg, "git_top", side_effect=lambda path: by_path[str(path)]), \
+                patch.object(wg, "command", side_effect=run), patch.object(wg, "git_output", return_value=head):
+            return wg.doctor_checkout()
+
+    def test_checkout_wg_and_the_skill_link_point_at_one_checkout_at_origin_main(self):
+        self.assertEqual(self.checkout(["/c", "/c"], remote=f"{SHA}\trefs/heads/main\n"), ("ok", "checkout: /c at origin/main"))
+        level, text = self.checkout(["/c", "/d"], remote=f"{SHA}\trefs/heads/main\n")
+        self.assertEqual(level, "FAIL")
+        self.assertIn("link each to one checkout", text)
+        level, text = self.checkout(["/c", "/c"], remote=f"{OTHER}\trefs/heads/main\n")
+        self.assertEqual((level, "behind origin/main" in text), ("FAIL", True))
+        self.assertEqual(self.checkout(["/c", "/c"], remote=f"{OTHER}\trefs/heads/main\n", ancestor=0)[0], "ok")
+        self.assertEqual(self.checkout(["/c", "/c"])[0], "warn")  # origin not readable
+        self.assertIn("no skill link", self.checkout(["/c"], remote=f"{SHA}\tx\n")[1])
+        self.assertEqual(self.checkout([], which=None)[0], "FAIL")
+
+    def test_key_present_private_and_accepted_with_the_budget(self):
+        key_file = self.d / "home-linear-api-key"
+        key_file.write_text("k")
+        key_file.chmod(0o644)
+        with patch.object(wg, "key_source", return_value=("k", key_file)):
+            level, text = wg.doctor_key("home")()
+        self.assertEqual(level, "FAIL")
+        self.assertIn("mode 644", text)
+        key_file.chmod(0o600)
+
+        def answer(query, variables=None):
+            self.assertEqual(wg.LINEAR_WORKSPACE.get(), "home")
+            wg.LINEAR_RATE.update({"requests-remaining": "10", "requests-limit": "2500"})
+            return {"viewer": {"id": "u"}}
+        with patch.object(wg, "key_source", return_value=("k", key_file)), patch.object(wg, "gql", side_effect=answer):
+            level, text = wg.doctor_key("home")()
+        self.assertEqual(level, "ok")
+        self.assertIn("requests 10/2500 left", text)
+        self.assertNotIn(": k", text)  # never the key
+        with patch.object(wg, "key_source", return_value=("", None)):
+            self.assertEqual(wg.doctor_key("home")()[0], "FAIL")
+        with patch.object(wg, "key_source", return_value=("k", "LINEAR_API_KEY")), \
+                patch.object(wg, "gql", side_effect=wg.ReadError("Linear HTTP 401: no")):
+            self.assertEqual(wg.doctor_run("key home", wg.doctor_key("home")), [("FAIL", "key home: Linear HTTP 401: no")])
+
+    def test_tools_use_the_preflight_commands(self):
+        with patch.object(wg, "command", return_value=done_proc(code=1, stderr="not logged in")):
+            self.assertEqual(wg.doctor_tool("gh auth", wg.TOOL_CHECKS["gh auth"])(), ("FAIL", "gh auth: gh: not logged in"))
+        with patch.object(wg, "command", side_effect=FileNotFoundError(2, "No such file")):
+            self.assertEqual(wg.doctor_tool("st", ("st", "--version"))()[0], "FAIL")
+        with patch.object(wg, "command", return_value=done_proc("1.0")):
+            self.assertEqual(wg.doctor_tool("st", ("st", "--version"))(), ("ok", "st: st --version"))
+
+    def test_page_health_and_contract(self):
+        def server(contract, ok=True):
+            return lambda path, timeout=10: {"ok": ok} if path == "/healthz" else {"contract": contract}
+        with patch.object(wg, "page_get", side_effect=server(wg.contract_hash())):
+            self.assertEqual(wg.doctor_page()[0], "ok")
+        with patch.object(wg, "page_get", side_effect=server("0123456789ab")):
+            level, text = wg.doctor_page()
+        self.assertEqual(level, "FAIL")
+        self.assertTrue(text.startswith("page contract: deploy the page"))
+        with patch.object(wg, "page_get", side_effect=server(wg.contract_hash(), ok=False)):
+            self.assertEqual(wg.doctor_page()[0], "FAIL")
+        with patch.object(wg, "page_get", side_effect=OSError("refused")):
+            self.assertEqual(wg.doctor_run("page", wg.doctor_page), [("FAIL", "page: refused")])
+
+    def test_tick_schedule(self):
+        with patch.object(wg.sys, "platform", "darwin"), patch.object(wg.Path, "home", return_value=self.d):
+            self.assertEqual(wg.doctor_tick()[0], "warn")
+            plist = self.d / "Library/LaunchAgents" / (wg.TICK_LABEL + ".plist")
+            plist.parent.mkdir(parents=True)
+            plist.write_text("x")
+            with patch.object(wg, "command", return_value=done_proc(code=113)):
+                self.assertIn("not loaded", wg.doctor_tick()[1])
+            with patch.object(wg, "command", return_value=done_proc()):
+                self.assertEqual(wg.doctor_tick()[0], "ok")
+        with patch.object(wg.sys, "platform", "linux"):
+            self.assertEqual(wg.doctor_tick()[0], "warn")
+
+    def test_autostart_schedule_of_each_effort(self):
+        self.keymap()
+        self.assertEqual(wg.doctor_autostart([self.d])(), [("ok", "autostart: off for each loaded effort")])
+        km = wg.load_keymap(self.d)
+        wg.run_rows(km)["effort"]["autostart"] = "auto1"
+        wg.save_keymap(self.d, km)
+        shown = json.dumps({"result": {"automation": {"id": "auto1", "enabled": False}}})
+        with patch.object(wg, "command", return_value=done_proc(shown)):
+            self.assertEqual(wg.doctor_autostart([self.d])()[0][0], "warn")
+        with patch.object(wg, "command", return_value=done_proc(code=1, stderr="not found")):
+            level, text = wg.doctor_autostart([self.d])()[0]
+        self.assertEqual(level, "FAIL")
+        self.assertIn("--install", text)
+
+    def test_keymap_against_linear(self):
+        old = "2026-01-01T00:00:00Z"
+        self.keymap(rows={"a": {"review": "clean"}, "mp": {"state": "creating", "step": "claim"},
+                          "sp": {"state": "running", "job": "review"}})
+        with (self.d / wg.JOURNAL).open("a") as f:
+            f.write(json.dumps({"time": old, "command": "dispatch", "key": "mp", "kind": "run",
+                                "changes": {"state": [None, "creating"]}}) + "\n")
+        live = {"a": live_issue("In Progress", ["agent:codex"]), "mp": live_issue("In Progress"),
+                "sp": {**live_issue("Done"), "state": {"name": "Done", "type": "completed"}}}
+        statuses = {}
+        with patch.object(wg, "fetch_nodes", return_value=live):
+            lines = wg.doctor_keymap(self.d, statuses)()
+        self.assertEqual([level for level, _ in lines], ["FAIL"] * 3)
+        texts = [text for _, text in lines]
+        self.assertEqual(texts[0], "keymap a CD-1: agent:codex with no live job in the run row")
+        self.assertTrue(texts[1].startswith("keymap mp CD-2: state=creating for "), texts)
+        self.assertEqual(texts[2], "keymap sp CD-3: state=running in the run row, but the issue is Done")
+        self.assertEqual(statuses, {"a": "In Progress", "mp": "In Progress", "sp": "Done"})
+        del live["sp"]
+        with patch.object(wg, "fetch_nodes", return_value=live):
+            lines = wg.doctor_keymap(self.d, {})()
+        self.assertIn(("FAIL", 'keymap sp CD-3: the issue is gone from Linear; recovery.md "Run state"'), lines)
+
+    def test_keymap_agrees_and_a_new_start_is_not_stuck(self):
+        self.keymap(rows={"a": {"state": "starting"}})
+        live = {k: live_issue("In Progress") for k in ("a", "mp", "sp")}
+        with patch.object(wg, "fetch_nodes", return_value=live):
+            self.assertEqual(wg.doctor_keymap(self.d, {})(), [("ok", "keymap: 3 node(s) agree with Linear")])
+
+    def test_each_worktree_path_of_an_open_node_exists(self):
+        gone = str(self.d / "gone")
+        self.keymap(rows={"a": {"path": gone}, "mp": {"path": gone}, "sp": {"path": str(self.d)}})
+        lines = wg.doctor_worktrees(self.d, {"a": "In Review", "mp": "Merged"})()
+        self.assertEqual(lines, [("FAIL", f"worktree a: {gone} does not exist")])
+        self.assertEqual(wg.doctor_worktrees(self.d, {"a": "Done", "mp": "Done"})()[0], "ok")
+
+    def test_link_sends_a_hello_of_its_own_session_and_closes(self):
+        self.keymap()
+        ws = FakeSocket()
+        client = Mock(connect=Mock(return_value=ws))
+        modules = {"websockets": Mock(), "websockets.sync": Mock(client=client), "websockets.sync.client": client}
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, {"WG_LINK": ""}):
+            self.assertEqual(wg.doctor_link(self.d, self.p)()[0], "ok")
+            _, _, session, _ = wg.link_target(self.d, self.p)
+            self.assertEqual([m["type"] for m in ws.sent], ["hello"])
+            self.assertEqual(ws.sent[0]["payload"]["session"], f"doctor-{session}")
+            client.connect.return_value = FakeSocket(closed=ConnectionError("1008 send hello first"))
+            self.assertEqual(wg.doctor_run("link", wg.doctor_link(self.d, self.p)), [("FAIL", "link: 1008 send hello first")])
+        self.assertEqual(wg.doctor_link(self.d, self.p)()[0], "warn")  # WG_LINK=off in the tests
+
+    def test_doctor_prints_each_line_and_exits_1_on_a_fail(self):
+        self.keymap()
+        fakes = {name: Mock(return_value=("ok", name)) for name in
+                 ("doctor_python", "doctor_websockets", "doctor_checkout", "doctor_page", "doctor_tick")}
+        with contextlib.ExitStack() as stack:
+            for name, fake in fakes.items():
+                stack.enter_context(patch.object(wg, name, fake))
+            stack.enter_context(patch.object(wg, "doctor_key", lambda w: lambda: ("ok", f"key {w}")))
+            stack.enter_context(patch.object(wg, "doctor_tool", lambda n, a: lambda: ("ok", n)))
+            stack.enter_context(patch.object(wg, "tick_plans", return_value=[]))
+            out, _ = self.call(wg.main, ["wg", "doctor"])
+            self.assertEqual(out.splitlines()[:3], ["ok doctor_python", "ok doctor_websockets", "ok doctor_checkout"])
+            self.assertIn("ok key work", out)
+            self.assertNotIn("plan:", out)
+            fakes["doctor_tick"].return_value = ("warn", "tick")
+            stack.enter_context(patch.object(wg, "doctor_keymap", lambda d, s: lambda: ("FAIL", "keymap x")))
+            stack.enter_context(patch.object(wg, "doctor_worktrees", lambda d, s: lambda: ("ok", "worktrees")))
+            stack.enter_context(patch.object(wg, "doctor_link", lambda d, p: lambda: ("ok", "link")))
+            out, _ = self.call(wg.main, ["wg", "doctor", str(self.d)], code=1)
+            self.assertIn("warn tick", out)
+            self.assertEqual(out.splitlines()[-4:], ["ok plan: wg check is clean", "FAIL keymap x", "ok worktrees", "ok link"])
+            out, _ = self.call(wg.doctor, str(self.d / "nothing"), code=1)
+            self.assertIn("FAIL plan: no plan.json", out)
+
+    def test_the_doctor_note_of_wg_next_reads_the_contract_once_in_ten_minutes(self):
+        self.keymap()
+        with patch.object(wg, "page_get", return_value={"contract": "0123456789ab"}) as get:
+            self.assertEqual(PAGE_CONTRACT_NOTE(self.d), [("note", "doctor @effort -: page contract differs; run wg doctor")])
+            self.assertEqual(PAGE_CONTRACT_NOTE(self.d), [("note", "doctor @effort -: page contract differs; run wg doctor")])
+        self.assertEqual(get.call_count, 1)
+        effort = wg.run_rows(wg.load_keymap(self.d))["effort"]
+        self.assertEqual(effort["page_contract"], "0123456789ab")
+        km = wg.load_keymap(self.d)
+        wg.run_rows(km)["effort"]["page_contract_at"] = "2026-01-01T00:00:00Z"  # stale
+        wg.save_keymap(self.d, km)
+        with patch.object(wg, "page_get", return_value={"contract": wg.contract_hash()}) as get:
+            self.assertEqual(PAGE_CONTRACT_NOTE(self.d), [])
+        self.assertEqual(get.call_count, 1)
+        km = wg.load_keymap(self.d)
+        wg.run_rows(km)["effort"].pop("page_contract")
+        wg.save_keymap(self.d, km)
+        with patch.object(wg, "page_get", side_effect=OSError("down")):
+            self.assertEqual(PAGE_CONTRACT_NOTE(self.d), [])
+
+    def test_wg_next_prints_the_doctor_note(self):
+        lines = wg.terminal_lines(self.d, [("note", "doctor @effort -: page contract differs; run wg doctor")])
+        self.assertEqual(lines, ["note doctor @effort -: page contract differs; run wg doctor"])

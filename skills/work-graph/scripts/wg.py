@@ -31,6 +31,7 @@ that Python, and without it `wg next` polls Linear.
   wg tick      [--root <dir>]... [--channel none|notify] [--install | --uninstall]
   wg wake      <dir>
   wg autostart <dir> [--install | --uninstall]
+  wg doctor    [<dir>]
   wg config
   wg contract  [--write]
   wg ui        [--port N] [--project <name>] [--no-open] [--no-tailnet]
@@ -276,22 +277,31 @@ def team_labels(plan):
     return bool(WORKSPACES[plan_workspace(plan)]["team_labels"])
 
 
+def key_env_name(workspace):
+    return f"LINEAR_{workspace.upper().replace('-', '_')}_API_KEY"
+
+
+def key_source(workspace):
+    """The workspace's Linear key and where it came from: the name of its environment variable, or the Path of
+    its key file. ("", None) when there is no key."""
+    for name in (key_env_name(workspace), *WORKSPACES.get(workspace, DEFAULT_WORKSPACE)["key_env"]):
+        if key := os.environ.get(name, "").strip():
+            return key, name
+    path = Path.home() / f".config/work-graph/{workspace}-linear-api-key"
+    if path.exists() and (key := path.read_text().strip()):
+        return key, path
+    return "", None
+
+
 def linear_key(workspace=None):
     """The key from LINEAR_<ID>_API_KEY, the workspace's `key_env` names, or ~/.config/work-graph/<id>-linear-api-key."""
     if workspace is None:
         workspace = LINEAR_WORKSPACE.get()
-    env_name = f"LINEAR_{workspace.upper().replace('-', '_')}_API_KEY"
-    key = os.environ.get(env_name, "").strip()
-    for name in WORKSPACES.get(workspace, DEFAULT_WORKSPACE)["key_env"]:
-        key = key or os.environ.get(name, "").strip()
+    key, source = key_source(workspace)
+    if isinstance(source, Path) and source.stat().st_mode & 0o044:
+        print(f"warn: {source} is readable by group or others; set mode 600", file=sys.stderr)
     if not key:
-        path = Path.home() / f".config/work-graph/{workspace}-linear-api-key"
-        if path.exists():
-            if path.stat().st_mode & 0o044:
-                print(f"warn: {path} is readable by group or others; set mode 600", file=sys.stderr)
-            key = path.read_text().strip()
-    if not key:
-        raise ReadError(f"no Linear key for {workspace}: set {env_name}")
+        raise ReadError(f"no Linear key for {workspace}: set {key_env_name(workspace)}")
     return key
 
 
@@ -2517,6 +2527,19 @@ def frozen_base_pr_problem(plan_dir, branch, parent):
     return None
 
 
+# The tool checks of `wg preflight` and `wg doctor`: the name of the check and the command that must exit 0.
+TOOL_CHECKS = {"gh auth": ("gh", "auth", "status"), "st": ("st", "--version")}
+
+
+def tool_problem(args, cwd=None):
+    """Why the tool command fails, as `<tool>: <error>`, or None when it exits 0."""
+    try:
+        result = command(*args, cwd=cwd)
+    except OSError as e:
+        return f"{args[0]}: {e.strerror}"
+    return f"{args[0]}: {command_error(result)}" if result.returncode else None
+
+
 def preflight(plan_dir, plan, phase):
     phases = phase_list(plan, phase)
     failed = False
@@ -2528,14 +2551,8 @@ def preflight(plan_dir, plan, phase):
 
     errors = check(plan)
     line("FAIL" if errors else "ok", "plan", "; ".join(errors) if errors else "valid")
-    errors = []
-    for args in (("git", "rev-parse", "--git-dir"), ("gh", "auth", "status"), ("st", "--version")):
-        try:
-            result = command(*args, cwd=plan_dir if args[0] == "git" else None)
-            if result.returncode:
-                errors.append(f"{args[0]}: {command_error(result)}")
-        except OSError as e:
-            errors.append(f"{args[0]}: {e.strerror}")
+    errors = [problem for args in (("git", "rev-parse", "--git-dir"), *TOOL_CHECKS.values())
+              if (problem := tool_problem(args, cwd=plan_dir if args[0] == "git" else None))]
     line("FAIL" if errors else "ok", "tools", "; ".join(errors).replace("\n", " ") or "git, gh, st")
     team = plan_team(plan)
     try:
@@ -3988,7 +4005,7 @@ DO_COMMANDS = {
     "load": "load {dir} --apply",  # coordinator.md "Loop": the dry run `wg load <plan-dir>` comes first
 }
 # The `note` lines that the terminal prints in full. It counts the other notes in one line.
-NOTES_SHOWN = ("autonomy", "triage", "page", "review")
+NOTES_SHOWN = ("autonomy", "triage", "page", "review", "doctor")
 
 
 def line_verb(text):
@@ -4150,7 +4167,7 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                 # Before next_lines: a new review effort applies to the lines of this same wg next.
                 reviews = review_effort_lines(plan_dir, plan)
                 head, lines = next_lines(plan_dir, plan, tolerant=wait)
-                lines = paused_lines(plan_dir, plan, extra + lines)
+                lines = paused_lines(plan_dir, plan, extra + lines) + page_contract_note(plan_dir)
                 if head != COMPLETE:
                     lines = autonomy_lines(plan_dir, plan) + reviews + lines
                 done = not wait or head == COMPLETE or any(level == "do" for level, _ in lines)
@@ -4633,14 +4650,19 @@ def trim_tick_logs(log_dir):
             continue
 
 
+def tick_plans(roots=None):
+    """The loaded efforts under the tick roots (config `tick_roots`): each `*-core` folder with plan.json and keymap.json."""
+    roots = roots or [Path(root) for root in CONFIG["tick_roots"]]
+    return sorted({path.parent.resolve() for root in roots for path in root.expanduser().glob("*-core/plan.json")
+                   if path.is_file() and (path.parent / "keymap.json").is_file()})
+
+
 def tick_command(ns):
     if ns.install or ns.uninstall:
         return tick_agent(ns)
     channel = ns.channel or TICK_DEFAULT_CHANNEL
     home = Path.home()
-    roots = ns.root or [Path(root) for root in CONFIG["tick_roots"]]
-    plans = sorted({path.parent.resolve() for root in roots for path in root.expanduser().glob("*-core/plan.json")
-                    if path.is_file() and (path.parent / "keymap.json").is_file()})
+    plans = tick_plans(ns.root)
     state_path = home / ".local/state/work-graph/tick.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(state_path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
@@ -4739,6 +4761,293 @@ def tick_agent(ns):
     print("Name each file <workspace id>-linear-api-key: " + ", ".join(f"{w}-linear-api-key" for w in WORKSPACES) + ".")
     print(f"/bin/launchctl bootstrap {domain} {shlex.quote(str(path))}")
     return 0
+
+
+# ---------------------------------------------------------------- doctor
+
+DOCTOR_STALE_START = 30 * 60  # seconds: a run row in creating or starting for longer is stuck (recovery.md "Resume")
+PAGE_CONTRACT_TTL = 10 * 60   # seconds: `wg next` reads the server's contract at most this often
+# The skill links of the agents (README "Install"). Each that exists must point at the checkout of `wg` on PATH.
+SKILL_LINKS = ("~/.claude/skills/work-graph", "~/.agents/skills/work-graph", "~/.codex/skills/work-graph")
+STUCK = {"creating", "starting"}
+NOT_STARTED = {"Todo", "Ready", "Backlog", "Triage"}
+
+
+def doctor_run(name, check):
+    """The lines of one check: a list of (level, text). A check that raises is one FAIL line with the error."""
+    try:
+        result = check()
+    except SystemExit as e:  # die() printed its message to stderr
+        return [("FAIL", f"{name}: stopped with exit code {e.code}")]
+    except Exception as e:
+        return [("FAIL", f"{name}: {one_line(e, 300) or type(e).__name__}")]
+    return result if isinstance(result, list) else [result]
+
+
+def doctor_python():
+    v = sys.version_info
+    if v < (3, 11):
+        return "FAIL", f"python: {v.major}.{v.minor}.{v.micro}; wg needs 3.11 or later"
+    return "ok", f"python: {v.major}.{v.minor}.{v.micro}"
+
+
+def doctor_websockets():
+    try:
+        import websockets
+    except ImportError:
+        return "warn", "websockets: not in this Python, so wg next polls Linear; run wg through uv for the link"
+    return "ok", f"websockets: {getattr(websockets, '__version__', 'installed')}"
+
+
+def git_top(path):
+    result = command("git", "-C", str(path), "rev-parse", "--show-toplevel")
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def doctor_checkout():
+    """`wg` on PATH and each skill link point at one checkout, and that checkout is not behind origin/main."""
+    found = {}
+    if on_path := shutil.which("wg"):
+        found["wg"] = Path(on_path).resolve().parent
+    for link in SKILL_LINKS:
+        if (path := Path(link).expanduser()).exists():
+            found[link] = path.resolve()
+    if "wg" not in found:
+        return "FAIL", "checkout: wg is not on PATH (setup.md: ln -s <skill-dir>/scripts/wg.py ~/.local/bin/wg)"
+    if len(found) == 1:
+        return "FAIL", "checkout: no skill link (README \"Install\": " + ", ".join(SKILL_LINKS) + ")"
+    tops = {name: git_top(path) or str(path) for name, path in found.items()}
+    if len(set(tops.values())) > 1:
+        return "FAIL", "checkout: " + "; ".join(f"{n} -> {t}" for n, t in tops.items()) + ": link each to one checkout"
+    top = tops["wg"]
+    remote = command("git", "-C", top, "ls-remote", "origin", "refs/heads/main")
+    if remote.returncode or not remote.stdout.split():
+        return "warn", f"checkout: {top}; origin/main not read ({command_error(remote) if remote.returncode else 'no main'})"
+    sha = remote.stdout.split()[0]
+    head = git_output("rev-parse", "HEAD", cwd=top)
+    if head == sha:
+        return "ok", f"checkout: {top} at origin/main"
+    if command("git", "-C", top, "merge-base", "--is-ancestor", sha, "HEAD").returncode == 0:
+        return "ok", f"checkout: {top}, ahead of origin/main"
+    return "FAIL", f"checkout: {top} is behind origin/main ({sha[:10]}); pull it (git -C {shlex.quote(top)} pull --ff-only)"
+
+
+def rate_budget():
+    """The remaining request budget from the last Linear response."""
+    parts = [f"{name} {LINEAR_RATE[f'{name}-remaining']}/{LINEAR_RATE.get(f'{name}-limit', '?')}"
+             for name in ("requests", "complexity") if f"{name}-remaining" in LINEAR_RATE]
+    return ", ".join(parts) + " left" if parts else "no budget headers"
+
+
+def doctor_key(workspace):
+    def check():
+        key, source = key_source(workspace)
+        if not key:
+            return "FAIL", (f"key {workspace}: none; set {key_env_name(workspace)} or write "
+                            f"~/.config/work-graph/{workspace}-linear-api-key (mode 600)")
+        if isinstance(source, Path) and source.stat().st_mode & 0o077:
+            return "FAIL", f"key {workspace}: {source} has mode {source.stat().st_mode & 0o777:o}; chmod 600 it"
+        LINEAR_RATE.clear()
+        token = LINEAR_WORKSPACE.set(workspace)
+        try:
+            gql("{ viewer { id } }")
+        finally:
+            LINEAR_WORKSPACE.reset(token)
+        return "ok", f"key {workspace}: accepted ({source}); {rate_budget()}"
+    return check
+
+
+def doctor_tool(name, args):
+    def check():
+        problem = tool_problem(args)
+        return ("FAIL", f"{name}: {flat_line(problem)}") if problem else ("ok", f"{name}: {' '.join(args)}")
+    return check
+
+
+def page_base():
+    return (os.environ.get("WG_UI_URL") or PAGE_URL).rstrip("/")
+
+
+def page_get(path, timeout=10):
+    with urllib.request.urlopen(f"{page_base()}{path}", timeout=timeout) as response:
+        return json.load(response)
+
+
+def doctor_page():
+    """The page server answers `/healthz`, and `/api/config` names the contract of this wg."""
+    health = page_get("/healthz")
+    if not isinstance(health, dict) or health.get("ok") is not True:
+        return "FAIL", f"page: {page_base()}/healthz did not answer ok"
+    theirs, ours = page_get("/api/config").get("contract"), contract_hash()
+    if theirs != ours:
+        return "FAIL", f"page contract: deploy the page (the server has {theirs}, wg has {ours})"
+    return "ok", f"page: {page_base()}, contract {ours}"
+
+
+def doctor_tick():
+    if sys.platform != "darwin":
+        return "warn", "tick: wg tick --install uses launchd (macOS); schedule wg tick another way"
+    path = Path.home() / "Library/LaunchAgents" / (TICK_LABEL + ".plist")
+    if not path.exists():
+        return "warn", "tick: not installed (wg tick --install)"
+    domain = f"gui/{os.getuid()}"
+    if command("/bin/launchctl", "print", f"{domain}/{TICK_LABEL}").returncode:
+        return "warn", f"tick: {path} is not loaded (/bin/launchctl bootstrap {domain} {shlex.quote(str(path))})"
+    return "ok", f"tick: {TICK_LABEL} loaded"
+
+
+def doctor_autostart(plans):
+    """Each effort with autostart on has its Orca automation, and the automation is on."""
+    def check():
+        lines = []
+        for path in plans:
+            automation = run_rows(load_keymap(path))["effort"].get("autostart")
+            if not automation:
+                continue
+            result = command(orca_cli(), "automations", "show", automation, "--json")
+            if result.returncode:
+                lines.append(("FAIL", f"autostart {path}: automation {automation}: {flat_line(command_error(result))}; "
+                              f"wg autostart {shlex.quote(str(path))} --install"))
+                continue
+            shown = json.loads(result.stdout)["result"].get("automation") or {}
+            on = shown.get("enabled", True)
+            lines.append(("ok" if on else "warn", f"autostart {path}: automation {automation} {'on' if on else 'disabled'}"))
+        return lines or [("ok", "autostart: off for each loaded effort")]
+    return check
+
+
+def row_age(plan_dir, key, field, value, entries, now):
+    """Seconds since the run row field got its value: the last journal entry that set it, else the time of
+    keymap.json (the row did not change after it)."""
+    times = [parse_utc(e["time"]).timestamp() for e in entries
+             if e.get("key") == key and (e.get("changes") or {}).get(field, [None, None])[1] == value]
+    return now - (times[-1] if times else keymap_path(plan_dir).stat().st_mtime)
+
+
+def doctor_keymap(plan_dir, statuses):
+    """keymap.json against Linear: each issue exists, each claim label has a live job, no job start is stuck,
+    and no live job runs on an issue that is not started or is settled. Fills `statuses` (key -> status)."""
+    def check():
+        km = load_keymap(plan_dir)
+        if not km["nodes"]:
+            return "warn", "keymap: no nodes; run wg load --apply"
+        live, rows, now = fetch_nodes(km), run_rows(km)["nodes"], time.time()
+        entries = journal_entries(plan_dir)
+        lines = []
+        for key, entry in sorted(km["nodes"].items()):
+            name, row = f"keymap {key} {entry.get('identifier', '-')}", rows.get(key, {})
+            issue = live.get(entry["id"])
+            if issue is None:
+                lines.append(("FAIL", f"{name}: the issue is gone from Linear; recovery.md \"Run state\""))
+                continue
+            status = statuses[key] = norm(issue["state"], issue_labels(issue))
+            job = row.get("state")
+            claims = [label["name"] for label in claim_labels(issue)]
+            if claims and job not in LIVE:
+                lines.append(("FAIL", f"{name}: {claims[0]} with no live job in the run row"))
+            if job in STUCK and (age := row_age(plan_dir, key, "state", job, entries, now)) > DOCTOR_STALE_START:
+                lines.append(("FAIL", f"{name}: state={job} for {duration_text(age)}; recovery.md \"Resume\""))
+            if job in LIVE and status in SETTLED | NOT_STARTED:
+                lines.append(("FAIL", f"{name}: state={job} in the run row, but the issue is {status}"))
+        return lines or [("ok", f"keymap: {len(km['nodes'])} node(s) agree with Linear")]
+    return check
+
+
+def doctor_worktrees(plan_dir, statuses):
+    """Each worktree path in a run row exists. A settled node's worktree is gone by design (wg move cleans it up)."""
+    def check():
+        rows = run_rows(load_keymap(plan_dir))["nodes"]
+        missing = [(k, row["path"]) for k, row in sorted(rows.items())
+                   if row.get("path") and statuses.get(k) not in SETTLED and not Path(row["path"]).exists()]
+        if missing:
+            return [("FAIL", f"worktree {k}: {path} does not exist") for k, path in missing]
+        return "ok", "worktrees: each path in the run rows exists"
+    return check
+
+
+def doctor_link(plan_dir, plan):
+    """Connect to the link, send a `hello` of a session of its own (never the coordinator's), and close."""
+    def check():
+        if os.environ.get("WG_LINK", "").lower() in ("off", "0", "no"):
+            return "warn", "link: WG_LINK is off"
+        try:
+            from websockets.sync.client import connect
+        except ImportError:
+            return "warn", "link: no websockets in this Python; run wg through uv"
+        url, project, session, hello = link_target(plan_dir, plan)
+        session = f"doctor-{session}"
+        with connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1) as ws:
+            ws.send(link_envelope(session, project, "hello", {**hello, "session": session}))
+            with contextlib.suppress(TimeoutError):
+                ws.recv(timeout=1)  # a refused hello closes the socket: recv raises ConnectionClosed
+        return "ok", f"link: {url.split('?')[0]} took the hello"
+    return check
+
+
+def doctor(plan_dir=None):
+    """`wg doctor [<dir>]`: one ok, warn, or FAIL line for each check of this machine and, with a plan
+    directory, of that effort. It changes nothing. Exit 1 on a FAIL."""
+    plans = set(tick_plans())
+    checks = [("python", doctor_python), ("websockets", doctor_websockets), ("checkout", doctor_checkout)]
+    checks += [(f"key {w}", doctor_key(w)) for w in WORKSPACES]
+    checks += [(name, doctor_tool(name, args)) for name, args in TOOL_CHECKS.items()]
+    checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", doctor_page), ("tick", doctor_tick)]
+    plan, failed = None, False
+    if plan_dir:
+        plans.add(Path(plan_dir).resolve())
+        try:
+            plan = load_plan(plan_dir, strict=True)
+            plan_workspace(plan)
+        except (FileNotFoundError, ValueError, SystemExit) as e:
+            print(f"FAIL plan: {one_line(e, 300) if not isinstance(e, SystemExit) else 'not readable'}", flush=True)
+            failed = True
+    checks.append(("autostart", doctor_autostart(sorted(plans))))
+
+    def show(lines):
+        nonlocal failed
+        for level, text in lines:
+            print(f"{level} {text}", flush=True)
+            failed |= level == "FAIL"
+
+    for name, step in checks:
+        show(doctor_run(name, step))
+    if plan is not None:
+        statuses = {}
+        errors = check(plan)
+        show([("FAIL", "plan: " + "; ".join(errors)) if errors else ("ok", "plan: wg check is clean")])
+        token = LINEAR_WORKSPACE.set(plan_workspace(plan))
+        try:
+            for name, step in (("keymap", doctor_keymap(plan_dir, statuses)),
+                               ("worktrees", doctor_worktrees(plan_dir, statuses)), ("link", doctor_link(plan_dir, plan))):
+                show(doctor_run(name, step))
+        finally:
+            LINEAR_WORKSPACE.reset(token)
+    return int(failed)
+
+
+def page_contract_note(plan_dir):
+    """The `note doctor` line of `wg next` when the page server runs another contract than this wg. One GET of
+    `/api/config` at most each PAGE_CONTRACT_TTL: the run row of @effort keeps the answer and its time. No
+    answer gives no line: the link and `wg doctor` report a server that is down."""
+    effort = run_rows(load_keymap(plan_dir))["effort"]
+    theirs, at = effort.get("page_contract"), effort.get("page_contract_at")
+    try:
+        fresh = bool(theirs and at) and time.time() - parse_utc(at).timestamp() < PAGE_CONTRACT_TTL
+    except (TypeError, ValueError):
+        fresh = False
+    if not fresh:
+        try:
+            theirs = str(page_get("/api/config", timeout=5).get("contract") or "none")
+        except (OSError, ValueError, AttributeError, http.client.HTTPException):
+            return []
+        with contextlib.suppress(TimeoutError, OSError, ValueError):
+            with plan_lock(plan_dir, wait=JOURNAL_WAIT):
+                km = load_keymap(plan_dir)
+                run_rows(km)["effort"].update(page_contract=theirs, page_contract_at=f"{utc_now():%Y-%m-%dT%H:%M:%SZ}")
+                save_keymap(plan_dir, km)
+    if theirs != contract_hash():
+        return [("note", "doctor @effort -: page contract differs; run wg doctor")]
+    return []
 
 
 # ---------------------------------------------------------------- worker jobs
@@ -6145,6 +6454,7 @@ def cli_parser():
     o_diff.add_argument("base")
     e = sub.add_parser("explain", help="print what to do for a verb of wg next; with no verb, list the verbs")
     e.add_argument("verb", nargs="?")
+    sub.add_parser("doctor", help="check this machine and, with a plan directory, that effort; changes nothing").add_argument("dir", nargs="?")
     sub.add_parser("config", help="print the config of this machine (no keys) and the local rules file")
     c = sub.add_parser("contract", help="print what the page must agree with; --write updates contract.json")
     c.add_argument("--write", action="store_true")
@@ -6260,6 +6570,8 @@ def main(argv):
             return show_config()
         if ns.cmd == "explain":
             return explain_command(ns.verb)
+        if ns.cmd == "doctor":
+            return doctor(ns.dir)
         if ns.cmd == "contract":
             if ns.write:
                 (Path(__file__).resolve().parent.parent / "contract.json").write_text(contract_text())

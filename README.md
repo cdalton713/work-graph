@@ -78,8 +78,9 @@ A workspace's key comes from `LINEAR_<ID>_API_KEY`, then the `key_env` names, th
 
 `wg next` (also with `--wait`) and `wg tick` send one notice when the human's moves have a new entry. An entry is
 a `wait human` line, a `do ask` line (also `ask-ready` and `ask-merge`), or an open worker question. The notice has
-one line for each new entry and the page link. The run row field `notified` of `@effort` holds the entries that
-were sent. An entry is not sent again while it stays. An entry that goes away and comes back is sent again. A
+one line for each new entry and the page link. `wg next` prints its result first and then sends. The run row field
+`notified_<n>` of `@effort` holds the entries that channel `<n>` (0 is the first) got. An entry is not sent again to
+a channel while it stays. An entry that goes away and comes back is sent again. A
 paused effort sends nothing.
 
 Each channel of `notify` is one of these:
@@ -88,13 +89,15 @@ Each channel of `notify` is one of these:
   `{"title", "body", "url", "text"}`. `text` holds the full notice, for a Slack-compatible incoming webhook. For a
   plain ntfy topic URL, the headers `X-Template`, `X-Title`, and `X-Message` make ntfy show the title and the body.
   The URL comes from the environment variable `url_env`, else from the file `url_file` (mode 600). The URL never
-  goes in the config, and `wg` never prints it. The scheduled `wg tick` has no shell environment: use `url_file`.
+  goes in the config, and `wg` never prints it: a failure shows only the HTTP status or the error type. The scheduled `wg tick` has no shell environment: use `url_file`.
 - `{"type": "command", "argv": […]}`: `wg` runs the command with the notice text on stdin. A non-zero exit is a
-  failure.
+  failure; `wg` shows its exit code, not its output.
 
-A failed send prints one `warn notify:` line, and `wg` tries again at the next run, at most once every 5 minutes.
-With `notify`, the default channel of `wg tick` is `notify`; without it, the default is `none`, which sends no
-notices.
+All channels of one notice together have 5 seconds. The failures of one run print one `warn notify:` line. A
+channel that failed tries again at a later run, at most once every 5 minutes (`notify_failed_<n>`); the other
+channels are not sent the same entries again. With `notify`, the default channel of `wg tick` is `notify`; without
+it, the default is `none`, which sends no notices. `wg tick --install --channel <name>` keeps that channel for the
+scheduled tick; without `--channel`, each tick uses the default of the config.
 
 In a workspace on Linear's Free plan (250 issues; archived issues do not count), `wg` archives each completed and
 canceled issue of the workspace at each `wg move` to Done or Canceled and at each `wg tick`. `wg archive <dir>`

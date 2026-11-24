@@ -4073,7 +4073,7 @@ class NotifyTests(unittest.TestCase):
         self.fail_post = None
         self.now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-        def post(url, data, headers):
+        def post(url, data, headers, timeout):
             if self.fail_post:
                 raise self.fail_post
             self.posts.append((url, json.loads(data), headers))
@@ -4119,6 +4119,10 @@ class NotifyTests(unittest.TestCase):
         asks = [{"key": "b", "issue": "CD-2", "body": "Which\nbase?"}]
         self.assertEqual(sorted(wg.notify_entries(self.lines, asks).values()), [
             "do ask b CD-2: Pick a region", "question CD-2: Which base?", "wait human a CD-1: merge PR #7"])
+        # Two questions with the same text are two entries: the Orca message id names each.
+        same = [{"id": "m1", "key": "b", "issue": "CD-2", "body": "x" * 300 + "a"},
+                {"id": "m2", "key": "b", "issue": "CD-2", "body": "x" * 300 + "b"}]
+        self.assertEqual(len(wg.notify_entries([], same)), 2)
         self.assertEqual(wg.notify_entries([("do", "dispatch b CD-2"), ("wait", "below b CD-2")], []), {})
 
     def test_a_webhook_posts_title_body_url_and_text_once_per_new_entry(self):
@@ -4135,7 +4139,7 @@ class NotifyTests(unittest.TestCase):
         self.assertTrue(payload["text"].startswith(payload["title"] + "\n"))
         self.assertEqual(headers["X-Click"], payload["url"])
         self.assertEqual((headers["X-Title"], headers["X-Message"]), ("{{.title}}", "{{.body}}"))
-        self.assertEqual(len(self.effort()["notified"].split(",")), 2)
+        self.assertEqual(len(self.effort()["notified_0"].split(",")), 2)
 
         # The same entries: no notice. A new entry: one notice with only the new line.
         self.assertEqual(self.notify()[0], None)
@@ -4147,29 +4151,88 @@ class NotifyTests(unittest.TestCase):
 
         # An entry that goes away is dropped; when it comes back, it is sent again.
         self.notify(lines=self.lines[:1])
-        self.assertEqual(len(self.effort()["notified"].split(",")), 1)
+        self.assertEqual(len(self.effort()["notified_0"].split(",")), 1)
         self.assertEqual(len(self.posts), 2)
         self.notify()
         self.assertEqual(self.posts[-1][1]["body"].splitlines()[0], "do ask b CD-2: Pick a region")
         self.notify(lines=[])
-        self.assertNotIn("notified", self.effort())
+        self.assertNotIn("notified_0", self.effort())
 
     def test_a_failed_send_warns_once_and_tries_again_after_five_minutes(self):
         self.fail_post = urllib.error.URLError(f"cannot reach {self.URL}")
         result, err = self.notify()
         self.assertEqual(result, "failed")
         self.assertEqual(err.count("warn notify:"), 1)
-        self.assertIn("webhook: <urlopen error cannot reach <url>>", err)
-        self.assertEqual(self.effort()["notify_failed"], "2026-01-01T00:00:00Z")
-        self.assertNotIn("notified", self.effort())
+        self.assertIn("warn notify: webhook: URLError\n", err)
+        self.assertEqual(self.effort()["notify_failed_0"], "2026-01-01T00:00:00Z")
+        self.assertNotIn("notified_0", self.effort())
         self.fail_post = None
-        self.now = self.now.replace(minute=4)
-        self.assertEqual(self.notify(), (None, ""))
+        # Two polls inside the retry window: both wait, and the failure time stays.
+        for minute in (1, 4):
+            self.now = self.now.replace(minute=minute)
+            self.assertEqual(self.notify(), (None, ""))
+            self.assertEqual(self.effort()["notify_failed_0"], "2026-01-01T00:00:00Z")
         self.assertFalse(self.posts)
         self.now = self.now.replace(minute=5)
         self.assertEqual(self.notify()[0], "sent")
         self.assertEqual(len(self.posts), 1)
-        self.assertNotIn("notify_failed", self.effort())
+        self.assertNotIn("notify_failed_0", self.effort())
+
+    def test_an_http_error_is_a_fixed_text(self):
+        self.fail_post = urllib.error.HTTPError(self.URL, 403, f"denied {self.URL}", {}, None)
+        self.assertIn("warn notify: webhook: HTTP 403\n", self.notify()[1])
+
+    def test_a_working_channel_is_not_sent_again_while_another_fails(self):
+        out = self.d / "notices.txt"
+        command = {"type": "command", "argv": [sys.executable, "-c",
+                                               f"import sys; open({str(out)!r}, 'a').write(sys.stdin.read())"]}
+        hook = {"type": "webhook", "url_env": "WG_TEST_HOOK"}
+        self.fail_post = urllib.error.URLError("down")
+        with patch.dict(wg.CONFIG, {"notify": [command, hook, hook]}):
+            for minute in (0, 6, 12, 18):
+                self.now = self.now.replace(minute=minute)
+                result, err = self.notify()
+                self.assertEqual(result, "failed")
+                self.assertEqual(err.count("warn notify:"), 1)
+                self.assertEqual(err.count("webhook: URLError"), 2)
+        self.assertEqual(out.read_text().count("wait human a CD-1: merge PR #7"), 1)
+        self.assertEqual(len(self.effort()["notified_0"].split(",")), 2)
+        self.assertNotIn("notified_1", self.effort())
+
+    def test_two_commands_at_once_send_a_notice_once(self):
+        in_post, other_done = threading.Event(), threading.Event()
+
+        def slow_post(url, data, headers, timeout):
+            self.posts.append(url)
+            in_post.set()
+            other_done.wait(5)
+
+        results = []
+        with patch.object(wg, "notify_post", side_effect=slow_post):
+            first = threading.Thread(target=lambda: results.append(
+                wg.notify_effort(self.d, self.p, self.lines, False, [])))
+            first.start()
+            self.assertTrue(in_post.wait(5))
+            results.append(wg.notify_effort(self.d, self.p, self.lines, False, []))
+            other_done.set()
+            first.join(5)
+        self.assertEqual(sorted(results, key=str), [None, "sent"])
+        self.assertEqual(len(self.posts), 1)
+
+    def test_all_channels_share_one_deadline(self):
+        def slow_post(url, data, headers, timeout):
+            self.posts.append(timeout)
+            time.sleep(0.3)
+
+        hook = {"type": "webhook", "url_env": "WG_TEST_HOOK"}
+        with patch.object(wg, "notify_post", side_effect=slow_post), patch.object(wg, "NOTIFY_DEADLINE", 0.2), \
+             patch.dict(wg.CONFIG, {"notify": [hook, hook]}):
+            result, err = self.notify()
+        self.assertEqual(len(self.posts), 1)
+        self.assertLessEqual(self.posts[0], 0.2)
+        self.assertEqual(result, "failed")
+        self.assertIn("warn notify: webhook: no time left", err)
+        self.assertIn("notified_0", self.effort())
 
     def test_a_webhook_url_comes_from_a_mode_600_file_when_the_variable_is_not_set(self):
         path = self.d / "hook-url"
@@ -4195,8 +4258,11 @@ class NotifyTests(unittest.TestCase):
             self.assertIn("2 new move(s)", text[0])
             self.assertEqual(text[1:3], ["wait human a CD-1: merge PR #7", "do ask b CD-2: Pick a region"])
             self.assertEqual(text[-1], wg.page_link(self.p))
-            channel["argv"] = [sys.executable, "-c", "import sys; sys.exit('no route')"]
-            self.assertIn("warn notify: command:", self.notify(asks=[{"key": "a", "body": "Q"}])[1])
+            channel["argv"] = [sys.executable, "-c", "import sys; sys.exit('token-in-stderr')"]
+            err = self.notify(asks=[{"id": "m9", "key": "a", "body": "Q"}])[1]
+            self.assertIn("warn notify: command:", err)
+            self.assertIn("exit 1", err)
+            self.assertNotIn("token-in-stderr", err)
 
     def test_no_channels_or_a_paused_effort_send_nothing_and_keep_the_run_row(self):
         before = (self.d / "keymap.json").read_text()
@@ -4216,7 +4282,8 @@ class NotifyTests(unittest.TestCase):
              patch.object(wg, "next_lines", return_value=("phase 1", self.lines)), \
              patch.object(wg, "effort_paused", return_value=False), \
              patch.object(wg, "publish", side_effect=lambda *a, **k: order.append("publish")), \
-             patch.object(wg, "notify_effort", side_effect=lambda *a: order.append(("notify", a[2], a[3]))), \
+             patch.object(wg, "notify_effort", side_effect=lambda *a: order.append(
+                 ("notify", a[2], a[3]) if "phase 1" in sys.stdout.getvalue() else "notify before the result")), \
              contextlib.redirect_stdout(io.StringIO()):
             wg.next_command(self.d, self.p, False, 1, copy=True)
             self.assertEqual(order, ["publish", ("notify", self.lines, False)])
@@ -4616,6 +4683,8 @@ class PublishTests(unittest.TestCase):
             args = data["ProgramArguments"]
             self.assertEqual(args[0], str(python))
             self.assertEqual(args[-1], "tick")
+            self.assertEqual(wg.main(["wg", "tick", "--install", "--channel", "none"]), 0)
+            self.assertEqual(wg.plistlib.loads(path.read_bytes())["ProgramArguments"][-3:], ["tick", "--channel", "none"])
             env = data["EnvironmentVariables"]
             self.assertEqual(env, {"PATH": f"{home}:{python.parent}:/usr/bin:/bin:/usr/sbin:/sbin", "GH_PROMPT_DISABLED": "1"})
             for value in (args[0], args[2], data["StandardOutPath"], data["StandardErrorPath"],

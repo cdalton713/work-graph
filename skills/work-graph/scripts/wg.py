@@ -4162,7 +4162,7 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                     link.send("progress", {"nodes": progress_nodes(plan_dir)})
                 if copy:
                     publish(plan_dir, plan, head, lines, wait_interval=interval if wait else None)
-                notify_effort(plan_dir, plan, lines, any(t.startswith("paused @effort") for _, t in lines))
+                paused = any(t.startswith("paused @effort") for _, t in lines)
                 if done:
                     print(head)
                     for line in terminal_lines(plan_dir, lines, everything, [n["key"] for n in plan["nodes"]]):
@@ -4172,9 +4172,12 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                     # A message is settled once its line is on the terminal. Before that, the server keeps it.
                     if link and settled:
                         link.send("ack", {"ids": settled})
+                    # After the result: a slow channel does not delay it (NOTIFY_DEADLINE).
+                    notify_effort(plan_dir, plan, lines, paused)
                     return 0
                 if link and settled:  # a `changed` that did not wake the coordinator is still read
                     link.send("ack", {"ids": settled})
+                notify_effort(plan_dir, plan, lines, paused)
             except (ReadError, OSError, json.JSONDecodeError) as e:
                 if not wait:
                     raise
@@ -4371,19 +4374,22 @@ TICK_DEFAULT_CHANNEL = "notify" if CONFIG["notify"] else "none"
 # ---------------------------------------------------------------- notices (config field `notify`)
 
 NOTIFY_RETRY = 300  # seconds: after a failed send, the next try waits this long
-NOTIFY_TIMEOUT = 20  # seconds for one channel
+NOTIFY_DEADLINE = 5  # seconds for all channels of one notice together
 
 
 def notify_entries(lines, asks):
     """The moves that are the human's: each `wait human` line, each `do ask` line, and each open worker question.
-    Returns {id: text}; the id is a hash of the text, so the run row holds no text."""
+    Returns {id: text}. A line's id is a hash of its text; a question's id is a hash of its Orca message id."""
     texts = [f"{level} {text}" for level, text in lines
              if (level, text.split(" ", 1)[0]) == ("wait", "human")
              or (level == "do" and text.split(" ", 1)[0] in {"ask", "ask-ready", "ask-merge"})]
+    entries = {hashlib.sha256(t.encode()).hexdigest()[:12]: t for t in texts}
     for ask in asks:
         body = " ".join(str(ask.get("body") or "").split())
-        texts.append(f"question {ask.get('issue') or ask.get('key')}: {body[:200]}")
-    return {hashlib.sha256(t.encode()).hexdigest()[:12]: t for t in texts}
+        source = f"ask:{ask.get('id')}" if ask.get("id") else f"ask-text:{ask.get('key')}:{body}"
+        entries[hashlib.sha256(source.encode()).hexdigest()[:12]] = \
+            f"question {ask.get('issue') or ask.get('key')}: {body[:200]}"
+    return entries
 
 
 def notify_url(channel):
@@ -4401,14 +4407,14 @@ def notify_url(channel):
     return url
 
 
-def notify_post(url, data, headers):
+def notify_post(url, data, headers, timeout):
     """One HTTP POST. Tests replace it (the fake transport)."""
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=NOTIFY_TIMEOUT) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         response.read()
 
 
-def send_webhook(channel, title, body, link):
+def send_webhook(channel, title, body, link, timeout):
     """POST {title, body, url, text} as JSON. `text` is for a Slack-compatible incoming webhook. A plain ntfy
     topic URL takes the body as a template: the headers name the fields for the title and the message."""
     url = notify_url(channel)
@@ -4417,71 +4423,96 @@ def send_webhook(channel, title, body, link):
     headers = {"Content-Type": "application/json", "X-Template": "yes", "X-Title": "{{.title}}",
                "X-Message": "{{.body}}", "X-Click": link}
     try:
-        notify_post(url, data, headers)
+        notify_post(url, data, headers, timeout)
     except (OSError, ValueError, http.client.HTTPException) as e:
-        # The URL is a secret (a topic or a webhook token): no error text names it.
-        raise ReadError(str(e).replace(url, "<url>") or type(e).__name__) from None
+        # The URL is a secret (a topic or a webhook token): the error is a fixed text, never the transport's own.
+        code = getattr(e, "code", None)
+        reason = getattr(e, "reason", None)
+        raise ReadError(f"HTTP {code}" if isinstance(code, int) else type(e).__name__ + (
+            f" ({type(reason).__name__})" if isinstance(reason, BaseException) else "")) from None
 
 
-def send_command(channel, title, body, link):
-    """Run argv with the notice text on stdin."""
+def send_command(channel, title, body, link, timeout):
+    """Run argv with the notice text on stdin. Its output is not shown: it can hold a credential."""
     try:
         result = subprocess.run(channel["argv"], input=f"{title}\n{body}\n{link}\n", capture_output=True,
-                                text=True, timeout=NOTIFY_TIMEOUT)
+                                text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
-        raise ReadError(f"{channel['argv'][0]}: {e}") from None
+        raise ReadError(f"{Path(channel['argv'][0]).name}: {type(e).__name__}") from None
     if result.returncode != 0:
-        raise ReadError(f"{channel['argv'][0]}: {one_line(command_error(result), 200)}")
+        raise ReadError(f"{Path(channel['argv'][0]).name}: exit {result.returncode}")
 
 
 NOTIFY_SENDERS = {"webhook": send_webhook, "command": send_command}
 
 
+def notify_ids(row, field):
+    return {i for i in (row.get(field) or "").split(",") if i}
+
+
+def notify_set(row, field, ids):
+    if ids:
+        row[field] = ",".join(sorted(ids))
+    else:
+        row.pop(field, None)
+
+
 def notify_effort(plan_dir, plan, lines, paused, asks=None):
     """Send one notice when the human's moves (notify_entries) have an entry that the last notice did not have.
 
-    The run row field `notified` holds the ids of the entries that were sent and still stand; an entry that goes
-    away is removed, so it is sent again if it comes back. A failed send is one `warn notify:` line; the next try
-    waits NOTIFY_RETRY seconds (`notify_failed`). No channels or a paused effort: nothing. It never raises."""
+    Each channel N has its own run row fields: `notified_N`, the ids of the entries that it got and that still
+    stand (an entry that goes away is removed, so it is sent again if it comes back), and `notify_failed_N`, the
+    time of its last failed send; its next try waits NOTIFY_RETRY seconds. New entries are claimed under the plan
+    lock before the send, so two commands do not send them twice. All channels together have NOTIFY_DEADLINE
+    seconds. Failures give one `warn notify:` line. No channels or a paused effort: nothing. It never raises."""
     channels = CONFIG.get("notify") or []
     if not channels or paused:
         return None
+    deadline = time.monotonic() + NOTIFY_DEADLINE
     try:
         entries = notify_entries(lines, open_asks(plan_dir) if asks is None else asks)
-        effort = run_rows(load_keymap(plan_dir))["effort"]
-        sent = {i for i in (effort.get("notified") or "").split(",") if i}
-        new = [i for i in entries if i not in sent]
-        failed = effort.get("notify_failed")
-        if new and failed and (utc_now() - parse_utc(failed)).total_seconds() < NOTIFY_RETRY:
-            new = []
-        errors = []
-        if new:
-            title = f"work-graph: {len(new)} new move(s) for {HUMAN} in {plan['effort']['name']}"
-            body = "\n".join(entries[i] for i in new)
-            for channel in channels:
-                try:
-                    NOTIFY_SENDERS[channel["type"]](channel, title, body, page_link(plan))
-                except ReadError as e:
-                    errors.append(f"{channel['type']}: {one_line(e, 200)}")
+        now = utc_now()
+        claims = {}
         with plan_lock(plan_dir):
             km = load_keymap(plan_dir)
             row = run_rows(km)["effort"]
             before = dict(row)
-            kept = {i for i in (row.get("notified") or "").split(",") if i} & entries.keys()
-            if errors:
-                row["notify_failed"] = f"{utc_now():%Y-%m-%dT%H:%M:%SZ}"
-            else:
-                kept |= set(new)
-                row.pop("notify_failed", None)
-            if kept:
-                row["notified"] = ",".join(sorted(kept))
-            else:
-                row.pop("notified", None)
+            for n in range(len(channels)):
+                sent = notify_ids(row, f"notified_{n}") & entries.keys()
+                new = [i for i in entries if i not in sent]
+                failed = row.get(f"notify_failed_{n}")
+                if new and not (failed and (now - parse_utc(failed)).total_seconds() < NOTIFY_RETRY):
+                    claims[n] = new
+                    sent |= set(new)
+                notify_set(row, f"notified_{n}", sent)
             if row != before:
                 save_keymap(plan_dir, km)
-        for error in errors:
-            print(f"warn notify: {error}", file=sys.stderr, flush=True)
-        return "failed" if errors else ("sent" if new else None)
+        errors = {}
+        for n, new in claims.items():
+            kind = channels[n]["type"]
+            title = f"work-graph: {len(new)} new move(s) for {HUMAN} in {plan['effort']['name']}"
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ReadError("no time left")
+                NOTIFY_SENDERS[kind](channels[n], title, "\n".join(entries[i] for i in new), page_link(plan),
+                                     remaining)
+            except ReadError as e:
+                errors[n] = f"{kind}: {one_line(e, 200)}"
+        if claims:
+            with plan_lock(plan_dir):
+                km = load_keymap(plan_dir)
+                row = run_rows(km)["effort"]
+                for n, new in claims.items():
+                    if n in errors:
+                        notify_set(row, f"notified_{n}", notify_ids(row, f"notified_{n}") - set(new))
+                        row[f"notify_failed_{n}"] = f"{now:%Y-%m-%dT%H:%M:%SZ}"
+                    else:
+                        row.pop(f"notify_failed_{n}", None)
+                save_keymap(plan_dir, km)
+        if errors:
+            print(f"warn notify: {'; '.join(errors.values())}", file=sys.stderr, flush=True)
+        return "failed" if errors else ("sent" if claims else None)
     except (ReadError, OSError, ValueError, KeyError, TypeError) as e:
         print(f"warn notify: {one_line(e, 200)}", file=sys.stderr, flush=True)
         return "failed"
@@ -4605,6 +4636,7 @@ def trim_tick_logs(log_dir):
 def tick_command(ns):
     if ns.install or ns.uninstall:
         return tick_agent(ns)
+    channel = ns.channel or TICK_DEFAULT_CHANNEL
     home = Path.home()
     roots = ns.root or [Path(root) for root in CONFIG["tick_roots"]]
     plans = sorted({path.parent.resolve() for root in roots for path in root.expanduser().glob("*-core/plan.json")
@@ -4628,7 +4660,7 @@ def tick_command(ns):
         failed = False
         for path in plans:
             try:
-                outcome = tick_effort(path, state, save, TICK_CHANNELS[ns.channel], ns.channel == "notify")
+                outcome = tick_effort(path, state, save, TICK_CHANNELS[channel], channel == "notify")
             except TICK_ERRORS as error:
                 outcome = tick_error(error)
                 state.setdefault("path-errors", {})[str(path)] = {"at": utc_now().isoformat(), "result": outcome}
@@ -4688,6 +4720,8 @@ def tick_agent(ns):
     log.mkdir(parents=True, exist_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     args = [str(python), "-I", str(Path(__file__).resolve()), "tick"]
+    if ns.channel:  # an explicit choice; without one, each tick uses the default of the config
+        args.extend(["--channel", ns.channel])
     path_dirs = dict.fromkeys([str(gh.parent), str(python.parent), "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
     for root in ns.root or []:
         args.extend(["--root", str(root.expanduser().resolve())])
@@ -6116,7 +6150,7 @@ def cli_parser():
     c.add_argument("--write", action="store_true")
     tick_parser = sub.add_parser("tick", help="refresh the page for each loaded effort")
     tick_parser.add_argument("--root", action="append", type=Path)
-    tick_parser.add_argument("--channel", choices=TICK_CHANNELS, default=TICK_DEFAULT_CHANNEL)
+    tick_parser.add_argument("--channel", choices=TICK_CHANNELS)
     mode = tick_parser.add_mutually_exclusive_group()
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--uninstall", action="store_true")

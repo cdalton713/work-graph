@@ -191,6 +191,24 @@ describe("LinkHub heartbeat, prune, and shutdown", () => {
     expect(hub.active()).toEqual([]);
   });
 
+  it("marks a coordinator that the deadline terminated as lost, also in working mode, and a normal close as not lost", () => {
+    const { time, hub } = started();
+    const silent = peer(), done = peer();
+    const s = hub.joinCoordinator(silent, A), d = hub.joinCoordinator(done, A);
+    s.receive(hello("silent"));
+    s.receive(msg("state", { mode: "working", head: "", lines: [] }));
+    d.receive(hello("done"));
+    d.receive(msg("state", { mode: "working", head: "", lines: [] }));
+    d.closed(); // wg next ended its wait and closed the socket
+    time.advance(DEAD_MS);
+    expect(silent.terminated).toBe(true);
+    const lost = Object.fromEntries(hub.presence(A).coordinators.map((c) => [c.session, [c.connected, c.mode, c.lost]]));
+    expect(lost).toEqual({ silent: [false, "working", true], done: [false, "working", false] });
+    // A new hello of the same session is not lost.
+    hub.joinCoordinator(peer(), A).receive(hello("silent"));
+    expect(hub.presence(A).coordinators.find((c) => c.session === "silent")?.lost).toBe(false);
+  });
+
   it("sets the deadline again at each pong, and counts no message as a pong", () => {
     const { time, hub } = started();
     const live = peer(), talker = peer();

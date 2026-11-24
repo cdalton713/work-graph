@@ -39,7 +39,7 @@ export const realTimers: Timers = {
   every: (fn, ms) => { const t = setInterval(fn, ms); t.unref(); return () => clearInterval(t); },
   after: (fn, ms) => { const t = setTimeout(fn, ms); t.unref(); return () => clearTimeout(t); },
 };
-interface Socket { peer: Peer; room: string | null; deadline: (() => void) | null; arm: () => void; closed: () => void }
+interface Socket { peer: Peer; room: string | null; deadline: (() => void) | null; arm: () => void; closed: (lost?: boolean) => void }
 
 /** The message types that a coordinator sends. The record makes the compiler check that it names each one. */
 const KNOWN_TYPES: Record<keyof FromCoordinator, true> = { hello: true, wrote: true, state: true, ack: true, asks: true, progress: true };
@@ -66,7 +66,7 @@ export function stopOnSignals(shutdown: () => Promise<boolean | void>, on: (sign
   }
 }
 
-interface Coordinator { peer: Peer | null; hello: Hello; state: CoordinatorState | null; since: string; lastSeen: string }
+interface Coordinator { peer: Peer | null; hello: Hello; state: CoordinatorState | null; since: string; lastSeen: string; lost?: boolean }
 interface Room {
   ref: ProjectRef; queue: Envelope[]; coordinators: Map<string, Coordinator>; pages: Set<Peer>;
   asks: Ask[]; progress: Progress[];
@@ -172,7 +172,7 @@ export class LinkHub {
    * sets it again. At the deadline the hub terminates the socket. With the heartbeat stopped, no socket has a deadline.
    * `closed` runs once, from the transport or from the deadline.
    */
-  private track(peer: Peer, ref: ProjectRef | null, closed: () => void): Connection {
+  private track(peer: Peer, ref: ProjectRef | null, closed: (lost: boolean) => void): Connection {
     let done = false;
     const socket: Socket = { peer, room: ref && projectKey(ref), deadline: null, arm: () => {}, closed: () => {} };
     socket.arm = () => {
@@ -184,16 +184,17 @@ export class LinkHub {
         if (peer.terminate) peer.terminate();
         else peer.close();
         // The transport calls `closed` too, maybe much later; the hub does not wait for it.
-        socket.closed();
+        socket.closed(true);
       }, DEAD_MS);
     };
-    socket.closed = () => {
+    // `lost`: the deadline terminated the socket; it did not close normally.
+    socket.closed = (lost = false) => {
       if (done) return;
       done = true;
       socket.deadline?.();
       socket.deadline = null;
       this.sockets.delete(peer);
-      closed();
+      closed(lost);
       if (this.stopping && !this.sockets.size) this.stopping.drained();
     };
     this.sockets.set(peer, socket);
@@ -241,7 +242,7 @@ export class LinkHub {
       .filter((c) => c.peer || Date.parse(c.lastSeen) >= cutoff)
       .map((c) => ({
         session: c.hello.session, host: c.hello.host, plan: c.hello.plan, connected: !!c.peer,
-        mode: c.state?.mode ?? null, head: c.state?.head ?? null, since: c.since, lastSeen: c.lastSeen,
+        mode: c.state?.mode ?? null, head: c.state?.head ?? null, since: c.since, lastSeen: c.lastSeen, lost: !!c.lost,
         paused: !!c.state?.lines.some((l) => l.level === "wait" && l.text.startsWith("paused ")),
       }))
       .sort((a, b) => Number(b.connected) - Number(a.connected) || b.lastSeen.localeCompare(a.lastSeen));
@@ -333,17 +334,18 @@ export class LinkHub {
     let me: Coordinator | null = null;
     const fail = (reason: string) => peer.close(1008, reason);
     /** Each coordinator entry of this socket goes away: the socket is no longer its connection. */
-    const release = () => {
+    const release = (lost = false) => {
       let changed = false;
       for (const c of room.coordinators.values()) {
         if (c.peer !== peer) continue;
         c.peer = null;
+        c.lost = lost;
         c.lastSeen = this.now().toISOString();
         changed = true;
       }
       return changed;
     };
-    const socket = this.track(peer, ref, () => { if (release()) this.announce(room); });
+    const socket = this.track(peer, ref, (lost) => { if (release(lost)) this.announce(room); });
     return {
       pong: socket.pong,
       closed: socket.closed,

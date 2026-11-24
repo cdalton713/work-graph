@@ -18,6 +18,13 @@ describe("presenceText", () => {
     expect(presenceText({ coordinators: [coordinator({ connected: false, mode: "waiting" })], queued: 2 }, now))
       .toMatchObject({ state: "gone", text: "coordinator not listening · 6 min ago" });
   });
+  it("says not listening for a coordinator that the heartbeat lost, also when it was working", () => {
+    expect(presenceText({ coordinators: [coordinator({ connected: false, mode: "working", lost: true })], queued: 0 }, now))
+      .toMatchObject({ state: "gone", text: "coordinator not listening · 6 min ago" });
+    // A normal close after a completed wait keeps the working display.
+    expect(presenceText({ coordinators: [coordinator({ connected: false, mode: "working", lost: false })], queued: 0 }, now))
+      .toMatchObject({ state: "working", text: "coordinator working · 6 min ago" });
+  });
 });
 
 describe("liveJob", () => {

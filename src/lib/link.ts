@@ -42,6 +42,8 @@ export interface CoordinatorPresence {
   mode: CoordinatorState["mode"] | null; head: string | null; since: string; lastSeen: string;
   /** `wg next` said `wait paused`: The human paused the effort on the page. */
   paused: boolean;
+  /** The heartbeat found the socket dead: the coordinator stopped answering. Not a normal close. */
+  lost?: boolean;
 }
 export interface Presence { coordinators: CoordinatorPresence[]; queued: number }
 export interface ToPage {
@@ -64,6 +66,6 @@ export function presenceText(presence: Presence | undefined, now: number):
   const seen = ageText(now - Date.parse(c.lastSeen)) ?? "";
   const where = `${c.host}: ${c.plan}`;
   if (c.connected && c.mode === "waiting") return { state: "listening", text: "coordinator listening", title: `wg next --wait is connected (${where}). Your change wakes it at once.` };
-  if (c.mode === "working") return { state: "working", text: `coordinator working · ${seen}`, title: `wg next ended ${seen}; the coordinator acts on it (${where}). It gets your changes at its next wg next.` };
+  if (c.mode === "working" && !(c.lost && !c.connected)) return { state: "working", text: `coordinator working · ${seen}`, title: `wg next ended ${seen}; the coordinator acts on it (${where}). It gets your changes at its next wg next.` };
   return { state: "gone", text: `coordinator not listening · ${seen}`, title: `No wg next --wait runs (${where}). Your change waits in the queue; send the coordinator a message to wake it.` };
 }

@@ -2457,6 +2457,8 @@ class JobTests(LaneTests):
         git("init", "-q", "--bare", str(origin), cwd=self.d)
         git("init", "-q", "-b", "main", str(repo), cwd=self.d)
         git("remote", "add", "origin", str(origin))
+        git("config", "user.name", "t")  # the rebase commits: no global identity on a CI runner
+        git("config", "user.email", "t@t")
         commit("base")
         git("checkout", "-qb", "wg/ex-one-00-a")
         commit("parent")

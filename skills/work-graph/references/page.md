@@ -68,7 +68,12 @@ A `wg next --wait` that runs in the background stays connected and takes the que
 `wg tick` refreshes the Linear page for each loaded effort every time it runs.
 It skips an effort while its coordinator listens and after it publishes the
 complete result. The tick makes only page updates in Linear. The `none`
-channel stores the “Your move” list locally and sends no notices.
+channel stores the “Your move” list locally and sends no notices. The
+`notify` channel is the default when the config has the field `notify`
+(README "Notices"). It sends one notice through each configured channel
+when the human's moves have a new entry. `wg next` sends the same notice.
+For the scheduled tick, put a webhook URL in a mode-600 file (`url_file`):
+launchd does not give the tick your shell environment.
 
 1. Run `wg tick --install`. Use a copy of the skill at a permanent path.
 2. Put the Linear keys in the private files named in the output. Set each file's

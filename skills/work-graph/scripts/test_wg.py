@@ -4054,6 +4054,254 @@ class ConfigTests(unittest.TestCase):
             self.assertIn("Needs Human", wg.contract()["statuses"])
 
 
+class NotifyTests(unittest.TestCase):
+    """The config field `notify`: one notice when the human's moves have a new entry, through each channel."""
+
+    URL = "https://hooks.invalid/secret-topic-token"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name)
+        self.p = {"effort": {"name": "Example"}, "phases": [{"key": "1", "target": "main"}],
+                  "nodes": [node("a"), node("b")], "edges": []}
+        wg.save_keymap(self.d, {"project": {"id": "proj"}, "milestones": {}, "run": {"effort": {}, "nodes": {}},
+                                "nodes": {"a": {"id": "ia", "identifier": "CD-1"}, "b": {"id": "ib", "identifier": "CD-2"}}})
+        self.lines = [("wait", "human a CD-1: merge PR #7"), ("do", "dispatch b CD-2"), ("wait", "below b CD-2"),
+                      ("do", "ask b CD-2: Pick a region")]
+        self.posts = []
+        self.fail_post = None
+        self.now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def post(url, data, headers, timeout):
+            if self.fail_post:
+                raise self.fail_post
+            self.posts.append((url, json.loads(data), headers))
+
+        for p in (patch.object(wg, "notify_post", side_effect=post),
+                  patch.dict(wg.os.environ, {"WG_TEST_HOOK": self.URL}),
+                  patch.dict(wg.CONFIG, {"notify": [{"type": "webhook", "url_env": "WG_TEST_HOOK"}]}),
+                  patch.object(wg, "utc_now", side_effect=lambda: self.now)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def notify(self, lines=None, asks=(), paused=False):
+        with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+            result = wg.notify_effort(self.d, self.p, self.lines if lines is None else lines, paused, list(asks))
+        self.assertNotIn(self.URL, err.getvalue() + out.getvalue())
+        self.assertNotIn(self.URL, (self.d / "keymap.json").read_text())
+        return result, err.getvalue()
+
+    def effort(self):
+        return wg.run_rows(wg.load_keymap(self.d))["effort"]
+
+    def test_the_config_names_where_the_url_is_never_the_url(self):
+        for channels, problem in (
+                ([], None),
+                ([{"type": "webhook", "url_env": "X"}, {"type": "command", "argv": ["say"]}], None),
+                ([{"type": "webhook", "url_file": "~/.config/work-graph/hook-url"}], None),
+                ({"type": "webhook"}, "must be a list"),
+                ([{"type": "webhook", "url": "https://x", "url_env": "X"}], "url_env or url_file"),
+                ([{"type": "webhook"}], "url_env or url_file"),
+                ([{"type": "command", "argv": "say hi"}], "argv"),
+                ([{"type": "email"}], "webhook or command")):
+            with self.subTest(channels=channels):
+                found = wg.notify_problem(channels)
+                self.assertEqual(found, None) if problem is None else self.assertIn(problem, found)
+        path = self.d / "config.json"
+        path.write_text(json.dumps({"notify": [{"type": "webhook", "url": "https://x"}]}))
+        with self.assertRaises(SystemExit):
+            wg.read_config(path)
+        path.write_text("{}")
+        self.assertEqual(wg.read_config(path)["notify"], [])
+
+    def test_the_entries_are_human_waits_asks_and_open_questions(self):
+        asks = [{"key": "b", "issue": "CD-2", "body": "Which\nbase?"}]
+        self.assertEqual(sorted(wg.notify_entries(self.lines, asks).values()), [
+            "do ask b CD-2: Pick a region", "question CD-2: Which base?", "wait human a CD-1: merge PR #7"])
+        # Two questions with the same text are two entries: the Orca message id names each.
+        same = [{"id": "m1", "key": "b", "issue": "CD-2", "body": "x" * 300 + "a"},
+                {"id": "m2", "key": "b", "issue": "CD-2", "body": "x" * 300 + "b"}]
+        self.assertEqual(len(wg.notify_entries([], same)), 2)
+        self.assertEqual(wg.notify_entries([("do", "dispatch b CD-2"), ("wait", "below b CD-2")], []), {})
+
+    def test_a_webhook_posts_title_body_url_and_text_once_per_new_entry(self):
+        result, err = self.notify()
+        self.assertEqual((result, err), ("sent", ""))
+        url, payload, headers = self.posts[-1]
+        self.assertEqual(url, self.URL)
+        self.assertEqual(set(payload), {"title", "body", "url", "text"})
+        self.assertIn("2 new move(s) for Human in Example", payload["title"])
+        self.assertEqual(payload["body"].splitlines()[:2],
+                         ["wait human a CD-1: merge PR #7", "do ask b CD-2: Pick a region"])
+        self.assertEqual(payload["url"], wg.page_link(self.p))
+        self.assertEqual(payload["body"].splitlines()[-1], payload["url"])
+        self.assertTrue(payload["text"].startswith(payload["title"] + "\n"))
+        self.assertEqual(headers["X-Click"], payload["url"])
+        self.assertEqual((headers["X-Title"], headers["X-Message"]), ("{{.title}}", "{{.body}}"))
+        self.assertEqual(len(self.effort()["notified_0"].split(",")), 2)
+
+        # The same entries: no notice. A new entry: one notice with only the new line.
+        self.assertEqual(self.notify()[0], None)
+        self.assertEqual(len(self.posts), 1)
+        self.notify(asks=[{"key": "a", "issue": "CD-1", "body": "Which base?"}])
+        self.assertEqual(len(self.posts), 2)
+        self.assertEqual(self.posts[-1][1]["body"].splitlines()[0], "question CD-1: Which base?")
+        self.assertIn("1 new move(s)", self.posts[-1][1]["title"])
+
+        # An entry that goes away is dropped; when it comes back, it is sent again.
+        self.notify(lines=self.lines[:1])
+        self.assertEqual(len(self.effort()["notified_0"].split(",")), 1)
+        self.assertEqual(len(self.posts), 2)
+        self.notify()
+        self.assertEqual(self.posts[-1][1]["body"].splitlines()[0], "do ask b CD-2: Pick a region")
+        self.notify(lines=[])
+        self.assertNotIn("notified_0", self.effort())
+
+    def test_a_failed_send_warns_once_and_tries_again_after_five_minutes(self):
+        self.fail_post = urllib.error.URLError(f"cannot reach {self.URL}")
+        result, err = self.notify()
+        self.assertEqual(result, "failed")
+        self.assertEqual(err.count("warn notify:"), 1)
+        self.assertIn("warn notify: webhook: URLError\n", err)
+        self.assertEqual(self.effort()["notify_failed_0"], "2026-01-01T00:00:00Z")
+        self.assertNotIn("notified_0", self.effort())
+        self.fail_post = None
+        # Two polls inside the retry window: both wait, and the failure time stays.
+        for minute in (1, 4):
+            self.now = self.now.replace(minute=minute)
+            self.assertEqual(self.notify(), (None, ""))
+            self.assertEqual(self.effort()["notify_failed_0"], "2026-01-01T00:00:00Z")
+        self.assertFalse(self.posts)
+        self.now = self.now.replace(minute=5)
+        self.assertEqual(self.notify()[0], "sent")
+        self.assertEqual(len(self.posts), 1)
+        self.assertNotIn("notify_failed_0", self.effort())
+
+    def test_an_http_error_is_a_fixed_text(self):
+        self.fail_post = urllib.error.HTTPError(self.URL, 403, f"denied {self.URL}", {}, None)
+        self.assertIn("warn notify: webhook: HTTP 403\n", self.notify()[1])
+
+    def test_a_working_channel_is_not_sent_again_while_another_fails(self):
+        out = self.d / "notices.txt"
+        command = {"type": "command", "argv": [sys.executable, "-c",
+                                               f"import sys; open({str(out)!r}, 'a').write(sys.stdin.read())"]}
+        hook = {"type": "webhook", "url_env": "WG_TEST_HOOK"}
+        self.fail_post = urllib.error.URLError("down")
+        with patch.dict(wg.CONFIG, {"notify": [command, hook, hook]}):
+            for minute in (0, 6, 12, 18):
+                self.now = self.now.replace(minute=minute)
+                result, err = self.notify()
+                self.assertEqual(result, "failed")
+                self.assertEqual(err.count("warn notify:"), 1)
+                self.assertEqual(err.count("webhook: URLError"), 2)
+        self.assertEqual(out.read_text().count("wait human a CD-1: merge PR #7"), 1)
+        self.assertEqual(len(self.effort()["notified_0"].split(",")), 2)
+        self.assertNotIn("notified_1", self.effort())
+
+    def test_two_commands_at_once_send_a_notice_once(self):
+        in_post, other_done = threading.Event(), threading.Event()
+
+        def slow_post(url, data, headers, timeout):
+            self.posts.append(url)
+            in_post.set()
+            other_done.wait(5)
+
+        results = []
+        with patch.object(wg, "notify_post", side_effect=slow_post):
+            first = threading.Thread(target=lambda: results.append(
+                wg.notify_effort(self.d, self.p, self.lines, False, [])))
+            first.start()
+            self.assertTrue(in_post.wait(5))
+            results.append(wg.notify_effort(self.d, self.p, self.lines, False, []))
+            other_done.set()
+            first.join(5)
+        self.assertEqual(sorted(results, key=str), [None, "sent"])
+        self.assertEqual(len(self.posts), 1)
+
+    def test_all_channels_share_one_deadline(self):
+        def slow_post(url, data, headers, timeout):
+            self.posts.append(timeout)
+            time.sleep(0.3)
+
+        hook = {"type": "webhook", "url_env": "WG_TEST_HOOK"}
+        with patch.object(wg, "notify_post", side_effect=slow_post), patch.object(wg, "NOTIFY_DEADLINE", 0.2), \
+             patch.dict(wg.CONFIG, {"notify": [hook, hook]}):
+            result, err = self.notify()
+        self.assertEqual(len(self.posts), 1)
+        self.assertLessEqual(self.posts[0], 0.2)
+        self.assertEqual(result, "failed")
+        self.assertIn("warn notify: webhook: no time left", err)
+        self.assertIn("notified_0", self.effort())
+
+    def test_a_webhook_url_comes_from_a_mode_600_file_when_the_variable_is_not_set(self):
+        path = self.d / "hook-url"
+        path.write_text(self.URL + "\n")
+        path.chmod(0o644)
+        channel = {"type": "webhook", "url_env": "WG_TEST_UNSET", "url_file": str(path)}
+        with patch.dict(wg.CONFIG, {"notify": [channel]}):
+            result, err = self.notify()
+            self.assertEqual(result, "failed")
+            self.assertIn("readable by group or others", err)
+            path.chmod(0o600)
+            self.now = self.now.replace(minute=10)
+            self.assertEqual(self.notify()[0], "sent")
+        self.assertEqual(self.posts[-1][0], self.URL)
+
+    def test_a_command_gets_the_notice_on_stdin(self):
+        out = self.d / "notice.txt"
+        channel = {"type": "command", "argv": [sys.executable, "-c",
+                                               f"import sys; open({str(out)!r}, 'w').write(sys.stdin.read())"]}
+        with patch.dict(wg.CONFIG, {"notify": [channel]}):
+            self.assertEqual(self.notify()[0], "sent")
+            text = out.read_text().splitlines()
+            self.assertIn("2 new move(s)", text[0])
+            self.assertEqual(text[1:3], ["wait human a CD-1: merge PR #7", "do ask b CD-2: Pick a region"])
+            self.assertEqual(text[-1], wg.page_link(self.p))
+            channel["argv"] = [sys.executable, "-c", "import sys; sys.exit('token-in-stderr')"]
+            err = self.notify(asks=[{"id": "m9", "key": "a", "body": "Q"}])[1]
+            self.assertIn("warn notify: command:", err)
+            self.assertIn("exit 1", err)
+            self.assertNotIn("token-in-stderr", err)
+
+    def test_no_channels_or_a_paused_effort_send_nothing_and_keep_the_run_row(self):
+        before = (self.d / "keymap.json").read_text()
+        self.assertEqual(self.notify(paused=True), (None, ""))
+        with patch.dict(wg.CONFIG, {"notify": []}), patch.object(wg, "open_asks") as asks:
+            self.assertEqual(self.notify(), (None, ""))
+            self.assertEqual(wg.notify_effort(self.d, self.p, self.lines, False), None)
+            asks.assert_not_called()
+        self.assertFalse(self.posts)
+        self.assertEqual((self.d / "keymap.json").read_text(), before)
+        self.assertEqual(wg.TICK_DEFAULT_CHANNEL, "notify" if wg.read_config()["notify"] else "none")
+
+    def test_wg_next_and_the_tick_call_the_notice_after_publish(self):
+        order = []
+        with patch.object(wg.Link, "open", return_value=None), patch.object(wg, "answer_lines", return_value=[]), \
+             patch.object(wg, "review_effort_lines", return_value=[]), patch.object(wg, "autonomy_lines", return_value=[]), \
+             patch.object(wg, "next_lines", return_value=("phase 1", self.lines)), \
+             patch.object(wg, "effort_paused", return_value=False), \
+             patch.object(wg, "publish", side_effect=lambda *a, **k: order.append("publish")), \
+             patch.object(wg, "notify_effort", side_effect=lambda *a: order.append(
+                 ("notify", a[2], a[3]) if "phase 1" in sys.stdout.getvalue() else "notify before the result")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            wg.next_command(self.d, self.p, False, 1, copy=True)
+            self.assertEqual(order, ["publish", ("notify", self.lines, False)])
+            order.clear()
+            plan = self.p | {"nodes": self.p["nodes"] + [node("ship", kind="ship-point")]}
+            with patch.object(wg, "snapshot", return_value=({}, {}, {}, {"ship": "Todo"}, {}, {})), \
+                 patch.object(wg, "tick_members", return_value={}):
+                for notify in (False, True):
+                    self.assertEqual(wg.tick_refresh(self.d, plan, {}, {}, notify), (None, {}))
+            self.assertEqual(order, ["publish", "publish", ("notify", self.lines, False)])
+            order.clear()
+            with patch.object(wg, "effort_paused", return_value=True):
+                wg.next_command(self.d, self.p, False, 1)
+            self.assertEqual(order, [("notify", [("wait", "human a CD-1: merge PR #7"), ("wait", "below b CD-2"),
+                                                 ("wait", "paused @effort -: Human paused this effort on the page; "
+                                                          "2 action(s) wait for Resume")], True)])
+
+
 class ContractTests(unittest.TestCase):
     def test_v3_exposes_heartbeat_fields_and_tests_both_edge_cases(self):
         contract = wg.contract()
@@ -4338,7 +4586,7 @@ class PublishTests(unittest.TestCase):
             wg.save_json(path / "plan.json", {"effort": {"name": name, "workspace": workspace}})
             wg.save_keymap(path, {"project": {"id": name}, "nodes": {"a": {"id": "ia"}}})
 
-        def refresh(path, plan, km, record):
+        def refresh(path, plan, km, record, notify=False):
             self.assertEqual(wg.LINEAR_WORKSPACE.get(), "work")
             if path.name == "b-core":
                 raise wg.ReadError("request failed")
@@ -4363,7 +4611,7 @@ class PublishTests(unittest.TestCase):
             wg.save_json(path / "plan.json", {"effort": {"name": name}})
             wg.save_keymap(path, {"project": {"id": name}, "nodes": {"a": {"id": "ia"}}})
 
-        def refresh(path, plan, km, record):
+        def refresh(path, plan, km, record, notify=False):
             if path.name == "a-core":
                 wg.shutil.rmtree(home / "b-core")
             if path.name == "c-core":
@@ -4435,6 +4683,8 @@ class PublishTests(unittest.TestCase):
             args = data["ProgramArguments"]
             self.assertEqual(args[0], str(python))
             self.assertEqual(args[-1], "tick")
+            self.assertEqual(wg.main(["wg", "tick", "--install", "--channel", "none"]), 0)
+            self.assertEqual(wg.plistlib.loads(path.read_bytes())["ProgramArguments"][-3:], ["tick", "--channel", "none"])
             env = data["EnvironmentVariables"]
             self.assertEqual(env, {"PATH": f"{home}:{python.parent}:/usr/bin:/bin:/usr/sbin:/sbin", "GH_PROMPT_DISABLED": "1"})
             for value in (args[0], args[2], data["StandardOutPath"], data["StandardErrorPath"],

@@ -127,7 +127,7 @@ Checks of a running server:
 
 Each API request that takes more than 5 s or ends with status 500 or more writes one log line with the method, the
 path, the status, and the duration. The server compresses static files and JSON answers of 1 KiB or more with gzip
-or deflate when the client accepts it, and `index.html` has an `ETag`.
+when the client accepts it, and `index.html` has an `ETag`.
 
 The server listens on `127.0.0.1:4747`. It does not check who the user is: keep it on a private network, such as a
 tailnet, or put an authenticating proxy in front of it. Then set `page_url` in the config of each machine that

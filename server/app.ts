@@ -135,8 +135,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const fixed = c.req.path.startsWith("/assets/") && c.res.status === 200;
     c.header("Cache-Control", fixed ? "public, max-age=31536000, immutable" : "no-store");
   });
-  // Static files and JSON answers of 1 KiB or more, when the client accepts gzip or deflate.
-  app.use(compress());
+  // Static files and JSON answers of 1 KiB or more, when the client accepts gzip. Every client that accepts
+  // Brotli or deflate accepts gzip too.
+  app.use(compress({ encoding: "gzip" }));
   // A slow API request or a server error writes one log line. The line has no body and no query.
   app.use("/api/*", async (c, next) => {
     const start = clock();
@@ -438,7 +439,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
 
   app.onError((error, c) => {
     const status = (error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;
-    if (status === 500) console.error(error);
+    // An API request writes its one log line in the request log above. Another route writes the error here.
+    if (status === 500 && !c.req.path.startsWith("/api/")) console.error(error);
     return c.json({ error: error.message }, status);
   });
   // Linear edits that did not come through this page: for each project with a connected coordinator,

@@ -872,7 +872,7 @@ describe("server status", () => {
 
   it("writes one log line for a slow request and for a server error", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const clock = { at: 0 };
     vi.stubEnv("LINEAR_API_KEY", "test-key");
     vi.stubGlobal("fetch", vi.fn(async () => {
@@ -889,6 +889,8 @@ describe("server status", () => {
     expect((await broken.request("/api/issues/i1/comments", { headers: local })).status).toBe(500);
     expect(warn).toHaveBeenCalledTimes(2);
     expect(warn.mock.calls[1][0]).toMatch(/^wg api: GET \/api\/issues\/i1\/comments 500 \d+ms$/);
+    // The 500 has its request line only: no error stack besides it.
+    expect(error).not.toHaveBeenCalled();
     expect((await app().request("/api/config", { headers: local })).status).toBe(200);
     expect(warn).toHaveBeenCalledTimes(2);
     vi.restoreAllMocks();
@@ -898,12 +900,20 @@ describe("server status", () => {
   it("compresses the page and JSON for a client that accepts it, and gives index.html an ETag", async () => {
     const big = join(dist, "assets", "big.js");
     await writeFile(big, "console.log('work graph');\n".repeat(200));
-    const js = await app().request("/assets/big.js", { headers: { ...local, "accept-encoding": "gzip, br" } });
+    const js = await app().request("/assets/big.js", { headers: { ...local, "accept-encoding": "gzip" } });
     expect(js.headers.get("content-encoding")).toBe("gzip");
     expect(js.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
     expect(gunzipSync(Buffer.from(await js.arrayBuffer())).toString()).toBe("console.log('work graph');\n".repeat(200));
     const plain = await app().request("/assets/big.js", { headers: local });
     expect(plain.headers.get("content-encoding")).toBeNull();
+    // Only gzip: a client that accepts deflate or Brotli alone gets the plain file.
+    for (const accepted of ["deflate", "br", "br, deflate"]) {
+      const other = await app().request("/assets/big.js", { headers: { ...local, "accept-encoding": accepted } });
+      expect(other.headers.get("content-encoding")).toBeNull();
+      expect(await other.text()).toBe("console.log('work graph');\n".repeat(200));
+    }
+    const both = await app().request("/assets/big.js", { headers: { ...local, "accept-encoding": "deflate, gzip;q=0.5" } });
+    expect(both.headers.get("content-encoding")).toBe("gzip");
 
     linear({ teams: { nodes: [{ projects: { nodes: Array.from({ length: 30 }, (_, at) => ({ id: `p${at}`, name: `Project ${at}`, url: "u", status: { name: "Started", type: "started" } })),
       pageInfo: { hasNextPage: false, endCursor: null } } }] } });

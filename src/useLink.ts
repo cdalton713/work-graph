@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { type Ask, type Envelope, type Presence, type Progress, type ProjectRef, projectKey } from "./lib/link";
+import { type Agents, type Ask, type Envelope, type Presence, type Progress, type ProjectRef, projectKey } from "./lib/link";
 
 export interface LinkState {
   /** The presence of each project, by `workspace:id`. The overview gets every project, a project page its own. */
@@ -7,6 +7,8 @@ export interface LinkState {
   asks: Ask[]; progress: Progress[];
   /** The open asks of each project, by `workspace:id`. The overview gets every project, a project page its own. */
   asksBy: Map<string, Ask[]>;
+  /** The agents of each project (`wg agents`), by `workspace:id`. */
+  agentsBy: Map<string, Agents>;
   connected: boolean;
 }
 
@@ -15,13 +17,13 @@ export interface LinkState {
  * reconnects after a drop. `onChanged` runs when the server says that an issue of the project changed.
  */
 export function useLink(ref: ProjectRef | null, onChanged: () => void): LinkState {
-  const [state, setState] = useState<LinkState>({ presence: new Map(), asks: [], progress: [], asksBy: new Map(), connected: false });
+  const [state, setState] = useState<LinkState>({ presence: new Map(), asks: [], progress: [], asksBy: new Map(), agentsBy: new Map(), connected: false });
   const changed = useRef(onChanged);
   changed.current = onChanged;
   const key = ref ? projectKey(ref) : "";
   useEffect(() => {
     let socket: WebSocket | null = null, timer = 0, stopped = false, delay = 1000;
-    setState({ presence: new Map(), asks: [], progress: [], asksBy: new Map(), connected: false });
+    setState({ presence: new Map(), asks: [], progress: [], asksBy: new Map(), agentsBy: new Map(), connected: false });
     const open = () => {
       const query = new URLSearchParams({ role: "page", ...(ref ? { workspace: ref.workspace, project: ref.id } : {}) });
       socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/link?${query}`);
@@ -35,6 +37,7 @@ export function useLink(ref: ProjectRef | null, onChanged: () => void): LinkStat
           setState((s) => ({ ...s, asks: ref ? asks : s.asks, asksBy: new Map(s.asksBy).set(projectKey(m.project), asks) }));
         }
         else if (m.type === "progress") setState((s) => ({ ...s, progress: (m.payload as { nodes: Progress[] }).nodes }));
+        else if (m.type === "agents") setState((s) => ({ ...s, agentsBy: new Map(s.agentsBy).set(projectKey(m.project), m.payload as Agents) }));
         else if (m.type === "changed") changed.current();
       };
       socket.onclose = () => {

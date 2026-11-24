@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { CARD_PREFIX, cardText, type GNode, type Graph, isProtectedLabel, moveWarnings, reviewMark, reviewOf, runTime, satisfied, signalOf, sortStates, statusName, yourMove } from "../lib/graph";
+import { CARD_PREFIX, ageText, cardText, type GNode, type Graph, isProtectedLabel, moveWarnings, reviewMark, reviewOf, runTime, satisfied, signalOf, sortStates, statusName, yourMove } from "../lib/graph";
 import type { Comment, GraphData, IssuePatch, Issue, State } from "../lib/types";
 import { Lamp, Picker, PrLinks, Rich } from "./ui";
-import { type Ask, type Progress, liveJob } from "../lib/link";
+import { type AgentRow, type Ask, type Progress, agentNeeds, agentState, liveJob } from "../lib/link";
 import { Asks } from "./Asks";
 
 const COMMENTS_MS = 60_000;
@@ -23,6 +23,8 @@ export interface PanelProps {
   onDispatch?: (key: string, issue: string) => Promise<void>;
   /** What the coordinator last reported about this node's job (from the link). */
   progress?: Progress;
+  /** The agent in this node's worktree, as Orca reports it (`wg agents`). */
+  agent?: AgentRow;
 }
 
 /** `note` says how many of these relations still hold, in the words of the canvas key. */
@@ -41,7 +43,7 @@ function Links({ title, ids, graph, onGo, note, clear }: { title: string; ids: s
   );
 }
 
-export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress }: PanelProps) {
+export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress, agent }: PanelProps) {
   const { issue, card } = node;
   const elapsed = runTime(card, now);
   const team = data.teams[issue.teamId];
@@ -140,6 +142,12 @@ export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError,
               ? `${issue.identifier} is in team ${issue.teamKey}, outside this project${card ? "; wg maps it as a node of this effort" : ""}. `
               : `${issue.identifier} is in team ${issue.teamKey}. `}
             This page writes only to its own team, so the issue is read-only here. <a href={issue.url} target="_blank" rel="noreferrer">Change it in Linear ↗</a>
+          </p>
+        )}
+        {agent && (
+          <p className={`notice panel-agent${agentNeeds(agent) ? " is-warning" : ""}`} title={agent.title || undefined}>
+            <b>Agent in Orca:</b> {agent.agent} {agentState(agent).text}{agent.at ? ` · ${ageText(now - Date.parse(agent.at))}` : ""}
+            {agent.said && <span className="panel-agent-said">{agent.said}</span>}
           </p>
         )}
         {asks && asks.length > 0 && <Asks asks={asks} projectId={data.project.id} workspace={data.workspace} now={now} onError={onError} />}

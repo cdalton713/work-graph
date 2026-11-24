@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import contract from "../../skills/work-graph/contract.json";
 import { ANSWERED_LABEL, AUTONOMY_DEFAULT, AUTONOMY_GROUP, AUTONOMY_LEVELS, autonomyOf, PAUSED_LABEL, pausedOf } from "./autonomy";
 import { REVIEW_DEFAULT, REVIEW_GROUP, REVIEW_LEVELS, REVIEW_PREFIX, reviewOf } from "./review";
-import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, liveJob, presenceText } from "./link";
+import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, agentState, agentsShown, liveJob, presenceText } from "./link";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
 const coordinator = (over: Partial<CoordinatorPresence>): CoordinatorPresence => ({
@@ -25,6 +25,27 @@ describe("presenceText", () => {
     // A normal close after a completed wait keeps the working display.
     expect(presenceText({ coordinators: [coordinator({ connected: false, mode: "working", lost: false })], queued: 0 }, now))
       .toMatchObject({ state: "working", text: "coordinator working · 6 min ago" });
+  });
+});
+
+describe("the agents of wg agents", () => {
+  const row = (state: string, at = "2026-11-20T11:50:00Z") => ({ id: state + at, role: "coordinator" as const, key: null, issue: null, agent: "claude", state, title: "Run", said: "Allow the push?", at });
+  const fresh = (state: string) => ({ at: "2026-11-20T11:59:30Z", agents: [row(state)] });
+  it("a coordinator agent at a prompt shows in place of the presence, while the report is fresh", () => {
+    const presence = { coordinators: [coordinator({ connected: false, mode: "working" })], queued: 0 };
+    expect(presenceText(presence, now, fresh("blocked"))).toMatchObject({ state: "needs", text: "coordinator waits at a prompt · 10 min ago" });
+    expect(presenceText(undefined, now, fresh("waiting"))).toMatchObject({ state: "needs", text: "coordinator waits for your input · 10 min ago" });
+    expect(presenceText(presence, now, fresh("working"))).toMatchObject({ state: "working" });
+    expect(presenceText(presence, now, { ...fresh("blocked"), at: "2026-11-20T11:56:00Z" })).toMatchObject({ state: "working" });
+    expect(presenceText(undefined, now, fresh("done"))).toBeNull();
+  });
+  it("shows an agent that ended for one hour, and gives each state a lamp", () => {
+    const agents = [row("working"), row("done"), row("done", "2026-11-20T10:59:00Z")];
+    expect(agentsShown({ at: "", agents }, now).map((a) => a.id)).toEqual([agents[0].id, agents[1].id]);
+    expect(agentsShown(undefined, now)).toEqual([]);
+    expect(["working", "blocked", "waiting", "done", ""].map((s) => agentState(row(s)))).toEqual([
+      { signal: "running", text: "working" }, { signal: "stop", text: "waits at a prompt" }, { signal: "stop", text: "waits for your input" },
+      { signal: "idle", text: "stopped" }, { signal: "idle", text: "unknown" }]);
   });
 });
 

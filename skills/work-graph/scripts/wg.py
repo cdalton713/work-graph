@@ -3734,7 +3734,7 @@ def publish(plan_dir, plan, head, lines, wait_interval=None, *, expected=None):
 LINK_VERSION = 1  # the protocol `wg-link/1` (src/lib/link.ts of the page)
 LINK_OPEN_TIMEOUT = 3
 LINK_TO_COORDINATOR = ("changed", "answer", "reply", "command")
-LINK_FROM_COORDINATOR = ("hello", "state", "asks", "progress", "ack", "wrote")
+LINK_FROM_COORDINATOR = ("hello", "state", "asks", "progress", "ack", "wrote", "agents")
 LINK_COMMANDS = ("next", "dispatch", "pause", "resume", "autonomy")
 
 
@@ -4273,13 +4273,18 @@ def wake_state_path():
     return Path.home() / ".local/state/work-graph/wake.json"
 
 
-def live_agents():
-    """The agents that Orca reports as not done, with the path of their workspace."""
+def orca_agents():
+    """Each agent that Orca knows, with the path of its workspace."""
     result = command(orca_cli(), "agent", "list", "--json")
     if result.returncode != 0:
         raise ReadError(f"orca agent list: {command_error(result)}")
     agents = json.loads(result.stdout)["result"]["agents"]
-    return [{**a, "path": (a.get("worktreeId") or "").split("::", 1)[-1]} for a in agents if a.get("state") != "done"]
+    return [{**a, "path": (a.get("worktreeId") or "").split("::", 1)[-1]} for a in agents]
+
+
+def live_agents():
+    """The agents that Orca reports as not done, with the path of their workspace."""
+    return [a for a in orca_agents() if a.get("state") != "done"]
 
 
 def page_waiting(plan, project_id):
@@ -4819,6 +4824,230 @@ def tick_agent(ns):
     return 0
 
 
+# ---------------------------------------------------------------- agents (the agents of each effort, from Orca)
+
+WATCH_LABEL = TICK_LABEL + ".agents"  # the launchd label of `wg agents --install`
+WATCH_INTERVAL = 10       # seconds between two reads of Orca
+WATCH_HEARTBEAT = 60      # seconds: the rows go again at least this often, so the page knows that `wg agents` runs
+WATCH_SAID = 500          # characters of an agent's last message that go to the page
+WATCH_ROWS = 50           # the most rows of one effort
+WATCH_DONE_AGE = 24 * 3600  # seconds: an agent that ended longer ago is not sent
+WATCH_POLLS = 2           # an agent must wait on the human in this many reads in sequence before the notice
+# The Orca states in which an agent waits on the human, and what the notice says.
+WATCH_NEEDS = {"blocked": "waits at a prompt", "waiting": "waits for your input"}
+
+
+def agent_needs(row):
+    """Why this agent waits on the human, or None. src/lib/link.ts `agentNeeds` has the same rule."""
+    return WATCH_NEEDS.get(row.get("state"))
+
+
+def agent_rows(plan_dir, km, agents, now=None):
+    """The rows of the link message `agents` for one effort: the agents in the plan directory (role coordinator)
+    and in the worktree of a run row (role worker, with its node key and issue). Coordinators first, then the
+    newest first."""
+    now = now or utc_now()
+    here = str(Path(plan_dir).resolve())
+    workers = {str(Path(row["path"]).expanduser().resolve()): key
+               for key, row in run_rows(km)["nodes"].items() if row.get("path")}
+    rows = []
+    for a in agents:
+        path = str(Path(a["path"]).resolve()) if a.get("path") else ""
+        key = workers.get(path)
+        if path != here and key is None:
+            continue
+        ident = str(a.get("orcaSessionId") or a.get("paneKey") or "")
+        stamp = a.get("updatedAt")
+        at = datetime.fromtimestamp(stamp / 1000, timezone.utc) if isinstance(stamp, (int, float)) else None
+        if not ident or (a.get("state") == "done" and (not at or (now - at).total_seconds() > WATCH_DONE_AGE)):
+            continue
+        rows.append({"id": ident, "role": "coordinator" if path == here else "worker",
+                     "key": None if path == here else key,
+                     "issue": None if path == here else (km.get("nodes", {}).get(key) or {}).get("identifier"),
+                     "agent": str(a.get("agent") or ""), "state": str(a.get("state") or ""),
+                     "title": one_line(a.get("title"), 120), "said": one_line(a.get("lastAssistantMessage"), WATCH_SAID),
+                     "at": f"{at:%Y-%m-%dT%H:%M:%SZ}" if at else None})
+    rows.sort(key=lambda r: r["at"] or "", reverse=True)
+    rows.sort(key=lambda r: r["role"] != "coordinator")
+    return rows[:WATCH_ROWS]
+
+
+def send_agents(plan_dir, plan, rows):
+    """Send the rows to the page server on a short connection with no `hello`, as `wrote` goes."""
+    from websockets.sync.client import connect
+    url, project, session, _ = link_target(plan_dir, plan)
+    with connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1) as ws:
+        ws.send(link_envelope(session, project, "agents", {"agents": rows}))
+
+
+def agent_entries(rows, seen):
+    """The notice entries {id: text} of the rows: each agent that waits on the human for WATCH_POLLS reads in
+    sequence. `seen` counts the reads, by entry id; an agent that moves again leaves it."""
+    entries, counts = {}, {}
+    for row in rows:
+        why = agent_needs(row)
+        if not why:
+            continue
+        ident = hashlib.sha256(f"agent:{row['id']}:{row['state']}".encode()).hexdigest()[:12]
+        counts[ident] = seen.get(ident, 0) + 1
+        if counts[ident] >= WATCH_POLLS:
+            who = "coordinator" if row["role"] == "coordinator" else f"worker {row['issue'] or row['key']}"
+            entries[ident] = f"{who} ({row['agent']}) {why}: {row['said'][:200]}"
+    seen.clear()
+    seen.update(counts)
+    return entries
+
+
+def notify_agents(plan, entries, record, now=None):
+    """Send one notice for the entries that channel N did not get yet. `record` is this effort's part of the
+    state file: `sent` {N: ids} and `failed` {N: time}. An entry that goes away leaves `sent`, so it is sent again
+    if it comes back. A failed channel waits NOTIFY_RETRY seconds. Returns True when `record` changed."""
+    channels = CONFIG.get("notify") or []
+    now = now or utc_now()
+    before = json.dumps(record, sort_keys=True)
+    deadline = time.monotonic() + NOTIFY_DEADLINE
+    sent_by, failed_by = record.setdefault("sent", {}), record.setdefault("failed", {})
+    errors = []
+    for n, channel in enumerate(channels):
+        sent = set(sent_by.get(str(n), [])) & entries.keys()
+        new = [i for i in entries if i not in sent]
+        failed = failed_by.get(str(n))
+        if new and not (failed and (now - parse_utc(failed)).total_seconds() < NOTIFY_RETRY):
+            title = f"work-graph: {len(new)} agent(s) wait on {HUMAN} in {plan['effort']['name']}"
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ReadError("no time left")
+                NOTIFY_SENDERS[channel["type"]](channel, title, "\n".join(entries[i] for i in new), page_link(plan),
+                                                remaining)
+                sent |= set(new)
+                failed_by.pop(str(n), None)
+            except ReadError as e:
+                failed_by[str(n)] = f"{now:%Y-%m-%dT%H:%M:%SZ}"
+                errors.append(f"{channel['type']}: {one_line(e, 200)}")
+        sent_by[str(n)] = sorted(sent)
+    if errors:
+        print(f"warn notify: {'; '.join(errors)}", file=sys.stderr, flush=True)
+    return json.dumps(record, sort_keys=True) != before
+
+
+def watch_poll(memory, state, roots=None, clock=time.monotonic):
+    """One read of Orca. For each loaded effort: send its rows when they changed or the heartbeat is due, and
+    send the notice of the agents that wait on the human. `memory` lives as long as the process: for each plan
+    directory, what was last sent and the wait counts. `state` is the file of the sent notices (agents.json). Returns the
+    efforts with their rows, and True when `state` changed."""
+    agents = orca_agents()
+    found, changed = [], False
+    for path in tick_plans(roots):
+        try:
+            plan, km = load_plan(path), load_keymap(path)
+        except (SystemExit, OSError, ValueError):
+            continue
+        project = (km.get("project") or {}).get("id")
+        if not project:
+            continue
+        rows = agent_rows(path, km, agents)
+        mine = memory.setdefault(str(path), {"digest": None, "at": 0.0, "seen": {}})
+        digest = json.dumps(rows, sort_keys=True)
+        due = digest != mine["digest"] or (rows and clock() - mine["at"] >= WATCH_HEARTBEAT)
+        # An effort with no agent sends nothing, but for one empty message after its last agent went away.
+        if due and (rows or mine["digest"] not in (None, "[]")):
+            try:
+                send_agents(path, plan, rows)
+                mine.update(digest=digest, at=clock())
+            except Exception as e:  # no server, an old server, or a project that the server does not list: try again
+                print(f"warn link: {plan['effort']['name']}: {type(e).__name__}", file=sys.stderr, flush=True)
+        key = f"{plan_workspace(plan)}/{project}"
+        entries = agent_entries(rows, mine["seen"])
+        if CONFIG.get("notify") and (entries or key in state):
+            record = state.setdefault(key, {})
+            changed |= notify_agents(plan, entries, record)
+            if not entries and not any(record.get("sent", {}).values()) and not record.get("failed"):
+                del state[key]
+                changed = True
+        found.append((plan["effort"]["name"], rows))
+    return found, changed
+
+
+def watch_command(ns):
+    """`wg agents`: read Orca each WATCH_INTERVAL seconds and send each effort's agents to the page. `--once`: one
+    read, and print the rows."""
+    if ns.install or ns.uninstall:
+        return watch_agent(ns)
+    home = Path.home()
+    state_path = home / ".local/state/work-graph/agents.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(state_path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    token = COMMAND_TIMEOUT.set(30)
+    try:
+        if not ns.once:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("skipped: wg agents is already running")
+                return 0
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        memory, warned, trimmed = {}, None, 0.0
+        while True:
+            try:
+                found, changed = watch_poll(memory, state, ns.root)
+                if changed:
+                    save_json(state_path, state, mode=0o600)
+                warned = None
+            except (ReadError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as e:
+                if ns.once:
+                    raise ReadError(one_line(e, 300)) from None
+                found, text = [], f"{type(e).__name__}: {one_line(e, 200)}"
+                if text != warned:  # one line for each new fault, not one for each read
+                    print(f"warn agents: {text}", file=sys.stderr, flush=True)
+                    warned = text
+            if ns.once:
+                for name, rows in found:
+                    for r in rows:
+                        who = "coordinator" if r["role"] == "coordinator" else f"worker {r['issue'] or r['key']}"
+                        print(f"{name}: {who} {r['agent']} {r['state']} {r['at'] or '-'}: {r['said'][:120]}")
+                if not any(rows for _, rows in found):
+                    print("no agent of a loaded effort is open in Orca")
+                return 0
+            if time.monotonic() - trimmed > 3600:
+                trim_tick_logs(home / "Library/Logs/wg-agents")
+                trimmed = time.monotonic()
+            time.sleep(WATCH_INTERVAL)
+    finally:
+        COMMAND_TIMEOUT.reset(token)
+        os.close(fd)
+
+
+def watch_agent(ns):
+    """`wg agents --install`: write the launchd agent that keeps `wg agents` running, and print how to load it."""
+    home = Path.home()
+    path = home / "Library/LaunchAgents" / (WATCH_LABEL + ".plist")
+    domain = f"gui/{os.getuid()}"
+    if ns.uninstall:
+        print(f"/bin/launchctl bootout {domain}/{WATCH_LABEL}")
+        path.unlink(missing_ok=True)
+        return 0
+    python = Path(sys.executable).absolute()
+    log = home / "Library/Logs/wg-agents"
+    log.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    args = [str(python), "-I", str(Path(__file__).resolve()), "agents"]
+    for root in ns.root or []:
+        args.extend(["--root", str(root.expanduser().resolve())])
+    path.write_bytes(plistlib.dumps({
+        "Label": WATCH_LABEL,
+        "ProgramArguments": args,
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": 30,
+        "EnvironmentVariables": {"PATH": ":".join(dict.fromkeys([str(python.parent), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))},
+        "StandardOutPath": str(log / "out.log"),
+        "StandardErrorPath": str(log / "error.log"),
+    }))
+    print(f"/bin/launchctl bootstrap {domain} {shlex.quote(str(path))}")
+    return 0
+
+
 # ---------------------------------------------------------------- doctor
 
 DOCTOR_STALE_START = 30 * 60  # seconds: a run row in creating or starting for longer is stuck (recovery.md "Resume")
@@ -4959,6 +5188,18 @@ def doctor_tick():
     return "ok", f"tick: {TICK_LABEL} loaded, each 15 minutes"
 
 
+def doctor_watch():
+    if sys.platform != "darwin":
+        return "warn", "agents: wg agents --install uses launchd (macOS); keep wg agents running another way"
+    path = Path.home() / "Library/LaunchAgents" / (WATCH_LABEL + ".plist")
+    if not path.exists():
+        return "warn", "agents: not installed (wg agents --install); the page does not show the agents"
+    domain = f"gui/{os.getuid()}"
+    if command("/bin/launchctl", "print", f"{domain}/{WATCH_LABEL}").returncode:
+        return "warn", f"agents: {path} is not loaded (/bin/launchctl bootstrap {domain} {shlex.quote(str(path))})"
+    return "ok", f"agents: {WATCH_LABEL} loaded"
+
+
 def wake_trigger(automation):
     """True when the Orca automation runs each 5 minutes (WAKE_SCHEDULE), False when it runs at other times, None
     when its trigger is not readable. Orca keeps the trigger as `rrule`; a `trigger` field is the cron text."""
@@ -5076,7 +5317,8 @@ def doctor(plan_dir=None):
     checks = [("python", doctor_python), ("websockets", doctor_websockets), ("checkout", doctor_checkout)]
     checks += [(f"key {w}", doctor_key(w)) for w in WORKSPACES]
     checks += [(name, doctor_tool(name, args)) for name, args in TOOL_CHECKS.items()]
-    checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", doctor_page), ("tick", doctor_tick)]
+    checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", doctor_page), ("tick", doctor_tick),
+               ("agents", doctor_watch)]
     failed = False
     if plan_dir:
         plans.add(Path(plan_dir).resolve())
@@ -6555,6 +6797,12 @@ def cli_parser():
     mode = tick_parser.add_mutually_exclusive_group()
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--uninstall", action="store_true")
+    watch_parser = sub.add_parser("agents", help="send each loaded effort's Orca agents to the page, each 10 seconds")
+    watch_parser.add_argument("--root", action="append", type=Path)
+    mode = watch_parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true")
+    mode.add_argument("--install", action="store_true")
+    mode.add_argument("--uninstall", action="store_true")
     u = sub.add_parser("ui")
     u.add_argument("--workspace", choices=tuple(WORKSPACES), default=DEFAULT_WORKSPACE_ID)
     u.add_argument("--port", type=int, default=4747)
@@ -6671,6 +6919,8 @@ def main(argv):
             return 0
         if ns.cmd == "tick":
             return tick_command(ns)
+        if ns.cmd == "agents":
+            return watch_command(ns)
         if ns.cmd == "ui":
             return ui(ns.port, ns.project, ns.no_open, ns.no_tailnet, ns.workspace)
         plan = load_plan(ns.dir)

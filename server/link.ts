@@ -3,7 +3,7 @@
 // app.ts feeds it the changes it sees.
 import { randomUUID } from "node:crypto";
 import {
-  type Ask, type CoordinatorPresence, type CoordinatorState, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
+  type AgentRow, type Agents, type Ask, type CoordinatorPresence, type CoordinatorState, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
   type Presence, type Progress, type ProjectRef, type ToCoordinator, type ToPage, projectKey,
 } from "../src/lib/link.ts";
 import { ASKS_MAX, type LinkState, type Store } from "./store.ts";
@@ -42,7 +42,10 @@ export const realTimers: Timers = {
 interface Socket { peer: Peer; room: string | null; deadline: (() => void) | null; arm: () => void; closed: (lost?: boolean) => void }
 
 /** The message types that a coordinator sends. The record makes the compiler check that it names each one. */
-const KNOWN_TYPES: Record<keyof FromCoordinator, true> = { hello: true, wrote: true, state: true, ack: true, asks: true, progress: true };
+const KNOWN_TYPES: Record<keyof FromCoordinator, true> = { hello: true, wrote: true, state: true, ack: true, asks: true, progress: true, agents: true };
+/** The most agent rows of a project, and the longest last message of a row. */
+export const AGENTS_MAX = 50;
+export const SAID_MAX = 500;
 const KNOWN = new Set<string>(Object.keys(KNOWN_TYPES));
 
 /** A client text as one log line: JSON escapes each control character, and the two Unicode line separators too. */
@@ -70,6 +73,8 @@ interface Coordinator { peer: Peer | null; hello: Hello; state: CoordinatorState
 interface Room {
   ref: ProjectRef; queue: Envelope[]; coordinators: Map<string, Coordinator>; pages: Set<Peer>;
   asks: Ask[]; progress: Progress[];
+  /** What `wg agents` last sent. Memory only: it sends them again each minute. */
+  agents: Agents | null;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -139,7 +144,8 @@ export class LinkHub {
     const used = new Set([...this.sockets.values()].map((s) => s.room));
     for (const [key, room] of this.rooms) {
       for (const [session, c] of room.coordinators) if (!c.peer && Date.parse(c.lastSeen) < cutoff) room.coordinators.delete(session);
-      if (!used.has(key) && !room.pages.size && !room.coordinators.size && !room.queue.length && !room.asks.length) this.rooms.delete(key);
+      if (room.agents && Date.parse(room.agents.at) < cutoff) room.agents = null;
+      if (!used.has(key) && !room.pages.size && !room.coordinators.size && !room.queue.length && !room.asks.length && !room.agents) this.rooms.delete(key);
     }
   }
 
@@ -213,7 +219,7 @@ export class LinkHub {
     const key = projectKey(ref);
     let room = this.rooms.get(key);
     if (!room) {
-      room = { ref, queue: [], coordinators: new Map(), pages: new Set(), asks: [], progress: [] };
+      room = { ref, queue: [], coordinators: new Map(), pages: new Set(), asks: [], progress: [], agents: null };
       this.rooms.set(key, room);
     }
     return room;
@@ -312,6 +318,7 @@ export class LinkHub {
       for (const room of this.rooms.values()) {
         peer.send(JSON.stringify(this.envelope(room.ref, "presence", this.presence(room.ref))));
         if (room.asks.length) peer.send(JSON.stringify(this.envelope(room.ref, "asks", { asks: room.asks })));
+        if (room.agents) peer.send(JSON.stringify(this.envelope(room.ref, "agents", room.agents)));
       }
       return this.track(peer, null, () => { this.watchers.delete(peer); });
     }
@@ -320,13 +327,15 @@ export class LinkHub {
     peer.send(JSON.stringify(this.envelope(ref, "presence", this.presence(ref))));
     peer.send(JSON.stringify(this.envelope(ref, "asks", { asks: room.asks })));
     peer.send(JSON.stringify(this.envelope(ref, "progress", { nodes: room.progress })));
+    if (room.agents) peer.send(JSON.stringify(this.envelope(ref, "agents", room.agents)));
     // A page only listens. It changes things through the HTTP API, which checks the origin and writes Linear.
     return this.track(peer, ref, () => { room.pages.delete(peer); });
   }
 
   /**
-   * A coordinator of one project. Its first message must be `hello`; then it gets the queue. Only `wrote` may
-   * come before it: a wg command that changed Linear sends it on a short connection that is no coordinator.
+   * A coordinator of one project. Its first message must be `hello`; then it gets the queue. Only `wrote` and
+   * `agents` may come before it: a wg command that changed Linear, or `wg agents`, sends them on a short
+   * connection that is no coordinator.
    */
   joinCoordinator(peer: Peer, ref: ProjectRef): Connection {
     if (this.closing) return this.refuse(peer);
@@ -361,6 +370,15 @@ export class LinkHub {
           this.onWrote(room.ref);
           // Only the pages: the coordinator made this change itself, so its queue gets nothing.
           return this.toPages(room, "changed", { by: "coordinator", what: "issue", issues });
+        }
+        if (message.type === "agents") {
+          const rows: AgentRow[] = (Array.isArray(payload.agents) ? payload.agents.filter(isObject) : []).slice(0, AGENTS_MAX).map((a) => ({
+            id: text(a.id, 200), role: a.role === "coordinator" ? "coordinator" as const : "worker" as const, key: text(a.key, 200) || null,
+            issue: text(a.issue, 50) || null, agent: text(a.agent, 50), state: text(a.state, 50), title: text(a.title, 200),
+            said: text(a.said, SAID_MAX), at: text(a.at, 50) || null,
+          })).filter((a) => a.id);
+          room.agents = { at, agents: rows };
+          return this.toPages(room, "agents", room.agents, true);
         }
         if (message.type === "hello") {
           const hello: Hello = { plan: text(payload.plan, 200), session: text(payload.session, 200) || randomUUID(), host: text(payload.host, 200), wg: text(payload.wg, 50) };

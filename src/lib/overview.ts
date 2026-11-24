@@ -1,7 +1,7 @@
 // The overview of all projects: one summary for each open project, made from its graph by the
 // same rules as the Board. The server makes the summaries, so the page does not load each graph.
 import { type Signal, boardGroups, buildGraph, parseStatus, projectGroups, statusTiming, yourMove } from "./graph.ts";
-import type { Ask } from "./link.ts";
+import { type Agents, type Ask, agentName, agentNeeds, agentsWaiting } from "./link.ts";
 import type { GraphData, Project, ProjectList, PullRequest } from "./types.ts";
 
 import { site, statusOrder } from "./site.ts";
@@ -100,6 +100,20 @@ export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined): YourMov
     extra.push({ identifier: id, title: a.body.split("\n")[0].trim(), why: "Worker asks:", pullRequests: [], updatedAt: a.at });
   }
   return [...extra, ...you.map((m) => (asked.has(m.identifier) ? { ...m, why: `Worker asks · ${m.why}` } : m))];
+}
+
+/**
+ * The moves of a project with its agents that wait on the human added (`wg agents`): an agent at a prompt
+ * stops until the human answers it in Orca. They come first. A worker's move names its issue, so an issue
+ * that is in the list keeps one entry and says that its worker waits.
+ */
+export function movesWithAgents(you: YourMove[], agents: Agents | undefined, now: number): YourMove[] {
+  const waiting = agentsWaiting(agents, now);
+  if (!waiting.length) return you;
+  const byIssue = new Map(waiting.flatMap((a) => (a.issue ? [[a.issue, a] as const] : [])));
+  const extra: YourMove[] = waiting.filter((a) => !a.issue || !you.some((m) => m.identifier === a.issue))
+    .map((a) => ({ identifier: agentName(a), title: a.said || a.title, why: `Agent ${agentNeeds(a)} in Orca:`, pullRequests: [], updatedAt: a.at ?? agents!.at }));
+  return [...extra, ...you.map((m) => (byIssue.has(m.identifier) ? { ...m, why: `Agent ${agentNeeds(byIssue.get(m.identifier)!)} · ${m.why}` } : m))];
 }
 
 /** The projects of one initiative in one workspace, and the sums of their summaries. `name` null: no initiative. */

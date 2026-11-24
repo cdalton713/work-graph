@@ -5,7 +5,7 @@ import WebSocket from "ws";
 import type { Envelope } from "../src/lib/link.ts";
 import { linkRefusal, type Rules } from "./access.ts";
 import { createApp } from "./app.ts";
-import { DEAD_MS, GONE_MS, LinkHub, PING_MS, QUEUE_MAX, RESTART_CODE, SHUTDOWN_MS, type Peer, stopOnSignals, type Timers } from "./link.ts";
+import { AGENTS_MAX, DEAD_MS, GONE_MS, LinkHub, PING_MS, QUEUE_MAX, RESTART_CODE, SHUTDOWN_MS, type Peer, stopOnSignals, type Timers } from "./link.ts";
 
 const A = { workspace: "work", id: "p1" }, B = { workspace: "work", id: "p2" };
 
@@ -107,6 +107,38 @@ describe("LinkHub", () => {
     expect(overview.of("asks").at(-1)).toMatchObject({ project: A, payload: { asks: [{ id: "q1", issue: "CD-1" }] } });
     hub.answered(A, "q1");
     expect(overview.of("asks").at(-1)).toMatchObject({ project: A, payload: { asks: [] } });
+  });
+
+  it("takes agents before hello: the pages of the project and the overview get the cleaned rows, also a page that opens later", () => {
+    const { now, timers, advance } = fakeTime();
+    const hub = new LinkHub(now, undefined, timers);
+    hub.start();
+    const pageA = peer(), pageB = peer(), overview = peer(), short = peer();
+    hub.joinPage(pageA, A);
+    hub.joinPage(pageB, B);
+    hub.joinPage(overview, null);
+    const row = { id: "s1", role: "coordinator", key: null, issue: null, agent: "claude", state: "blocked", title: "Run", said: "x".repeat(900), at: "2026-11-20T00:00:00Z" };
+    hub.joinCoordinator(short, A).receive(msg("agents", { agents: [row, { ...row, id: "", said: "no id" }, { ...row, id: "s2", role: "root", key: "a", issue: "CD-1" }, 7] }));
+    expect(short.closed).toEqual([]);
+    const got = pageA.of("agents").at(-1)!.payload as { at: string; agents: Record<string, unknown>[] };
+    expect(got.at).toBe("2026-11-20T00:00:00.000Z");
+    expect(got.agents.map((a) => [a.id, a.role, a.issue, (a.said as string).length])).toEqual([["s1", "coordinator", null, 500], ["s2", "worker", "CD-1", 500]]);
+    expect(overview.of("agents").at(-1)).toMatchObject({ project: A, payload: got });
+    expect(pageB.of("agents")).toEqual([]);
+    expect(hub.presence(A).coordinators).toEqual([]); // wg agents is no coordinator
+    const late = peer(), lateOverview = peer();
+    hub.joinPage(late, A);
+    hub.joinPage(lateOverview, null);
+    expect(late.of("agents")).toHaveLength(1);
+    expect(lateOverview.of("agents")).toHaveLength(1);
+    hub.joinCoordinator(peer(), A).receive(msg("agents", { agents: Array.from({ length: AGENTS_MAX + 9 }, (_, n) => ({ ...row, id: `s${n}` })) }));
+    expect((pageA.of("agents").at(-1)!.payload as { agents: unknown[] }).agents).toHaveLength(AGENTS_MAX);
+    // After a day with no report, the hub forgets the rows.
+    advance(GONE_MS + PING_MS);
+    const next = peer();
+    hub.joinPage(next, A);
+    expect(next.of("agents")).toEqual([]);
+    hub.stop();
   });
 
   it("refuses a message before hello, and anything that is not wg-link/1", () => {

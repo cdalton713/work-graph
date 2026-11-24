@@ -9,8 +9,8 @@ import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdg
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
 import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
 import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./lib/health";
-import { liveJob, presenceText } from "./lib/link";
-import { type OverviewData, PROJECT_LAMP, movesWithAsks, summaryKey } from "./lib/overview";
+import { agentsFresh, liveJob, presenceText } from "./lib/link";
+import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, summaryKey } from "./lib/overview";
 import { site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
 import type { GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
@@ -156,10 +156,11 @@ export function App() {
   const linkRef = useMemo(() => (project ? { workspace: project.workspace ?? site.defaultWorkspace, id: project.id } : null), [openKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const link = useLink(linkRef, () => { if (project && !document.hidden) void load(project); });
   // A worker's question is a move of the human's: it counts in "Your move", the picker, and the badge.
-  const yours = useMemo(() => new Map((overview?.summaries ?? []).map((s) => [summaryKey(s), movesWithAsks(s.you, link.asksBy.get(summaryKey(s))).length])), [overview, link.asksBy]);
+  const yours = useMemo(() => new Map((overview?.summaries ?? []).map((s) => [summaryKey(s), movesWithAgents(movesWithAsks(s.you, link.asksBy.get(summaryKey(s))), link.agentsBy.get(summaryKey(s)), now).length])), [overview, link.asksBy, link.agentsBy, now]);
   const asked = useMemo(() => new Set(link.asks.flatMap((a) => (a.issue ? [a.issue] : []))), [link.asks]);
   const presence = linkRef ? link.presence.get(summaryKey(linkRef)) : undefined;
-  const coordinator = useMemo(() => (linkRef ? presenceText(presence, now) : null), [presence, linkRef, now]);
+  const agents = linkRef ? link.agentsBy.get(summaryKey(linkRef)) : undefined;
+  const coordinator = useMemo(() => (linkRef ? presenceText(presence, now, agents) : null), [presence, linkRef, now, agents]);
   const stale = useMemo(() => (project ? staleBanner(data, now) : null), [project, data, now]);
   const budget = useMemo(() => budgetWarnings(status, now), [status, now]);
   // The project label `paused` is the record; an older coordinator report stands in until the list has it.
@@ -524,7 +525,7 @@ export function App() {
 
       <main className="stage">
         {!project && directory && (
-          <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} presence={link.presence} asks={link.asksBy}
+          <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
             budget={budget}
             initiative={query.get("initiative")} onInitiative={(name) => setQuery({ initiative: name }, true)} />
         )}
@@ -540,6 +541,7 @@ export function App() {
         {selected && full && data && (
           <Panel node={selected} now={now} graph={full} data={data} asks={link.asks.filter((a) => a.issue === selected.issue.identifier)}
             progress={link.progress.find((p) => p.issue === selected.issue.identifier)}
+            agent={agentsFresh(agents, now) ? agents.agents.find((a) => a.issue === selected.issue.identifier) : undefined}
             onDispatch={coordinator ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview ? onReview : undefined}
             onGo={(id) => { select(id); setFocus({ id, tick: Date.now() }); }} />
         )}

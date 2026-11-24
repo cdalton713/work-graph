@@ -331,7 +331,18 @@ button.ov-section-name:hover { text-decoration: underline; }
 .ov-init-on { color: var(--ink-1); font-weight: 600; }
 .ov-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--rail); border-radius: var(--r-2); background: var(--cab-1); overflow: hidden; }
 .ov-row + .ov-row { border-top: 1px solid var(--rail); }
-.ov-row { display: flex; align-items: center; box-shadow: inset 2px 0 0 transparent; }
+.ov-row { display: flex; flex-wrap: wrap; align-items: center; box-shadow: inset 2px 0 0 transparent; }
+/* The agents of the effort in Orca (wg agents): one line each, below the project row. A click shows the full message. */
+.ov-agents { flex: 0 0 100%; min-width: 0; margin: 0; padding: 0 12px 6px 29px; list-style: none; font-size: 12px; }
+.ov-agents.is-stale .ov-agent { opacity: 0.55; }
+.ov-agents-note { font-size: 11px; }
+.ov-agent summary { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 0; cursor: pointer; list-style: none; color: var(--ink-3); }
+.ov-agent summary::-webkit-details-marker { display: none; }
+.ov-agent-who { flex: none; color: var(--ink-2); }
+.ov-agent-state, .ov-agent-age { flex: none; font-size: 11px; }
+.ov-agent-said { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.ov-agent[open] .ov-agent-said { visibility: hidden; }
+.ov-agent-full { margin: 0 0 6px 14px; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ov-row .ov-open { flex: 1; min-width: 0; }
 /* The copy button of a row shows on hover or focus; a touch screen has no hover, so there it always shows. */
 .ov-copy { flex: none; margin-right: 8px; font-size: 11px; }
@@ -479,6 +490,8 @@ button.copy.is-copied { color: var(--lamp-done); }
 .coord-listening { color: var(--lamp-done); }
 .coord-working { color: var(--lamp-running); }
 .coord-gone { color: var(--ink-3); }
+.coord-needs { color: var(--lamp-stop); }
+.panel-agent-said { display: block; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ov-coord::before, .effort-age[class*="coord-"]::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: currentColor; vertical-align: 1px; }
 @media (max-width: 720px) { .ov-coord { display: none; } }
 

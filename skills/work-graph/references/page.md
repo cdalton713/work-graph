@@ -84,3 +84,11 @@ launchd does not give the tick your shell environment.
 
 To remove the schedule, run `wg tick --uninstall` and run the printed
 `launchctl bootout` command.
+
+## The agents on the page
+
+`wg agents` runs on the human's machine, not in a coordinator. It reads Orca each 10 seconds and sends the link
+message `agents` for each loaded effort: the state and the last message of the coordinator agent and of each
+worker agent (README "The agents on the page"). The page shows them on the Overview and counts an agent that
+stopped at a prompt (`blocked` or `waiting` in Orca) as a move of the human's. A coordinator does not run
+`wg agents` and does not read its rows. `wg doctor` reports when the launchd agent of `wg agents` is not loaded.

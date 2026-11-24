@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type OverviewData, type OverviewFilter, type OverviewRow, type ProjectSummary, NO_INITIATIVE, PROJECT_LAMP, initiativeNames, initiativeSections, movesWithAsks, overviewRows, summaryKey } from "../lib/overview";
+import { type OverviewData, type OverviewFilter, type OverviewRow, type ProjectSummary, NO_INITIATIVE, PROJECT_LAMP, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, summaryKey } from "../lib/overview";
 import { ageText } from "../lib/graph";
-import { type Ask, type Presence, presenceText } from "../lib/link";
+import { type Agents, type Ask, type Presence, agentName, agentState, agentsFresh, agentsShown, presenceText } from "../lib/link";
 import type { Project, ProjectList } from "../lib/types";
 import { CopyButton, Lamp, Picker, PrLinks } from "./ui";
 
@@ -37,6 +37,8 @@ export interface OverviewProps {
   presence?: Map<string, Presence>;
   /** The open questions of the workers of each project, by `workspace:id`, from the link. Each one is a move of the human's. */
   asks?: Map<string, Ask[]>;
+  /** The agents of each project, by `workspace:id`, from the link (`wg agents`). One that waits at a prompt is a move of the human's. */
+  agents?: Map<string, Agents>;
   /** The initiative filter from the link (`?initiative=`): null shows all; NO_INITIATIVE the projects with none. */
   initiative?: string | null;
   onInitiative?: (name: string | null) => void;
@@ -48,10 +50,10 @@ export interface OverviewProps {
  * All projects on one page: which ones wait on the human, how far each is, and what wg next last said.
  * `/` finds a project, the arrow keys move, Enter opens.
  */
-export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, initiative = null, onInitiative, budget = [] }: OverviewProps) {
-  const list = useMemo<OverviewData | ProjectList>(() => ("summaries" in given && asks?.size
-    ? { ...given, summaries: given.summaries.map((s) => ({ ...s, you: movesWithAsks(s.you, asks.get(summaryKey(s))) })) }
-    : given), [given, asks]);
+export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, initiative = null, onInitiative, budget = [] }: OverviewProps) {
+  const list = useMemo<OverviewData | ProjectList>(() => ("summaries" in given && (asks?.size || agents?.size)
+    ? { ...given, summaries: given.summaries.map((s) => ({ ...s, you: movesWithAgents(movesWithAsks(s.you, asks?.get(summaryKey(s))), agents?.get(summaryKey(s)), now) })) }
+    : given), [given, asks, agents, now]);
   const [filter, setFilter] = useState(stored);
   useEffect(() => {
     try { localStorage.setItem(STORE, JSON.stringify({ ...filter, text: "" })); } catch { /* the filter is a convenience */ }
@@ -101,7 +103,10 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const renderRow = ({ project: p, summary: s }: OverviewRow, at: number) => {
       const closed = p.statusType === "completed" || p.statusType === "canceled";
       const you = s?.you ?? [];
-      const coordinator = presenceText(presence?.get(summaryKey(p)), Date.now());
+      const reported = agents?.get(summaryKey(p));
+      const coordinator = presenceText(presence?.get(summaryKey(p)), Date.now(), reported);
+      const shown = agentsShown(reported, now);
+      const fresh = agentsFresh(reported, now);
       return (
         <li key={summaryKey(p)} className={`ov-row${at === active ? " is-active" : ""}${you.length ? " is-you" : ""}${closed ? " is-closed" : ""}`}>
           <button type="button" className="ov-open" onClick={() => onOpen(p)} onFocus={() => setActive(at)} onMouseEnter={() => setActive(at)}>
@@ -142,6 +147,28 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             )}
           </button>
           <CopyButton text={p.name} label="Copy the project name" className="ov-copy" />
+          {shown.length > 0 && (
+            <ul className={`ov-agents${fresh ? "" : " is-stale"}`} aria-label={`Agents of ${p.name} in Orca`}>
+              {!fresh && <li className="ov-agents-note is-warning">agent view stopped · last report {ageText(now - Date.parse(reported!.at))} · wg agents does not run</li>}
+              {shown.map((a) => {
+                const state = agentState(a);
+                return (
+                  <li key={a.id}>
+                    <details className="ov-agent">
+                      <summary title={a.title || undefined}>
+                        <Lamp signal={fresh ? state.signal : "off"} pulse={fresh && state.signal === "running"} />
+                        <span className="ov-agent-who mono">{agentName(a)}</span>
+                        <span className={`ov-agent-state${fresh && state.signal === "stop" ? " sig-fg-stop" : ""}`}>{a.agent} {state.text}</span>
+                        <span className="ov-agent-age mono">{a.at ? ageText(now - Date.parse(a.at)) : ""}</span>
+                        <span className="ov-agent-said">{a.said || "no message yet"}</span>
+                      </summary>
+                      <p className="ov-agent-full">{a.said || "no message yet"}</p>
+                    </details>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </li>
       );
   };
@@ -172,7 +199,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
               const title = m.why.trim() !== m.title.trim() && !m.why.includes(m.title.trim()) ? m.title : null;
               return (
                 <li key={`${summaryKey(p)}:${m.identifier}`} className="inbox-row">
-                  <button type="button" className="inbox-open" onClick={() => onOpen(p, m.identifier === "worker" ? undefined : m.identifier)} title={`${p.name}: ${m.title}`}>
+                  <button type="button" className="inbox-open" onClick={() => onOpen(p, m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier)} title={`${p.name}: ${m.title}`}>
                     <Lamp signal="stop" />
                     <span className="inbox-id mono">{m.identifier}</span>
                     <span className="inbox-text">

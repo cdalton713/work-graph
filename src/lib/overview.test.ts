@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NO_INITIATIVE, initiativeNames, initiativeSections, movesWithAsks, overviewRows, summarize, type OverviewData, type ProjectSummary } from "./overview";
+import { NO_INITIATIVE, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, summarize, type OverviewData, type ProjectSummary } from "./overview";
 import type { GraphData, Issue, State } from "./types";
 
 const state = (name: string, type: State["type"] = "unstarted"): State => ({ id: name, name, type, color: "#000" });
@@ -110,6 +110,26 @@ describe("initiatives", () => {
   });
   it("lists each initiative name once", () => {
     expect(initiativeNames(list.projects)).toEqual(["Billing", "Home", "Tooling"]);
+  });
+});
+
+describe("movesWithAgents", () => {
+  const at = Date.parse("2026-11-20T12:00:00Z");
+  const move = { identifier: "CD-1", title: "Merge it", why: "Merge #7", pullRequests: [], updatedAt: "2026-11-01T00:00:00Z" };
+  const agent = (id: string, state: string, issue: string | null = null) => ({
+    id, role: issue ? "worker" as const : "coordinator" as const, key: issue && "a", issue, agent: "claude", state, title: "Run", said: "Allow the push?", at: "2026-11-20T11:50:00Z",
+  });
+  const report = (agents: ReturnType<typeof agent>[], sent = "2026-11-20T11:59:30Z") => ({ at: sent, agents });
+  it("adds each agent that waits at a prompt as a move first, and marks the move of its issue", () => {
+    expect(movesWithAgents([move], report([agent("c", "blocked"), agent("w1", "waiting", "CD-1"), agent("w2", "blocked", "CD-2"), agent("w3", "working", "CD-3"), agent("w4", "done", "CD-4")]), at)).toEqual([
+      { identifier: "coordinator", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", pullRequests: [], updatedAt: "2026-11-20T11:50:00Z" },
+      { identifier: "CD-2", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", pullRequests: [], updatedAt: "2026-11-20T11:50:00Z" },
+      { ...move, why: "Agent waits for your input · Merge #7" },
+    ]);
+  });
+  it("keeps the moves as they are with no report, or with a report that is older than 3 minutes", () => {
+    expect(movesWithAgents([move], undefined, at)).toEqual([move]);
+    expect(movesWithAgents([move], report([agent("c", "blocked")], "2026-11-20T11:56:00Z"), at)).toEqual([move]);
   });
 });
 

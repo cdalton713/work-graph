@@ -109,6 +109,20 @@ channels are not sent the same entries again. With `notify`, the default channel
 it, the default is `none`, which sends no notices. `wg tick --install --channel <name>` keeps that channel for the
 scheduled tick; without `--channel`, each tick uses the default of the config.
 
+### The agents on the page
+
+`wg agents` reads Orca each 10 seconds (`orca agent list`) and sends the agents of each loaded effort to the page:
+the agents in the plan directory (the coordinator) and in the worktree of each run row (the workers). For each
+agent, the page gets its state, its title, and its last message as one line of at most 500 characters. The
+Overview shows one line for each agent below its project. An agent that Orca reports as `blocked` or `waiting`
+stopped at a prompt: it counts as a move of the human's, and it sends one notice through the `notify` channels
+when it waits for two reads in sequence. The message text goes to the page server, so do not use `wg agents` with
+a page that other people can read.
+
+`wg agents --once` does one read and prints the rows. `wg agents --install` writes a launchd agent that keeps
+`wg agents` running; run the printed `launchctl bootstrap` command to load it. Logs: `~/Library/Logs/wg-agents/`.
+When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the agent.
+
 In a workspace on Linear's Free plan (250 issues; archived issues do not count), `wg` archives each completed and
 canceled issue of the workspace at each `wg move` to Done or Canceled and at each `wg tick`. `wg archive <dir>`
 shows the list; `--apply` archives it. `wg` and the page read archived issues and their relations.

@@ -2,12 +2,12 @@
 // skill), and each open page. Design: CD-192. Linear stays the source of truth: a message here only
 // makes a change known sooner, or shows what a coordinator does now.
 
-import { ageText } from "./graph.ts";
+import { type Signal, ageText } from "./graph.ts";
 
 export const LINK_VERSION = 1;
 /** The message types of each direction, and the commands. contract.json `link` must hold the same lists. */
 export const LINK_TO_COORDINATOR = ["changed", "answer", "reply", "command"] as const;
-export const LINK_FROM_COORDINATOR = ["hello", "state", "asks", "progress", "ack", "wrote"] as const;
+export const LINK_FROM_COORDINATOR = ["hello", "state", "asks", "progress", "ack", "wrote", "agents"] as const;
 export const LINK_COMMANDS = ["next", "dispatch", "pause", "resume", "autonomy"] as const;
 export type Role = "coordinator" | "page";
 
@@ -32,8 +32,18 @@ export interface Ask { id: string; key: string | null; issue: string | null; fro
 export interface Progress { key: string; issue: string | null; job: string | null; state: string | null; ci: string | null; evidence: string | null; at: string | null }
 /** `wrote`: wg changed these issues in Linear. It may come without `hello`, on a short connection of any wg command. */
 export interface Wrote { issues: string[] }
+/**
+ * One agent of an effort, as Orca reports it (`wg agents`): in the plan directory (coordinator) or in the worktree
+ * of a node (worker). `said`: its last message, as one line. `at`: when Orca last heard from it.
+ */
+export interface AgentRow {
+  id: string; role: "coordinator" | "worker"; key: string | null; issue: string | null;
+  agent: string; state: string; title: string; said: string; at: string | null;
+}
 export interface FromCoordinator {
   hello: Hello; state: CoordinatorState; asks: { asks: Ask[] }; progress: { nodes: Progress[] }; ack: { ids: string[] }; wrote: Wrote;
+  /** Like `wrote`, it may come without `hello`: `wg agents` is no coordinator. */
+  agents: { agents: AgentRow[] };
 }
 
 // Server → page.
@@ -46,8 +56,10 @@ export interface CoordinatorPresence {
   lost?: boolean;
 }
 export interface Presence { coordinators: CoordinatorPresence[]; queued: number }
+/** The agents of a project. `at`: when the server last got them from `wg agents`. */
+export interface Agents { at: string; agents: AgentRow[] }
 export interface ToPage {
-  presence: Presence; changed: Changed; asks: { asks: Ask[] }; progress: { nodes: Progress[] };
+  presence: Presence; changed: Changed; asks: { asks: Ask[] }; progress: { nodes: Progress[] }; agents: Agents;
 }
 
 export const projectKey = (p: ProjectRef) => `${p.workspace}:${p.id}`;
@@ -58,9 +70,47 @@ export function liveJob(progress: Progress | undefined): string | null {
   return progress?.job && progress.state && LIVE.has(progress.state) ? `${progress.job} ${progress.state}` : null;
 }
 
-/** What the page says about the coordinators of a project, or null when none ever connected. */
-export function presenceText(presence: Presence | undefined, now: number):
-  { state: "listening" | "working" | "gone"; text: string; title: string } | null {
+/** `wg agents` sends the rows at least each minute. Rows that are older than this: it does not run. */
+export const AGENTS_STALE_MS = 3 * 60_000;
+export const agentsFresh = (agents: Agents | undefined, now: number): agents is Agents => !!agents && now - Date.parse(agents.at) < AGENTS_STALE_MS;
+
+/** The Orca states in which an agent waits on the human. `WATCH_NEEDS` of wg.py has the same rule. */
+const AGENT_NEEDS: Record<string, string> = { blocked: "waits at a prompt", waiting: "waits for your input" };
+/** Why this agent waits on the human, or null. */
+export const agentNeeds = (row: AgentRow): string | null => AGENT_NEEDS[row.state] ?? null;
+/** Who an agent is: `coordinator`, or the issue of its node. */
+export const agentName = (row: AgentRow): string => (row.role === "coordinator" ? "coordinator" : row.issue ?? row.key ?? "worker");
+
+/** How long the page still shows an agent that ended. */
+export const AGENT_DONE_MS = 60 * 60_000;
+/** The agents that the page shows: each one that has not ended, and each one that ended in the last hour. */
+export function agentsShown(agents: Agents | undefined, now: number): AgentRow[] {
+  return (agents?.agents ?? []).filter((a) => a.state !== "done" || now - Date.parse(a.at ?? "") < AGENT_DONE_MS);
+}
+/** The lamp and the state text of one agent row. */
+export function agentState(row: AgentRow): { signal: Signal; text: string } {
+  const needs = agentNeeds(row);
+  if (needs) return { signal: "stop", text: needs };
+  if (row.state === "working") return { signal: "running", text: "working" };
+  return { signal: "idle", text: row.state === "done" ? "stopped" : row.state || "unknown" };
+}
+
+/** The agents that wait on the human, when the rows are fresh. */
+export function agentsWaiting(agents: Agents | undefined, now: number): AgentRow[] {
+  return agentsFresh(agents, now) ? agents.agents.filter((a) => agentNeeds(a)) : [];
+}
+
+/**
+ * What the page says about the coordinators of a project, or null when none ever connected. With fresh rows
+ * of `wg agents`, a coordinator agent that waits on the human says so: the link cannot see a prompt.
+ */
+export function presenceText(presence: Presence | undefined, now: number, agents?: Agents):
+  { state: "listening" | "working" | "gone" | "needs"; text: string; title: string } | null {
+  const waits = agentsWaiting(agents, now).find((a) => a.role === "coordinator");
+  if (waits) {
+    const age = ageText(now - Date.parse(waits.at ?? "")) ?? "";
+    return { state: "needs", text: `coordinator ${agentNeeds(waits)}${age ? ` · ${age}` : ""}`, title: `Orca: the coordinator agent (${waits.agent}) is ${waits.state}. Open its terminal in Orca. Last message: ${waits.said || "none"}` };
+  }
   const c = presence?.coordinators[0];
   if (!c) return null;
   const seen = ageText(now - Date.parse(c.lastSeen)) ?? "";

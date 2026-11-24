@@ -12,7 +12,7 @@ import tempfile
 import time
 import unittest
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -6727,3 +6727,171 @@ class DoctorTests(DirTests):
     def test_wg_next_prints_the_doctor_note(self):
         lines = wg.terminal_lines(self.d, [("note", "doctor @effort -: page contract differs; run wg doctor")])
         self.assertEqual(lines, ["note doctor @effort -: page contract differs; run wg doctor"])
+
+
+class WatchTests(unittest.TestCase):
+    """`wg agents`: the agents of each loaded effort, from Orca, go to the page and to the notice channels."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.d = self.root / "effort-core"
+        self.worker = self.root / "effort-1"
+        self.d.mkdir()
+        self.plan = {"effort": {"name": "Example"}}
+        (self.d / "plan.json").write_text("{}")
+        self.km = {"project": {"id": "proj"}, "milestones": {}, "nodes": {"a": {"id": "ia", "identifier": "CD-1"}},
+                   "run": {"effort": {}, "nodes": {"a": {"path": str(self.worker), "state": "running"}}}}
+        wg.save_keymap(self.d, self.km)
+        self.now = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+        self.agents, self.sent, self.posts, self.clock = [], [], [], 0.0
+        self.fail_send = self.fail_post = None
+
+        def send(plan_dir, plan, rows):
+            if self.fail_send:
+                raise self.fail_send
+            self.sent.append(rows)
+
+        def post(url, data, headers, timeout):
+            if self.fail_post:
+                raise self.fail_post
+            self.posts.append(json.loads(data))
+
+        for p in (patch.object(wg, "orca_agents", side_effect=lambda: self.agents),
+                  patch.object(wg, "send_agents", side_effect=send),
+                  patch.object(wg, "load_plan", side_effect=lambda path, **kw: self.plan),
+                  patch.object(wg, "plan_workspace", return_value="main"),
+                  patch.object(wg, "page_link", return_value="https://page.invalid/?project=Example"),
+                  patch.object(wg, "notify_post", side_effect=post),
+                  patch.object(wg, "utc_now", side_effect=lambda: self.now),
+                  patch.dict(wg.os.environ, {"WG_TEST_HOOK": "https://hooks.invalid/topic"}),
+                  patch.dict(wg.CONFIG, {"notify": [{"type": "webhook", "url_env": "WG_TEST_HOOK"}]})):
+            p.start()
+            self.addCleanup(p.stop)
+        self.memory, self.state = {}, {}
+
+    def agent(self, path, state="working", said="Step 2 of 5.\nTests run.", minutes=1, ident="s1", **more):
+        stamp = (self.now.timestamp() - minutes * 60) * 1000
+        return {"orcaSessionId": ident, "agent": "claude", "state": state, "title": "Run the effort", "path": str(path),
+                "lastAssistantMessage": said, "updatedAt": stamp, **more}
+
+    def poll(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            found, changed = wg.watch_poll(self.memory, self.state, [self.root], clock=lambda: self.clock)
+        return found, changed, err.getvalue()
+
+    def test_rows_name_the_coordinator_and_each_worker_and_leave_out_other_agents(self):
+        agents = [self.agent(self.worker, ident="w", minutes=5), self.agent(self.root / "other", ident="x"),
+                  self.agent(self.d, ident="c", minutes=9), self.agent(self.d, "done", ident="old", minutes=25 * 60),
+                  self.agent(self.d, ident="")]
+        rows = wg.agent_rows(self.d, self.km, agents, self.now)
+        self.assertEqual([(r["id"], r["role"], r["key"], r["issue"]) for r in rows],
+                         [("c", "coordinator", None, None), ("w", "worker", "a", "CD-1")])
+        self.assertEqual(rows[0]["said"], "Step 2 of 5. / Tests run.")
+        self.assertEqual(rows[0]["at"], "2026-01-01T11:51:00Z")
+        self.assertEqual((rows[0]["agent"], rows[0]["state"], rows[0]["title"]), ("claude", "working", "Run the effort"))
+
+    def test_a_long_message_is_cut_and_the_rows_have_a_limit(self):
+        rows = wg.agent_rows(self.d, self.km, [self.agent(self.d, said="x" * 2000, ident=f"s{n}") for n in range(60)], self.now)
+        self.assertEqual(len(rows), wg.WATCH_ROWS)
+        self.assertEqual(len(rows[0]["said"]), wg.WATCH_SAID)
+
+    def test_only_a_blocked_or_waiting_agent_waits_on_the_human(self):
+        self.assertEqual([bool(wg.agent_needs({"state": s})) for s in ("working", "done", "blocked", "waiting", "")],
+                         [False, False, True, True, False])
+
+    def test_the_rows_go_when_they_change_and_again_at_the_heartbeat(self):
+        self.agents = [self.agent(self.d)]
+        self.poll()
+        self.poll()
+        self.assertEqual(len(self.sent), 1)
+        self.clock = wg.WATCH_HEARTBEAT
+        self.poll()
+        self.assertEqual(len(self.sent), 2)
+        self.agents = [self.agent(self.d, said="Step 3 of 5.")]
+        found, _, _ = self.poll()
+        self.assertEqual(self.sent[-1][0]["said"], "Step 3 of 5.")
+        self.assertEqual(found, [("Example", self.sent[-1])])
+
+    def test_an_effort_with_no_agent_sends_nothing_but_one_empty_message_after_its_last_agent(self):
+        self.poll()
+        self.assertEqual(self.sent, [])
+        self.agents = [self.agent(self.d)]
+        self.poll()
+        self.agents = []
+        self.poll()
+        self.clock = 10 * wg.WATCH_HEARTBEAT
+        self.poll()
+        self.assertEqual([len(rows) for rows in self.sent], [1, 0])
+
+    def test_a_failed_send_is_tried_again_at_the_next_read(self):
+        self.agents = [self.agent(self.d)]
+        self.fail_send = OSError("refused")
+        _, _, err = self.poll()
+        self.assertIn("warn link: Example: OSError", err)
+        self.fail_send = None
+        self.poll()
+        self.assertEqual(len(self.sent), 1)
+
+    def test_one_notice_after_two_reads_and_one_more_when_the_agent_waits_again(self):
+        self.agents = [self.agent(self.worker, "blocked", said="Allow the push?")]
+        self.assertEqual(self.poll()[1], False)
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.poll()[1], True)
+        self.poll()
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.posts[0]["title"], f"work-graph: 1 agent(s) wait on {wg.HUMAN} in Example")
+        self.assertIn("worker CD-1 (claude) waits at a prompt: Allow the push?", self.posts[0]["body"])
+        self.agents = [self.agent(self.worker, "working")]
+        self.assertEqual(self.poll()[1], True)
+        self.assertEqual(self.state, {})
+        self.agents = [self.agent(self.worker, "blocked")]
+        self.poll()
+        self.poll()
+        self.assertEqual(len(self.posts), 2)
+
+    def test_a_failed_notice_waits_for_the_retry_time(self):
+        self.agents = [self.agent(self.d, "waiting")]
+        self.fail_post = OSError("down")
+        self.poll()
+        _, _, err = self.poll()
+        self.assertIn("warn notify: webhook: OSError", err)
+        self.fail_post = None
+        self.poll()
+        self.assertEqual(self.posts, [])
+        self.now += timedelta(seconds=wg.NOTIFY_RETRY)
+        self.poll()
+        self.assertEqual(len(self.posts), 1)
+        self.assertIn("coordinator (claude) waits for your input", self.posts[0]["body"])
+
+    def test_no_channel_keeps_no_state(self):
+        self.agents = [self.agent(self.d, "blocked")]
+        with patch.dict(wg.CONFIG, {"notify": []}):
+            self.poll()
+            self.assertEqual(self.poll()[1], False)
+        self.assertEqual((self.state, self.posts), ({}, []))
+
+    def test_agents_once_prints_the_rows(self):
+        self.agents = [self.agent(self.d), self.agent(self.worker, "blocked", said="Allow?", ident="w")]
+        with patch.object(Path, "home", return_value=self.root), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(wg.main(["wg", "agents", "--once", "--root", str(self.root)]), 0)
+        self.assertEqual(out.getvalue().splitlines(), [
+            "Example: coordinator claude working 2026-01-01T11:59:00Z: Step 2 of 5. / Tests run.",
+            "Example: worker CD-1 claude blocked 2026-01-01T11:59:00Z: Allow?"])
+
+    def test_agents_install_writes_an_agent_that_launchd_keeps_alive(self):
+        python = self.root / "bin/python3"
+        with patch.object(Path, "home", return_value=self.root), patch.object(wg.sys, "executable", str(python)), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(wg.main(["wg", "agents", "--install"]), 0)
+            path = self.root / "Library/LaunchAgents/dev.work-graph.tick.agents.plist"
+            data = wg.plistlib.loads(path.read_bytes())
+            self.assertEqual((data["Label"], data["KeepAlive"], data["RunAtLoad"]), (wg.WATCH_LABEL, True, True))
+            self.assertEqual(data["ProgramArguments"][0::3], [str(python), "agents"])
+            self.assertIn("launchctl bootstrap", out.getvalue())
+            self.assertEqual(wg.main(["wg", "agents", "--uninstall"]), 0)
+            self.assertFalse(path.exists())
+
+    def test_the_link_contract_has_the_agents_message(self):
+        self.assertIn("agents", wg.contract()["link"]["from_coordinator"])

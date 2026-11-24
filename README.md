@@ -22,7 +22,16 @@ git clone https://github.com/cdalton713/work-graph.git ~/Projects/work-graph
 ln -s ~/Projects/work-graph/skills/work-graph ~/.claude/skills/work-graph   # or your agent's skills folder
 ln -s ~/Projects/work-graph/skills/work-graph/scripts/wg.py ~/.local/bin/wg
 wg config                                                                    # what wg will use
+wg doctor                                                                    # one ok, warn, or FAIL line per check
 ```
+
+`wg doctor` checks this machine and changes nothing: the Python version, the `websockets` package, that `wg` on
+PATH and each skill link point at one checkout and that checkout is not behind its `origin/main`, each workspace
+key (present, mode 600, accepted by Linear) with the request budget that is left, `gh auth`, `st`, the Orca CLI,
+the page server (`/healthz`, and the contract of `/api/config`), and the `tick` and `autostart` schedules.
+`wg doctor <plan-dir>` also checks that effort: `wg check`, `keymap.json` against Linear (an issue that is gone, a
+claim label with no live job, a job start that is stuck for more than 30 minutes, a status that the run row
+contradicts), each worktree path of the run rows, and the link (connect, `hello`, close). It exits 1 on a `FAIL`.
 
 ## Config
 

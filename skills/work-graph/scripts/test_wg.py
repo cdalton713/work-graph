@@ -40,6 +40,8 @@ spec.loader.exec_module(wg)
 # The other tests mock Linear call by call; AutonomyTests use the real autonomy_lines.
 AUTONOMY_LINES = wg.autonomy_lines
 wg.autonomy_lines = lambda plan_dir, plan: []
+REVIEW_LINES = wg.review_effort_lines
+wg.review_effort_lines = lambda plan_dir, plan: []
 # Likewise the pause label and the answers from the page: CommandTests and AnswerTests use the real ones.
 ANSWER_LINES = wg.answer_lines
 wg.answer_lines = lambda plan_dir: []
@@ -710,8 +712,11 @@ class GuardTests(DirTests):
         self.write_plan()
 
     def move(self, key, status, *, live=None, rows=None, prs=None, eng_labels=(), code=0, note=None, force=None,
-             checks=(True, "no checks")):
-        self.keymap(rows=rows or {})
+             checks=(True, "no checks"), effort=None):
+        km = self.keymap(rows=rows or {})
+        if effort:
+            wg.run_rows(km)["effort"].update(effort)
+            wg.save_keymap(self.d, km)
         issues = {n["key"]: live_issue((live or {}).get(n["key"], "Todo")) for n in self.p["nodes"]}
         issues[key]["labels"]["nodes"] += [{"name": name, "id": name} for name in eng_labels]
         names = {status, "In Review", wg.ENG_WRITES.get(status, status)}
@@ -772,6 +777,30 @@ class GuardTests(DirTests):
         out, _ = self.move("b", "Ready to Merge", live={"a": "Merged"}, rows={"b": row}, prs={"8": pr},
                            checks=(False, "lint"), code=1)
         self.assertEqual(out, "FAIL b: a check of PR #8 failed: lint\n")
+
+    def test_ready_to_merge_gate_at_each_review_effort(self):
+        pr = {"state": "OPEN", "isDraft": False, "headRefOid": SHA, "baseRefName": "main", "mergeable": "MERGEABLE"}
+        base = {"pr": "8", "code_done_head": SHA}
+        cases = [
+            (None, {"merge_review": "clean"}, None),  # no level seen: thorough
+            ("thorough", {"review": "clean"}, 'b: no merge review of this patch: review-and-merge.md "Merge point" step 2'),
+            ("thorough", {"merge_review": "accepted"}, None),
+            ("standard", {"review": "accepted"}, None),
+            ("standard", {"merge_review": "clean"}, "b: no review of this patch at review effort standard"),
+            ("light", {"review": "clean"}, None),
+            ("light", {}, "b: no review of this patch at review effort light: review-and-merge.md \"Review effort\""),
+        ]
+        for level, row, problem in cases:
+            with self.subTest(level=level, row=row):
+                out, _ = self.move("b", "Ready to Merge", live={"a": "Merged"}, rows={"b": base | row}, prs={"8": pr},
+                                   effort={"review_seen": level} if level else None, code=1 if problem else 0)
+                if problem:
+                    self.assertIn(f"FAIL {problem}", out)
+                else:
+                    self.assertEqual(out, "CD-4: Todo -> Ready to Merge\n")
+        out, _ = self.move("b", "Ready to Merge", live={"a": "Merged"}, rows={"b": base}, prs={"8": pr},
+                           eng_labels=["reviewed"], effort={"review_seen": "light"})
+        self.assertEqual(out, "CD-4: Todo -> Ready to Merge\n")
 
     def test_a_row_of_the_old_flow_passes_with_its_verified_head(self):
         row = {"pr": "8", "code_done_head": SHA, "verified_head": SHA}
@@ -1489,7 +1518,8 @@ class LocalTests(DirTests):
             sync.assert_not_called()  # the node above started at code done: a review changes no blocker
         self.assertEqual(wg.run_row(wg.load_keymap(self.d), "a"),
                          {"pr": "7", "patch": "p1", "code_done_head": SHA, "review_round": "1", "review": "clean",
-                          "merge_review": "accepted", "thorough_count": "1", "thorough_head": SHA})
+                          "merge_review": "accepted", "thorough_count": "1", "thorough_head": SHA,
+                          "review_head": SHA})
 
     def test_run_set_saves_a_review_request_when_github_is_not_read(self):
         self.keymap(rows={"a": {"pr": "7"}})
@@ -1918,6 +1948,44 @@ class NextTests(LaneTests):
                 _, lines = self.lines(live={"a": "In Review", "s": "Done", "c": "Backlog", "b": "Backlog"},
                                       rows={"a": row}, prs={"7": pr})
                 self.assertEqual(lines, [expected])
+
+    def test_wave_review_lines_at_each_review_effort(self):
+        done = {"pr": "7", "code_done_head": SHA}
+        open_pr = {"state": "OPEN", "headRefOid": SHA, "isDraft": True}
+        cases = [
+            (None, done | {"review_round": "1"}, "do review a CD-1: #7 round 2"),  # the default is thorough
+            ("thorough", done | {"review_round": "1"}, "do review a CD-1: #7 round 2"),
+            ("standard", done, "do review a CD-1: #7 round 1"),
+            ("standard", done | {"review_round": "1", "review_dispatch": "r1"}, "wait reviewer a CD-1: #7 round 1"),
+            # After the one fix job: no round 2, the coordinator checks the fix.
+            ("standard", done | {"review_round": "1", "review_head": OTHER},
+             f"do review a CD-1: #7: check the fix since {OTHER[:10]}"),
+            ("light", done, "do review a CD-1: #7: read the diff yourself"),
+            ("light", done | {"review_round": "1"}, "do review a CD-1: #7: read the diff yourself"),
+            ("light", done | {"review": "clean"}, "do undraft a CD-1: #7"),
+        ]
+        for level, row, expected in cases:
+            with self.subTest(level=level, expected=expected):
+                _, lines = self.lines(live={"a": "In Review", "s": "Done", "c": "Backlog", "b": "Backlog"},
+                                      rows={"a": row}, prs={"7": open_pr},
+                                      effort={"review_seen": level} if level else None)
+                self.assertEqual(lines, [expected])
+
+    def test_no_merge_review_line_at_standard_and_light(self):
+        ready = {"isDraft": False}
+        for level in ("standard", "light"):
+            with self.subTest(level=level):
+                lines = self.merge_stage({}, ready, effort={"review_seen": level})
+                self.assertIn("do ask-merge a CD-1: #7", lines)
+                self.assertFalse([line for line in lines if "merge-review" in line])
+        # A thread fix cleared the review: the level's own check, never a merge review.
+        cleared = {"review": None, "review_head": OTHER}
+        lines = self.merge_stage(cleared, ready, effort={"review_seen": "standard"})
+        self.assertIn(f"do review a CD-1: #7: check the fix since {OTHER[:10]}", lines)
+        lines = self.merge_stage({"review": None}, ready, effort={"review_seen": "light"})
+        self.assertIn("do review a CD-1: #7: read the diff yourself", lines)
+        lines = self.merge_stage({}, ready, effort={"review_seen": "thorough"})
+        self.assertIn("do merge-review a CD-1: #7: request the thorough review", lines)
 
     def merge_stage(self, row=None, pr=None, live=None, rows=None, effort=None, checks=(True, "no checks")):
         reviewed = {"code_done_head": SHA, "review": "clean"}
@@ -4352,6 +4420,74 @@ class AutonomyTests(DirTests):
         self.assertEqual((lines, settled), ([], ["m"]))
 
 
+class ReviewEffortTests(DirTests):
+    """The review effort: a project label of the group `review`, set and read as the autonomy level is."""
+
+    sync = AutonomyTests.sync
+
+    def setUp(self):
+        super().setUp()
+        km = wg.load_keymap(self.d)
+        km["project"] = {"id": "p", "url": "u"}
+        wg.save_keymap(self.d, km)
+        self.plan = {"effort": {"name": "Example", "team": "CD"}}
+        self.level = None
+        self.sets = []
+
+    def gql(self, query, variables=None):
+        if "project(id" in query:
+            on = [{"name": self.level, "parent": {"name": "Review"}}] if self.level else []
+            return {"project": {"labels": {"nodes": on + [{"name": "full", "parent": {"name": "autonomy"}}]}}}
+        raise AssertionError(query)
+
+    def lines(self):
+        with patch.object(wg, "gql", side_effect=self.gql), patch.object(wg, "sync_project_label", side_effect=self.sync), \
+             patch.object(wg, "team_info", return_value=("cd", {}, {})):
+            return REVIEW_LINES(self.d, self.plan)
+
+    def seen(self):
+        return wg.review_level(wg.load_keymap(self.d))
+
+    def test_no_label_is_thorough_and_a_change_is_a_do_line(self):
+        self.assertEqual(self.seen(), "thorough")
+        self.assertEqual(self.lines(), [("note", "review @effort -: thorough")])
+        self.assertEqual(self.lines(), [("note", "review @effort -: thorough")])
+        self.level = "light"
+        [(level, text)] = self.lines()
+        self.assertEqual(level, "do")
+        self.assertIn("set the review effort to light (was thorough)", text)
+        self.assertIn('review-and-merge.md "Review effort"', text)
+        self.assertEqual(self.seen(), "light")
+        self.assertEqual(self.lines(), [("note", "review @effort -: light")])
+
+    def test_wg_review_effort_sets_the_label_and_marks_it_seen(self):
+        out = io.StringIO()
+        with patch.object(wg, "gql", side_effect=self.gql), patch.object(wg, "sync_project_label", side_effect=self.sync), \
+             patch.object(wg, "team_info", return_value=("cd", {}, {})), contextlib.redirect_stdout(out):
+            wg.review_effort_command(self.d, self.plan, "standard")
+            wg.review_effort_command(self.d, self.plan, None)
+        self.assertEqual(out.getvalue(), "review effort standard (was thorough)\nreview effort standard\n")
+        self.assertEqual(self.sets, [("review", "standard", True)])
+        self.assertEqual(self.seen(), "standard")
+        self.assertEqual(self.lines(), [("note", "review @effort -: standard")])
+
+    def test_the_command_line_takes_the_three_levels_only(self):
+        self.assertEqual(wg.cli_parser().parse_args(["review-effort", str(self.d), "light"]).level, "light")
+        self.assertIsNone(wg.cli_parser().parse_args(["review-effort", str(self.d)]).level)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            wg.cli_parser().parse_args(["review-effort", str(self.d), "none"])
+
+    def test_a_read_error_keeps_the_last_level(self):
+        with patch.object(wg, "gql", side_effect=wg.ReadError("down")):
+            [(level, text)] = REVIEW_LINES(self.d, self.plan)
+        self.assertEqual(level, "note")
+        self.assertIn("review effort not read", text)
+
+    def test_the_contract_does_not_change(self):
+        # A page menu for the level is later work: the contract between wg and the page has no review group.
+        self.assertNotIn("thorough", wg.contract_text())
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -5581,7 +5717,7 @@ class ExplainTests(unittest.TestCase):
     """`wg explain <verb>`: the part of the skill text for one verb of `wg next`."""
 
     def test_every_verb_that_next_can_print_has_an_entry(self):
-        verbs = printed_verbs(wg.next_lines, wg.link_lines, AUTONOMY_LINES, wg.paused_lines, ANSWER_LINES,
+        verbs = printed_verbs(wg.next_lines, wg.link_lines, AUTONOMY_LINES, REVIEW_LINES, wg.paused_lines, ANSWER_LINES,
                               wg.relay_reply)
         # The scan must see the verbs of each function, or it proves nothing.
         for verb in ("dispatch", "undraft", "ask-ready", "worker", "wave", "load", "triage", "answer", "paused",

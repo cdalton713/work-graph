@@ -4,7 +4,7 @@ The coordinator is this session. It reads `wg next`, runs the Orca commands that
 
 ## Loop
 
-0. At the start of a run only: ask for the autonomy level and record it with `wg autonomy <plan-dir> <level>` (autonomy.md). `wg autonomy <plan-dir>` prints the current level.
+0. At the start of a run only: ask for the autonomy level and the review effort in one question, and record them with `wg autonomy <plan-dir> <level>` (autonomy.md) and `wg review-effort <plan-dir> <level>` (review-and-merge.md "Review effort"). Without a level, each command prints the current level.
 1. `wg next <plan-dir>`.
 2. Do each `do` line (table below). Put the lines that ask the human for the same thing into one message. A line that one `wg` command does ends with ` -> <command>`, with each argument filled in: run that command. For a verb that you have not handled in this session, run `wg explain <verb>` first: it prints only the part of the references that tells you what to do for that `do` or `wait` verb. `wg explain` lists the verbs.
 3. When no `do` line is left: "Wait".
@@ -45,7 +45,7 @@ An Orca message, the end of `wg next --wait`, or a message from the human wakes 
 
 The coordinator often runs where nobody sees a prompt: a background session, an autostart run, or a session that the human left. A question that waits for an answer stops the whole effort, while workers report and the page still shows the coordinator as working.
 
-- Inside the loop, never use `AskUserQuestion` or any other tool that waits for an answer. The one exception is the autonomy question at the start of a run in a foreground session (autonomy.md).
+- Inside the loop, never use `AskUserQuestion` or any other tool that waits for an answer. The one exception is the question for the autonomy level and the review effort at the start of a run in a foreground session (autonomy.md).
 - Ask through Linear: `wg move <plan-dir> <key> "Needs <human>"` with a comment that gives the question, the options with their costs, your recommendation, and the page link. A question that is not a node goes to a `decision` node (recovery.md "Replan"). Then act on the other lines and Wait. Their answer arrives as `do answer` (page) or as a status change.
 - When a permission check refuses a tool call, do not retry it and do not work around it. Write the step that needs their approval to `Needs <human>` and continue with the other lines.
 <!-- /explain -->

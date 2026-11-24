@@ -7,7 +7,7 @@ A review covers a **patch** (terms.md). `wg done` clears `review` and `merge_rev
 <!-- explain: review -->
 ## Wave review
 
-`wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. The reviewer is a different agent from the writer (Claude reviews Codex). Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review ("Mark a PR reviewed").
+`wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. This section is the flow at review effort `thorough`; "Review effort" gives the other levels. The reviewer is a different agent from the writer (Claude reviews Codex). Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review ("Mark a PR reviewed").
 
 1. Start the reviewer in your own worktree: `orca orchestration worker-start --spec-file <review-spec> --worktree current --agent claude --json`. Then `wg run set <plan-dir> <key> review_round=<k> review_dispatch=<dispatch_id>`. Give it the PR, not the worker's report. The spec:
 
@@ -21,6 +21,22 @@ A review covers a **patch** (terms.md). `wg done` clears `review` and `merge_rev
 3. After a review fix, only the branch directly above it in the lane gets a restack job, and only if that branch exists. Higher branches wait for their turn at the merge point.
 
 Done when: the node's run row has `review=clean` or `review=accepted`, or the issue has the `reviewed` label. Then this PR goes on to "Merge point".
+<!-- /explain -->
+
+<!-- explain: review -->
+## Review effort
+
+The review effort sets how much review each PR gets. It is a label of the Linear project: one child of the single-select project label group `review` (`thorough`, `standard`, or `light`). No label means `thorough`. `wg review-effort <plan-dir>` prints the level; `wg review-effort <plan-dir> <level>` sets it. Ask for it at the start of each run in the same `AskUserQuestion` call as the autonomy level, with the same exceptions (autonomy.md): put the current level first, marked "(current)". Then record it with `wg review-effort <plan-dir> <level>`.
+
+| Level | Wave review | Merge review |
+|---|---|---|
+| `thorough` | Up to 2 rounds by a different agent ("Wave review"). | One `@claude-thorough` review, then the fix check ("Merge point" step 2). |
+| `standard` | One round by a different agent ("Wave review" steps 1 and 2). Blocking findings go to the worker in one fix job. After that fix, `wg next` prints `review <key> #<n>: check the fix since <sha>`: read `git diff <sha> <code_done_head>`. When each change answers a finding and adds no other behavior, `wg run set <plan-dir> <key> review=accepted`, and comment the check on the issue. No round 2. If the fix fails the check, comment why and tell the human once: they accept it with the `reviewed` label, or they ask for one more fix. | None. |
+| `light` | No reviewer agent. `wg next` prints `review <key> #<n>: read the diff yourself`: read the PR diff against the node's acceptance. No blocking finding: `wg run set <plan-dir> <key> review=clean`. Blocking findings: send one fix job (`wg claim <plan-dir> <key> review`), then read the diff again. | None. |
+
+At `standard` and `light`, `wg next` prints no `merge-review` line, and `wg move … "Ready to Merge"` needs `review=clean` or `accepted` for the current patch in place of `merge_review`. A push that changes the patch after the review (for example a thread fix) clears the review: `wg next` prints the `review` line of the level again. Open review threads are still "Merge point" step 3 at each level. The `reviewed` label counts as each review at each level. At `ask-merge`, name the review that the PR got (for example "standard review accepted").
+
+`wg next` prints `note review @effort -: <level>`. When the label changed since your last `wg next`, that line is `do review @effort -: The human set the review effort to <new> (was <old>)…` instead. The new level applies at once to each PR that has not passed its review gate. Say the change in your next status line. A level change that the human gives in this session: record it with `wg review-effort <plan-dir> <level>`.
 <!-- /explain -->
 
 <!-- explain: ask-ready,undraft,merge-review,ask-merge,merged,close -->

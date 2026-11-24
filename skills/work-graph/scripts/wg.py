@@ -149,6 +149,11 @@ INITIATIVE_GROUP = "initiative"  # the team's single-select project label group;
 AUTONOMY_GROUP = "autonomy"
 AUTONOMY_LEVELS = ("full", "standard", "supervised")
 AUTONOMY_DEFAULT = "standard"
+# The review effort of each effort (references/review-and-merge.md "Review effort"): one child label of the
+# single-select project label group `review`, set and read as the autonomy level is. No label means REVIEW_DEFAULT.
+REVIEW_GROUP = "review"
+REVIEW_LEVELS = ("thorough", "standard", "light")
+REVIEW_DEFAULT = "thorough"
 # The plain project label that pauses an effort. The page sets it; `wg next` holds each `do` line while it is there.
 PAUSED_LABEL = "paused"
 # The workspace issue label that marks the human's answer from the page on a Needs <human> issue. `wg next`
@@ -1043,6 +1048,33 @@ def effort_autonomy(plan_dir, plan, km=None):
     return level or AUTONOMY_DEFAULT
 
 
+def project_review_effort(project_id):
+    """The review effort label of the project, or None when it has none."""
+    on = gql("""query($id:String!){ project(id:$id){ labels(first:50){ nodes{name parent{name}} } } }""",
+             {"id": project_id})["project"]["labels"]["nodes"]
+    return next((label["name"] for label in on if (label.get("parent") or {}).get("name", "").lower() == REVIEW_GROUP
+                 and label["name"] in REVIEW_LEVELS), None)
+
+
+def set_project_review_effort(plan, project_id, level):
+    """Give the project the review effort `level`; returns the changes."""
+    team_id = team_info(plan_team(plan))[0]
+    changes = []
+    sync_project_label(REVIEW_GROUP, "work-graph: the review effort of each effort (thorough, standard, light). "
+                       "The coordinator follows it.", "review effort",
+                       team_id, project_id, level, True, changes, team_scoped=team_labels(plan))
+    return changes
+
+
+def effort_review(plan_dir, km=None):
+    """The review effort of the effort: the project label, or REVIEW_DEFAULT when it has none."""
+    km = load_keymap(plan_dir) if km is None else km
+    project_id = (km.get("project") or {}).get("id")
+    if not project_id:
+        raise ReadError("keymap.json has no project; run wg load --apply first")
+    return project_review_effort(project_id) or REVIEW_DEFAULT
+
+
 def project_paused(project_id):
     """Does the project have the plain label `paused`?"""
     on = gql("""query($id:String!){ project(id:$id){ labels(first:50){ nodes{name parent{name}} } } }""",
@@ -1172,6 +1204,49 @@ def autonomy_lines(plan_dir, plan):
         return [("do", f"autonomy @effort -: {HUMAN} set the autonomy level to {level} (was {seen}); "
                        f"from now on act as references/autonomy.md says for {level}")]
     return [("note", f"autonomy @effort -: {level}")]
+
+
+def review_effort_command(plan_dir, plan, level):
+    """`wg review-effort <plan-dir> [level]`: print the review effort, or set it as the project label."""
+    km = load_keymap(plan_dir)
+    project_id = (km.get("project") or {}).get("id")
+    if not project_id:
+        die("keymap.json has no project; run wg load --apply first, then wg review-effort")
+    current = effort_review(plan_dir, km)
+    if level:
+        if level != current or not project_review_effort(project_id):
+            set_project_review_effort(plan, project_id, level)
+        print(f"review effort {level}" + (f" (was {current})" if level != current else ""))
+    else:
+        level = current
+        print(f"review effort {level}")
+    # The coordinator knows this level now: wg next tells it only of a later change.
+    with plan_lock(plan_dir):
+        km = load_keymap(plan_dir)
+        run_rows(km)["effort"]["review_seen"] = level
+        save_keymap(plan_dir, km)
+    return 0
+
+
+def review_effort_lines(plan_dir, plan):
+    """One line with the effort's review effort; a `do review` line when it changed since the coordinator last saw
+    it. The run row keeps the level that wg next and wg move follow (review_level)."""
+    try:
+        level = effort_review(plan_dir)
+    except (ReadError, OSError, KeyError, TypeError) as e:
+        return [("note", f"review @effort -: review effort not read ({one_line(e, 120)}); keep the last level")]
+    with plan_lock(plan_dir):
+        km = load_keymap(plan_dir)
+        effort = run_rows(km)["effort"]
+        seen = effort.get("review_seen")
+        if seen != level:
+            effort["review_seen"] = level
+            save_keymap(plan_dir, km)
+    if seen and seen != level:
+        return [("do", f"review @effort -: {HUMAN} set the review effort to {level} (was {seen}); from now on "
+                       f"review each PR that has not passed its review gate as review-and-merge.md \"Review effort\" "
+                       f"says for {level}")]
+    return [("note", f"review @effort -: {level}")]
 
 
 def project_entries(project_id, connection, fields):
@@ -1584,6 +1659,20 @@ def marked_reviewed(issue):
     return bool(issue) and any(label["name"] == REVIEWED_LABEL for label in issue_labels(issue))
 
 
+def review_level(km):
+    """The review effort that the coordinator last saw (`wg next`, `wg review-effort`). None seen means the default."""
+    level = run_rows(km)["effort"].get("review_seen")
+    return level if level in REVIEW_LEVELS else REVIEW_DEFAULT
+
+
+def review_gate(row, head, issue=None, level=REVIEW_DEFAULT):
+    """The PR passed the review gate of its merge request. At `thorough` it is the merge review; at `standard` and
+    `light` it is the wave review result (`review=clean` or `accepted`), which a new patch clears."""
+    if level == "thorough":
+        return merge_reviewed(row, head, issue)
+    return row.get("review") in REVIEW_OK or marked_reviewed(issue)
+
+
 def merge_reviewed(row, head, issue=None):
     """The PR has its merge review. A row of the flow before `merge_review` holds the reviewed head in `verified_head`."""
     return (row.get("merge_review") in REVIEW_OK or (bool(head) and row.get("verified_head") == head)
@@ -1741,9 +1830,12 @@ def move_guard(plan_dir, plan, km, node, status_name, note, issue=None):
                     problems.append(f"{key}: PR #{pr} is " + ("a draft" if info["state"] == "OPEN" else info["state"]))
                 if not row.get("code_done_head") or info.get("headRefOid") != row["code_done_head"]:
                     problems.append(f"{key}: the PR head is not code done (wg done)")
-                if not merge_reviewed(row, info.get("headRefOid"), issue):
+                level = review_level(km)
+                if not review_gate(row, info.get("headRefOid"), issue, level):
                     problems.append(f"{key}: no merge review of this patch: review-and-merge.md \"Merge point\" step 2, "
-                                    "then wg run set … merge_review=clean")
+                                    "then wg run set … merge_review=clean" if level == "thorough" else
+                                    f"{key}: no review of this patch at review effort {level}: review-and-merge.md "
+                                    "\"Review effort\", then wg run set … review=clean")
                 base = bottom_base(node, phase_of(plan, node)["target"])
                 if info.get("baseRefName") != base:
                     problems.append(f"{key}: the base of PR #{pr} is {info.get('baseRefName')}, not {base}")
@@ -1904,6 +1996,9 @@ def run_set(plan_dir, plan, key, assignments):
         patch_field = f"{field}_patch"
         if fields.get(started) or fields.get(field) == "requested":
             row[patch_field] = row.get("patch", "")
+        if field == "review" and fields.get(started):
+            # The head that the reviewer reads: at review effort `standard`, the fix check starts from it.
+            row["review_head"] = row.get("code_done_head", "")
         if field == "merge_review" and fields.get(field) == "requested":
             # The thorough review is costly: one per PR, a second only when a fix needs it.
             count = int(row.get("thorough_count") or 0)
@@ -2774,6 +2869,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
     """
     km, live, nodes, st, deps, rows = inputs if inputs is not None else snapshot(plan_dir, plan)
     effort = run_rows(km)["effort"]
+    level = review_level(km)
     wave = [k for k in effort.get("wave", "").split(",") if k]
     order = topo_order(plan)
     tasks = [k for k in order if nodes[k]["kind"] == "task"]
@@ -2874,7 +2970,12 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
             else:
                 add("do", "undraft" if effort.get("merge_prep", "coordinator") == "coordinator" else "ask-ready", k,
                     f"#{number}")
-        elif not merge_reviewed(row, info.get("headRefOid"), issue(k)):
+        elif level != "thorough" and not review_gate(row, info.get("headRefOid"), issue(k), level):
+            # A push after the review (a thread fix) changed the patch: the level's own check, no merge review.
+            add("do", "review", k, f"#{number}: " + (f"check the fix since {row['review_head'][:10]}"
+                                                   if level == "standard" and row.get("review_head")
+                                                   else "read the diff yourself"))
+        elif level == "thorough" and not merge_reviewed(row, info.get("headRefOid"), issue(k)):
             if row.get("merge_review") != "requested" and row.get("thorough_head"):
                 add("do", "merge-review", k, f"#{number}: check the fix since {row['thorough_head'][:10]}, "
                     "no new thorough review")
@@ -2932,6 +3033,10 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
             rounds = int(row.get("review_round") or 0)
             if row.get("review_dispatch"):
                 add("wait", "reviewer", k, f"#{number} round {rounds or 1}")
+            elif level == "light":
+                add("do", "review", k, f"#{number}: read the diff yourself")
+            elif level == "standard" and rounds >= 1:
+                add("do", "review", k, f"#{number}: check the fix since {(row.get('review_head') or '')[:10] or '-'}")
             elif rounds >= 2:
                 add("wait", "human", k, f"#{number}: 2 review rounds had blocking findings; only this PR is held "
                     f"(label {REVIEWED_LABEL!r} accepts them, or ask for one more fix)")
@@ -3490,7 +3595,7 @@ DO_COMMANDS = {
     "load": "load {dir} --apply",  # coordinator.md "Loop": the dry run `wg load <plan-dir>` comes first
 }
 # The `note` lines that the terminal prints in full. It counts the other notes in one line.
-NOTES_SHOWN = ("autonomy", "triage", "page")
+NOTES_SHOWN = ("autonomy", "triage", "page", "review")
 
 
 def line_verb(text):
@@ -3560,7 +3665,7 @@ EXPLAIN = {
     "adopt": "a node whose branch or PR exists: adopt it, no dispatch",
     "integration": "the coordinator's own integration branch",
     "verify": "check code done: wg done",
-    "review": "the wave review of a draft PR, or the thorough review that runs",
+    "review": "the wave review of a draft PR at the review effort, or a change of the review effort",
     "ask-ready": "ask the human to mark PRs ready (merge_prep=human)",
     "undraft": "mark the PR ready for review yourself",
     "merge-review": "request, read, or check the thorough merge review",
@@ -3649,10 +3754,12 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                 # An answer in Linear and its message give one line; the label also holds after a server restart.
                 marked = {text.split(":", 1)[0] for level, text in answers if level == "do"}
                 extra = answers + [line for line in extra if not (line[0] == "do" and line[1].split(":", 1)[0] in marked)]
+                # Before next_lines: a new review effort applies to the lines of this same wg next.
+                reviews = review_effort_lines(plan_dir, plan)
                 head, lines = next_lines(plan_dir, plan, tolerant=wait)
                 lines = paused_lines(plan_dir, plan, extra + lines)
                 if head != COMPLETE:
-                    lines = autonomy_lines(plan_dir, plan) + lines
+                    lines = autonomy_lines(plan_dir, plan) + reviews + lines
                 done = not wait or head == COMPLETE or any(level == "do" for level, _ in lines)
                 if link:
                     flush_writes(plan_dir, plan, link)
@@ -3783,8 +3890,9 @@ def autostart_prompt(plan_dir):
             "verb of each `do` and `wait` line, read `wg explain <verb>` before you act on it; do not read "
             "references/coordinator.md as a whole. Act on each line, until the effort is complete or a line needs "
             f"{HUMAN}. Then wait as references/coordinator.md \"Wait\" says (`wg explain human` prints it): one "
-            f"`wg next {plan_dir} --wait` in the background, then end the turn. Do not ask for the autonomy level: this run uses the project's current level "
-            f"(`wg autonomy {plan_dir}`), as setup.md \"Autostart\" says.")
+            f"`wg next {plan_dir} --wait` in the background, then end the turn. Do not ask for the autonomy level or the review effort: this run uses the "
+            f"project's current levels (`wg autonomy {plan_dir}`, `wg review-effort {plan_dir}`), as setup.md "
+            "\"Autostart\" says.")
 
 
 def autostart_command(plan_dir, plan, install, uninstall):
@@ -5301,7 +5409,8 @@ def done(plan_dir, plan, key, failed=None, worktree=None, dispatch_id=None):
     status, row = st.get(key), run_row(load_keymap(plan_dir), key)
     if not result and status in ("Todo", "Ready", "In Progress"):
         move(plan_dir, plan, key, "In Review")
-    elif status == "Ready to Merge" and (result or not merge_reviewed(row, row.get("code_done_head"), issue)):
+    elif status == "Ready to Merge" and (result or not review_gate(row, row.get("code_done_head"), issue,
+                                                                   review_level(load_keymap(plan_dir)))):
         move(plan_dir, plan, key, "In Review")  # this head has no merge review: it leaves the merge queue
     refresh_card(plan_dir, plan, key)
     return result
@@ -5463,6 +5572,7 @@ def cli_parser():
     add(r, "reset").add_argument("key")
     add(sub, "evidence").add_argument("key")
     add(sub, "autonomy").add_argument("level", nargs="?", choices=AUTONOMY_LEVELS)
+    add(sub, "review-effort").add_argument("level", nargs="?", choices=REVIEW_LEVELS)
     add(sub, "verify").add_argument("key")
     o = sub.add_parser("owns").add_subparsers(dest="mode", required=True)
     add(o, "overlap").add_argument("keys", nargs="+")
@@ -5555,6 +5665,8 @@ def run_command(ns, d, plan, given):
         return evidence(d, plan, ns.key, given)
     if ns.cmd == "autonomy":
         return autonomy_command(d, plan, ns.level)
+    if ns.cmd == "review-effort":
+        return review_effort_command(d, plan, ns.level)
     if ns.cmd == "verify":
         return verify(d, plan, ns.key)
     if ns.mode == "overlap":

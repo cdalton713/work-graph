@@ -165,9 +165,10 @@ describe("graph cache", () => {
     const cache = createGraphCache({
       load: async () => graph(++count.load),
       changed: async () => { count.changed++; return false; },
-      changedMany: async () => { count.many++; throw new Error("Linear: HTTP 500"); },
+      changedMany: async () => { count.many++; clock.at += slow; throw new Error("Linear: HTTP 500"); },
       now: () => clock.at,
     });
+    let slow = 0;
     const first = await cache.get("a");
     await cache.get("b");
     clock.at += FRESH_MS;
@@ -176,6 +177,13 @@ describe("graph cache", () => {
     expect(a).toEqual({ data: first.data, version: first.version, stale: true, error: "Linear: HTTP 500" });
     expect(b.stale).toBe(true);
     expect(count).toEqual({ load: 2, changed: 0, many: 1 });
+    // A slow check: Linear rejects it after 30 s (its time-out). The reads of the same poll still get its error.
+    slow = 30_000;
+    clock.at += FRESH_MS;
+    await cache.check(["a", "b"]);
+    const late = await Promise.all([cache.get("a"), cache.get("b")]);
+    expect(late.map((v) => [v.stale, v.error])).toEqual([[true, "Linear: HTTP 500"], [true, "Linear: HTTP 500"]]);
+    expect(count).toEqual({ load: 2, changed: 0, many: 2 });
   });
   it("does not keep a load that a write overtook as the fallback for a failed refresh", async () => {
     const linear = { down: false };

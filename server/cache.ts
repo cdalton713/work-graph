@@ -36,7 +36,11 @@ export interface Versioned {
 }
 interface Entry extends Versioned {
   loadedAt: number; checkedAt: number; changed?: boolean;
-  /** The check of all projects failed at `failedAt`: until the next check is due, a read gives this error with no request of its own. */
+  /**
+   * The check of all projects failed; `failedAt` is when its answer came, not when it started, so a slow check
+   * still gives its error to the reads of the same poll. Until `FRESH_MS` after that, a read gives this error
+   * (or the stale graph) with no request of its own.
+   */
   failure?: Error; failedAt?: number;
 }
 
@@ -117,10 +121,11 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
       found = await changedMany(ids, new Date(from - SKEW_MS).toISOString());
     } catch (error) {
       // The reads after this check give the error (or the stale graph), with no check of their own for each project.
+      const failedAt = now();
       for (const [id, entry, mine] of checked) {
         if (entries.get(id) !== entry || mine !== generation(id)) continue;
         entry.failure = error instanceof Error ? error : new Error(String(error));
-        entry.failedAt = at;
+        entry.failedAt = failedAt;
       }
       return;
     }

@@ -37,7 +37,7 @@ const realTimers: Timers = {
   every: (fn, ms) => { const t = setInterval(fn, ms); t.unref(); return () => clearInterval(t); },
   after: (fn, ms) => { const t = setTimeout(fn, ms); t.unref(); return () => clearTimeout(t); },
 };
-interface Socket { peer: Peer; room: string | null; deadline: (() => void) | null; closed: () => void }
+interface Socket { peer: Peer; room: string | null; deadline: (() => void) | null; arm: () => void; closed: () => void }
 
 /** A client text as one log line: JSON escapes each control character, and the two Unicode line separators too. */
 const logField = (v: string) => JSON.stringify(v).replace(/[\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16)}`);
@@ -84,9 +84,11 @@ export class LinkHub {
     this.timers = timers;
   }
 
-  /** Start the heartbeat: each `PING_MS`, `beat`. */
+  /** Start the heartbeat: each `PING_MS`, `beat`. Each open socket gets a new pong deadline of `DEAD_MS`. */
   start() {
-    this.stopBeat ??= this.timers.every(() => this.beat(), PING_MS);
+    if (this.stopBeat || this.stopping) return;
+    this.stopBeat = this.timers.every(() => this.beat(), PING_MS);
+    for (const socket of this.sockets.values()) socket.arm();
   }
 
   /** True from the start of `shutdown`: the server takes no new link socket. */
@@ -130,15 +132,18 @@ export class LinkHub {
   }
 
   /**
-   * Keep track of an open socket. A peer with `ping` gets a deadline of `DEAD_MS`; each pong sets it again. At the
-   * deadline the hub terminates the socket. `closed` runs once, from the transport or from the deadline.
+   * Keep track of an open socket. While the heartbeat runs, a peer with `ping` has a deadline of `DEAD_MS`; each pong
+   * sets it again. At the deadline the hub terminates the socket. With the heartbeat stopped, no socket has a deadline.
+   * `closed` runs once, from the transport or from the deadline.
    */
   private track(peer: Peer, ref: ProjectRef | null, closed: () => void): Connection {
     let done = false;
-    const socket: Socket = { peer, room: ref && projectKey(ref), deadline: null, closed: () => {} };
-    const arm = () => {
+    const socket: Socket = { peer, room: ref && projectKey(ref), deadline: null, arm: () => {}, closed: () => {} };
+    socket.arm = () => {
       socket.deadline?.();
-      socket.deadline = this.stopping ? null : this.timers.after(() => {
+      socket.deadline = null;
+      if (done || !peer.ping || !this.stopBeat || this.stopping) return;
+      socket.deadline = this.timers.after(() => {
         socket.deadline = null;
         if (peer.terminate) peer.terminate();
         else peer.close();
@@ -156,8 +161,8 @@ export class LinkHub {
       if (this.stopping && !this.sockets.size) this.stopping.drained();
     };
     this.sockets.set(peer, socket);
-    if (peer.ping) arm();
-    return { receive: () => {}, closed: () => socket.closed(), pong: () => { if (!done && peer.ping) arm(); } };
+    socket.arm();
+    return { receive: () => {}, closed: () => socket.closed(), pong: () => socket.arm() };
   }
 
   /** A socket that the transport admitted while the hub stops: it gets the close of a restart, and shutdown waits for it. */

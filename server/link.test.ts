@@ -211,6 +211,44 @@ describe("LinkHub heartbeat, prune, and shutdown", () => {
     expect(hub.active()).toHaveLength(1);
   });
 
+  it("keeps no pong deadline while the heartbeat is stopped: not after a late pong, not for a new socket", () => {
+    const { time, hub } = started();
+    const old = peer(), c = hub.joinCoordinator(old, A);
+    c.receive(hello("old"));
+    hub.stop();
+    expect(time.running()).toBe(0);
+    c.pong(); // a pong that arrives after the stop
+    const late = peer();
+    hub.joinPage(late, A); // a socket that opens after the stop
+    expect(time.running()).toBe(0);
+    time.advance(5 * DEAD_MS);
+    expect([old.terminated, late.terminated, old.pings, late.pings]).toEqual([false, false, 0, 0]);
+    expect(hub.active()).toHaveLength(1);
+  });
+
+  it("at a restart of the heartbeat gives each open socket a new deadline, so a silent socket does not survive", () => {
+    const { time, hub } = started();
+    const silent = peer(), answering = peer();
+    hub.joinCoordinator(silent, A).receive(hello("silent"));
+    const a = hub.joinCoordinator(answering, B);
+    a.receive(hello("answering"));
+    time.advance(DEAD_MS - 1);
+    hub.stop();
+    time.advance(10 * DEAD_MS);
+    hub.start();
+    expect(time.running()).toBe(3); // the heartbeat and one deadline for each socket
+    time.advance(PING_MS);
+    a.pong();
+    time.advance(DEAD_MS - PING_MS - 1);
+    expect(silent.terminated).toBe(false);
+    time.advance(1);
+    expect(silent.terminated).toBe(true); // DEAD_MS after the restart
+    expect(answering.terminated).toBe(false);
+    expect(hub.active().map((r) => r.id)).toEqual(["p2"]);
+    hub.start(); // a second start changes nothing
+    expect(time.running()).toBe(2);
+  });
+
   it("pings no peer that cannot ping, and never terminates it", () => {
     const { time, hub } = started();
     const plain: Peer = { send: () => {}, close: vi.fn() };

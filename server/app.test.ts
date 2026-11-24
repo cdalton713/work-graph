@@ -1,10 +1,14 @@
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { serve } from "@hono/node-server";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import WebSocket from "ws";
 import type { Rules } from "./access.ts";
 import { createApp } from "./app.ts";
 import { setTransport } from "./linear.ts";
+import { DEAD_MS, PING_MS, RESTART_CODE, type Timers } from "./link.ts";
 
 const rules: Rules = { port: 4747, tailnet: null };
 const local = { host: "127.0.0.1:4747" };
@@ -714,5 +718,67 @@ describe("graph cache of the server", () => {
     expect(asked.many).toEqual([["p1", "p2"], ["p1", "p2"]]);
     expect(asked.one).toBe(0);
     expect(asked.loads).toHaveLength(3);
+  });
+});
+
+
+describe("link sockets of the server", () => {
+  const closers: (() => void)[] = [];
+  afterEach(() => { closers.splice(0).forEach((close) => close()); });
+
+  /** A server with a clock and heartbeat timers that move only when the test says so. */
+  async function start() {
+    const clock = { at: Date.parse("2026-11-20T00:00:00Z") };
+    const beats: (() => void)[] = [];
+    const timers: Timers = {
+      every: (fn) => { beats.push(fn); return () => { beats.splice(beats.indexOf(fn), 1); }; },
+      after: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); },
+    };
+    const portRules: Rules = { port: 0, tailnet: null };
+    const server = createApp(portRules, { team: "CD", dist, workspaces: [workWorkspace()], watchMs: 0, now: () => clock.at, linkTimers: timers });
+    const http = serve({ fetch: server.fetch, port: 0, hostname: "127.0.0.1" });
+    server.injectWebSocket(http as never);
+    await new Promise<void>((ok) => http.once("listening", () => ok()));
+    portRules.port = (http.address() as AddressInfo).port;
+    closers.push(() => { server.link.stop(); http.close(); });
+    /** One heartbeat after `ms` of the fake clock. */
+    const beat = (ms: number) => { clock.at += ms; beats.forEach((fn) => fn()); };
+    return { server, port: portRules.port, beat, beats };
+  }
+  /** An overview page socket. `autoPong: false` is a client that went away without a close. */
+  async function page(port: number, autoPong = true) {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=page`, { headers: { origin: `http://127.0.0.1:${port}` }, autoPong });
+    const closed = new Promise<number>((ok) => ws.once("close", (code) => ok(code)));
+    await new Promise((ok) => ws.once("open", ok));
+    closers.push(() => ws.terminate());
+    return { ws, closed };
+  }
+
+  it("pings each socket, keeps one that sends pongs, and terminates one that sends none for 45 s", async () => {
+    const { port, beat } = await start();
+    const live = await page(port), dead = await page(port, false);
+    let livePings = 0, deadPings = 0;
+    live.ws.on("ping", () => { livePings++; });
+    dead.ws.on("ping", () => { deadPings++; });
+    for (let t = PING_MS; t <= DEAD_MS; t += PING_MS) {
+      beat(PING_MS);
+      // The pong of the live socket comes back to the server before the next beat.
+      await vi.waitFor(() => expect(livePings).toBe(t / PING_MS));
+      await new Promise((ok) => setTimeout(ok, 20));
+    }
+    expect(deadPings).toBe(Math.floor(DEAD_MS / PING_MS));
+    beat(PING_MS);
+    expect(await dead.closed).toBe(1006); // terminated: no close frame
+    expect(live.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("at shutdown stops the heartbeat and closes each socket with 1012", async () => {
+    const { server, port, beats } = await start();
+    const a = await page(port), b = await page(port);
+    expect(beats).toHaveLength(1);
+    await server.link.shutdown();
+    expect(await a.closed).toBe(RESTART_CODE);
+    expect(await b.closed).toBe(RESTART_CODE);
+    expect(beats).toHaveLength(0);
   });
 });

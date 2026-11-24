@@ -7,15 +7,37 @@ import {
   type Presence, type Progress, type ProjectRef, type ToCoordinator, type ToPage, projectKey,
 } from "../src/lib/link.ts";
 
-/** One open WebSocket, as the hub uses it. */
-export interface Peer { send: (text: string) => void; close: (code?: number, reason?: string) => void }
-/** What the transport calls for each connection. */
-export interface Connection { receive: (text: string) => void; closed: () => void }
+/**
+ * One open WebSocket, as the hub uses it. A peer with `ping` takes part in the heartbeat: the hub pings it and
+ * calls `terminate` when it sent no pong for `DEAD_MS`.
+ */
+export interface Peer {
+  send: (text: string) => void; close: (code?: number, reason?: string) => void;
+  ping?: () => void; terminate?: () => void;
+}
+/** What the transport calls for each connection. `pong`: the socket answered a ping. */
+export interface Connection { receive: (text: string) => void; closed: () => void; pong: () => void }
 
 /** The longest queue of a project. The oldest `changed` goes first: a newer `changed` covers it. */
 export const QUEUE_MAX = 100;
 /** How long the page still shows a coordinator that went away. */
 export const GONE_MS = 24 * 60 * 60_000;
+/** How often the hub pings each socket, and prunes what is gone. */
+export const PING_MS = 20_000;
+/** A socket that sent no pong (and no message) for this long is dead: a machine that sleeps, or a lost network. */
+export const DEAD_MS = 45_000;
+/** The WebSocket close code of a server restart. A client connects again. */
+export const RESTART_CODE = 1012;
+/** How long `shutdown` waits for the sockets to close. */
+export const SHUTDOWN_MS = 3_000;
+
+/** The timers of the hub (tests give fake ones). */
+export interface Timers { every: (fn: () => void, ms: number) => () => void; after: (fn: () => void, ms: number) => () => void }
+const realTimers: Timers = {
+  every: (fn, ms) => { const t = setInterval(fn, ms); t.unref(); return () => clearInterval(t); },
+  after: (fn, ms) => { const t = setTimeout(fn, ms); t.unref(); return () => clearTimeout(t); },
+};
+interface Socket { peer: Peer; room: string | null; alive: number; closed: () => void }
 
 interface Coordinator { peer: Peer | null; hello: Hello; state: CoordinatorState | null; since: string; lastSeen: string }
 interface Room {
@@ -33,9 +55,85 @@ export class LinkHub {
   private now: () => Date;
   /** wg changed Linear (`wrote`): the server forgets its cached graph before the pages load it again. */
   private onWrote: (ref: ProjectRef) => void;
-  constructor(now: () => Date = () => new Date(), onWrote: (ref: ProjectRef) => void = () => {}) {
+  private timers: Timers;
+  /** Each open socket, pages and coordinators, with the time it last showed it is alive. */
+  private sockets = new Map<Peer, Socket>();
+  private stopBeat: (() => void) | null = null;
+  constructor(now: () => Date = () => new Date(), onWrote: (ref: ProjectRef) => void = () => {}, timers: Timers = realTimers) {
     this.now = now;
     this.onWrote = onWrote;
+    this.timers = timers;
+  }
+
+  /** Start the heartbeat: each `PING_MS`, `beat`. */
+  start() {
+    this.stopBeat ??= this.timers.every(() => this.beat(), PING_MS);
+  }
+
+  /** Stop the heartbeat. */
+  stop() {
+    this.stopBeat?.();
+    this.stopBeat = null;
+  }
+
+  /**
+   * One heartbeat: terminate each socket that was silent for `DEAD_MS` and ping the others, then remove a
+   * coordinator that went away more than `GONE_MS` ago, and a room that holds nothing.
+   */
+  beat() {
+    const now = this.now().getTime();
+    for (const socket of [...this.sockets.values()]) {
+      if (!socket.peer.ping) continue;
+      if (now - socket.alive > DEAD_MS) {
+        if (socket.peer.terminate) socket.peer.terminate();
+        else socket.peer.close();
+        // The transport calls `closed` too, maybe much later; the hub does not wait for it.
+        socket.closed();
+      } else {
+        socket.peer.ping();
+      }
+    }
+    const cutoff = now - GONE_MS;
+    // A room that an open socket uses stays, also before the `hello` of its coordinator.
+    const used = new Set([...this.sockets.values()].map((s) => s.room));
+    for (const [key, room] of this.rooms) {
+      for (const [session, c] of room.coordinators) if (!c.peer && Date.parse(c.lastSeen) < cutoff) room.coordinators.delete(session);
+      if (!used.has(key) && !room.pages.size && !room.coordinators.size && !room.queue.length && !room.asks.length) this.rooms.delete(key);
+    }
+  }
+
+  /**
+   * The server stops: stop the heartbeat and close each socket with `RESTART_CODE`. The promise resolves when
+   * all sockets closed, or after `SHUTDOWN_MS`.
+   */
+  shutdown(): Promise<void> {
+    this.stop();
+    const open = [...this.sockets.values()];
+    if (!open.length) return Promise.resolve();
+    return new Promise((done) => {
+      let left = open.length;
+      const cancel = this.timers.after(done, SHUTDOWN_MS);
+      for (const socket of open) {
+        const closed = socket.closed;
+        socket.closed = () => { closed(); if (--left === 0) { cancel(); done(); } };
+        socket.peer.close(RESTART_CODE, "server restart");
+      }
+    });
+  }
+
+  /** Keep track of an open socket for the heartbeat. `closed` runs once, from the transport or from the heartbeat. */
+  private track(peer: Peer, ref: ProjectRef | null, closed: () => void): Connection & { alive: () => void } {
+    let done = false;
+    const socket: Socket = { peer, room: ref && projectKey(ref), alive: this.now().getTime(), closed: () => {} };
+    socket.closed = () => {
+      if (done) return;
+      done = true;
+      this.sockets.delete(peer);
+      closed();
+    };
+    this.sockets.set(peer, socket);
+    const alive = () => { socket.alive = this.now().getTime(); };
+    return { receive: () => {}, closed: () => socket.closed(), pong: alive, alive };
   }
 
   private room(ref: ProjectRef): Room {
@@ -130,7 +228,8 @@ export class LinkHub {
         peer.send(JSON.stringify(this.envelope(room.ref, "presence", this.presence(room.ref))));
         if (room.asks.length) peer.send(JSON.stringify(this.envelope(room.ref, "asks", { asks: room.asks })));
       }
-      return { receive: () => {}, closed: () => { this.watchers.delete(peer); } };
+      const watcher = this.track(peer, null, () => { this.watchers.delete(peer); });
+      return { receive: watcher.alive, closed: watcher.closed, pong: watcher.pong };
     }
     const room = this.room(ref);
     room.pages.add(peer);
@@ -138,7 +237,8 @@ export class LinkHub {
     peer.send(JSON.stringify(this.envelope(ref, "asks", { asks: room.asks })));
     peer.send(JSON.stringify(this.envelope(ref, "progress", { nodes: room.progress })));
     // A page only listens. It changes things through the HTTP API, which checks the origin and writes Linear.
-    return { receive: () => {}, closed: () => { room.pages.delete(peer); } };
+    const page = this.track(peer, ref, () => { room.pages.delete(peer); });
+    return { receive: page.alive, closed: page.closed, pong: page.pong };
   }
 
   /**
@@ -149,8 +249,18 @@ export class LinkHub {
     const room = this.room(ref);
     let me: Coordinator | null = null;
     const fail = (reason: string) => peer.close(1008, reason);
+    const socket = this.track(peer, ref, () => {
+      if (me?.peer === peer) {
+        me.peer = null;
+        me.lastSeen = this.now().toISOString();
+        this.announce(room);
+      }
+    });
     return {
+      pong: socket.pong,
+      closed: socket.closed,
       receive: (raw) => {
+        socket.alive();
         let message: unknown;
         try { message = JSON.parse(raw); } catch { return fail("message is not JSON"); }
         if (!isObject(message) || message.v !== LINK_VERSION || typeof message.type !== "string") return fail(`not a wg-link/${LINK_VERSION} message`);
@@ -196,14 +306,8 @@ export class LinkHub {
           })).filter((n) => n.key);
           this.toPages(room, "progress", { nodes: room.progress });
         } else {
-          fail(`unknown message type ${message.type}`);
-        }
-      },
-      closed: () => {
-        if (me?.peer === peer) {
-          me.peer = null;
-          me.lastSeen = this.now().toISOString();
-          this.announce(room);
+          // A newer wg can send a type that this server does not know yet: ignore it, and keep the connection.
+          console.log(`link: ignored a message of unknown type ${text(message.type, 100)} from ${me.hello.session}`);
         }
       },
     };

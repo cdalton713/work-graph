@@ -5,19 +5,44 @@ import WebSocket from "ws";
 import type { Envelope } from "../src/lib/link.ts";
 import { linkRefusal, type Rules } from "./access.ts";
 import { createApp } from "./app.ts";
-import { LinkHub, QUEUE_MAX, type Peer } from "./link.ts";
+import { DEAD_MS, GONE_MS, LinkHub, PING_MS, QUEUE_MAX, RESTART_CODE, SHUTDOWN_MS, type Peer, type Timers } from "./link.ts";
 
 const A = { workspace: "work", id: "p1" }, B = { workspace: "work", id: "p2" };
 
-/** A peer that records what the hub sends. */
+/** A peer that records what the hub sends, its pings, and a terminate. */
 function peer() {
   const sent: Envelope[] = [];
   const closed: { code?: number; reason?: string }[] = [];
-  const p: Peer & { sent: Envelope[]; closed: typeof closed; of: (type: string) => Envelope[] } = {
+  const p: Peer & { sent: Envelope[]; closed: typeof closed; of: (type: string) => Envelope[]; pings: number; terminated: boolean } = {
     send: (text) => sent.push(JSON.parse(text)), close: (code, reason) => closed.push({ code, reason }),
-    sent, closed, of: (type) => sent.filter((m) => m.type === type),
+    ping: () => { p.pings++; }, terminate: () => { p.terminated = true; },
+    sent, closed, of: (type) => sent.filter((m) => m.type === type), pings: 0, terminated: false,
   };
   return p;
+}
+/** A clock and timers that move only when the test says so. */
+function fakeTime() {
+  const clock = { at: Date.parse("2026-11-20T00:00:00Z") };
+  const jobs: { fn: () => void; at: number; every: number | null; off: boolean }[] = [];
+  const add = (fn: () => void, ms: number, every: boolean) => {
+    const job = { fn, at: clock.at + ms, every: every ? ms : null, off: false };
+    jobs.push(job);
+    return () => { job.off = true; };
+  };
+  const timers: Timers = { every: (fn, ms) => add(fn, ms, true), after: (fn, ms) => add(fn, ms, false) };
+  /** Move the clock by `ms` and run each timer that falls due, in time order. */
+  const advance = (ms: number) => {
+    const end = clock.at + ms;
+    for (;;) {
+      const due = jobs.filter((j) => !j.off && j.at <= end).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      clock.at = due.at;
+      if (due.every) due.at += due.every; else due.off = true;
+      due.fn();
+    }
+    clock.at = end;
+  };
+  return { now: () => new Date(clock.at), timers, advance, running: () => jobs.filter((j) => !j.off).length };
 }
 const msg = (type: string, payload: unknown = {}) => JSON.stringify({ v: 1, type, id: "x", project: A, at: "", payload });
 const hello = (session: string) => msg("hello", { plan: "/plans/a", session, host: "mac", wg: "1" });
@@ -138,6 +163,130 @@ describe("LinkHub", () => {
     hub.joinCoordinator(p, A).receive(hello("s"));
     expect(p.sent.filter((m) => m.type !== "presence")).toHaveLength(QUEUE_MAX);
     expect(p.of("answer").map((m) => m.id)).toEqual([answer.id]);
+  });
+});
+
+describe("LinkHub heartbeat, prune, and shutdown", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("pings each socket, keeps one that answers, and terminates one that is silent for DEAD_MS", () => {
+    const time = fakeTime();
+    const hub = new LinkHub(time.now, undefined, time.timers);
+    hub.start();
+    const live = peer(), dead = peer(), page = peer();
+    const a = hub.joinCoordinator(live, A), b = hub.joinCoordinator(dead, A);
+    a.receive(hello("live"));
+    b.receive(hello("dead"));
+    hub.joinPage(page, A);
+    time.advance(PING_MS);
+    expect([live.pings, dead.pings, page.pings]).toEqual([1, 1, 1]);
+    for (let t = PING_MS; t <= DEAD_MS + PING_MS; t += PING_MS) { a.pong(); time.advance(PING_MS); }
+    expect(live.terminated).toBe(false);
+    expect(dead.terminated).toBe(true);
+    expect(page.terminated).toBe(true); // a page that sends no pong is dead too
+    const presence = hub.presence(A).coordinators;
+    expect(presence.map((c) => [c.session, c.connected])).toEqual([["live", true], ["dead", false]]);
+    // The Linear check stops for a project with no live coordinator.
+    expect(hub.active()).toHaveLength(1);
+    b.closed(); // the transport reports the close later: nothing changes again
+    expect(hub.presence(A).coordinators.map((c) => c.connected)).toEqual([true, false]);
+  });
+
+  it("stops the Linear check of a project whose only coordinator went silent", () => {
+    const time = fakeTime();
+    const hub = new LinkHub(time.now, undefined, time.timers);
+    hub.start();
+    const gone = peer(), page = peer();
+    hub.joinCoordinator(gone, A).receive(hello("sleeping"));
+    hub.joinPage(page, A);
+    expect(hub.active()).toHaveLength(1);
+    time.advance(DEAD_MS + PING_MS);
+    expect(hub.active()).toEqual([]);
+    expect(page.of("presence").at(-1)?.payload).toMatchObject({ coordinators: [{ session: "sleeping", connected: false }] });
+  });
+
+  it("counts a message as a sign of life, and skips a peer that cannot ping", () => {
+    const time = fakeTime();
+    const hub = new LinkHub(time.now, undefined, time.timers);
+    hub.start();
+    const talker = peer(), plain: Peer = { send: () => {}, close: vi.fn() };
+    const c = hub.joinCoordinator(talker, A);
+    c.receive(hello("t"));
+    hub.joinCoordinator(plain, B).receive(hello("p"));
+    for (let i = 0; i < 5; i++) { c.receive(msg("state", { mode: "working", head: "", lines: [] })); time.advance(PING_MS); }
+    expect(talker.terminated).toBe(false);
+    expect(plain.close).not.toHaveBeenCalled();
+    expect(hub.active()).toHaveLength(2);
+  });
+
+  it("ignores a message of an unknown type with one log line, and keeps the connection", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const hub = new LinkHub();
+    const p = peer(), c = hub.joinCoordinator(p, A);
+    c.receive(hello("s1"));
+    c.receive(msg("notice", { text: "from a newer wg" }));
+    expect(p.closed).toEqual([]);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0][0]).toContain("unknown type notice");
+    c.receive(msg("state", { mode: "waiting", head: "h", lines: [] }));
+    expect(hub.presence(A).coordinators[0]).toMatchObject({ connected: true, mode: "waiting" });
+  });
+
+  it("removes a coordinator gone for GONE_MS, and a room that holds nothing", () => {
+    const time = fakeTime();
+    const hub = new LinkHub(time.now, undefined, time.timers);
+    hub.start();
+    const c = hub.joinCoordinator(peer(), A);
+    c.receive(hello("old"));
+    c.closed();
+    const queued = hub.joinCoordinator(peer(), B);
+    queued.receive(hello("b"));
+    queued.closed();
+    hub.publish(B, "answer", { issue: "CD-1", key: null, body: "wait for a coordinator" });
+    // A socket with no hello yet, of a transport with no ping: the heartbeat leaves it open.
+    const waiting = hub.joinCoordinator({ send: () => {}, close: () => {} }, { workspace: "work", id: "p3" });
+    time.advance(GONE_MS + PING_MS);
+    expect(hub.presence(A).coordinators).toEqual([]);
+    const overview = peer();
+    hub.joinPage(overview, null);
+    // Room A held nothing more; room B holds a queue; room p3 has an open socket.
+    expect(overview.of("presence").map((m) => m.project.id).sort()).toEqual(["p2", "p3"]);
+    waiting.receive(hello("late"));
+    expect(hub.active().map((r) => r.id)).toEqual(["p3"]);
+  });
+
+  it("at shutdown stops the heartbeat and closes each socket with 1012, then resolves at the last close", async () => {
+    const time = fakeTime();
+    const hub = new LinkHub(time.now, undefined, time.timers);
+    hub.start();
+    const coordinator = peer(), page = peer();
+    const c = hub.joinCoordinator(coordinator, A);
+    c.receive(hello("s"));
+    const p = hub.joinPage(page, A);
+    let done = false;
+    const stopped = hub.shutdown().then(() => { done = true; });
+    expect(coordinator.closed).toEqual([{ code: RESTART_CODE, reason: "server restart" }]);
+    expect(page.closed).toEqual([{ code: RESTART_CODE, reason: "server restart" }]);
+    c.closed();
+    await Promise.resolve();
+    expect(done).toBe(false);
+    p.closed();
+    await stopped;
+    expect(time.running()).toBe(0); // no heartbeat, no wait timer
+  });
+
+  it("at shutdown resolves after SHUTDOWN_MS when a socket does not close", async () => {
+    const time = fakeTime();
+    const hub = new LinkHub(time.now, undefined, time.timers);
+    hub.joinCoordinator(peer(), A).receive(hello("stuck"));
+    let done = false;
+    const stopped = hub.shutdown().then(() => { done = true; });
+    time.advance(SHUTDOWN_MS - 1);
+    await Promise.resolve();
+    expect(done).toBe(false);
+    time.advance(1);
+    await stopped;
+    expect(await new LinkHub().shutdown()).toBeUndefined(); // no socket: at once
   });
 });
 

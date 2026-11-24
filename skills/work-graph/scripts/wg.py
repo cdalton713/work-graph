@@ -2484,11 +2484,14 @@ def latest_checks(contexts):
     workflow name, and event. A failed run and its rerun that passed give one check, the rerun."""
     seen, out = set(), []
     for c in sorted(contexts, key=lambda c: c.get("startedAt") or "", reverse=True):
-        if c.get("__typename") == "StatusContext":
-            key = ("status", c.get("context"))
+        if c.get("context"):
+            key = ("status", c["context"])
         else:
+            # The key of `gh pr checks` joins the three parts with slashes: a name or workflow with a slash in it
+            # can give the key of another check, and then only the later of the two counts, as in `gh pr checks`.
             run = ((c.get("checkSuite") or {}).get("workflowRun") or {})
-            key = ("check", c.get("name"), (run.get("workflow") or {}).get("name"), run.get("event"))
+            parts = (c.get("name"), (run.get("workflow") or {}).get("name"), run.get("event"))
+            key = ("check", "/".join(part or "" for part in parts))
         if key not in seen:
             seen.add(key)
             out.append(c)
@@ -2566,8 +2569,12 @@ def pr_batch(numbers, cwd=None):
         chunk = numbers[start:start + PR_BATCH_SIZE]
         query = ("query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {"
                  + "".join(f" pr{n}: pullRequest(number: {n}) {{{PR_BATCH_FIELDS} }}" for n in chunk) + " } }")
-        result = command("gh", "api", "graphql", "--hostname", host, "-f", f"query={query}",
-                         "-f", f"owner={owner}", "-f", f"name={name}", cwd=cwd)
+        try:
+            result = command("gh", "api", "graphql", "--hostname", host, "-f", f"query={query}",
+                             "-f", f"owner={owner}", "-f", f"name={name}", cwd=cwd)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            failures.append(str(e))
+            continue  # this chunk only: the PRs of the requests before it stay in the result
         try:
             answer = json.loads(result.stdout)
             repository = (answer.get("data") or {}).get("repository") or {}

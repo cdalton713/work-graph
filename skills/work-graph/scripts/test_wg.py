@@ -4523,6 +4523,20 @@ class PrBatchTests(unittest.TestCase):
         push = dict(failed, checkSuite={"workflowRun": {"event": "push", "workflow": {"name": "CI"}}})
         self.assertEqual(wg.rollup_checks([push, rerun]), (False, "test"))
 
+    def test_a_check_key_is_the_slash_key_of_gh_pr_checks(self):
+        # Name "build/test" in workflow "CI" and name "build" in workflow "test/CI" both give "build/test/CI/push".
+        def check(name, workflow, conclusion, started):
+            return self.check_run(name, {"status": "COMPLETED", "conclusion": conclusion, "startedAt": started,
+                                         "checkSuite": {"workflowRun": {"event": "push",
+                                                                        "workflow": {"name": workflow}}}})
+        older = check("build/test", "CI", "FAILURE", "2026-11-20T10:00:00Z")
+        newer = check("build", "test/CI", "SUCCESS", "2026-11-20T11:00:00Z")
+        self.assertEqual(wg.rollup_checks([older, newer]), (True, "no failed checks"))
+        self.assertEqual(wg.latest_checks([older, newer]), [newer])
+        # A check with no workflow run has the key "<name>//".
+        self.assertEqual(len(wg.latest_checks([self.check_run("lint", {"status": "QUEUED"}),
+                                               self.check_run("lint", {"status": "QUEUED"})])), 1)
+
     def test_a_list_with_a_second_page_is_read_alone(self):
         for more in ("reviews", "comments", "contexts"):
             with self.subTest(more=more):
@@ -4566,6 +4580,18 @@ class PrBatchTests(unittest.TestCase):
         self.assertEqual(sorted(out, key=int), numbers[:50])
         out, _ = self.run_batch([(1, "", "HTTP 502"), (0, second, "")], numbers=numbers)
         self.assertEqual(list(out), ["51"])
+        # A request that times out, or that gh cannot start, skips only its own PRs.
+        for error in (subprocess.TimeoutExpired(["gh"], 60), OSError("no gh")):
+            with self.subTest(error=type(error).__name__):
+                answers = [subprocess.CompletedProcess([], 0, self.REPO, ""),
+                           subprocess.CompletedProcess([], 0, json.dumps(first), ""), error]
+                with patch.object(wg, "command", side_effect=answers):
+                    out = PR_BATCH(numbers, cwd="/plan")
+                self.assertEqual(sorted(out, key=int), numbers[:50])
+        with patch.object(wg, "command", side_effect=[subprocess.CompletedProcess([], 0, self.REPO, ""),
+                                                      subprocess.TimeoutExpired(["gh"], 60)]):
+            with self.assertRaisesRegex(wg.ReadError, "timed out"):
+                PR_BATCH(["7"])
 
     def test_a_failed_request_is_a_read_error(self):
         for answer in [(1, "", "HTTP 502"), (1, self.data(pr7=None), "HTTP 502"), (0, "not json", "")]:

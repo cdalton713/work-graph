@@ -7,7 +7,7 @@ A review covers a **patch** (terms.md). `wg done` clears `review` and `merge_rev
 <!-- explain: review -->
 ## Wave review
 
-`wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. The reviewer is a different agent from the writer (Claude reviews Codex). Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review ("Mark a PR reviewed").
+`wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. This section is the flow at review effort `thorough`; "Review effort" gives the other levels. The reviewer is a different agent from the writer (Claude reviews Codex). Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review ("Mark a PR reviewed").
 
 1. Start the reviewer in your own worktree: `orca orchestration worker-start --spec-file <review-spec> --worktree current --agent claude --json`. Then `wg run set <plan-dir> <key> review_round=<k> review_dispatch=<dispatch_id>`. Give it the PR, not the worker's report. The spec:
 
@@ -21,6 +21,22 @@ A review covers a **patch** (terms.md). `wg done` clears `review` and `merge_rev
 3. After a review fix, only the branch directly above it in the lane gets a restack job, and only if that branch exists. Higher branches wait for their turn at the merge point.
 
 Done when: the node's run row has `review=clean` or `review=accepted`, or the issue has the `reviewed` label. Then this PR goes on to "Merge point".
+<!-- /explain -->
+
+<!-- explain: review -->
+## Review effort
+
+The review effort sets how much review each PR gets. It is a label of the Linear project: one child of the single-select project label group `review` (`thorough`, `standard`, or `light`). No label means `thorough`. `wg review-effort <plan-dir>` prints the level; `wg review-effort <plan-dir> <level>` sets it. Ask for it at the start of each run in the same `AskUserQuestion` call as the autonomy level, with the same exceptions (autonomy.md): put the current level first, marked "(current)". Then record it with `wg review-effort <plan-dir> <level>`.
+
+| Level | Wave review | Merge review |
+|---|---|---|
+| `thorough` | Up to 2 rounds by a different agent ("Wave review"). | One `@claude-thorough` review, then the fix check ("Merge point" step 2). |
+| `standard` | One round by a different agent ("Wave review" steps 1 and 2). Blocking findings go to the worker in one fix job. After that fix, `wg next` prints `review <key> #<n>: check the fix since <sha>`: read `git diff <sha> <code_done_head>`. When each change answers a finding and adds no other behavior, `wg run set <plan-dir> <key> review=accepted`, and comment the check on the issue. No round 2. A PR with no independent review of its patch, or with no reviewed head in `review_head` (an adopted PR, a level change, a round that started before `wg` kept that head), gets `review <key> #<n> round <k>` instead, also after it left draft: start a reviewer. If the fix fails the check, comment why and tell the human once: they accept it with the `reviewed` label, or they ask for one more fix. | None. |
+| `light` | No reviewer agent. `wg next` prints `review <key> #<n>: read the diff yourself`: read the PR diff against the node's acceptance. No blocking finding: `wg run set <plan-dir> <key> review=clean`. Blocking findings: send one fix job (`wg claim <plan-dir> <key> review`), then read the diff again. | None. |
+
+At `standard` and `light`, `wg next` prints no `merge-review` line, and `wg move … "Ready to Merge"` needs `review=clean` or `accepted` for the current patch in place of `merge_review`. A push that changes the patch after the review (for example a thread fix) clears the review: `wg next` prints the `review` line of the level again. Open review threads are still "Merge point" step 3 at each level. The `reviewed` label counts as each review at each level. At `ask-merge`, name the review that the PR got (for example "standard review accepted").
+
+`wg next` prints `note review @effort -: <level>`. When the label changed since your last `wg next`, that line is `do review @effort -: The human set the review effort to <new> (was <old>)…` instead. The new level applies at once to each PR that has not passed its review gate. A gate that passed stays passed for its patch (the merge review, or the run field `gate` that `wg run set … review=clean` writes at `standard` and `light`); a new patch clears it. Say the change in your next status line. A level change that the human gives in this session: record it with `wg review-effort <plan-dir> <level>`.
 <!-- /explain -->
 
 <!-- explain: ask-ready,undraft,merge-review,ask-merge,merged,close -->
@@ -42,10 +58,12 @@ Each PR starts these steps as soon as its own wave review passes; it does not wa
    **One thorough review per PR.** A thorough review is slow and costs many tokens. `wg` records the head that it read in `thorough_head`. When a push after it changes the patch (a thread fix, or a restack that touched the code), `wg next` prints `merge-review <key> #<n>: check the fix since <sha>, no new thorough review`. Do not post `@claude-thorough` again. Check the fix yourself: read `git diff <thorough_head> <code_done_head>` (after a base move, `git range-diff <old base>..<thorough_head> <new base>..<code_done_head>`). It passes when each change answers a thread or a finding of the thorough review, and adds no other behavior. Then `wg run set <plan-dir> <key> merge_review=clean`.
 
    Request a second thorough review only when the check finds that the fix is new work: it adds a behavior, a contract, or a file that no finding asked for, or a conflict resolution rewrote reviewed code. Write the reason in an issue comment, then do the request steps above. `wg` refuses a third request: the fix check is the gate, or the human accepts the PR with the `reviewed` label.
-3. **Threads.** `wg claim <plan-dir> <key> threads`, with the job "load `gh-close-review-loop`, prepare phase". Relay the push-ready report. After the human accepts, the worker pushes, reports the new head SHA, runs the finalize phase with `pr_threads.py resolve --expected-head-oid <new head SHA>`, and fetches the threads again. Each thread that stays open needs the human's disposition; write it as an issue comment. The push changes the patch, so step 2 comes back for this PR as a fix check, not as a new thorough review.
+<!-- /explain -->
+<!-- explain: merge-review,ask-merge -->
+3. **Threads.** At each review effort, an open review thread on the PR holds its merge request. `wg claim <plan-dir> <key> threads`, with the job "load `gh-close-review-loop`, prepare phase". Relay the push-ready report. After the human accepts, the worker pushes, reports the new head SHA, runs the finalize phase with `pr_threads.py resolve --expected-head-oid <new head SHA>`, and fetches the threads again. Each thread that stays open needs the human's disposition; write it as an issue comment. The push changes the patch, so step 2 comes back for this PR as a fix check, not as a new thorough review (at review effort `standard` or `light`: the `review` line of the level, "Review effort").
 <!-- /explain -->
 <!-- explain: ask-merge -->
-4. **Merge request** (`ask-merge <key> #<n>`: the bottom PR of a lane, with a merge review). `wg move <plan-dir> <key> "Ready to Merge"`; `wg` checks the PR, its base, its head, its checks, conflicts, the merge review, and the lane order. Ask: "PR #a: thorough review done, threads settled, code done on `<sha>`. Please merge #a with <method>." The method is squash, or a merge commit for a SYNC PR. One message can name a whole lane in order ("merge #a, then #b after I restack it"). At autonomy level `full` in a repository where agents may merge, merge it yourself instead of asking (autonomy.md). At level `supervised`, ask only after the issue has the `reviewed` label.
+4. **Merge request** (`ask-merge <key> #<n>`: the bottom PR of a lane, with a merge review). First, at each review effort, read the PR's review threads (`gh api graphql` with `reviewThreads { nodes { isResolved } }`). An open thread: step 3, and no move. Then `wg move <plan-dir> <key> "Ready to Merge"`; `wg` checks the PR, its base, its head, its checks, conflicts, the merge review, and the lane order. Ask: "PR #a: thorough review done, threads settled, code done on `<sha>`. Please merge #a with <method>." The method is squash, or a merge commit for a SYNC PR. One message can name a whole lane in order ("merge #a, then #b after I restack it"). At autonomy level `full` in a repository where agents may merge, merge it yourself instead of asking (autonomy.md). At level `supervised`, ask only after the issue has the `reviewed` label.
 <!-- /explain -->
 <!-- explain: merged -->
 5. **After each merge** (`merged <key> #<n> <sha>`). `wg move <plan-dir> <key> Merged`: `wg` checks that the PR is merged and comments the merge commit. It also removes the node's Orca worktree, and the lane parent when every node of the lane is settled (jobs.md "Worktree cleanup"). Then `git fetch origin`. After a SYNC merge, also check `git merge-base --is-ancestor <<release> head SHA in the SYNC PR> origin/main`. Then:

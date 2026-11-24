@@ -8,6 +8,7 @@ Each bold term of the skill has the one meaning below.
 | **phase** | The nodes from one ship point to the next, with one target branch. It ends at a merge point, then a ship point. It is a milestone of the effort's Linear project. A split phase uses keys `1a`, `1b`. |
 | **wave** | A frozen list of node keys of one phase, picked in SKILL.md step 3 and recorded with `wg run set <plan-dir> @effort wave=<k1,k2>`. One dispatch round. It may hold higher lane nodes that wait only for a lower node of the same wave. |
 | **wave review** | The agent review of a draft PR before the merge review, with up to two rounds (review-and-merge.md "Wave review"). |
+| **review effort** | How much review each PR gets: `thorough` (the default), `standard`, or `light`, a project label. review-and-merge.md "Review effort" describes the three levels. |
 | **lane** | A chain of `task` nodes in one phase (`"lane": "<name>"`): one stax stack. Each node stacks on the node before it as soon as that node is code done. Two nodes can stack on one node (a fork). |
 | **pre-merge task** | A `task` that the merge point depends on. |
 | **post-merge task** | A SYNC or integration `task` (`"role": "sync"` or `"integration"`). It depends on the merge point, runs as its own wave, and the ship point depends on it. |

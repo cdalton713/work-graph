@@ -11,7 +11,7 @@ Use this skill when the effort has two or more lanes that can run at the same ti
 
 `scripts/wg.py` (written `wg`) holds the rules that must not slip: it checks the graph, syncs it to Linear, holds the claims, checks code done, guards each status change, and derives the next action. To run it, or when a shell says `command not found`: setup.md "Run wg".
 
-**At the start of each run, ask the human for the autonomy level** ("Autonomy level") before any other step. **`wg next <plan-dir>` is the first command of each session and of each turn.** It prints one status line, then what to do (`do`), what you wait for (`wait`), and what you must know (`note`). It changes no status, no claim, and no run field (setup.md "Queries"). `wg explain <verb>` prints what to do for one verb of these lines.
+**First in each run, ask the human for both levels** ("Autonomy level and review effort"). **`wg next <plan-dir>` is the first command of each session and of each turn.** It prints one status line, then what to do (`do`), what you wait for (`wait`), and what you must know (`note`). It changes no status, no claim, and no run field (setup.md "Queries"). `wg explain <verb>` prints what to do for one verb of these lines.
 
 Load `stax` and `orchestration` when a step names their commands. Read `<cmd> --help` for flags; the references hold only what help does not say.
 
@@ -19,7 +19,7 @@ Load `stax` and `orchestration` when a step names their commands. Read `<cmd> --
 
 ## Terms
 
-[references/terms.md](references/terms.md) defines each term of this skill (node, phase, wave, lane, code done, evidence, patch, claim, and the others), the six node kinds, and ENG nodes. Read it before step 1, and each time a term is not clear.
+[references/terms.md](references/terms.md) defines each term of this skill (node, phase, wave, lane, code done, evidence, patch, review effort, claim, and the others), the six node kinds, and ENG nodes. Read it before step 1, and each time a term is not clear.
 
 ## Rules
 
@@ -33,9 +33,9 @@ Load `stax` and `orchestration` when a step names their commands. Read `<cmd> --
 - Orca liveness decides if a worker is dead, never a claim label. Reuse a worktree only after Orca shows its last worker exited.
 - Update the `PLAN.md` flowchart in the same step as each graph change. `PLAN.md` has no log: history goes to Linear comments.
 
-## Autonomy level
+## Autonomy level and review effort
 
-The level (`full`, `standard`, or `supervised`; no label means `standard`) is a project label that `wg autonomy <plan-dir> [<level>]` prints or sets. Ask for it once at the start of each run, except when the request names it, autostart started the run, or the session runs in the background. Before you ask, and at each `do autonomy` line, read [references/autonomy.md](references/autonomy.md) (also `wg explain autonomy`).
+Each is a project label: `wg autonomy <plan-dir> [<level>]` or `wg review-effort <plan-dir> [<level>]` prints or sets it. Autonomy `full`, `standard`, `supervised` (default `standard`); review effort `thorough`, `standard`, `light` (default `thorough`). Ask for both in one `AskUserQuestion` call at the start of each run, except when the request names them, in an autostart run, or in a background session. Before you ask and at each `do autonomy` or `do review @effort` line, read [references/autonomy.md](references/autonomy.md) and review-and-merge.md "Review effort".
 
 ## Linear workspace
 
@@ -47,7 +47,7 @@ An initiative is a project label that groups related efforts. Set `effort.initia
 
 ## Autostart
 
-`wg autostart <plan-dir> --install` makes an Orca automation that starts a fresh coordinator when the effort has work and none runs. The human installs it; that run uses the current autonomy level. Details: setup.md "Autostart".
+`wg autostart <plan-dir> --install` makes an Orca automation that starts a fresh coordinator when the effort has work and none runs. The human installs it; that run uses the current levels. Details: setup.md "Autostart".
 
 ## Steps
 

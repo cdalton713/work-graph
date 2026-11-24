@@ -58,7 +58,7 @@ Linear's Free plan holds 250 issues in a workspace; archived issues do not count
 
 `wg autostart <plan-dir> --install` makes an Orca automation for the effort's `<effort>-core` worktree. Every 5 minutes it runs `wg wake <plan-dir>` as its precheck, and starts a coordinator agent (the human's default agent, in a fresh session) only when `wg wake` says `start`. `wg wake` says `start` when all of these hold: no agent that Orca reports as not done runs in that worktree; fewer than 2 coordinator agents run on the machine; fewer than 3 starts for this effort in the last hour; the autonomy level is not `supervised`; the effort is not paused; and the effort has work (a page message waits for a coordinator, an answer from the page, an autonomy change, or a `do` line from `wg next`). Otherwise it prints `skip: <reason>`, which Orca keeps in the automation's run history. `wg autostart <plan-dir>` prints the state; `--uninstall` removes the automation. The human installs it; a coordinator does not install it on its own.
 
-A run that autostart started uses the project's current autonomy level and does not ask for one. It runs the coordinator loop (coordinator.md) as any other run.
+A run that autostart started uses the project's current autonomy level and review effort, and does not ask for them. It runs the coordinator loop (coordinator.md) as any other run.
 
 ## Stax trunk and targets
 

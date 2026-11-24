@@ -24,6 +24,10 @@ export interface GraphData {
   milestones: Milestone[]; issues: Issue[]; teams: Record<string, Team>; labels: Label[]; viewerId: string;
   /** The project document that `wg next` writes: its text, and when it was written. Null when the project has none. */
   status: { content: string; updatedAt: string } | null;
+  /** The server could not refresh the graph from Linear: this is its last graph, at most 15 minutes old. */
+  stale?: boolean;
+  /** Why the refresh failed. Set only with `stale`. */
+  error?: string;
 }
 export interface Project {
   id: string; name: string; url: string; status: string; statusType: string; workspace?: string; workspaceName?: string;

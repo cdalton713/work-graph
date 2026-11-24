@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GraphData } from "../src/lib/types.ts";
-import { FRESH_MS, FULL_MS, createGraphCache } from "./cache.ts";
+import { FRESH_MS, FULL_MS, STALE_MS, createGraphCache } from "./cache.ts";
 
 const graph = (n: number) => ({ project: { id: "p", name: `v${n}`, url: "" }, milestones: [], issues: [], teams: {}, labels: [], viewerId: "me", status: null }) as GraphData;
 
@@ -77,5 +77,71 @@ describe("graph cache", () => {
     await slow;
     await cache.get("p");
     expect(count.load).toBe(3);
+  });
+  it("forgets only the graph of the project that a write names, and all graphs for a write with no project", async () => {
+    const loads: string[] = [];
+    const cache = createGraphCache({ load: async (id) => { loads.push(id); return graph(loads.length); }, changed: async () => false, now: () => 1_000_000 });
+    await Promise.all([cache.get("a"), cache.get("b")]);
+    cache.clear("a");
+    await Promise.all([cache.get("a"), cache.get("b")]);
+    expect(loads).toEqual(["a", "b", "a"]);
+    // A write to "a" while a load of "b" runs: the load of "b" is kept.
+    cache.clear();
+    const slow = cache.get("b");
+    cache.clear("a");
+    await slow;
+    await cache.get("b");
+    expect(loads).toEqual(["a", "b", "a", "b"]);
+    cache.clear();
+    await Promise.all([cache.get("a"), cache.get("b")]);
+    expect(loads).toEqual(["a", "b", "a", "b", "a", "b"]);
+  });
+  it("gives the last graph, marked stale with the error, when a refresh fails, while it is at most 15 minutes old", async () => {
+    const clock = { at: 1_000_000 }, linear = { down: false };
+    const cache = createGraphCache({
+      load: async () => { if (linear.down) throw new Error("Linear: HTTP 500"); return graph(1); },
+      changed: async () => { if (linear.down) throw new Error("Linear: HTTP 500"); return false; },
+      now: () => clock.at,
+    });
+    const first = await cache.get("p");
+    expect(first.stale).toBeUndefined();
+    linear.down = true;
+    clock.at += FRESH_MS;
+    const stale = await cache.get("p");
+    expect(stale).toEqual({ data: first.data, version: first.version, stale: true, error: "Linear: HTTP 500" });
+    // After a write the graph is gone from the cache, but a failed load still gives the last graph.
+    cache.clear("p");
+    expect((await cache.get("p")).stale).toBe(true);
+    clock.at = 1_000_000 + STALE_MS + 1;
+    await expect(cache.get("p")).rejects.toThrow("Linear: HTTP 500");
+    linear.down = false;
+    expect((await cache.get("p")).stale).toBeUndefined();
+  });
+  it("checks all due projects with one request, and loads again only the changed ones", async () => {
+    const clock = { at: 1_000_000 }, loads: string[] = [], many: { ids: string[]; since: string }[] = [];
+    let answer: Map<string, string> | null = new Map();
+    const cache = createGraphCache({
+      load: async (id) => { loads.push(id); return graph(loads.length); },
+      changed: async () => { throw new Error("no check for one project"); },
+      changedMany: async (ids, since) => { many.push({ ids, since }); return answer; },
+      now: () => clock.at,
+    });
+    await Promise.all(["a", "b", "c"].map((id) => cache.get(id)));
+    await cache.check(["a", "b", "c"]); // all fresh: no request
+    expect(many).toEqual([]);
+    clock.at += FRESH_MS;
+    const sinceA = new Date(1_000_000 - 5_000).toISOString();
+    // "b" changed after its last check; the time of "c" is older than its last check.
+    answer = new Map([["b", new Date(clock.at).toISOString()], ["c", new Date(1_000_000 - 60_000).toISOString()]]);
+    await Promise.all([cache.check(["a", "b", "c", "unknown"]), cache.check(["a"])]);
+    expect(many).toEqual([{ ids: ["a", "b", "c"], since: sinceA }]);
+    await Promise.all(["a", "b", "c"].map((id) => cache.get(id)));
+    expect(loads).toEqual(["a", "b", "c", "b"]);
+    // Too many changes to list: all of them load again.
+    clock.at += FRESH_MS;
+    answer = null;
+    await cache.check(["a", "b", "c"]);
+    await Promise.all(["a", "b", "c"].map((id) => cache.get(id)));
+    expect(loads).toEqual(["a", "b", "c", "b", "a", "b", "c"]);
   });
 });

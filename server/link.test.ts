@@ -163,7 +163,8 @@ describe("/api/link over a real socket", () => {
   function fakeLinear() {
     const comments: string[] = [];
     const marks = { answered: [] as string[], paused: false };
-    let updatedAt = "2026-11-20T00:00:00Z";
+    let updatedAt = "2026-11-20T00:00:00Z", card = "";
+    const none = { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
     vi.stubEnv("LINEAR_API_KEY", "k");
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
       const { query, variables } = JSON.parse(init.body as string);
@@ -185,6 +186,9 @@ describe("/api/link over a real socket", () => {
         comments.push(variables.i.body);
         data = { commentCreate: { success: true, comment: { id: "c1", body: variables.i.body, createdAt: "t", user: { name: "C", displayName: "C" }, botActor: null, parent: null } } };
       } else if (query.includes("issue(id:$id){ team{key}")) data = { issue: { team: { key: "CD" }, project: { id: "p1" }, description: "", labels: { nodes: [] }, comments: { nodes: [] } } };
+      // The check of all projects at once: each project always changed, so each check loads the graph again.
+      else if (query.includes("project:{id:{in:$ids}}")) data = { issues: { ...none, nodes: (variables.ids as string[]).map((id) => ({ updatedAt: "2999-01-01T00:00:00Z", project: { id } })) },
+        comments: none, ...Object.fromEntries((variables.ids as string[]).map((_, at) => [`d${at}`, { documents: { nodes: [] } }])) };
       else if (query.includes("updatedAt:{gt:$t}")) data = { issues: { nodes: [{ id: "i1" }] }, comments: { nodes: [] }, project: { documents: { nodes: [] } } };
       else if (query.includes("viewer{")) data = { viewer: { id: "me" }, project: { id: variables.id, name: "Effort A", url: "u", projectMilestones: { nodes: [] } } };
       else if (query.includes("issues(first:25")) data = { project: { issues: { nodes: variables.id === "p1" ? [{
@@ -193,13 +197,13 @@ describe("/api/link over a real socket", () => {
         labels: { nodes: [] }, projectMilestone: null,
         relations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
         inverseRelations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
-        comments: { nodes: [] }, attachments: { nodes: [] }, project: { id: "p1" },
+        comments: { nodes: card ? [{ id: "card", body: card }] : [] }, attachments: { nodes: [] }, project: { id: "p1" },
       }] : [], pageInfo: { hasNextPage: false, endCursor: null } } } };
       else if (query.includes("members(first")) data = { teams: { nodes: [] } };
       else data = { issueLabels: { nodes: [], pageInfo: { hasNextPage: false } } };
       return { ok: true, json: async () => ({ data }) };
     }));
-    return { comments, marks, touch: (at: string) => { updatedAt = at; } };
+    return { comments, marks, touch: (at: string) => { updatedAt = at; }, writeCard: (body: string) => { card = body; } };
   }
 
   async function start(clock = { at: Date.now() }) {
@@ -304,6 +308,20 @@ describe("/api/link over a real socket", () => {
     expect(a.inbox.filter((m) => m.type === "changed")).toEqual([]);
     linear.touch("2026-11-20T01:00:00Z");
     clock.at += 11_000; // past the 10 s in which the graph cache answers from memory
+    await app.link.check();
+    expect((await a.next("changed")).payload).toEqual({ by: "linear", what: "issue", issues: ["CD-1"] });
+  });
+
+  it("finds a changed node card of the same length, with no change of the issue", async () => {
+    const linear = fakeLinear();
+    const clock = { at: Date.now() };
+    const { app, port } = await start(clock);
+    const a = await coordinator(port, "Effort A");
+    await vi.waitFor(() => expect(app.link.hub.active()).toHaveLength(1));
+    linear.writeCard("**work-graph node card** `a`\n\n```json\n{\"wg\":1}\n```");
+    await app.link.check(); // the first look records the state
+    linear.writeCard("**work-graph node card** `a`\n\n```json\n{\"wg\":2}\n```");
+    clock.at += 11_000;
     await app.link.check();
     expect((await a.next("changed")).payload).toEqual({ by: "linear", what: "issue", issues: ["CD-1"] });
   });

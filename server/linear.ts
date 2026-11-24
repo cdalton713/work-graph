@@ -529,6 +529,58 @@ export async function changedSince(projectId: string, since: string): Promise<bo
     || (data.project?.documents.nodes.length ?? 0) > 0;
 }
 
+/** How many requests `changedProjects` makes at most. More changes than these pages hold: all changed. */
+export const CHANGED_PAGES = 3;
+const CHANGED_PAGE = 100;
+
+/**
+ * Which of these projects changed after `since`: one question for all of them, not one for each.
+ * The answer maps each changed project to the time of its latest change, so a caller can compare each
+ * project with its own time. It looks at issues, comments (node cards), and the status document of each
+ * project. Null: more changes than `CHANGED_PAGES` requests hold, so treat every project as changed.
+ */
+export async function changedProjects(ids: string[], since: string): Promise<Map<string, string> | null> {
+  const changed = new Map<string, string>();
+  if (!ids.length) return changed;
+  const note = (projectId: string | undefined, at: string) => {
+    if (projectId && ids.includes(projectId) && !(at <= (changed.get(projectId) ?? ""))) changed.set(projectId, at);
+  };
+  const scope = "project:{id:{in:$ids}}";
+  const page = "pageInfo{hasNextPage endCursor}";
+  // The status document of each project is an alias of the first request.
+  const docs = ids.map((_, at) =>
+    `d${at}: project(id:$d${at}){ documents(first:1, filter:{title:{eq:"${STATUS_DOC}"}, updatedAt:{gt:$t}}){ nodes{updatedAt} } }`);
+  let issuesAfter: string | null = null, commentsAfter: string | null = null;
+  for (let request = 1; ; request++) {
+    const first = request === 1;
+    const parts: string[] = [], params = ["$ids:[ID!]!", "$t:DateTimeOrDuration!"];
+    const variables: Record<string, unknown> = { ids, t: since };
+    if (first || issuesAfter) {
+      params.push("$ia:String");
+      variables.ia = issuesAfter;
+      parts.push(`issues(first:${CHANGED_PAGE}, after:$ia, filter:{${scope}, updatedAt:{gt:$t}}){ nodes{updatedAt project{id}} ${page} }`);
+    }
+    if (first || commentsAfter) {
+      params.push("$ca:String");
+      variables.ca = commentsAfter;
+      parts.push(`comments(first:${CHANGED_PAGE}, after:$ca, filter:{issue:{${scope}}, updatedAt:{gt:$t}}){ nodes{updatedAt issue{project{id}}} ${page} }`);
+    }
+    if (first) ids.forEach((id, at) => { params.push(`$d${at}:String!`); variables[`d${at}`] = id; });
+    const data = await gql(`query(${params.join(",")}){ ${[...parts, ...(first ? docs : [])].join("\n")} }`, variables);
+    if (first) ids.forEach((id, at) => { for (const d of data[`d${at}`]?.documents.nodes ?? []) note(id, d.updatedAt); });
+    if (data.issues) {
+      for (const i of data.issues.nodes) note(i.project?.id, i.updatedAt);
+      issuesAfter = data.issues.pageInfo.hasNextPage ? data.issues.pageInfo.endCursor : null;
+    }
+    if (data.comments) {
+      for (const c of data.comments.nodes) note(c.issue?.project?.id, c.updatedAt);
+      commentsAfter = data.comments.pageInfo.hasNextPage ? data.comments.pageInfo.endCursor : null;
+    }
+    if (!issuesAfter && !commentsAfter) return changed;
+    if (request >= CHANGED_PAGES) return null;
+  }
+}
+
 /** The states, members, and labels of the teams change seldom: one load serves ten minutes. */
 const META_MS = 10 * 60_000;
 const metaCache = new Map<string, { at: number; teams: Record<string, Team>; labels: Label[] }>();

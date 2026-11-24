@@ -1,4 +1,5 @@
 // The Hono app of the work-graph UI: static files from dist/ and a small JSON API over Linear.
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import type { Server } from "node:http";
@@ -13,7 +14,7 @@ import type { GraphData, IssuePatch, Project, ProjectList } from "../src/lib/typ
 import { type Rules, linkRefusal, refusal } from "./access.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
-import { LinearError, addComment, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, updateIssue } from "./linear.ts";
+import { LinearError, addComment, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, updateIssue } from "./linear.ts";
 import { type Connection, LinkHub } from "./link.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
 import { configureSite, site } from "../src/lib/site.ts";
@@ -65,8 +66,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
   configureSite({ human, defaultWorkspace: workspaces[0].id });
   const app = new Hono();
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
-  // `wrote` from wg: forget the cached graphs of that workspace, so the pages that load again see the change.
-  const hub = new LinkHub(undefined, (ref) => caches.get(ref.workspace)?.clear());
+  // `wrote` from wg: forget the cached graph of that project, so the pages that load again see the change.
+  const hub = new LinkHub(undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined));
   app.use(async (c, next) => {
     await next();
     // Vite puts a hash of the content in each name under assets/, so such a file never changes.
@@ -75,13 +76,21 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
   });
   app.get("/healthz", (c) => c.json({ ok: true }));
 
-  const caches = new Map(workspaces.map((w) => [w.id, createGraphCache({ load: loadGraph, changed: changedSince, now })]));
+  const caches = new Map(workspaces.map((w) => [w.id, createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now })]));
   const graphs = () => caches.get(linearWorkspace.getStore()!.id)!;
-  /** A write changed Linear: the next poll of each tab must see it. */
-  const wrote = <T>(result: T): T => {
-    graphs().clear();
+  /**
+   * A write changed Linear: the next poll of each tab must see it. It forgets only the graph of the
+   * project, when the write names it; a write with no known project forgets all graphs of the workspace.
+   */
+  const wrote = <T>(result: T, projectId?: string): T => {
+    graphs().clear(projectId);
     return result;
   };
+  /** One request for each workspace: which of these projects changed. Then each `get` of an unchanged project is free. */
+  const checkAll = (refs: { workspace?: string; id: string }[]) => Promise.all(workspaces.map((workspace) => {
+    const ids = refs.filter((r) => r.workspace === workspace.id).map((r) => r.id);
+    return ids.length ? linearWorkspace.run(workspace, () => caches.get(workspace.id)!.check(ids)) : null;
+  }));
   /** The project of a page request (`x-project`), for the link. A request with no project tells no coordinator. */
   const pageProject = (header: (name: string) => string | undefined): ProjectRef | null => {
     const id = header("x-project");
@@ -126,6 +135,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
   api.get("/overview", async (c) => {
     const list = await projectList();
     const open = list.projects.filter((p) => p.statusType !== "completed" && p.statusType !== "canceled");
+    await checkAll(open);
     const summaries: ProjectSummary[] = [];
     let next = 0;
     const worker = async () => {
@@ -152,9 +162,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
   });
   // `?have=<version>`: the page has this version already. Then the answer has no body.
   api.get("/projects/:id/graph", async (c) => {
-    const { data, version } = await graphs().get(c.req.param("id"));
+    // A stale graph (the refresh failed) also carries `stale` and the error, so the page can show both.
+    const { data, version, stale, error } = await graphs().get(c.req.param("id"));
     if (c.req.query("have") === version) return c.body(null, 204);
-    return c.json({ ...data, version, workspace: linearWorkspace.getStore()!.id });
+    return c.json({ ...data, version, workspace: linearWorkspace.getStore()!.id, ...(stale ? { stale, error } : {}) });
   });
   api.post("/projects/:id/close", async (c) => {
     const { confirm } = await json(c.req.json<{ confirm?: unknown }>());
@@ -162,7 +173,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
       return c.json(await closeProject(c.req.param("id"), confirm, linearWorkspace.getStore()!.team));
     } finally {
       // A failed closeout can still have completed some issues.
-      graphs().clear();
+      graphs().clear(c.req.param("id"));
     }
   });
   // A command for the coordinator: run `wg next` now, dispatch a node, pause or resume the effort. A
@@ -178,7 +189,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
       const found = (await graphs().get(ref.id)).data.issues.find((i) => i.identifier === issue);
       if (!found) throw new LinearError(`no issue ${issue} in this project`, 404);
       await addComment(found.id, "**Dispatch requested** on the page. The coordinator dispatches it at its next `wg next`.", linearWorkspace.getStore()!.team);
-      graphs().clear();
+      graphs().clear(ref.id);
       identifier = found.identifier;
     }
     if (name === "pause" || name === "resume") {
@@ -219,7 +230,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     if (issue) {
       const quote = ask.body.split("\n").map((line) => `> ${line}`).join("\n");
       await addComment(issue.id, `**Reply to a worker question** (from the page)\n\n${quote}\n\n${body.trim()}`, linearWorkspace.getStore()!.team);
-      graphs().clear();
+      graphs().clear(ref.id);
     }
     hub.publish(ref, "reply", { ask: ask.id, issue: ask.issue, key: ask.key, body: body.trim() });
     hub.answered(ref, ask.id);
@@ -227,9 +238,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
   });
   api.patch("/issues/:id", async (c) => {
     const patch = await json(c.req.json<IssuePatch>());
-    const issue = wrote(await updateIssue(c.req.param("id"), patch, linearWorkspace.getStore()!.team));
+    const ref = pageProject((name) => c.req.header(name));
+    const issue = wrote(await updateIssue(c.req.param("id"), patch, linearWorkspace.getStore()!.team), ref?.id);
     const what: Changed["what"] = patch.stateId ? "status" : patch.labelIds ? "label" : "issue";
-    pageChanged(pageProject((name) => c.req.header(name)), what, [issue.identifier]);
+    pageChanged(ref, what, [issue.identifier]);
     return c.json(issue);
   });
   api.get("/issues/:id/comments", async (c) => c.json(await listComments(c.req.param("id"))));
@@ -237,7 +249,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     const { body } = await json(c.req.json<{ body?: unknown }>());
     const ref = pageProject((name) => c.req.header(name));
     const info = ref ? await issueInfo(ref, c.req.param("id")) : null;
-    const comment = wrote(await addComment(c.req.param("id"), body, linearWorkspace.getStore()!.team));
+    const comment = wrote(await addComment(c.req.param("id"), body, linearWorkspace.getStore()!.team), ref?.id);
     pageChanged(ref, "comment", [info?.identifier ?? c.req.param("id")]);
     // A comment in the page on an issue that waits on the human is their answer: the label `answered` marks it
     // in Linear (wg next finds it there after a restart), and the message wakes the coordinator at once.
@@ -252,7 +264,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
         answered = false;
         console.warn(`wg ui: comment saved, but the answered label failed: ${(error as Error).message}`);
       }
-      graphs().clear();
+      graphs().clear(ref.id);
       hub.publish(ref, "answer", { issue: info.identifier, key: info.key, body: comment.body });
       return c.json({ ...comment, answered });
     }
@@ -318,10 +330,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
   // Linear edits that did not come through this page: for each project with a connected coordinator,
   // the cached graph (its cheap check) shows which issues changed since the last look.
   const seen = new Map<string, Map<string, string>>();
-  const fingerprint = (data: GraphData) => new Map(data.issues.map((i) => [i.id, `${i.updatedAt}|${i.state.id}|${i.card?.body.length ?? 0}`]));
+  // A hash of the node card: two card texts of the same length are still a change.
+  const cardHash = (body: string | undefined) => (body === undefined ? "" : createHash("sha1").update(body).digest("hex"));
+  const fingerprint = (data: GraphData) => new Map(data.issues.map((i) => [i.id, `${i.updatedAt}|${i.state.id}|${cardHash(i.card?.body)}`]));
   const check = async () => {
     const active = hub.active();
     for (const key of [...seen.keys()]) if (!active.some((r) => projectKey(r) === key)) seen.delete(key);
+    await checkAll(active);
     for (const ref of active) {
       const workspace = workspaces.find((w) => w.id === ref.workspace);
       if (!workspace) continue;

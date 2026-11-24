@@ -146,7 +146,11 @@ function keepBudget(headers: Headers | undefined): void {
 /** Why a try failed, as far as the retry rule needs it. */
 type Failure = "network" | "timeout" | "rate" | "server" | "final";
 
-const isMutation = (query: string) => /^\s*mutation\b/.test(query);
+/**
+ * Is the operation of a GraphQL document a mutation? GraphQL ignores whitespace, commas, a byte order
+ * mark, and `#` comments before the first token, so they are skipped before the keyword is read.
+ */
+export const isMutation = (query: string) => /^mutation\b/.test(query.replace(/^(?:[\s,\uFEFF]+|#[^\n\r]*)*/, ""));
 /**
  * A query is safe to send again. A mutation is sent again only when Linear refused it before it did
  * anything (HTTP 429 or RATELIMITED): after a timeout or a 5xx, Linear can have applied it.
@@ -154,11 +158,24 @@ const isMutation = (query: string) => /^\s*mutation\b/.test(query);
 const retryable = (failure: Failure, mutation: boolean) =>
   failure === "rate" || (!mutation && failure !== "final");
 
-function delay(tryNumber: number, retryAfter: string | null): number {
+/**
+ * The delay before the next try, or null when Linear asks for a longer wait than this server supports.
+ * The exponential delay with jitter is capped at MAX_DELAY_MS; `Retry-After` is a minimum, never cut short.
+ */
+export function delay(tryNumber: number, retryAfter: string | null): number | null {
   const exponential = BASE_DELAY_MS * 2 ** (tryNumber - 1);
-  const jittered = exponential / 2 + transport.random() * exponential;
-  const asked = retryAfter !== null && Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : 0;
-  return Math.min(MAX_DELAY_MS, Math.max(jittered, asked));
+  const jittered = Math.min(MAX_DELAY_MS, exponential / 2 + transport.random() * exponential);
+  const seconds = retryAfter === null || retryAfter.trim() === "" ? NaN : Number(retryAfter);
+  const asked = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+  if (asked > MAX_DELAY_MS) return null;
+  return Math.max(jittered, asked);
+}
+
+/** A try whose request or response body did not arrive: a timeout or a network error. */
+function transportFailure(error: unknown): { failure: Failure; error: LinearError; retryAfter: null } {
+  const name = (error as Error).name;
+  const failure: Failure = name === "TimeoutError" || name === "AbortError" ? "timeout" : "network";
+  return { failure, error: new LinearError(`Linear request failed: ${(error as Error).message}`), retryAfter: null };
 }
 
 interface GraphQLError { message: string; extensions?: { code?: string } }
@@ -180,12 +197,18 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       try {
         response = await transport.fetch(ENDPOINT, init());
       } catch (error) {
-        const name = (error as Error).name;
-        const failure: Failure = name === "TimeoutError" || name === "AbortError" ? "timeout" : "network";
-        return { failure, error: new LinearError(`Linear request failed: ${(error as Error).message}`), retryAfter: null };
+        return transportFailure(error);
       }
       keepBudget(response.headers);
-      const body = (await response.json().catch(() => null)) as { data?: Data; errors?: GraphQLError[] } | null;
+      let body: { data?: Data; errors?: GraphQLError[] } | null;
+      try {
+        body = await response.json();
+      } catch (error) {
+        // Text that is not JSON is Linear's answer. A timeout or a dropped connection while the body
+        // arrives is a failed transport, the same as one before the headers.
+        if (!(error instanceof SyntaxError)) return transportFailure(error);
+        body = null;
+      }
       if (response.ok && body && !body.errors) return { data: body.data };
       const detail = body?.errors?.map((e) => e.message).join("; ") ?? `HTTP ${response.status}`;
       const rated = response.status === 429 || !!body?.errors?.some((e) => e.extensions?.code === "RATELIMITED");
@@ -195,7 +218,9 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
     });
     if ("data" in result) return result.data;
     if (tryNumber >= MAX_TRIES || !retryable(result.failure, mutation)) throw result.error;
-    await transport.sleep(delay(tryNumber, result.retryAfter));
+    const wait = delay(tryNumber, result.retryAfter);
+    if (wait === null) throw result.error;
+    await transport.sleep(wait);
   }
 }
 
@@ -417,7 +442,8 @@ export async function markAnswered(issueId: string): Promise<void> {
     { n: ANSWERED_LABEL })).issueLabels.nodes as { id: string }[];
   const labelId = found[0]?.id ?? (await gql(`mutation($i:IssueLabelCreateInput!){ issueLabelCreate(input:$i){ issueLabel{id} } }`,
     { i: { name: ANSWERED_LABEL } })).issueLabelCreate.issueLabel.id as string;
-  await gql(`mutation($id:String!,$l:[String!]){ issueUpdate(id:$id, input:{addedLabelIds:$l}){ success } }`, { id: issueId, l: [labelId] });
+  const data = await gql(`mutation($id:String!,$l:[String!]){ issueUpdate(id:$id, input:{addedLabelIds:$l}){ success } }`, { id: issueId, l: [labelId] });
+  if (!data.issueUpdate?.success) throw new LinearError("Linear did not add the answered label");
 }
 
 /** Explicit project closeout. Do not follow blocking relations into other projects. */

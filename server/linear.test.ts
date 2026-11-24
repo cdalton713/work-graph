@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   INITIATIVE_GROUP, LinearError, MAX_PARALLEL, addComment, addReviewUrls, changedSince, gql, initiativeOf, linearBudget, loadGraph,
-  mapLimit, pullRequestsOf, setTransport,
+  delay, isMutation, mapLimit, pullRequestsOf, setTransport,
 } from "./linear.ts";
 
 const pr = (n: number, extra: Record<string, unknown> = {}) => ({ url: `https://github.com/o/r/pull/${n}`, title: `PR ${n}`, sourceType: "github", metadata: { title: `t${n}`, status: "draft", ...extra } });
@@ -194,6 +194,56 @@ describe("gql retry and limit", () => {
     expect(sleeps).toEqual([3000, 1000]);
   });
 
+  it.each([
+    ["a timeout", () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" })],
+    ["a dropped connection", () => new TypeError("terminated")],
+  ])("tries a query again after %s while the body of an HTTP 200 arrives", async (_name, failure) => {
+    // The headers arrive; the stream of the body then fails, as it does when the connection drops.
+    const broken = () => new Response(new ReadableStream({ start(c) { c.error(failure()); } }), { status: 200 });
+    const fetch = answers(broken(), ok());
+    expect(await gql("query{ viewer{id} }")).toEqual({ viewer: { id: "me" } });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not send a mutation again when its body times out: Linear can have applied it", async () => {
+    const fetch = answers(new Response(new ReadableStream({ start(c) { c.error(timeout()); } }), { status: 200 }), ok());
+    await expect(gql("mutation{ a }")).rejects.toThrow("Linear request failed");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not try again after an answer that is not JSON", async () => {
+    const fetch = answers(new Response("<html>", { status: 200 }), ok());
+    await expect(gql("query{ viewer{id} }")).rejects.toThrow("Linear: HTTP 200");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "# write\nmutation{ a }",
+    "\uFEFF, \n  # one\n  # two\r\n\tmutation Named($i:X){ a }",
+  ])("knows a mutation after ignored tokens and does not send it again after a timeout: %j", async (query) => {
+    expect(isMutation(query)).toBe(true);
+    const fetch = answers(timeout, ok());
+    await expect(gql(query)).rejects.toThrow("Linear request failed");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not take a query that names a mutation in a comment or a field for a mutation", () => {
+    expect(isMutation("# mutation\nquery{ a }")).toBe(false);
+    expect(isMutation("{ mutationLog }")).toBe(false);
+    expect(isMutation("query{ a }")).toBe(false);
+  });
+
+  it("waits at least as long as Retry-After asks, and stops when it asks for longer than the server waits", async () => {
+    const fetch = answers(json(null, 429, { "retry-after": "30" }), ok()); // also sets random to 0.5
+    expect(delay(1, "8")).toBe(8000);
+    expect(delay(1, null)).toBe(500);
+    expect(delay(9, null)).toBe(10_000); // the exponential delay is capped
+    expect(delay(1, "30")).toBeNull();
+    await expect(gql("query{ viewer{id} }")).rejects.toThrow("Linear rate limit");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
   it("runs at most six requests at the same time, also while 20 are asked for", async () => {
     let active = 0;
     let most = 0;
@@ -257,10 +307,10 @@ describe("addComment", () => {
       const { query } = JSON.parse(init.body as string);
       const data = query.includes("commentCreate")
         ? { commentCreate: { success: false, comment: null } }
-        : { issue: { team: { key: "CD" }, project: null, description: "", labels: { nodes: [] }, comments: { nodes: [] } } };
+        : { issue: { team: { key: "TM" }, project: null, description: "", labels: { nodes: [] }, comments: { nodes: [] } } };
       return { ok: true, json: async () => ({ data }) };
     }));
-    const error = await addComment("i1", "hi", "CD").catch((e: unknown) => e);
+    const error = await addComment("i1", "hi", "TM").catch((e: unknown) => e);
     expect(error).toBeInstanceOf(LinearError);
     expect(error).toMatchObject({ status: 502, message: "Linear did not save the comment" });
   });

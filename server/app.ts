@@ -311,12 +311,16 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const role = c.req.query("role") ?? "";
     const reason = linkRefusal(role, (name) => c.req.header(name), rules);
     if (reason) return c.json({ error: reason }, 403);
+    // The server stops: it takes no new link socket (also below, for an upgrade that waited for the project).
+    const restarting = () => c.json({ error: "the server restarts" }, 503);
+    if (hub.closing) return restarting();
     const workspace = c.req.query("workspace") || site.defaultWorkspace;
     if (!workspaces.some((w) => w.id === workspace)) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
     const wanted = c.req.query("project");
     if (!wanted && role === "coordinator") return c.json({ error: "a coordinator names its project" }, 400);
     const project = wanted ? await resolve(workspace, wanted) : null;
     if (wanted && !project) return c.json({ error: `no project "${wanted}" in ${workspace}` }, 404);
+    if (hub.closing) return restarting();
     c.set("linkRef" as never, (project ? { workspace, id: project.id } : null) as never);
     return next();
   }, upgradeWebSocket((c) => {

@@ -108,7 +108,7 @@ The server listens on `127.0.0.1:4747`. It does not check who the user is: keep 
 tailnet, or put an authenticating proxy in front of it. Then set `page_url` in the config of each machine that
 runs `wg`.
 
-The server pings each link socket every 20 s. It closes a socket that sent no pong and no message for 45 s, so the
+The server pings each link socket every 20 s. It closes a socket that sent no pong for 45 s (messages do not count), so the
 page shows a coordinator whose machine sleeps as not connected. On `SIGTERM` or `SIGINT`, the server closes each
 link socket with code 1012 (restart), and stops after the sockets close or after 3 s. A proxy in front of the server
 must keep a WebSocket open for longer than 20 s with no data.

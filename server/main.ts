@@ -8,6 +8,7 @@ import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
 import type { Rules } from "./access.ts";
 import { createApp } from "./app.ts";
+import { stopOnSignals } from "./link.ts";
 import { serve as serveTailnet } from "./tailnet.ts";
 import { readConfig } from "./workspaces.ts";
 
@@ -31,14 +32,7 @@ const app = createApp(rules, { team: config.workspaces[0].team, dist, human: con
 
 // A signal must end the process through `exit`, so that Tailscale Serve stops with it. Before that, the link
 // closes each socket with a close frame (code 1012), so that each client connects again at once.
-let stopping = false;
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-  process.on(signal, () => {
-    if (stopping) return;
-    stopping = true;
-    void app.link.shutdown().finally(() => process.exit(0));
-  });
-}
+stopOnSignals(() => app.link.shutdown(), (signal, fn) => process.on(signal, fn), (code) => process.exit(code));
 
 const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, () => {
   if (hosted) {

@@ -45,6 +45,10 @@ ANSWER_LINES = wg.answer_lines
 wg.answer_lines = lambda plan_dir: []
 PROJECT_PAUSED = wg.project_paused
 wg.project_paused = lambda project_id: False
+# The other tests mock pr_view and pr_checks PR by PR: with no batch answer, next_lines reads each PR alone.
+# PrBatchTests use the real pr_batch.
+PR_BATCH = wg.pr_batch
+wg.pr_batch = lambda numbers, cwd=None: {}
 
 SHA = "a" * 40
 OTHER = "b" * 40
@@ -1739,6 +1743,61 @@ class NextTests(LaneTests):
         for call in view.call_args_list:
             self.assertEqual((call.args[1], call.kwargs["cwd"]), (wg.PR_FIELDS, self.d))
         return head, [f"{level} {text}" for level, text in lines]
+
+    def batch_lines(self, batch, live=None, rows=None, prs=None):
+        """next_lines with a batch answer; pr_view answers only the PRs that the batch does not hold."""
+        self.keymap(rows=rows or {})
+        with patch.object(wg, "fetch_nodes", return_value=self.issues(live)), \
+             patch.object(wg, "pr_batch", side_effect=batch) as read, \
+             patch.object(wg, "pr_view", side_effect=lambda pr, fields, cwd=None: (prs or {})[pr]) as view, \
+             patch.object(wg, "pr_checks", side_effect=AssertionError("pr_checks")) as checks, \
+             patch.object(wg, "project_entries", return_value=[]), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            _, lines = wg.next_lines(self.d, self.p)
+        return [f"{level} {text}" for level, text in lines], read, view, checks, err.getvalue()
+
+    def test_next_reads_every_pr_in_one_batch(self):
+        rows = {"a": {"pr": "7", "code_done_head": SHA, "review": "clean", "merge_review": "clean"},
+                "b": {"pr": "8"}}
+        pr = {"state": "OPEN", "headRefOid": SHA, "isDraft": False, "mergeCommit": None, "mergeable": "MERGEABLE",
+              "baseRefName": "main", "reviews": [], "comments": []}
+        merged = dict(pr, state="MERGED", mergeCommit={"oid": OTHER})
+        _, expected = self.lines(live={"a": "In Review", "b": "Merged"}, rows=rows, prs={"7": pr, "8": merged},
+                                 checks=(False, "ci"))
+        lines, read, view, checks, _ = self.batch_lines(
+            lambda numbers, cwd=None: {"7": (pr, (False, "ci")), "8": (merged, (True, "no checks"))},
+            live={"a": "In Review", "b": "Merged"}, rows=rows)
+        self.assertEqual(sorted(read.call_args.args[0]), ["7", "8"])
+        self.assertEqual(read.call_args.kwargs["cwd"], self.d)
+        self.assertFalse(view.called)
+        self.assertFalse(checks.called)
+        self.assertIn("do verify a CD-1: #7: a check failed", lines)
+        self.assertEqual(lines, expected)
+
+    def test_a_pr_missing_from_the_batch_is_read_alone(self):
+        rows = {"a": {"pr": "7"}}
+        for live in ("In Review", "Merged"):
+            with self.subTest(status=live):
+                self.keymap(rows=rows)
+                with patch.object(wg, "fetch_nodes", return_value=self.issues({"a": live})), \
+                     patch.object(wg, "pr_batch", return_value={}), \
+                     patch.object(wg, "pr_view", side_effect=wg.ReadError("no such PR")) as view, \
+                     patch.object(wg, "project_entries", return_value=[]):
+                    if live == "Merged":
+                        with contextlib.redirect_stderr(io.StringIO()) as err:
+                            wg.next_lines(self.d, self.p)
+                        self.assertIn("warn next: a #7: no such PR", err.getvalue())
+                    else:
+                        with self.assertRaisesRegex(wg.ReadError, "no such PR"):
+                            wg.next_lines(self.d, self.p)
+                self.assertEqual(view.call_args.args[:2], ("7", wg.PR_FIELDS))
+
+    def test_a_failed_batch_falls_back_to_one_read_for_each_pr(self):
+        pr = {"state": "MERGED", "mergeCommit": {"oid": OTHER}}
+        lines, _, view, _, err = self.batch_lines(wg.ReadError("rate limited"), live={"a": "Merged"},
+                                                  rows={"a": {"pr": "7"}}, prs={"7": pr})
+        self.assertTrue(view.called)
+        self.assertIn("warn next: the request for all PRs failed, so each PR is read alone: rate limited", err)
 
     def test_merged_task_reconciles_only_when_its_pr_is_not_merged(self):
         rows = {"a": {"pr": "7"}, "b": {"pr": "8"}, "c": {"pr": "9"}}
@@ -4392,3 +4451,162 @@ class FreePlanTests(DirTests):
             self.assertEqual(sweep.called, sweeps)
             unarchive = [c for c in request.call_args_list if "issueUnarchive" in c.args[0]]
             self.assertEqual([c.args[1] for c in unarchive], [] if sweeps else [{"id": "a"}])
+
+
+class PrBatchTests(unittest.TestCase):
+    REPO = json.dumps({"owner": {"login": "octo"}, "name": "repo", "url": "https://git.example.com/octo/repo"})
+    DONE = {"hasNextPage": False}
+
+    def pr(self, contexts=(), *, more=None, **fields):
+        """One PR of the answer; `more` names the connection that has a second page."""
+        def page(name, nodes):
+            return {"nodes": list(nodes), "pageInfo": {"hasNextPage": more == name}}
+        rollup = {"contexts": page("contexts", contexts)} if contexts or more == "contexts" else None
+        return {"state": "OPEN", "headRefOid": SHA, "isDraft": True, "mergeCommit": None, "mergeable": "MERGEABLE",
+                "baseRefName": "main", "reviews": page("reviews", [{"body": "ok"}]),
+                "comments": page("comments", []),
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]}, **fields}
+
+    def check_run(self, run_name, contexts):
+        return {"__typename": "CheckRun", "name": run_name, **contexts}
+
+    def run_batch(self, answers, numbers=("7",)):
+        """PR_BATCH with `gh repo view` and then one `gh api graphql` answer (code, stdout, stderr) for each request."""
+        results = [subprocess.CompletedProcess([], 0, self.REPO, "")]
+        results += [subprocess.CompletedProcess([], code, out if isinstance(out, str) else json.dumps(out), err)
+                    for code, out, err in answers]
+        with patch.object(wg, "command", side_effect=results) as run:
+            return PR_BATCH(list(numbers), cwd="/plan"), run
+
+    def data(self, **prs):
+        return {"data": {"repository": prs}}
+
+    def test_one_request_maps_each_pr_to_the_shape_of_pr_view_and_pr_checks(self):
+        contexts = [self.check_run("test", {"status": "COMPLETED", "conclusion": "FAILURE"}),
+                    self.check_run("lint", {"status": "IN_PROGRESS", "conclusion": None}),
+                    {"__typename": "StatusContext", "context": "deploy", "state": "SUCCESS"}]
+        data = self.data(pr7=self.pr(contexts), pr12=self.pr(state="MERGED", mergeCommit={"oid": OTHER}))
+        out, run = self.run_batch([(0, data, "")], numbers=("12", "7", "7", None, "x"))
+        self.assertEqual(run.call_args_list[0].args, ("gh", "repo", "view", "--json", "owner,name,url"))
+        args = run.call_args_list[1].args
+        self.assertEqual(args[:5], ("gh", "api", "graphql", "--hostname", "git.example.com"))
+        self.assertIn("owner=octo", args)
+        self.assertIn("name=repo", args)
+        self.assertIn("pr7: pullRequest(number: 7)", args[6])
+        self.assertIn("pr12: pullRequest(number: 12)", args[6])
+        self.assertEqual(run.call_args_list[1].kwargs["cwd"], "/plan")
+        info, checks = out["7"]
+        self.assertEqual(set(info), set(wg.PR_FIELDS.split(",")))
+        self.assertEqual((info["state"], info["headRefOid"], info["isDraft"], info["mergeable"]),
+                         ("OPEN", SHA, True, "MERGEABLE"))
+        self.assertEqual((info["reviews"], info["comments"]), ([{"body": "ok"}], []))
+        self.assertEqual(checks, (False, "test"))
+        self.assertEqual(out["12"], (dict(info, state="MERGED", mergeCommit={"oid": OTHER}), (True, "no checks")))
+
+    def test_pending_and_passed_checks_pass(self):
+        contexts = [self.check_run("lint", {"status": "QUEUED", "conclusion": None}),
+                    self.check_run("test", {"status": "COMPLETED", "conclusion": "SKIPPED"}),
+                    {"__typename": "StatusContext", "context": "ci", "state": "PENDING"}]
+        self.assertEqual(wg.rollup_checks(contexts), (True, "no failed checks (2 pending)"))
+        failed = [{"__typename": "StatusContext", "context": "ci", "state": "ERROR"}]
+        self.assertEqual(wg.rollup_checks(failed), (False, "ci"))
+
+    def test_a_rerun_that_passed_replaces_the_failed_run(self):
+        suite = {"checkSuite": {"workflowRun": {"event": "pull_request", "workflow": {"name": "CI"}}}}
+        failed = self.check_run("test", {"status": "COMPLETED", "conclusion": "FAILURE",
+                                   "startedAt": "2026-11-20T10:00:00Z", **suite})
+        rerun = self.check_run("test", {"status": "COMPLETED", "conclusion": "SUCCESS",
+                                  "startedAt": "2026-11-20T11:00:00Z", **suite})
+        self.assertEqual(wg.rollup_checks([failed, rerun]), (True, "no failed checks"))
+        self.assertEqual(wg.rollup_checks([rerun, dict(failed, startedAt="2026-11-20T12:00:00Z")]), (False, "test"))
+        # Another workflow or event is another check, as in `gh pr checks`.
+        push = dict(failed, checkSuite={"workflowRun": {"event": "push", "workflow": {"name": "CI"}}})
+        self.assertEqual(wg.rollup_checks([push, rerun]), (False, "test"))
+
+    def test_a_check_key_is_the_slash_key_of_gh_pr_checks(self):
+        # Name "build/test" in workflow "CI" and name "build" in workflow "test/CI" both give "build/test/CI/push".
+        def check(name, workflow, conclusion, started):
+            return self.check_run(name, {"status": "COMPLETED", "conclusion": conclusion, "startedAt": started,
+                                         "checkSuite": {"workflowRun": {"event": "push",
+                                                                        "workflow": {"name": workflow}}}})
+        older = check("build/test", "CI", "FAILURE", "2026-11-20T10:00:00Z")
+        newer = check("build", "test/CI", "SUCCESS", "2026-11-20T11:00:00Z")
+        self.assertEqual(wg.rollup_checks([older, newer]), (True, "no failed checks"))
+        self.assertEqual(wg.latest_checks([older, newer]), [newer])
+        # A check with no workflow run has the key "<name>//".
+        self.assertEqual(len(wg.latest_checks([self.check_run("lint", {"status": "QUEUED"}),
+                                               self.check_run("lint", {"status": "QUEUED"})])), 1)
+
+    def test_a_list_with_a_second_page_is_read_alone(self):
+        for more in ("reviews", "comments", "contexts"):
+            with self.subTest(more=more):
+                out, _ = self.run_batch([(0, self.data(pr7=self.pr(more=more), pr8=self.pr()), "")],
+                                        numbers=("7", "8"))
+                self.assertEqual(list(out), ["8"])
+        self.assertIn("pageInfo { hasNextPage }", PR_BATCH.__globals__["PR_BATCH_FIELDS"])
+
+    def test_an_error_on_a_field_of_a_pr_sends_that_pr_to_the_single_reads(self):
+        broken = self.pr(commits={"nodes": [{"commit": {"statusCheckRollup": None}}]})
+        data = dict(self.data(pr7=broken, pr8=self.pr()),
+                    errors=[{"message": "timeout", "path": ["repository", "pr7", "commits", "nodes", 0, "commit",
+                                                            "statusCheckRollup"]}])
+        out, _ = self.run_batch([(1, data, "gh: timeout")], numbers=("7", "8"))
+        self.assertEqual(list(out), ["8"])
+        # A null list is a failed read, not an empty list.
+        for field in ("reviews", "comments"):
+            with self.subTest(field=field):
+                out, _ = self.run_batch([(0, self.data(pr7=self.pr(**{field: None})), "")])
+                self.assertEqual(out, {})
+        # An error that names no PR can touch each PR of the request.
+        data = dict(self.data(pr7=self.pr()), errors=[{"message": "something failed"}])
+        with self.assertRaisesRegex(wg.ReadError, "gh: failed"):
+            self.run_batch([(1, data, "gh: failed")])
+
+    def test_a_pr_that_github_does_not_return_is_left_out(self):
+        data = dict(self.data(pr7=self.pr(), pr8=None),
+                    errors=[{"message": "Could not resolve to a PullRequest with the number of 8.",
+                             "path": ["repository", "pr8"]}])
+        out, _ = self.run_batch([(1, data, "gh: Could not resolve")], numbers=("7", "8"))
+        self.assertEqual(list(out), ["7"])
+
+    def test_fifty_prs_go_in_each_request_and_a_failed_request_keeps_the_others(self):
+        numbers = [str(n) for n in range(1, 52)]
+        first = self.data(**{f"pr{n}": self.pr() for n in range(1, 51)})
+        second = self.data(pr51=self.pr())
+        out, run = self.run_batch([(0, first, ""), (0, second, "")], numbers=numbers)
+        self.assertEqual(len(run.call_args_list), 3)
+        self.assertEqual(sorted(out, key=int), numbers)
+        out, _ = self.run_batch([(0, first, ""), (1, "", "HTTP 502")], numbers=numbers)
+        self.assertEqual(sorted(out, key=int), numbers[:50])
+        out, _ = self.run_batch([(1, "", "HTTP 502"), (0, second, "")], numbers=numbers)
+        self.assertEqual(list(out), ["51"])
+        # A request that times out, or that gh cannot start, skips only its own PRs.
+        for error in (subprocess.TimeoutExpired(["gh"], 60), OSError("no gh")):
+            with self.subTest(error=type(error).__name__):
+                answers = [subprocess.CompletedProcess([], 0, self.REPO, ""),
+                           subprocess.CompletedProcess([], 0, json.dumps(first), ""), error]
+                with patch.object(wg, "command", side_effect=answers):
+                    out = PR_BATCH(numbers, cwd="/plan")
+                self.assertEqual(sorted(out, key=int), numbers[:50])
+        with patch.object(wg, "command", side_effect=[subprocess.CompletedProcess([], 0, self.REPO, ""),
+                                                      subprocess.TimeoutExpired(["gh"], 60)]):
+            with self.assertRaisesRegex(wg.ReadError, "timed out"):
+                PR_BATCH(["7"])
+
+    def test_a_failed_request_is_a_read_error(self):
+        for answer in [(1, "", "HTTP 502"), (1, self.data(pr7=None), "HTTP 502"), (0, "not json", "")]:
+            with self.subTest(answer=answer):
+                with self.assertRaises(wg.ReadError):
+                    self.run_batch([answer])
+        with patch.object(wg, "command", return_value=subprocess.CompletedProcess([], 1, "", "no repo")):
+            with self.assertRaisesRegex(wg.ReadError, "no repo"):
+                PR_BATCH(["7"])
+        with patch.object(wg, "command", return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps({"owner": {"login": "octo"}, "name": "repo"}), "")):
+            with self.assertRaisesRegex(wg.ReadError, "host"):
+                PR_BATCH(["7"])
+
+    def test_no_pr_needs_no_request(self):
+        with patch.object(wg, "command") as run:
+            self.assertEqual(PR_BATCH([None, "", "0"]), {})
+        self.assertFalse(run.called)

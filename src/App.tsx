@@ -7,7 +7,7 @@ import { Panel } from "./components/Panel";
 import { CopyButton, Lamp, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
-import { budgetWarnings, staleBanner, versionText } from "./lib/health";
+import { type HeldGraph, budgetWarnings, pollGraph, staleBanner, versionText } from "./lib/health";
 import { liveJob, presenceText } from "./lib/link";
 import { type OverviewData, PROJECT_LAMP, movesWithAsks, summaryKey } from "./lib/overview";
 import { site, statusOrder } from "./lib/site";
@@ -70,7 +70,7 @@ export function App() {
   const pending = useRef(0);
   // The version of the graph that the server sent last. An edit changes the graph on screen, so it clears this.
   // While the graph is stale, the page asks without the version: a fresh graph with the same version must replace it.
-  const version = useRef<{ project: string; value: string; stale?: boolean } | null>(null);
+  const version = useRef<HeldGraph | null>(null);
   const generation = useRef(0);
 
   const { project, missing } = useMemo(() => projectFromQuery(directory, query), [directory, query]);
@@ -109,13 +109,10 @@ export function App() {
     setBusy(true);
     try {
       const scope = `${project.workspace}:${project.id}`;
-      const have = version.current?.project === scope && !version.current.stale ? version.current.value : undefined;
-      const next = await api.graph(project.id, have, project.workspace);
+      const { held, next } = await pollGraph(version.current, scope, (have) => api.graph(project.id, have, project.workspace));
       if (mine !== generation.current || pending.current) return;
-      if (next) {
-        version.current = { project: scope, value: next.version, stale: next.stale };
-        setData(next);
-      }
+      version.current = held;
+      if (next) setData(next);
       setSyncedAt(new Date()); // also for an answer of "no change": the page is as new as this poll
       setError(null);
     } catch (e) {

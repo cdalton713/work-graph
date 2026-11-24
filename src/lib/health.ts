@@ -38,3 +38,18 @@ export function versionText(status: Pick<ServerStatus, "version"> | null): strin
   if (!status?.version) return null;
   return /^[0-9a-f]{40}$/i.test(status.version) ? status.version.slice(0, 7) : status.version;
 }
+
+/** The graph version that the page holds for a project (`workspace:id`), and whether that graph was stale. */
+export interface HeldGraph { project: string; value: string; stale?: boolean }
+
+/**
+ * One poll of the graph. The page sends the version it holds (`have`), so the server can answer 204 for no
+ * change, except while its graph is stale: a fresh graph with the same version must replace the stale one, or
+ * the banner stays. `next` is the new graph, or null for no change.
+ */
+export async function pollGraph<T extends { version: string; stale?: boolean }>(held: HeldGraph | null, project: string,
+  fetchGraph: (have?: string) => Promise<T | null>): Promise<{ held: HeldGraph | null; next: T | null }> {
+  const have = held?.project === project && !held.stale ? held.value : undefined;
+  const next = await fetchGraph(have);
+  return next ? { held: { project, value: next.version, stale: next.stale }, next } : { held, next: null };
+}

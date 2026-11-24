@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LOW_BUDGET, budgetWarnings, staleBanner, versionText } from "./health";
+import { type HeldGraph, LOW_BUDGET, budgetWarnings, pollGraph, staleBanner, versionText } from "./health";
 import type { ServerStatus } from "./types";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
@@ -45,5 +45,42 @@ describe("versionText", () => {
     expect(versionText(null)).toBeNull();
     expect(versionText({ version: "ac8ba2c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6" })).toBe("ac8ba2c");
     expect(versionText({ version: "dev" })).toBe("dev");
+  });
+});
+
+describe("pollGraph", () => {
+  it("replaces a stale graph with a fresh graph of the same version, and removes the banner", async () => {
+    // A server like server/app.ts: 204 (null) when the page has the version, except while the graph is stale.
+    const linear = { down: false }, asked: (string | undefined)[] = [];
+    const fetchGraph = async (have?: string) => {
+      asked.push(have);
+      const stale = linear.down || undefined;
+      if (!stale && have === "v1") return null;
+      return { version: "v1", ...(stale ? { stale, loadedAt: now - 60_000 } : {}) };
+    };
+    let held: HeldGraph | null = null, shown: { version: string; stale?: boolean; loadedAt?: number } | null = null;
+    const poll = async () => {
+      const result = await pollGraph(held, "w:p", fetchGraph);
+      held = result.held;
+      if (result.next) shown = result.next;
+    };
+    await poll(); // fresh
+    expect(staleBanner(shown, now)).toBeNull();
+    await poll(); // no change: 204
+    linear.down = true;
+    await poll(); // stale, same version: a body, not 204
+    expect(staleBanner(shown, now)?.text).toBe("Linear is unavailable: this graph is from 1 min ago");
+    await poll(); // still stale: the page asks without the version
+    linear.down = false;
+    await poll(); // fresh again with the same version: the page must get the body
+    expect(staleBanner(shown, now)).toBeNull();
+    await poll(); // fresh: 204 again
+    expect(asked).toEqual([undefined, "v1", "v1", undefined, undefined, "v1"]);
+    expect(held).toEqual({ project: "w:p", value: "v1", stale: undefined });
+  });
+  it("sends no version for another project", async () => {
+    const asked: (string | undefined)[] = [];
+    await pollGraph({ project: "w:a", value: "v1" }, "w:b", async (have) => { asked.push(have); return null; });
+    expect(asked).toEqual([undefined]);
   });
 });

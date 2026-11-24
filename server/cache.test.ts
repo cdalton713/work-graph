@@ -185,6 +185,32 @@ describe("graph cache", () => {
     expect(late.map((v) => [v.stale, v.error])).toEqual([[true, "Linear: HTTP 500"], [true, "Linear: HTTP 500"]]);
     expect(count).toEqual({ load: 2, changed: 0, many: 2 });
   });
+  it("serves the reads of the same poll after a slow successful check of all projects, with no check for each project", async () => {
+    const clock = { at: 1_000_000 }, count = { load: 0, changed: 0 }, many: string[] = [];
+    const cache = createGraphCache({
+      load: async () => graph(++count.load),
+      changed: async () => { count.changed++; return false; },
+      // Linear answers after 15 s: no change, given with a time of another precision and offset.
+      changedMany: async (_ids, since) => {
+        many.push(since);
+        clock.at += 15_000;
+        return new Map([["a", new Date(1_000_000 - 60_000).toISOString().replace("Z", "+00:00")]]);
+      },
+      now: () => clock.at,
+    });
+    await cache.get("a");
+    await cache.get("b");
+    clock.at += FRESH_MS;
+    const start = clock.at;
+    await cache.check(["a", "b"]);
+    const reads = await Promise.all([cache.get("a"), cache.get("b")]);
+    expect(reads.every((r) => r.stale === undefined)).toBe(true);
+    expect(count).toEqual({ load: 2, changed: 0 });
+    // The next check asks for changes from the start of this one, not from its answer.
+    clock.at += FRESH_MS;
+    await cache.check(["a", "b"]);
+    expect(many[1]).toBe(new Date(start - 5_000).toISOString());
+  });
   it("does not keep a load that a write overtook as the fallback for a failed refresh", async () => {
     const linear = { down: false };
     let release = () => {};

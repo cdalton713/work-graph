@@ -79,12 +79,18 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
   const caches = new Map(workspaces.map((w) => [w.id, createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now })]));
   const graphs = () => caches.get(linearWorkspace.getStore()!.id)!;
   /**
-   * A write changed Linear: the next poll of each tab must see it. It forgets only the graph of the
-   * project, when the write names it; a write with no known project forgets all graphs of the workspace.
+   * A write changed Linear: the next poll of each tab must see it. It forgets only the graph of the project
+   * of the written issue (from Linear, not from the request); a write with no known project forgets all
+   * graphs of the workspace.
    */
-  const wrote = <T>(result: T, projectId?: string): T => {
-    graphs().clear(projectId);
+  const wrote = <T>(result: T, projectId: string | null | undefined): T => {
+    graphs().clear(projectId ?? undefined);
     return result;
+  };
+  /** Records the project of the issue that a write changes, for `wrote`. */
+  const projectOfWrite = () => {
+    const seen: { id: string | null | undefined; hear: (id: string | null) => void } = { id: undefined, hear: (id) => { seen.id = id; } };
+    return seen;
   };
   /** One request for each workspace: which of these projects changed. Then each `get` of an unchanged project is free. */
   const checkAll = (refs: { workspace?: string; id: string }[]) => Promise.all(workspaces.map((workspace) => {
@@ -96,9 +102,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     const id = header("x-project");
     return id ? { workspace: linearWorkspace.getStore()!.id, id } : null;
   };
-  /** The identifier, status, and wg node key of an issue, from the cached graph. */
+  /** The identifier, status, and wg node key of an issue, from the cached graph (never a stale one: the status decides a write). */
   const issueInfo = async (ref: ProjectRef, issueId: string) => {
-    const issue = (await graphs().get(ref.id).catch(() => null))?.data.issues.find((i) => i.id === issueId);
+    const issue = (await graphs().get(ref.id, { fresh: true }).catch(() => null))?.data.issues.find((i) => i.id === issueId);
     return issue
       ? { identifier: issue.identifier, status: statusName(issue.state, issue.labels), key: parseCard(issue.card?.body)?.key ?? null }
       : { identifier: issueId, status: null, key: null };
@@ -186,16 +192,19 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     let identifier: string | null = null;
     if (name === "dispatch") {
       if (typeof key !== "string" || typeof issue !== "string") throw new LinearError("dispatch names the node key and its issue", 400);
-      const found = (await graphs().get(ref.id)).data.issues.find((i) => i.identifier === issue);
+      // Which issues are in the project decides the write: a stale graph is not enough.
+      const found = (await graphs().get(ref.id, { fresh: true })).data.issues.find((i) => i.identifier === issue);
       if (!found) throw new LinearError(`no issue ${issue} in this project`, 404);
-      await addComment(found.id, "**Dispatch requested** on the page. The coordinator dispatches it at its next `wg next`.", linearWorkspace.getStore()!.team);
-      graphs().clear(ref.id);
+      const written = projectOfWrite();
+      await addComment(found.id, "**Dispatch requested** on the page. The coordinator dispatches it at its next `wg next`.", linearWorkspace.getStore()!.team, written.hear);
+      wrote(null, written.id);
       identifier = found.identifier;
     }
     if (name === "pause" || name === "resume") {
       const workspace = linearWorkspace.getStore()!;
       await setPaused(ref.id, name === "pause", workspace.team, workspace.teamLabels);
       names.at = 0;
+      wrote(null, ref.id);
     }
     hub.publish(ref, "command", { name, key: typeof key === "string" ? key : null, issue: identifier });
     return c.json({ ok: true, queued: hub.presence(ref).queued });
@@ -215,6 +224,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     const ref = { workspace: workspace.id, id: c.req.param("id") };
     await setAutonomy(ref.id, level, workspace.team, workspace.teamLabels);
     names.at = 0;
+    wrote(null, ref.id);
     hub.publish(ref, "command", { name: "autonomy", key: null, issue: null, level });
     return c.json({ ok: true, level, queued: hub.presence(ref).queued });
   });
@@ -226,11 +236,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     const ref = { workspace: linearWorkspace.getStore()!.id, id: c.req.param("id") };
     const ask = hub.ask(ref, c.req.param("ask"));
     if (!ask) throw new LinearError("no open question with this id: it was answered, or the coordinator has not reported it", 404);
-    const issue = ask.issue ? (await graphs().get(ref.id)).data.issues.find((i) => i.identifier === ask.issue) : undefined;
+    // Which issues are in the project decides whether the reply is saved in Linear: a stale graph is not enough.
+    // A failed refresh stops the route here, and the question stays open.
+    const issue = ask.issue ? (await graphs().get(ref.id, { fresh: true })).data.issues.find((i) => i.identifier === ask.issue) : undefined;
     if (issue) {
       const quote = ask.body.split("\n").map((line) => `> ${line}`).join("\n");
-      await addComment(issue.id, `**Reply to a worker question** (from the page)\n\n${quote}\n\n${body.trim()}`, linearWorkspace.getStore()!.team);
-      graphs().clear(ref.id);
+      const written = projectOfWrite();
+      await addComment(issue.id, `**Reply to a worker question** (from the page)\n\n${quote}\n\n${body.trim()}`, linearWorkspace.getStore()!.team, written.hear);
+      wrote(null, written.id);
     }
     hub.publish(ref, "reply", { ask: ask.id, issue: ask.issue, key: ask.key, body: body.trim() });
     hub.answered(ref, ask.id);
@@ -239,7 +252,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
   api.patch("/issues/:id", async (c) => {
     const patch = await json(c.req.json<IssuePatch>());
     const ref = pageProject((name) => c.req.header(name));
-    const issue = wrote(await updateIssue(c.req.param("id"), patch, linearWorkspace.getStore()!.team), ref?.id);
+    const written = projectOfWrite();
+    const issue = wrote(await updateIssue(c.req.param("id"), patch, linearWorkspace.getStore()!.team, written.hear), written.id);
     const what: Changed["what"] = patch.stateId ? "status" : patch.labelIds ? "label" : "issue";
     pageChanged(ref, what, [issue.identifier]);
     return c.json(issue);
@@ -249,7 +263,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     const { body } = await json(c.req.json<{ body?: unknown }>());
     const ref = pageProject((name) => c.req.header(name));
     const info = ref ? await issueInfo(ref, c.req.param("id")) : null;
-    const comment = wrote(await addComment(c.req.param("id"), body, linearWorkspace.getStore()!.team), ref?.id);
+    const written = projectOfWrite();
+    const comment = wrote(await addComment(c.req.param("id"), body, linearWorkspace.getStore()!.team, written.hear), written.id);
     pageChanged(ref, "comment", [info?.identifier ?? c.req.param("id")]);
     // A comment in the page on an issue that waits on the human is their answer: the label `answered` marks it
     // in Linear (wg next finds it there after a restart), and the message wakes the coordinator at once.
@@ -264,7 +279,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
         answered = false;
         console.warn(`wg ui: comment saved, but the answered label failed: ${(error as Error).message}`);
       }
-      graphs().clear(ref.id);
+      wrote(null, written.id);
       hub.publish(ref, "answer", { issue: info.identifier, key: info.key, body: comment.body });
       return c.json({ ...comment, answered });
     }

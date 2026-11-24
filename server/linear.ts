@@ -542,8 +542,11 @@ const CHANGED_PAGE = 100;
 export async function changedProjects(ids: string[], since: string): Promise<Map<string, string> | null> {
   const changed = new Map<string, string>();
   if (!ids.length) return changed;
+  // Times as numbers: two ISO texts of one time can differ in precision or offset.
   const note = (projectId: string | undefined, at: string) => {
-    if (projectId && ids.includes(projectId) && !(at <= (changed.get(projectId) ?? ""))) changed.set(projectId, at);
+    if (!projectId || !ids.includes(projectId)) return;
+    const before = changed.get(projectId);
+    if (before === undefined || Date.parse(at) > Date.parse(before)) changed.set(projectId, at);
   };
   const scope = "project:{id:{in:$ids}}";
   const page = "pageInfo{hasNextPage endCursor}";
@@ -696,12 +699,16 @@ async function writable(issueId: string, team: string): Promise<Writable> {
 /** The first word of the comment that records why an `ops` or `decision` node is done, as `wg move --note` writes it. */
 const NOTE_WORD: Record<string, string> = { ops: "Evidence", decision: "Answer" };
 
-export async function updateIssue(issueId: string, { baseDescription, note, ...patch }: IssuePatch, team: string): Promise<Issue> {
+/** Hears the project of the issue that a write changes (null: the issue has no project), before the write. */
+export type ProjectOfWrite = (projectId: string | null) => void;
+
+export async function updateIssue(issueId: string, { baseDescription, note, ...patch }: IssuePatch, team: string, project?: ProjectOfWrite): Promise<Issue> {
   const unknown = Object.keys(patch).filter((k) => !EDITABLE.has(k));
   if (unknown.length || !Object.keys(patch).length) {
     throw new LinearError(`fields not editable: ${unknown.join(", ") || "(none given)"}`, 400);
   }
   const current = { issue: await writable(issueId, team) };
+  project?.(current.issue.project?.id ?? null);
   // `wg load` sets the title of a node from plan.json, so a title that is changed here is lost.
   if (patch.title !== undefined && current.issue.comments.nodes.length) {
     throw new LinearError("plan.json has the title of a wg node: change it there, then run `wg load --apply`", 400);
@@ -754,10 +761,10 @@ export async function listComments(issueId: string): Promise<Comment[]> {
   return nodes.map(comment).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
-export async function addComment(issueId: string, body: unknown, team: string): Promise<Comment> {
+export async function addComment(issueId: string, body: unknown, team: string, project?: ProjectOfWrite): Promise<Comment> {
   if (typeof body !== "string" || !body.trim()) throw new LinearError("comment body is empty", 400);
   if (body.startsWith(CARD_PREFIX)) throw new LinearError("that text is reserved for the wg node card", 400);
-  await writable(issueId, team);
+  project?.((await writable(issueId, team)).project?.id ?? null);
   const data = await gql(
     `mutation($i:CommentCreateInput!){ commentCreate(input:$i){ success comment{${COMMENT}} } }`,
     { i: { issueId, body } },

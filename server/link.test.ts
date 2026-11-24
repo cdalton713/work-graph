@@ -160,7 +160,8 @@ describe("/api/link over a real socket", () => {
   afterEach(() => { closers.splice(0).forEach((close) => close()); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
   /** Linear with two projects; issue i1 (CD-1) is in p1. Each comment create is recorded. */
-  function fakeLinear() {
+  /** `team`: the team key of the issue of p1 in its graph. */
+  function fakeLinear(team = "CD") {
     const comments: string[] = [];
     const marks = { answered: [] as string[], paused: false };
     let updatedAt = "2026-11-20T00:00:00Z", card = "";
@@ -192,8 +193,8 @@ describe("/api/link over a real socket", () => {
       else if (query.includes("updatedAt:{gt:$t}")) data = { issues: { nodes: [{ id: "i1" }] }, comments: { nodes: [] }, project: { documents: { nodes: [] } } };
       else if (query.includes("viewer{")) data = { viewer: { id: "me" }, project: { id: variables.id, name: "Effort A", url: "u", projectMilestones: { nodes: [] } } };
       else if (query.includes("issues(first:25")) data = { project: { issues: { nodes: variables.id === "p1" ? [{
-        id: "i1", identifier: "CD-1", title: "t", description: null, priority: 0, url: "u", sortOrder: 0, updatedAt,
-        team: { id: "team", key: "CD" }, state: { id: "s", name: "Needs Human", type: "started", color: "" }, assignee: null,
+        id: "i1", identifier: `${team}-1`, title: "t", description: null, priority: 0, url: "u", sortOrder: 0, updatedAt,
+        team: { id: "team", key: team }, state: { id: "s", name: "Needs Human", type: "started", color: "" }, assignee: null,
         labels: { nodes: [] }, projectMilestone: null,
         relations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
         inverseRelations: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
@@ -313,7 +314,7 @@ describe("/api/link over a real socket", () => {
   });
 
   it("finds a changed node card of the same length, with no change of the issue", async () => {
-    const linear = fakeLinear();
+    const linear = fakeLinear("TM"); // a fictional team
     const clock = { at: Date.now() };
     const { app, port } = await start(clock);
     const a = await coordinator(port, "Effort A");
@@ -323,7 +324,7 @@ describe("/api/link over a real socket", () => {
     linear.writeCard("**work-graph node card** `a`\n\n```json\n{\"wg\":2}\n```");
     clock.at += 11_000;
     await app.link.check();
-    expect((await a.next("changed")).payload).toEqual({ by: "linear", what: "issue", issues: ["CD-1"] });
+    expect((await a.next("changed")).payload).toEqual({ by: "linear", what: "issue", issues: ["TM-1"] });
   });
 
   it("after wrote, the page hears of it and the next graph load skips the cache", async () => {

@@ -103,6 +103,10 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
   host name, and a write needs the exact HTTPS origin and a JSON body.
 - `WG_CONFIG_JSON`: the config text (at least `human` and `workspaces`).
 - The Linear key of each workspace (`LINEAR_API_KEY`, or the names in `key_env`).
+- `WG_STATE_DIR` (optional): a directory where the link keeps the queue of each project and the open worker
+  questions over a restart. Without it, a restart loses them: a reply or a command that a coordinator did not get
+  yet does not arrive. The server writes one file, `link-state.json` (mode 600), at most 1 s after a change, and
+  reads it at start. Give the directory a volume, so that the file stays when the container changes.
 
 The server listens on `127.0.0.1:4747`. It does not check who the user is: keep it on a private network, such as a
 tailnet, or put an authenticating proxy in front of it. Then set `page_url` in the config of each machine that

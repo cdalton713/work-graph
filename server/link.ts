@@ -6,6 +6,7 @@ import {
   type Ask, type CoordinatorPresence, type CoordinatorState, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
   type Presence, type Progress, type ProjectRef, type ToCoordinator, type ToPage, projectKey,
 } from "../src/lib/link.ts";
+import { ASKS_MAX, type LinkState, type Store } from "./store.ts";
 
 /**
  * One open WebSocket, as the hub uses it. A peer with `ping` takes part in the heartbeat: the hub pings it and
@@ -33,7 +34,7 @@ export const SHUTDOWN_MS = 3_000;
 
 /** The timers of the hub (tests give fake ones). */
 export interface Timers { every: (fn: () => void, ms: number) => () => void; after: (fn: () => void, ms: number) => () => void }
-const realTimers: Timers = {
+export const realTimers: Timers = {
   every: (fn, ms) => { const t = setInterval(fn, ms); t.unref(); return () => clearInterval(t); },
   after: (fn, ms) => { const t = setTimeout(fn, ms); t.unref(); return () => clearTimeout(t); },
 };
@@ -82,10 +83,28 @@ export class LinkHub {
   private stopBeat: (() => void) | null = null;
   /** Set at `shutdown`: the hub takes no new socket, and `drained` runs when the last socket closed. */
   private stopping: { drained: () => void; done: Promise<void> } | null = null;
-  constructor(now: () => Date = () => new Date(), onWrote: (ref: ProjectRef) => void = () => {}, timers: Timers = realTimers) {
+  /** Where the queue and the asks of each room survive a restart (`WG_STATE_DIR`). None: they live in memory only. */
+  private store: Store | null;
+  constructor(now: () => Date = () => new Date(), onWrote: (ref: ProjectRef) => void = () => {}, timers: Timers = realTimers, store: Store | null = null) {
     this.now = now;
     this.onWrote = onWrote;
     this.timers = timers;
+    this.store = store;
+    for (const saved of store?.load().rooms ?? []) {
+      const room = this.room(saved.ref);
+      room.queue = saved.queue.slice(-QUEUE_MAX);
+      room.asks = saved.asks.slice(0, ASKS_MAX);
+    }
+  }
+
+  /** The queue or the asks of a room changed: the store writes them soon. */
+  private changed() {
+    this.store?.save(() => this.state());
+  }
+
+  /** The state that the store keeps: the queue and the asks of each room. */
+  state(): LinkState {
+    return { rooms: [...this.rooms.values()].map((r) => ({ ref: r.ref, queue: r.queue, asks: r.asks })) };
   }
 
   /** Start the heartbeat: each `PING_MS`, `beat`. Each open socket gets a new pong deadline of `DEAD_MS`. */
@@ -126,6 +145,7 @@ export class LinkHub {
   shutdown(): Promise<void> {
     if (this.stopping) return this.stopping.done;
     this.stop();
+    this.store?.flush();
     let finish = () => {};
     const done = new Promise<void>((ok) => { finish = ok; });
     const cancel = this.timers.after(() => finish(), SHUTDOWN_MS);
@@ -231,6 +251,7 @@ export class LinkHub {
     const room = this.rooms.get(projectKey(ref));
     if (!room) return;
     room.asks = room.asks.filter((a) => a.id !== id);
+    this.changed();
     this.toPages(room, "asks", { asks: room.asks }, true);
   }
 
@@ -252,6 +273,7 @@ export class LinkHub {
       const at = room.queue.findIndex((m) => m.type === "changed");
       room.queue.splice(at === -1 ? 0 : at, 1);
     }
+    this.changed();
     const textMessage = JSON.stringify(message);
     for (const c of room.coordinators.values()) c.peer?.send(textMessage);
     if (type === "changed") this.toPages(room, "changed", payload as ToPage["changed"]);
@@ -344,12 +366,15 @@ export class LinkHub {
           this.announce(room);
         } else if (type === "ack") {
           const ids = new Set(Array.isArray(payload.ids) ? payload.ids.filter((id): id is string => typeof id === "string") : []);
+          const before = room.queue.length;
           room.queue = room.queue.filter((m) => !ids.has(m.id));
+          if (room.queue.length !== before) this.changed();
           this.announce(room);
         } else if (type === "asks") {
-          room.asks = (Array.isArray(payload.asks) ? payload.asks.filter(isObject) : []).slice(0, 100).map((a) => ({
+          room.asks = (Array.isArray(payload.asks) ? payload.asks.filter(isObject) : []).slice(0, ASKS_MAX).map((a) => ({
             id: text(a.id, 200), key: text(a.key, 200) || null, issue: text(a.issue, 50) || null, from: text(a.from, 200), body: text(a.body), at: text(a.at, 50),
           })).filter((a) => a.id);
+          this.changed();
           this.toPages(room, "asks", { asks: room.asks }, true);
         } else if (type === "progress") {
           room.progress = (Array.isArray(payload.nodes) ? payload.nodes.filter(isObject) : []).slice(0, 500).map((n) => ({

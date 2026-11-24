@@ -154,6 +154,9 @@ AUTONOMY_DEFAULT = "standard"
 REVIEW_GROUP = "review"
 REVIEW_LEVELS = ("thorough", "standard", "light")
 REVIEW_DEFAULT = "thorough"
+# A workspace has one project label for each name, also in two groups, and the group `autonomy` has `standard`:
+# the child labels are `review:<level>`, as the claim labels are `agent:<name>`.
+REVIEW_PREFIX = "review:"
 # The plain project label that pauses an effort. The page sets it; `wg next` holds each `do` line while it is there.
 PAUSED_LABEL = "paused"
 # The workspace issue label that marks the human's answer from the page on a Needs <human> issue. `wg next`
@@ -1048,12 +1051,30 @@ def effort_autonomy(plan_dir, plan, km=None):
     return level or AUTONOMY_DEFAULT
 
 
-def project_review_effort(project_id):
-    """The review effort label of the project, or None when it has none."""
+def review_label(level):
+    """The child label of the group `review` for the review effort `level`."""
+    return f"{REVIEW_PREFIX}{level}"
+
+
+def review_label_level(name):
+    """The review effort of a child label of the group `review`, or None. An old label without the prefix
+    (`thorough`, `light`) is still that level; the next `wg review-effort` set replaces it."""
+    level = name[len(REVIEW_PREFIX):] if name.startswith(REVIEW_PREFIX) else name
+    return level if level in REVIEW_LEVELS else None
+
+
+def project_review_label(project_id):
+    """The name of the review effort label of the project, or None when it has none."""
     on = gql("""query($id:String!){ project(id:$id){ labels(first:50){ nodes{name parent{name}} } } }""",
              {"id": project_id})["project"]["labels"]["nodes"]
     return next((label["name"] for label in on if (label.get("parent") or {}).get("name", "").lower() == REVIEW_GROUP
-                 and label["name"] in REVIEW_LEVELS), None)
+                 and review_label_level(label["name"])), None)
+
+
+def project_review_effort(project_id):
+    """The review effort of the project's label, or None when it has none."""
+    name = project_review_label(project_id)
+    return review_label_level(name) if name else None
 
 
 def set_project_review_effort(plan, project_id, level):
@@ -1062,7 +1083,7 @@ def set_project_review_effort(plan, project_id, level):
     changes = []
     sync_project_label(REVIEW_GROUP, "work-graph: the review effort of each effort (thorough, standard, light). "
                        "The coordinator follows it.", "review effort",
-                       team_id, project_id, level, True, changes, team_scoped=team_labels(plan))
+                       team_id, project_id, review_label(level), True, changes, team_scoped=team_labels(plan))
     return changes
 
 
@@ -1214,7 +1235,7 @@ def review_effort_command(plan_dir, plan, level):
         die("keymap.json has no project; run wg load --apply first, then wg review-effort")
     current = effort_review(plan_dir, km)
     if level:
-        if level != current or not project_review_effort(project_id):
+        if level != current or project_review_label(project_id) != review_label(level):
             set_project_review_effort(plan, project_id, level)
         print(f"review effort {level}" + (f" (was {current})" if level != current else ""))
     else:

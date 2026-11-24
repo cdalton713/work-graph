@@ -15,7 +15,8 @@ import { type Rules, linkRefusal, refusal } from "./access.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { LinearError, addComment, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, updateIssue } from "./linear.ts";
-import { type Connection, LinkHub, type Timers } from "./link.ts";
+import { type Connection, LinkHub, QUEUE_MAX, realTimers as realLinkTimers, type Timers } from "./link.ts";
+import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
 import { configureSite, site } from "../src/lib/site.ts";
 
@@ -50,6 +51,11 @@ export interface AppOptions {
   now?: () => number;
   /** The timers of the link heartbeat (tests). */
   linkTimers?: Timers;
+  /**
+   * The directory where the link keeps its queue and the open asks over a restart. Default: `WG_STATE_DIR`.
+   * None: the link keeps them in memory only.
+   */
+  stateDir?: string;
 }
 
 /** The app, and what the server process needs besides `fetch`. */
@@ -58,22 +64,46 @@ export type App = Hono & {
   injectWebSocket: (server: Server) => void;
   link: {
     hub: LinkHub; check: () => Promise<void>; stop: () => void;
-    /** The server stops: stop the timers and close each link socket (`LinkHub.shutdown`). */
-    shutdown: () => Promise<void>;
+    /** The server stops: stop the timers and close each link socket (`LinkHub.shutdown`). False: the link state was not written. */
+    shutdown: () => Promise<boolean>;
   };
 };
+
+/**
+ * The store of the link in `stateDir`, or none. The static route serves each file under `dist`, so a state directory
+ * there is refused. The store loads only the rooms of the configured workspaces: the overview shows the asks of each room.
+ */
+function linkStore(stateDir: string | undefined, dist: string, workspaces: Workspace[], after: Timers["after"]): Store | null {
+  if (!stateDir) return null;
+  if (isInside(stateDir, dist)) {
+    console.log(`link state: ${stateDir} is in the page directory ${dist}, which the server serves; the link keeps its state in memory only`);
+    return null;
+  }
+  const store = fileStore(stateDir, { queueMax: QUEUE_MAX, after });
+  const ids = new Set(workspaces.map((w) => w.id));
+  return {
+    ...store,
+    load: () => {
+      const { rooms } = store.load();
+      const kept = rooms.filter((r) => ids.has(r.ref.workspace));
+      if (kept.length < rooms.length) console.log(`link state: ignored ${rooms.length - kept.length} rooms of workspaces that the config does not name`);
+      return { rooms: kept };
+    },
+  };
+}
 
 /**
  * The app for `rules`. `rules` is read on each request, so a change of `rules.tailnet` takes
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
-export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, human, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
+export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, human, stateDir = process.env.WG_STATE_DIR || undefined, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   // The overview and the graph rules on the server use the same names as the page.
   configureSite({ human, defaultWorkspace: workspaces[0].id });
   const app = new Hono();
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   // `wrote` from wg: forget the cached graph of that project, so the pages that load again see the change.
-  const hub = new LinkHub(now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers);
+  const store = linkStore(stateDir, dist, workspaces, (linkTimers ?? realLinkTimers).after);
+  const hub = new LinkHub(now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers, store);
   hub.start();
   app.use(async (c, next) => {
     await next();

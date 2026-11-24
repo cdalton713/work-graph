@@ -6,6 +6,7 @@ import io
 import json
 import re
 import subprocess
+import threading
 import sys
 import tempfile
 import time
@@ -1048,6 +1049,20 @@ class BaseTests(DirTests):
         self.assertEqual(out, "FAIL base main: fatal: Needed a single revision\n")
         self.assertEqual(self.git("show-ref"), before)
         self.assertFalse((self.repo / ".git" / "FETCH_HEAD").exists())
+
+    def test_base_waits_for_a_refresh_that_holds_the_repository_lock(self):
+        self.metadata("main")
+        new = self.advance_origin()
+        done = []
+        with wg.base_lock(self.plan_dir):
+            worker = threading.Thread(target=lambda: done.append(wg.refresh_base(self.plan_dir, "main")))
+            worker.start()
+            worker.join(0.5)
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(self.git("rev-parse", "main"), self.old)
+        worker.join(10)
+        self.assertEqual(done, [f"{self.old[:10]} -> {new[:10]}"])
+        self.assertEqual(self.git("rev-parse", "main"), new)
 
     def test_base_reports_git_error_on_one_line(self):
         self.blob_ref("refs/stax/trunk", "release")
@@ -2248,6 +2263,7 @@ class JobTests(LaneTests):
         text = spec.read_text()
         for part in ("Linear issue `CD-1`", "node `a`", "branch `wg/ex-one-00-a`", "diff base `origin/main`",
                      "st branch submit --draft --no-restack", f"evidence {wg.shlex.quote(str(self.d.resolve()))} a`",
+                     f"base {wg.shlex.quote(str(self.d.resolve()))}`. It fast-forwards",
                      "in project `Example`"):
             self.assertIn(part, text)
         self.assertNotRegex(text, r"\{[a-z_]+\}")

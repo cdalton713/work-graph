@@ -127,7 +127,7 @@ How each branch kind is refreshed onto a moved base (review-and-merge.md "Restac
 | Branch | Refresh | Update push | stax |
 |---|---|---|---|
 | Lane on the stax trunk | If the parent merged: `st sync --force --no-stash --no-delete`. Then `st restack --stop-here --yes`. | `st branch submit --no-restack --no-native-stack --no-prompt --yes` | yes |
-| Lane on a frozen base | `wg claim … restack` refreshes the base first. If the parent merged: `st branch reparent --parent <target>`. Then `st restack --stop-here --yes`. Never `st sync`. | `st branch submit --no-restack --no-native-stack --no-prompt --yes` | yes |
+| Lane on a frozen base | `wg claim … restack` refreshes the base first. If the parent merged: `st branch reparent --parent <target>`. Then `st restack --stop-here --yes`. Never `st sync`. | `wg base <plan-dir>`, then `st branch submit --no-restack --no-native-stack --no-prompt --yes` | yes |
 | Lane on `effort/<slug>` | `main` must pass `wg preflight` (trunk or frozen base). The coordinator refreshes `effort/<slug>` first. If the parent merged: `st branch reparent --parent effort/<slug>`. Then `st restack --stop-here --yes`. | `st branch submit --no-restack --no-native-stack --no-prompt --yes` | yes |
 | HOTFIX | `git rebase origin/<release>` (stacked hotfix: the lane rows above) | `git push --force-with-lease origin <branch>` | no (stacked hotfix: yes) |
 | SYNC | `git merge origin/<release>` | `git push origin <branch>` | no |

@@ -45,7 +45,7 @@ When moving an existing setup, copy all of them, check that `wg status <new-dir>
 stax has one trunk for the repository (`git cat-file -p refs/stax/trunk`); it stays as it is. A lane runs in one of two modes:
 
 - **Target is the trunk:** `st sync` refreshes it.
-- **Target is an imported, frozen base:** its metadata (`git cat-file -p refs/branch-metadata/<target>`) has a non-empty `sourceRemote` and `"frozen": true`. stax never pushes, restacks, or syncs it. The coordinator refreshes it with `wg base <plan-dir>` (fast-forward only); on a `FAIL base` line it stops and asks the human.
+- **Target is an imported, frozen base:** its metadata (`git cat-file -p refs/branch-metadata/<target>`) has a non-empty `sourceRemote` and `"frozen": true`. stax never pushes, restacks, or syncs it. `wg base <plan-dir>` refreshes it (fast-forward only, one refresh at a time in the repository). The coordinator runs it, and each lane worker runs it immediately before each `st branch submit` (worker-spec.md "submit lane"), because the base moves while a worker runs and stax refuses a submit whose parent is behind `origin`. On a `FAIL base` line the coordinator stops and asks the human; a worker escalates.
 
 Setup of a base, one time for each branch, in the checkout that holds it: `st get <target> --parent <trunk> --no-checkout --downstack --no-restack && st freeze <target>`. Only the human runs or approves it: on `FAIL trunk` the coordinator stops and asks them. In a routine refresh, the coordinator and the workers never run `st sync`, `st get`, `st unfreeze`, or `st branch untrack` on a frozen base. If the human later makes a base the trunk, they first run `st branch untrack <branch>`.
 

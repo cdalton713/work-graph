@@ -19,6 +19,8 @@
 
 ## submit lane
 
+Immediately before each `st branch submit`, run `{wg} base {plan_dir}`. It fast-forwards the frozen target branch to `origin` (never a reset or a merge), so stax does not refuse the submit with `Parent branch … is not in sync`. A `FAIL base` line: send an `escalation` with that line and stop; never fast-forward, reset, or sync the base yourself.
+
 First PR: `st branch submit --draft --no-restack --no-native-stack --no-prompt --yes` (current branch only; `--no-restack` keeps the tested head). Title in conventional commit form. Check that the PR head equals the SHA that `wg evidence` tested, and with `st ll` that the base is `{parent}`. Each later update: `st branch submit --no-restack --no-native-stack --no-prompt --yes`. Never run `st submit` or `st ss`, and never omit `--no-native-stack`: a native GitHub stack retargets the bottom PR to the stax trunk. Then check scope: `gh pr view <n> --json commits --jq '.commits|length'` must equal `git rev-list --count {lower}..HEAD`; a larger number means the branch is not based on its PR base, so stop and report it.
 
 ## submit hotfix

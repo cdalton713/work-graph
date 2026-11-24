@@ -1864,7 +1864,26 @@ def base_git_error(result):
     return f"{first}; {last}" if first != last else last
 
 
+@contextlib.contextmanager
+def base_lock(plan_dir):
+    """One base refresh at a time in a repository. Workers run `wg base` before each submit, often at once."""
+    result = command("git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=plan_dir)
+    if result.returncode:
+        raise ReadError(base_git_error(result))
+    fd = os.open(Path(result.stdout.strip()) / "wg-base.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def refresh_base(plan_dir, target):
+    with base_lock(plan_dir):
+        return _refresh_base(plan_dir, target)
+
+
+def _refresh_base(plan_dir, target):
     def git(*args):
         result = command("git", *args, cwd=plan_dir)
         if result.returncode:

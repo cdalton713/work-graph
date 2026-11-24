@@ -241,10 +241,20 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, hum
     pageChanged(ref, "comment", [info?.identifier ?? c.req.param("id")]);
     // A comment in the page on an issue that waits on the human is their answer: the label `answered` marks it
     // in Linear (wg next finds it there after a restart), and the message wakes the coordinator at once.
+    // The comment is saved before the label: when the label fails, the answer is still 200. A retry from
+    // the page would write a second comment, so the coordinator gets the message, and `answered: false`
+    // tells the page that the label is missing.
     if (ref && info?.status === site.waitStatus) {
-      await markAnswered(c.req.param("id"));
+      let answered = true;
+      try {
+        await markAnswered(c.req.param("id"));
+      } catch (error) {
+        answered = false;
+        console.warn(`wg ui: comment saved, but the answered label failed: ${(error as Error).message}`);
+      }
       graphs().clear();
       hub.publish(ref, "answer", { issue: info.identifier, key: info.key, body: comment.body });
+      return c.json({ ...comment, answered });
     }
     return c.json(comment);
   });

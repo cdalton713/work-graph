@@ -91,6 +91,10 @@ pnpm test
 the page on your tailnet with Tailscale Serve while it runs; `--no-tailnet` keeps it on this machine. Keys stay in
 the server. Every graph, edit, comment, and cache is scoped to its workspace.
 
+The server sends at most 6 Linear requests at the same time. It tries a query again, at most 3 tries, after a
+network error, a timeout, HTTP 429, HTTP 5xx, or Linear's `RATELIMITED` error. It tries a mutation again only after
+HTTP 429 or `RATELIMITED`, because Linear can have applied a mutation that timed out.
+
 ## Host the page
 
 The `Dockerfile` builds the page and its server. Run the container behind a proxy that serves HTTPS, and set:

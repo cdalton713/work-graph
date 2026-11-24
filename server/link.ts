@@ -140,14 +140,22 @@ export class LinkHub {
 
   /**
    * The server stops: stop the heartbeat and close each socket with `RESTART_CODE`. The promise resolves when
-   * all sockets closed, or after `SHUTDOWN_MS`.
+   * all sockets closed, or after `SHUTDOWN_MS`. Then the store writes what still waits: an acknowledgment can
+   * arrive while the sockets close.
    */
   shutdown(): Promise<void> {
     if (this.stopping) return this.stopping.done;
     this.stop();
-    this.store?.flush();
     let finish = () => {};
-    const done = new Promise<void>((ok) => { finish = ok; });
+    const done = new Promise<void>((ok) => {
+      let finished = false;
+      finish = () => {
+        if (finished) return;
+        finished = true;
+        this.store?.flush();
+        ok();
+      };
+    });
     const cancel = this.timers.after(() => finish(), SHUTDOWN_MS);
     this.stopping = { drained: () => { cancel(); finish(); }, done };
     if (!this.sockets.size) this.stopping.drained();
@@ -368,7 +376,8 @@ export class LinkHub {
           const ids = new Set(Array.isArray(payload.ids) ? payload.ids.filter((id): id is string => typeof id === "string") : []);
           const before = room.queue.length;
           room.queue = room.queue.filter((m) => !ids.has(m.id));
-          if (room.queue.length !== before) this.changed();
+          // At once, not after the debounce: a process that stops before it must not send the message again.
+          if (room.queue.length !== before) { this.changed(); this.store?.flush(); }
           this.announce(room);
         } else if (type === "asks") {
           room.asks = (Array.isArray(payload.asks) ? payload.asks.filter(isObject) : []).slice(0, ASKS_MAX).map((a) => ({

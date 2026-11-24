@@ -59,10 +59,10 @@ export function fileStore(
   const file = join(dir, STATE_FILE);
   let pending: (() => LinkState) | null = null;
   let cancel: (() => void) | null = null;
+  // `pending` stays until the rename succeeds, so that a failed write is tried again.
   const write = () => {
     cancel = null;
     const state = pending;
-    pending = null;
     if (!state) return;
     const { rooms } = state();
     const text = JSON.stringify({
@@ -74,8 +74,10 @@ export function fileStore(
       const temp = `${file}.${process.pid}.tmp`;
       writeFileSync(temp, text, { mode: 0o600 });
       renameSync(temp, file);
+      if (pending === state) pending = null;
     } catch (error) {
-      log(`link state: cannot write ${file}: ${(error as Error).message}`);
+      log(`link state: cannot write ${file}: ${(error as Error).message}; the next try is in ${SAVE_MS} ms`);
+      cancel ??= after(write, SAVE_MS);
     }
   };
   return {

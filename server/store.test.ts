@@ -39,10 +39,11 @@ describe("fileStore", () => {
     const reply = first.publish(A, "reply", { ask: "ask-0", issue: "CD-1", key: "a", body: "main" });
     const command = first.publish(A, "command", { name: "dispatch", key: "b", issue: "CD-2" });
     const done = first.publish(A, "command", { name: "next", key: null, issue: null });
-    c.receive(msg("ack", { ids: [done.id] }));
     // One write for all the changes, at most SAVE_MS after the first.
     expect(timer.waiting()).toEqual([SAVE_MS]);
     timer.run();
+    c.receive(msg("ack", { ids: [done.id] })); // written at once
+    expect(timer.waiting()).toEqual([]);
     expect(statSync(join(dir, STATE_FILE)).mode & 0o777).toBe(0o600);
 
     const second = new LinkHub(undefined, undefined, undefined, store());
@@ -71,6 +72,74 @@ describe("fileStore", () => {
     const again = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
     c2.receive(hello("s2"));
     expect(again.sent).toEqual([]);
+  });
+
+  it("writes an acknowledgment at once, so a hub that starts before the debounce timer does not send the message again", () => {
+    const dir = tempDir(), timer = fakeAfter();
+    const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: () => {} });
+    const hub = new LinkHub(undefined, undefined, undefined, store());
+    const sent = hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
+    timer.run();
+    const c = hub.joinCoordinator(peer(), A);
+    c.receive(hello("s1"));
+    c.receive(msg("ack", { ids: [sent.id] }));
+    // No timer runs and no shutdown: the process stops here.
+    const again = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
+    c2.receive(hello("s2"));
+    expect(again.sent).toEqual([]);
+  });
+
+  it("writes the state after the sockets closed, with an acknowledgment that came while they closed", async () => {
+    const dir = tempDir(), timer = fakeAfter();
+    const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: () => {} });
+    const hub = new LinkHub(undefined, undefined, undefined, store());
+    const sent = hub.publish(A, "reply", { ask: "ask-1", issue: "CD-1", key: "a", body: "main" });
+    timer.run();
+    const c = hub.joinCoordinator(peer(), A);
+    c.receive(hello("s1"));
+    const stopped = hub.shutdown();
+    c.receive(msg("ack", { ids: [sent.id] }));
+    hub.publish(A, "command", { name: "next", key: null, issue: null }); // an HTTP request while the sockets close
+    c.closed();
+    await stopped;
+    const again = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
+    c2.receive(hello("s2"));
+    expect(again.sent.map((m) => m.type)).toEqual(["command"]);
+  });
+
+  it("keeps a change after a failed write, and writes it at the next try", () => {
+    const parent = tempDir(), dir = join(parent, "state"), timer = fakeAfter(), logs: string[] = [];
+    writeFileSync(dir, "a file where the directory must be");
+    const store = fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: (l) => logs.push(l) });
+    const hub = new LinkHub(undefined, undefined, undefined, store);
+    const sent = hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
+    timer.run();
+    expect(logs.filter((l) => l.includes("cannot write"))).toHaveLength(1);
+    expect(timer.waiting()).toEqual([SAVE_MS]); // the next try
+    rmSync(dir);
+    store.flush();
+    const saved = JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8"));
+    expect(saved.rooms[0].queue.map((m: Envelope) => m.id)).toEqual([sent.id]);
+    expect(timer.waiting()).toEqual([]);
+  });
+
+  it("removes an answered ask from the file, and keeps at most 100 asks of a room", () => {
+    const dir = tempDir(), timer = fakeAfter();
+    const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: () => {} });
+    const asks = Array.from({ length: 150 }, (_, i) => ({ ...ask, id: `ask-${i}` }));
+    const many = store();
+    many.save(() => ({ rooms: [{ ref: A, queue: [], asks }] }));
+    many.flush();
+    const saved = JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8"));
+    expect(saved.rooms[0].asks.map((a: { id: string }) => a.id)).toEqual(asks.slice(0, 100).map((a) => a.id));
+
+    const hub = new LinkHub(undefined, undefined, undefined, store());
+    expect(hub.ask(A, "ask-0")).toEqual(asks[0]);
+    hub.answered(A, "ask-0");
+    timer.run();
+    const after = new LinkHub(undefined, undefined, undefined, store());
+    expect(after.ask(A, "ask-0")).toBeNull();
+    expect(after.ask(A, "ask-1")).toEqual(asks[1]);
   });
 
   it("starts empty with one log line when the file is unreadable or of another version", () => {
@@ -102,6 +171,20 @@ describe("fileStore", () => {
     app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
     app.link.stop();
     expect(() => readFileSync(join(dir, STATE_FILE))).toThrow();
+  });
+
+  it("builds the store from WG_STATE_DIR when the app gets no state directory", async () => {
+    const dir = tempDir();
+    process.env.WG_STATE_DIR = dir;
+    try {
+      const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: dir, watchMs: 0 });
+      const sent = app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
+      await app.link.shutdown();
+      const saved = JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8"));
+      expect(saved.rooms[0].queue.map((m: Envelope) => m.id)).toEqual([sent.id]);
+    } finally {
+      delete process.env.WG_STATE_DIR;
+    }
   });
 
   it("builds the store from the state directory of the app", async () => {

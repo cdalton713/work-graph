@@ -4508,7 +4508,7 @@ class ReviewEffortTests(DirTests):
             wg.review_effort_command(self.d, self.plan, "standard")
             wg.review_effort_command(self.d, self.plan, None)
         self.assertEqual(out.getvalue(), "review effort standard (was thorough)\nreview effort standard\n")
-        self.assertEqual(self.sets, [("review", "standard", True)])
+        self.assertEqual(self.sets, [("review", "review:standard", True)])
         self.assertEqual(self.seen(), "standard")
         self.assertEqual(self.lines(), [("note", "review @effort -: standard")])
 
@@ -4523,6 +4523,71 @@ class ReviewEffortTests(DirTests):
             [(level, text)] = REVIEW_LINES(self.d, self.plan)
         self.assertEqual(level, "note")
         self.assertIn("review effort not read", text)
+
+    def strict_linear(self, on_project):
+        """A fake Linear with the workspace rule: one project label for each name, also in two groups. The
+        group `autonomy` and its three levels exist."""
+        labels = [{"id": "ga", "name": "autonomy", "isGroup": True, "retiredAt": None, "parent": None}]
+        labels += [{"id": f"a-{n}", "name": n, "isGroup": False, "retiredAt": None, "parent": {"id": "ga"}}
+                   for n in wg.AUTONOMY_LEVELS]
+
+        def gql(query, variables=None):
+            if "projectLabels(" in query:
+                return {"projectLabels": {"nodes": labels}}
+            if "projectLabelCreate" in query:
+                i = variables["i"]
+                if any(label["name"].lower() == i["name"].lower() for label in labels):
+                    raise wg.ReadError(f'Linear error: [{{"message": "duplicate label name: Label {i["name"]} '
+                                       'already exists in the workspace"}]')
+                made = {"id": f"l{len(labels)}", "name": i["name"], "isGroup": i.get("isGroup", False), "retiredAt": None,
+                        "parent": {"id": i["parentId"]} if "parentId" in i else None}
+                labels.append(made)
+                return {"projectLabelCreate": {"projectLabel": {"id": made["id"]}}}
+            by_id = {label["id"]: label for label in labels}
+            if "projectRemoveLabel" in query:
+                on_project.remove(variables["l"])
+                return {"projectRemoveLabel": {"success": True}}
+            if "projectAddLabel" in query:
+                on_project.append(variables["l"])
+                return {"projectAddLabel": {"success": True}}
+            if "project(id" in query:
+                nodes = [{"id": by_id[l]["id"], "name": by_id[l]["name"],
+                          "parent": by_id[by_id[l]["parent"]["id"]] if by_id[l]["parent"] else None} for l in on_project]
+                return {"project": {"labels": {"nodes": nodes}}}
+            raise AssertionError(query)
+        return labels, gql
+
+    def test_each_level_is_set_in_a_workspace_where_autonomy_has_standard(self):
+        on_project = ["a-full"]
+        labels, gql = self.strict_linear(on_project)
+        out = io.StringIO()
+        with patch.object(wg, "gql", side_effect=gql), patch.object(wg, "team_info", return_value=("cd", {}, {})), \
+             patch.object(wg, "team_labels", return_value=False), patch.object(wg.time, "sleep"), \
+             contextlib.redirect_stdout(out):
+            for level in ("standard", "light", "thorough"):
+                wg.review_effort_command(self.d, self.plan, level)
+                self.assertEqual(wg.effort_review(self.d), level)
+                names = {label["id"]: label["name"] for label in labels}
+                self.assertEqual(sorted(names[l] for l in on_project), sorted(["full", f"review:{level}"]))
+        self.assertEqual(out.getvalue(), "review effort standard (was thorough)\nreview effort light (was standard)\n"
+                                         "review effort thorough (was light)\n")
+        self.assertEqual(sorted(label["name"] for label in labels if (label["parent"] or {}).get("id") == "l4"),
+                         ["review:light", "review:standard", "review:thorough"])
+
+    def test_an_old_label_without_the_prefix_is_read_and_replaced(self):
+        on_project = ["a-full", "old"]
+        labels, gql = self.strict_linear(on_project)
+        labels += [{"id": "gr", "name": "review", "isGroup": True, "retiredAt": None, "parent": None},
+                   {"id": "old", "name": "light", "isGroup": False, "retiredAt": None, "parent": {"id": "gr"}}]
+        out = io.StringIO()
+        with patch.object(wg, "gql", side_effect=gql), patch.object(wg, "team_info", return_value=("cd", {}, {})), \
+             patch.object(wg, "team_labels", return_value=False), contextlib.redirect_stdout(out):
+            self.assertEqual(wg.effort_review(self.d), "light")
+            wg.review_effort_command(self.d, self.plan, "light")
+            self.assertEqual(wg.effort_review(self.d), "light")
+        self.assertEqual(out.getvalue(), "review effort light\n")
+        names = {label["id"]: label["name"] for label in labels}
+        self.assertEqual(sorted(names[l] for l in on_project), ["full", "review:light"])
 
     def test_the_contract_does_not_change(self):
         # A page menu for the level is later work: the contract between wg and the page has no review group.

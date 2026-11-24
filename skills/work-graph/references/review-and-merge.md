@@ -26,7 +26,7 @@ Done when: the node's run row has `review=clean` or `review=accepted`, or the is
 <!-- explain: review -->
 ## Review effort
 
-The review effort sets how much review each PR gets. It is a label of the Linear project: one child of the single-select project label group `review` (`thorough`, `standard`, or `light`). No label means `thorough`. `wg review-effort <plan-dir>` prints the level; `wg review-effort <plan-dir> <level>` sets it. Ask for it at the start of each run in the same `AskUserQuestion` call as the autonomy level, with the same exceptions (autonomy.md): put the current level first, marked "(current)". Then record it with `wg review-effort <plan-dir> <level>`.
+The review effort sets how much review each PR gets. It is a label of the Linear project: one child of the single-select project label group `review` (`thorough`, `standard`, or `light`). No label means `thorough`. The child labels are `review:thorough`, `review:standard`, and `review:light`, because a workspace has one project label for each name and the group `autonomy` has `standard`; `wg` reads an old label `thorough` or `light` as its level, and the next `wg review-effort <plan-dir> <level>` replaces it. `wg review-effort <plan-dir>` prints the level; `wg review-effort <plan-dir> <level>` sets it. Ask for it at the start of each run in the same `AskUserQuestion` call as the autonomy level, with the same exceptions (autonomy.md): put the current level first, marked "(current)". Then record it with `wg review-effort <plan-dir> <level>`.
 
 | Level | Wave review | Merge review |
 |---|---|---|

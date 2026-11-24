@@ -28,7 +28,7 @@ that Python, and without it `wg next` polls Linear.
   wg verify    <dir> <key>
   wg owns overlap <dir> <key>...
   wg owns diff    <dir> <key> <base>
-  wg tick      [--root <dir>]... [--channel none] [--install | --uninstall]
+  wg tick      [--root <dir>]... [--channel none|notify] [--install | --uninstall]
   wg wake      <dir>
   wg autostart <dir> [--install | --uninstall]
   wg config
@@ -81,7 +81,7 @@ DEFAULT_WORKSPACE = {"id": "default", "name": "Linear", "team": None, "teams": N
 DEFAULT_CONFIG = {"human": "Human", "page_url": None, "github_user": None, "tick_roots": ["~/Projects"],
                   "tick_label": "dev.work-graph.tick", "test_runner": None, "branch_prefix": "wg/",
                   "release_branch": "release", "rules": "~/.config/work-graph/rules.md",
-                  "workspaces": [DEFAULT_WORKSPACE]}
+                  "notify": [], "workspaces": [DEFAULT_WORKSPACE]}
 
 
 def read_config(path=CONFIG_PATH):
@@ -98,7 +98,28 @@ def read_config(path=CONFIG_PATH):
         raise SystemExit(f"{path}: each workspace needs a unique id of a-z, 0-9 and -")
     if not isinstance(config["human"], str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9 ]*", config["human"]):
         raise SystemExit(f"{path}: human must be a name of letters, digits and spaces")
+    if problem := notify_problem(config["notify"]):
+        raise SystemExit(f"{path}: notify: {problem}")
     return config | {"workspaces": workspaces}
+
+
+def notify_problem(channels):
+    """What is wrong with the config field `notify`, or None. A webhook names where its URL is, never the URL."""
+    if not isinstance(channels, list):
+        return "must be a list of channels"
+    for i, channel in enumerate(channels):
+        kind = channel.get("type") if isinstance(channel, dict) else None
+        if kind == "webhook":
+            names = [channel.get(f) for f in ("url_env", "url_file") if f in channel]
+            if "url" in channel or not names or not all(isinstance(n, str) and n for n in names):
+                return f"channel {i}: a webhook needs url_env or url_file (the URL never goes in the config)"
+        elif kind == "command":
+            argv = channel.get("argv")
+            if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
+                return f"channel {i}: a command needs argv, a list of strings"
+        else:
+            return f"channel {i}: type must be webhook or command"
+    return None
 
 
 CONFIG = read_config()
@@ -4141,6 +4162,7 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                     link.send("progress", {"nodes": progress_nodes(plan_dir)})
                 if copy:
                     publish(plan_dir, plan, head, lines, wait_interval=interval if wait else None)
+                notify_effort(plan_dir, plan, lines, any(t.startswith("paused @effort") for _, t in lines))
                 if done:
                     print(head)
                     for line in terminal_lines(plan_dir, lines, everything, [n["key"] for n in plan["nodes"]]):
@@ -4342,7 +4364,127 @@ def discard_notice(page, entries):
     return True
 
 
-TICK_CHANNELS = {"none": discard_notice}
+# `notify`: the notice of notify_effort, through the channels of the config field `notify`. It replaces the digest.
+TICK_CHANNELS = {"none": discard_notice, "notify": discard_notice}
+TICK_DEFAULT_CHANNEL = "notify" if CONFIG["notify"] else "none"
+
+# ---------------------------------------------------------------- notices (config field `notify`)
+
+NOTIFY_RETRY = 300  # seconds: after a failed send, the next try waits this long
+NOTIFY_TIMEOUT = 20  # seconds for one channel
+
+
+def notify_entries(lines, asks):
+    """The moves that are the human's: each `wait human` line, each `do ask` line, and each open worker question.
+    Returns {id: text}; the id is a hash of the text, so the run row holds no text."""
+    texts = [f"{level} {text}" for level, text in lines
+             if (level, text.split(" ", 1)[0]) == ("wait", "human")
+             or (level == "do" and text.split(" ", 1)[0] in {"ask", "ask-ready", "ask-merge"})]
+    for ask in asks:
+        body = " ".join(str(ask.get("body") or "").split())
+        texts.append(f"question {ask.get('issue') or ask.get('key')}: {body[:200]}")
+    return {hashlib.sha256(t.encode()).hexdigest()[:12]: t for t in texts}
+
+
+def notify_url(channel):
+    """The URL of a webhook: from the environment variable `url_env`, else the mode-600 file `url_file`."""
+    url = os.environ.get(channel["url_env"], "").strip() if channel.get("url_env") else ""
+    if not url and channel.get("url_file"):
+        path = Path(channel["url_file"]).expanduser()
+        if not path.is_file():
+            raise ReadError(f"no URL: {channel.get('url_env') or '-'} is not set and {path} does not exist")
+        if path.stat().st_mode & 0o077:
+            raise ReadError(f"{path} is readable by group or others; set mode 600")
+        url = path.read_text().strip()
+    if not url:
+        raise ReadError(f"no URL: set {channel.get('url_env')}")
+    return url
+
+
+def notify_post(url, data, headers):
+    """One HTTP POST. Tests replace it (the fake transport)."""
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=NOTIFY_TIMEOUT) as response:
+        response.read()
+
+
+def send_webhook(channel, title, body, link):
+    """POST {title, body, url, text} as JSON. `text` is for a Slack-compatible incoming webhook. A plain ntfy
+    topic URL takes the body as a template: the headers name the fields for the title and the message."""
+    url = notify_url(channel)
+    text = f"{title}\n{body}\n{link}"
+    data = json.dumps({"title": title, "body": f"{body}\n{link}", "url": link, "text": text}).encode()
+    headers = {"Content-Type": "application/json", "X-Template": "yes", "X-Title": "{{.title}}",
+               "X-Message": "{{.body}}", "X-Click": link}
+    try:
+        notify_post(url, data, headers)
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        # The URL is a secret (a topic or a webhook token): no error text names it.
+        raise ReadError(str(e).replace(url, "<url>") or type(e).__name__) from None
+
+
+def send_command(channel, title, body, link):
+    """Run argv with the notice text on stdin."""
+    try:
+        result = subprocess.run(channel["argv"], input=f"{title}\n{body}\n{link}\n", capture_output=True,
+                                text=True, timeout=NOTIFY_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ReadError(f"{channel['argv'][0]}: {e}") from None
+    if result.returncode != 0:
+        raise ReadError(f"{channel['argv'][0]}: {one_line(command_error(result), 200)}")
+
+
+NOTIFY_SENDERS = {"webhook": send_webhook, "command": send_command}
+
+
+def notify_effort(plan_dir, plan, lines, paused, asks=None):
+    """Send one notice when the human's moves (notify_entries) have an entry that the last notice did not have.
+
+    The run row field `notified` holds the ids of the entries that were sent and still stand; an entry that goes
+    away is removed, so it is sent again if it comes back. A failed send is one `warn notify:` line; the next try
+    waits NOTIFY_RETRY seconds (`notify_failed`). No channels or a paused effort: nothing. It never raises."""
+    channels = CONFIG.get("notify") or []
+    if not channels or paused:
+        return None
+    try:
+        entries = notify_entries(lines, open_asks(plan_dir) if asks is None else asks)
+        effort = run_rows(load_keymap(plan_dir))["effort"]
+        sent = {i for i in (effort.get("notified") or "").split(",") if i}
+        new = [i for i in entries if i not in sent]
+        failed = effort.get("notify_failed")
+        if new and failed and (utc_now() - parse_utc(failed)).total_seconds() < NOTIFY_RETRY:
+            new = []
+        errors = []
+        if new:
+            title = f"work-graph: {len(new)} new move(s) for {HUMAN} in {plan['effort']['name']}"
+            body = "\n".join(entries[i] for i in new)
+            for channel in channels:
+                try:
+                    NOTIFY_SENDERS[channel["type"]](channel, title, body, page_link(plan))
+                except ReadError as e:
+                    errors.append(f"{channel['type']}: {one_line(e, 200)}")
+        with plan_lock(plan_dir):
+            km = load_keymap(plan_dir)
+            row = run_rows(km)["effort"]
+            before = dict(row)
+            kept = {i for i in (row.get("notified") or "").split(",") if i} & entries.keys()
+            if errors:
+                row["notify_failed"] = f"{utc_now():%Y-%m-%dT%H:%M:%SZ}"
+            else:
+                kept |= set(new)
+                row.pop("notify_failed", None)
+            if kept:
+                row["notified"] = ",".join(sorted(kept))
+            else:
+                row.pop("notified", None)
+            if row != before:
+                save_keymap(plan_dir, km)
+        for error in errors:
+            print(f"warn notify: {error}", file=sys.stderr, flush=True)
+        return "failed" if errors else ("sent" if new else None)
+    except (ReadError, OSError, ValueError, KeyError, TypeError) as e:
+        print(f"warn notify: {one_line(e, 200)}", file=sys.stderr, flush=True)
+        return "failed"
 
 
 def coordinator_listens(doc_id):
@@ -4377,7 +4519,7 @@ def tick_members(inputs, lines, triage):
     return members
 
 
-def tick_refresh(plan_dir, plan, km, record):
+def tick_refresh(plan_dir, plan, km, record, notify=False):
     inputs = snapshot(plan_dir, plan, copy.deepcopy(km))
     statuses = inputs[3]
     ships = [node["key"] for node in plan["nodes"] if node["kind"] == "ship-point"]
@@ -4396,11 +4538,13 @@ def tick_refresh(plan_dir, plan, km, record):
     skipped = publish(plan_dir, plan, head, lines, expected=km)
     if skipped:
         return skipped, None
+    if notify and not complete:
+        notify_effort(plan_dir, plan, lines, effort_paused(plan_dir, plan))
     record["complete"] = complete
     return None, members
 
 
-def tick_effort(plan_dir, state, save, sender):
+def tick_effort(plan_dir, state, save, sender, notify=False):
     plan = load_plan(plan_dir, strict=True)
     km = load_keymap(plan_dir)
     project = (km.get("project") or {}).get("id")
@@ -4411,7 +4555,7 @@ def tick_effort(plan_dir, state, save, sender):
     token = LINEAR_WORKSPACE.set(workspace)
     try:
         linear_key()
-        skipped, members = tick_refresh(plan_dir, plan, km, record)
+        skipped, members = tick_refresh(plan_dir, plan, km, record, notify)
         if skipped:
             outcome = f"skipped: {skipped}"
         else:
@@ -4484,7 +4628,7 @@ def tick_command(ns):
         failed = False
         for path in plans:
             try:
-                outcome = tick_effort(path, state, save, TICK_CHANNELS[ns.channel])
+                outcome = tick_effort(path, state, save, TICK_CHANNELS[ns.channel], ns.channel == "notify")
             except TICK_ERRORS as error:
                 outcome = tick_error(error)
                 state.setdefault("path-errors", {})[str(path)] = {"at": utc_now().isoformat(), "result": outcome}
@@ -5972,7 +6116,7 @@ def cli_parser():
     c.add_argument("--write", action="store_true")
     tick_parser = sub.add_parser("tick", help="refresh the page for each loaded effort")
     tick_parser.add_argument("--root", action="append", type=Path)
-    tick_parser.add_argument("--channel", choices=TICK_CHANNELS, default="none")
+    tick_parser.add_argument("--channel", choices=TICK_CHANNELS, default=TICK_DEFAULT_CHANNEL)
     mode = tick_parser.add_mutually_exclusive_group()
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--uninstall", action="store_true")

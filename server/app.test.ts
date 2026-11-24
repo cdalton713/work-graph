@@ -789,13 +789,13 @@ describe("link sockets of the server", () => {
     expect(live.ws.readyState).toBe(WebSocket.OPEN);
   });
 
-  it("on SIGTERM closes each socket with 1012, refuses a new one with 503, and then exits", async () => {
+  it.each(["SIGTERM", "SIGINT"] as const)("on %s closes each socket with 1012, refuses a new one with 503, and then exits", async (signal) => {
     const { server, port, running } = await start();
     const a = await page(port), b = await page(port);
     const signals = new EventEmitter();
     const exit = vi.fn();
     stopOnSignals(() => server.link.shutdown(), (signal, fn) => signals.on(signal, fn), exit);
-    signals.emit("SIGTERM");
+    signals.emit(signal);
     const status = await new Promise<number>((ok) => {
       const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=page`, { headers: { origin: `http://127.0.0.1:${port}` } });
       ws.on("unexpected-response", (_req, res) => ok(res.statusCode ?? 0));

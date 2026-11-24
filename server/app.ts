@@ -372,6 +372,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     for (const ref of active) {
       const workspace = workspaces.find((w) => w.id === ref.workspace);
       if (!workspace) continue;
+      // The coordinator can go away while the check of all projects waits for Linear: then no load for it.
+      if (!hub.active().some((r) => projectKey(r) === projectKey(ref))) {
+        seen.delete(projectKey(ref));
+        continue;
+      }
       try {
         const { data } = await linearWorkspace.run(workspace, () => caches.get(workspace.id)!.get(ref.id));
         const now = fingerprint(data), before = seen.get(projectKey(ref));

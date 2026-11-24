@@ -287,6 +287,18 @@ describe("LinkHub heartbeat, prune, and shutdown", () => {
     expect(hub.presence(A).coordinators[0]).toMatchObject({ connected: true, mode: "waiting" });
   });
 
+  it("ignores a first message of an unknown type, before hello, and keeps the connection", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const hub = new LinkHub();
+    const p = peer(), c = hub.joinCoordinator(p, A);
+    c.receive(msg("notice", { text: "from a newer wg" }));
+    expect(p.closed).toEqual([]);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(String(log.mock.calls[0][0])).toBe('link: ignored a message of unknown type "notice" from "(no hello yet)"');
+    c.receive(msg("state", { mode: "working", head: "", lines: [] })); // a known type still needs hello
+    expect(p.closed.map((x) => x.reason)).toEqual(["send hello first"]);
+  });
+
   it("removes a coordinator gone for GONE_MS, and a room with no page, coordinator, queue, ask, or socket", () => {
     const { time, hub } = started();
     const P3 = { workspace: "work", id: "p3" }, P4 = { workspace: "work", id: "p4" };
@@ -547,19 +559,54 @@ describe("/api/link over a real socket", () => {
     expect(calls()).toBe(before); // no live coordinator: no Linear request
   });
 
+  it("loads no graph for a project whose last coordinator timed out while the check of all projects waited", async () => {
+    fakeLinear();
+    const time = fakeTime();
+    const { app, port } = await start(time.clock, time.timers);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=coordinator&workspace=work&project=p1`, { autoPong: false });
+    const closed = new Promise<number>((ok) => ws.once("close", (code) => ok(code)));
+    await new Promise((ok) => ws.once("open", ok));
+    closers.push(() => ws.terminate());
+    ws.send(JSON.stringify({ v: 1, type: "hello", id: "h", project: { workspace: "work", id: "" }, at: "", payload: { plan: "p", session: "sleeping", host: "test", wg: "1" } }));
+    await vi.waitFor(() => expect(app.link.hub.active()).toHaveLength(1));
+    await app.link.check(); // the graph of p1 is now in the cache
+    time.clock.at += 60_000; // past the time in which the cache answers from memory
+    // The next check of all projects waits for Linear; the coordinator times out meanwhile.
+    const inner = globalThis.fetch;
+    const queries: string[] = [];
+    let release = () => {}, asked = () => {};
+    const gate = new Promise<void>((ok) => { release = ok; });
+    const waiting = new Promise<void>((ok) => { asked = ok; });
+    vi.stubGlobal("fetch", async (...args: Parameters<typeof fetch>) => {
+      const { query } = JSON.parse((args[1] as RequestInit).body as string);
+      queries.push(query);
+      if (query.includes("project:{id:{in:$ids}}")) { asked(); await gate; }
+      return inner(...args);
+    });
+    const checked = app.link.check();
+    await waiting;
+    time.advance(DEAD_MS);
+    expect(await closed).toBe(1006);
+    expect(app.link.hub.active()).toEqual([]);
+    release();
+    await checked;
+    expect(queries.filter((q) => q.includes("issues(first:25"))).toEqual([]); // no load of the graph
+  });
+
   it("refuses with 503 an upgrade that waited for its project while the server began to stop", async () => {
     fakeLinear();
     const inner = globalThis.fetch;
-    let release = () => {};
+    let release = () => {}, asked = () => {};
     const gate = new Promise<void>((ok) => { release = ok; });
-    vi.stubGlobal("fetch", async (...args: Parameters<typeof fetch>) => { await gate; return inner(...args); });
+    const lookup = new Promise<void>((ok) => { asked = ok; });
+    vi.stubGlobal("fetch", async (...args: Parameters<typeof fetch>) => { asked(); await gate; return inner(...args); });
     const { app, port } = await start();
     const status = new Promise<number>((ok) => {
       const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=coordinator&workspace=work&project=Effort%20A`);
       ws.on("unexpected-response", (_req, res) => ok(res.statusCode ?? 0));
       ws.on("open", () => { ws.close(); ok(101); });
     });
-    await new Promise((ok) => setTimeout(ok, 30)); // the upgrade now waits for the project list
+    await lookup; // the upgrade now waits for the project list
     const stopped = app.link.shutdown();
     release();
     expect(await status).toBe(503);

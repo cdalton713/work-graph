@@ -39,6 +39,10 @@ const realTimers: Timers = {
 };
 interface Socket { peer: Peer; room: string | null; deadline: (() => void) | null; arm: () => void; closed: () => void }
 
+/** The message types that a coordinator sends. The record makes the compiler check that it names each one. */
+const KNOWN_TYPES: Record<keyof FromCoordinator, true> = { hello: true, wrote: true, state: true, ack: true, asks: true, progress: true };
+const KNOWN = new Set<string>(Object.keys(KNOWN_TYPES));
+
 /** A client text as one log line: JSON escapes each control character, and the two Unicode line separators too. */
 const logField = (v: string) => JSON.stringify(v).replace(/[\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16)}`);
 
@@ -325,6 +329,12 @@ export class LinkHub {
           for (const queued of room.queue) peer.send(JSON.stringify(queued));
           return this.announce(room);
         }
+        if (!KNOWN.has(message.type)) {
+          // A newer wg can send a type that this server does not know yet, also as its first message: ignore it,
+          // and keep the connection.
+          console.log(`link: ignored a message of unknown type ${logField(text(message.type, 100))} from ${logField(me?.hello.session ?? "(no hello yet)")}`);
+          return;
+        }
         if (!me) return fail("send hello first");
         me.lastSeen = at;
         const type = message.type as keyof FromCoordinator;
@@ -347,9 +357,6 @@ export class LinkHub {
             ci: text(n.ci, 200) || null, evidence: text(n.evidence, 500) || null, at: text(n.at, 50) || null,
           })).filter((n) => n.key);
           this.toPages(room, "progress", { nodes: room.progress });
-        } else {
-          // A newer wg can send a type that this server does not know yet: ignore it, and keep the connection.
-          console.log(`link: ignored a message of unknown type ${logField(text(message.type, 100))} from ${logField(me.hello.session)}`);
         }
       },
     };

@@ -4209,7 +4209,7 @@ def branch_plan(plan, key, nodes, deps, st, rows, recorded=None):
     return names | {"branch": f"{BRANCH_PREFIX}{names['child']}", "lower": lower, "parent": parent, "stax": True}
 
 
-def first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=False):
+def first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=False, warnings=None):
     """The checks and the claim of a node's first job.
 
     The run row records the claim (`step=claim`) before the label and the move, so a call that stops in between
@@ -4245,7 +4245,7 @@ def first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=False):
     if model:
         row["model"] = model
     save_keymap(plan_dir, km)
-    claim_steps(plan_dir, plan, key, snap, quiet)
+    claim_steps(plan_dir, plan, key, snap, quiet, warnings)
 
 
 def claim_steps(plan_dir, plan, key, snap, quiet=False, warnings=None):
@@ -4309,6 +4309,8 @@ def dispatch(plan_dir, plan, key, agent, worktree, model=None):
     here = shlex.quote(str(Path(plan_dir).resolve()))
     # A retry prints the names of the claim, also when the node below merged or was canceled in between.
     names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None)
+    if mine:
+        pending_start(key, row, here)
     if worktree:
         if not mine:
             die(f"{key}: run 'wg dispatch {plan_dir} {key}' first (state={row.get('state', '-')})", 1)
@@ -4413,7 +4415,9 @@ def orca_mutation(*args, retry=None, warnings=None):
     if isinstance(recovery, dict) and recovery.get("orchestrationRequestId"):
         query = recovery.get("queryCommand") or ""
         raise OrcaLost(recovery["orchestrationRequestId"], " ".join(query) if isinstance(query, list) else query)
-    if result.returncode and answer.get("ok") is False and error.get("code"):
+    if result.returncode and answer.get("ok") is False and error.get("code") and not retry:
+        # With --retry-request, an error can be a failed lookup or replay: it does not prove that the first
+        # request did nothing, so the request id stays (an unknown outcome below).
         raise OrcaRefused(f"{error['code']}: {error.get('message', '')}".strip())
     raise ReadError(f"orca gave no result (exit {result.returncode}): {command_error(result)}")
 
@@ -4457,6 +4461,21 @@ def git_common_dir(path):
     return str((Path(path) / git_output("rev-parse", "--git-common-dir", cwd=path)).resolve())
 
 
+def checked_out(path):
+    return git_output("branch", "--show-current", cwd=path)
+
+
+def branch_problem(key, path, branch):
+    """Why the checkout at `path` is not on `branch` (None: it is)."""
+    try:
+        actual = checked_out(path)
+    except (ReadError, OSError) as e:
+        return f"{key}: {path}: {e}"
+    if actual != branch:
+        return f"{key}: {path} is on {actual or 'a detached HEAD'}, not {branch}"
+    return None
+
+
 def repo_problem(key, path, plan_dir):
     """Why `path` is not a checkout of the coordinator's repository (None: it is one)."""
     try:
@@ -4488,6 +4507,18 @@ def run_durable(plan_dir, key, step, args, retry, warnings):
         warnings.append(f"{key}: the outcome is not known; " + (
             f"the next call retries request {retry}" if retry else "the next call refuses until you look in Orca"))
     return None
+
+
+def pending_start(key, row, plan_dir):
+    """Stop a printed dispatch while a worker-start of an earlier `--run` has no known result: a new start
+    could be a second worker."""
+    request = row.get("retry_request")
+    if request:
+        die(f"{key}: worker-start request {request} has no known result. Run wg dispatch {plan_dir} {key} --run "
+            f"(it retries with --retry-request {request}), or look with orca orchestration request-show --request "
+            f"{request} --json and record a started worker with wg started {plan_dir} {key} dispatch=<id> ...", 1)
+    if row.get("step") == "start":
+        unknown_start(key, "start", plan_dir)
 
 
 def unknown_start(key, step, plan_dir):
@@ -4606,6 +4637,7 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
     mine = row.get("job") == "dispatch" and (row.get("state") in ("creating", "starting") or receipt_due)
     names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None)
     continues = f"wg dispatch {here} {key} --run continues there"
+    claim_pending = mine and row.get("step") in ("claim", "status")
     if mine and receipt_due:
         try:
             row = finish_receipt(plan_dir, plan, key)
@@ -4617,7 +4649,7 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
         return 0
     try:
         if not mine:
-            first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=True)
+            first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=True, warnings=warnings)
         elif row.get("step") in ("claim", "status"):
             claim_steps(plan_dir, plan, key, snap, quiet=True, warnings=warnings)
     except (ReadError, OSError, subprocess.SubprocessError) as e:
@@ -4628,21 +4660,35 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
     step = row.get("step") or "parent"
     if step == "start" and not row.get("retry_request"):
         unknown_start(key, step, here)
+    if mine and not claim_pending:
+        # A resume: before an Orca call that can start a worker, Linear must show this claim and In Progress.
+        held = {label["name"] for label in claim_labels(issue)}
+        if f"agent:{row['agent']}" not in held or st.get(key) != "In Progress":
+            try:
+                update_row(plan_dir, key, step="claim")
+                claim_steps(plan_dir, plan, key, snap, quiet=True, warnings=warnings)
+            except (ReadError, OSError, subprocess.SubprocessError) as e:
+                print_fail(run_row(load_keymap(plan_dir), key).get("step", "claim"), e)
+                warnings.append(continues)
+                return 1
+            update_row(plan_dir, key, step=step)
     row = update_row(plan_dir, key, step=step)
     try:
         if RUN_STEPS.index(step) <= RUN_STEPS.index("child") or not (row.get("worktree") and row.get("path")):
             row = first_worktree(plan_dir, plan, key, names, row)
         path = Path(row["path"])
         if not row.get("retry_request"):  # a lost start reply: the worktree steps are done
-            row = update_row(plan_dir, key, step="track")
-            problem = repo_problem(key, path, plan_dir)
+            # Read-only checks of the checkout; only a call that has not passed `track` may change stax.
+            problem = repo_problem(key, path, plan_dir) or branch_problem(key, path, row["branch"])
             if problem:
                 raise ReadError(problem)
-            if names["stax"] and (branch_metadata(path, row["branch"]) or {}).get("parentBranchName") != row["parent"]:
-                tracked = command("st", "branch", "track", "--parent", row["parent"], cwd=path)
-                if tracked.returncode:
-                    raise ReadError(f"st branch track: {command_error(tracked)}")
-            row = update_row(plan_dir, key, step="spec")
+            if RUN_STEPS.index(row.get("step") or "track") <= RUN_STEPS.index("track"):
+                row = update_row(plan_dir, key, step="track")
+                if names["stax"] and (branch_metadata(path, row["branch"]) or {}).get("parentBranchName") != row["parent"]:
+                    tracked = command("st", "branch", "track", "--parent", row["parent"], cwd=path)
+                    if tracked.returncode:
+                        raise ReadError(f"st branch track: {command_error(tracked)}")
+                row = update_row(plan_dir, key, step="spec")
     except (ReadError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
         print_fail(run_row(load_keymap(plan_dir), key).get('step', step), e)
         warnings.append(continues)
@@ -4655,7 +4701,12 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
                 warnings.append(f"{entry['identifier']}: no worker spec; {continues}")
                 return 1
             row = update_row(plan_dir, key, state="starting")
-        spec, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
+        sent = Path(plan_dir).resolve() / "specs" / f"{key}.md"
+        if row.get("retry_request") and sent.is_file():  # the spec of an unresolved request stays as it was sent
+            spec = sent
+            title = f"{entry['identifier']}: {node.get('title') or issue.get('title', key)}"
+        else:
+            spec, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
     except OSError as e:
         print_fail("spec", e)
         warnings.append(continues)
@@ -4702,10 +4753,14 @@ def first_worktree(plan_dir, plan, key, names, row):
     if not child:
         child = created_tree("--name", names["child"], "--branch", row["branch"], "--base-branch", row["lower"],
                              "--parent-worktree", f"id:{parent['id']}", "--setup", "run")
-    row = update_row(plan_dir, key, worktree=child["id"], path=str(Path(child["path"]).resolve()))
-    problem = repo_problem(key, row["path"], plan_dir)
+    if short_branch(child.get("branch")) != row["branch"]:
+        raise ReadError(f"Orca made {child['path']} on {short_branch(child.get('branch')) or 'no branch'}, not "
+                        f"{row['branch']} (Orca adds a number to a taken name): free the name, then run again")
+    path = str(Path(child["path"]).resolve())
+    problem = repo_problem(key, path, plan_dir) or branch_problem(key, path, row["branch"])
     if problem:
         raise ReadError(problem)
+    row = update_row(plan_dir, key, worktree=child["id"], path=path)
     orca_result("worktree", "set", "--worktree", f"id:{child['id']}", "--display-name", names["display"])
     return update_row(plan_dir, key, step="track")
 
@@ -4813,6 +4868,9 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
         refuse(ident, problems, "not claimed")
     restack = restack_line(plan_dir, plan, node, row, nodes, deps, st) if job == "restack" else ""
     if not resume:
+        held = claim_labels(issue)
+        if send and held:  # the same refusal as take_claim, before the run row changes
+            die(f"{ident}: {held[0]['name']} holds the claim; find its job with wg run show", 1)
         if not send:
             take_claim(plan, entry, issue, agent)
         row.update(state="starting", job=job, agent=agent)
@@ -4833,7 +4891,9 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
     if fresh:  # a new worker has no contract in its context
         kind = node.get("role") if node.get("role") in ("hotfix", "sync") else "lane"
         header = render(sections["task"], {"submit": sections[f"submit {kind}"]} | values) + "\n\n" + header
-    spec_path = write_spec(plan_dir, f"{key}-{job}", header + (f"\n\n{work}" if work else ""))
+    spec_path = Path(plan_dir).resolve() / "specs" / f"{key}-{job}.md"
+    if not (resume and row.get("retry_request") and spec_path.is_file()):  # a pending request keeps its spec
+        spec_path = write_spec(plan_dir, f"{key}-{job}", header + (f"\n\n{work}" if work else ""))
     spec = shlex.quote(str(spec_path))
     task_title = f"{ident}: {node.get('title') or issue.get('title', key)}"
     subject = f"{job}: #{row['pr']}" if row.get("pr") else f"{job}: {row['branch']}"

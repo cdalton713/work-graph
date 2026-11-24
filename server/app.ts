@@ -252,12 +252,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (!workspace) return c.json({ error: `workspace ${id} is not configured` }, 400);
     return linearWorkspace.run(workspace, next);
   });
-  // `?have=<version>`: the page has this version already. Then the answer has no body.
+  // `?have=<version>`: the page has this version already. Then the answer has no body, except while the graph is stale.
   api.get("/projects/:id/graph", async (c) => {
-    // A stale graph (the refresh failed) also carries `stale` and the error, so the page can show both.
-    const { data, version, stale, error } = await graphs().get(c.req.param("id"));
-    if (c.req.query("have") === version) return c.body(null, 204);
-    return c.json({ ...data, version, workspace: linearWorkspace.getStore()!.id, ...(stale ? { stale, error } : {}) });
+    // A stale graph (the refresh failed) also carries `stale`, the error, and its load time, so the page can show them.
+    const { data, version, stale, error, loadedAt } = await graphs().get(c.req.param("id"));
+    if (!stale && c.req.query("have") === version) return c.body(null, 204);
+    return c.json({ ...data, version, workspace: linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
   });
   api.post("/projects/:id/close", async (c) => {
     const { confirm } = await json(c.req.json<{ confirm?: unknown }>());

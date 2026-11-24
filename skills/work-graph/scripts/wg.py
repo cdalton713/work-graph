@@ -4377,6 +4377,7 @@ def autostart_command(plan_dir, plan, install, uninstall):
 # ---------------------------------------------------------------- scheduled refresh
 
 TICK_LABEL = CONFIG["tick_label"]  # the launchd label of `wg tick --install`
+TICK_TRIGGER = [{"Minute": minute} for minute in (0, 15, 30, 45)]  # its launchd calendar: each 15 minutes
 
 
 def discard_notice(page, entries):
@@ -4751,7 +4752,7 @@ def tick_agent(ns):
         "Label": TICK_LABEL,
         "ProgramArguments": args,
         "RunAtLoad": True,
-        "StartCalendarInterval": [{"Minute": minute} for minute in (0, 15, 30, 45)],
+        "StartCalendarInterval": TICK_TRIGGER,
         "EnvironmentVariables": {"PATH": ":".join(path_dirs),
                                  "GH_PROMPT_DISABLED": "1"},
         "StandardOutPath": str(log / "out.log"),
@@ -4767,6 +4768,7 @@ def tick_agent(ns):
 
 DOCTOR_STALE_START = 30 * 60  # seconds: a run row in creating or starting for longer is stuck (recovery.md "Resume")
 PAGE_CONTRACT_TTL = 10 * 60   # seconds: `wg next` reads the server's contract at most this often
+PAGE_CONTRACT_WAIT = 2        # seconds: the time limit of that GET, and of the plan lock for its cache
 # The skill links of the agents (README "Install"). Each that exists must point at the checkout of `wg` on PATH.
 SKILL_LINKS = ("~/.claude/skills/work-graph", "~/.agents/skills/work-graph", "~/.codex/skills/work-graph")
 STUCK = {"creating", "starting"}
@@ -4845,8 +4847,8 @@ def doctor_key(workspace):
         if not key:
             return "FAIL", (f"key {workspace}: none; set {key_env_name(workspace)} or write "
                             f"~/.config/work-graph/{workspace}-linear-api-key (mode 600)")
-        if isinstance(source, Path) and source.stat().st_mode & 0o077:
-            return "FAIL", f"key {workspace}: {source} has mode {source.stat().st_mode & 0o777:o}; chmod 600 it"
+        if isinstance(source, Path) and (mode := stat.S_IMODE(source.stat().st_mode)) != 0o600:
+            return "FAIL", f"key {workspace}: {source} has mode {mode:o}, not 600; chmod 600 it"
         LINEAR_RATE.clear()
         token = LINEAR_WORKSPACE.set(workspace)
         try:
@@ -4893,7 +4895,29 @@ def doctor_tick():
     domain = f"gui/{os.getuid()}"
     if command("/bin/launchctl", "print", f"{domain}/{TICK_LABEL}").returncode:
         return "warn", f"tick: {path} is not loaded (/bin/launchctl bootstrap {domain} {shlex.quote(str(path))})"
-    return "ok", f"tick: {TICK_LABEL} loaded"
+    try:
+        trigger = plistlib.loads(path.read_bytes()).get("StartCalendarInterval")
+    except (OSError, ValueError, AttributeError, plistlib.InvalidFileException):
+        return "warn", f"tick: {TICK_LABEL} loaded, but its trigger in {path} is not readable"
+    if trigger != TICK_TRIGGER:
+        return "FAIL", f"tick: the trigger of {path} is {trigger!r}, not each 15 minutes; wg tick --install again"
+    return "ok", f"tick: {TICK_LABEL} loaded, each 15 minutes"
+
+
+def wake_trigger(automation):
+    """True when the Orca automation runs each 5 minutes (WAKE_SCHEDULE), False when it runs at other times, None
+    when its trigger is not readable. Orca keeps the trigger as `rrule`; a `trigger` field is the cron text."""
+    if (cron := automation.get("trigger")) is not None:
+        return cron == WAKE_SCHEDULE
+    rrule = automation.get("rrule")
+    if not isinstance(rrule, str) or "FREQ=" not in rrule:
+        return None
+    parts = dict(part.split("=", 1) for part in rrule.upper().split(";") if "=" in part)
+    if parts.get("BYSECOND") == "0":
+        del parts["BYSECOND"]
+    every5 = {"FREQ": "MINUTELY", "INTERVAL": "5"}
+    hourly = {"FREQ": "HOURLY", "BYMINUTE": ",".join(str(m) for m in range(0, 60, 5))}
+    return parts in (every5, hourly)
 
 
 def doctor_autostart(plans):
@@ -4910,8 +4934,16 @@ def doctor_autostart(plans):
                               f"wg autostart {shlex.quote(str(path))} --install"))
                 continue
             shown = json.loads(result.stdout)["result"].get("automation") or {}
-            on = shown.get("enabled", True)
-            lines.append(("ok" if on else "warn", f"autostart {path}: automation {automation} {'on' if on else 'disabled'}"))
+            name = f"autostart {path}: automation {automation}"
+            if not shown.get("enabled", True):
+                lines.append(("warn", f"{name} disabled"))
+            elif (every5 := wake_trigger(shown)) is None:
+                lines.append(("warn", f"{name} on, but its trigger is not readable"))
+            elif not every5:
+                lines.append(("FAIL", f"{name} does not run each 5 minutes ({shown.get('rrule') or shown.get('trigger')}); "
+                              f"wg autostart {shlex.quote(str(path))} --install"))
+            else:
+                lines.append(("ok", f"{name} on, each 5 minutes"))
         return lines or [("ok", "autostart: off for each loaded effort")]
     return check
 
@@ -4966,7 +4998,8 @@ def doctor_worktrees(plan_dir, statuses):
 
 
 def doctor_link(plan_dir, plan):
-    """Connect to the link, send a `hello` of a session of its own (never the coordinator's), and close."""
+    """Open the link socket and close it with no `hello`: the server registers no coordinator, so the page does
+    not change. It tests the connection only, not the messages."""
     def check():
         if os.environ.get("WG_LINK", "").lower() in ("off", "0", "no"):
             return "warn", "link: WG_LINK is off"
@@ -4974,13 +5007,10 @@ def doctor_link(plan_dir, plan):
             from websockets.sync.client import connect
         except ImportError:
             return "warn", "link: no websockets in this Python; run wg through uv"
-        url, project, session, hello = link_target(plan_dir, plan)
-        session = f"doctor-{session}"
-        with connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1) as ws:
-            ws.send(link_envelope(session, project, "hello", {**hello, "session": session}))
-            with contextlib.suppress(TimeoutError):
-                ws.recv(timeout=1)  # a refused hello closes the socket: recv raises ConnectionClosed
-        return "ok", f"link: {url.split('?')[0]} took the hello"
+        url = link_target(plan_dir, plan)[0]
+        with connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1):
+            pass  # the WebSocket handshake passed
+        return "ok", f"link: {url.split('?')[0]} accepts a connection (the connection only; no hello sent)"
     return check
 
 
@@ -4992,15 +5022,9 @@ def doctor(plan_dir=None):
     checks += [(f"key {w}", doctor_key(w)) for w in WORKSPACES]
     checks += [(name, doctor_tool(name, args)) for name, args in TOOL_CHECKS.items()]
     checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", doctor_page), ("tick", doctor_tick)]
-    plan, failed = None, False
+    failed = False
     if plan_dir:
         plans.add(Path(plan_dir).resolve())
-        try:
-            plan = load_plan(plan_dir, strict=True)
-            plan_workspace(plan)
-        except (FileNotFoundError, ValueError, SystemExit) as e:
-            print(f"FAIL plan: {one_line(e, 300) if not isinstance(e, SystemExit) else 'not readable'}", flush=True)
-            failed = True
     checks.append(("autostart", doctor_autostart(sorted(plans))))
 
     def show(lines):
@@ -5011,10 +5035,19 @@ def doctor(plan_dir=None):
 
     for name, step in checks:
         show(doctor_run(name, step))
-    if plan is not None:
-        statuses = {}
+    loaded = {}
+
+    def plan_check():
+        plan = load_plan(plan_dir, strict=True)
+        plan_workspace(plan)
         errors = check(plan)
-        show([("FAIL", "plan: " + "; ".join(errors)) if errors else ("ok", "plan: wg check is clean")])
+        loaded["plan"] = plan
+        return ("FAIL", "plan: " + "; ".join(errors)) if errors else ("ok", "plan: wg check is clean")
+
+    if plan_dir:
+        show(doctor_run("plan", plan_check))
+    if plan := loaded.get("plan"):
+        statuses = {}
         token = LINEAR_WORKSPACE.set(plan_workspace(plan))
         try:
             for name, step in (("keymap", doctor_keymap(plan_dir, statuses)),
@@ -5032,20 +5065,20 @@ def page_contract_note(plan_dir):
     effort = run_rows(load_keymap(plan_dir))["effort"]
     theirs, at = effort.get("page_contract"), effort.get("page_contract_at")
     try:
-        fresh = bool(theirs and at) and time.time() - parse_utc(at).timestamp() < PAGE_CONTRACT_TTL
+        fresh = bool(at) and time.time() - parse_utc(at).timestamp() < PAGE_CONTRACT_TTL
     except (TypeError, ValueError):
         fresh = False
     if not fresh:
         try:
-            theirs = str(page_get("/api/config", timeout=5).get("contract") or "none")
+            theirs = str(page_get("/api/config", timeout=PAGE_CONTRACT_WAIT).get("contract") or "none")
         except (OSError, ValueError, AttributeError, http.client.HTTPException):
-            return []
+            theirs = ""  # no answer: cached too, so a page that is down costs one GET each PAGE_CONTRACT_TTL
         with contextlib.suppress(TimeoutError, OSError, ValueError):
-            with plan_lock(plan_dir, wait=JOURNAL_WAIT):
+            with plan_lock(plan_dir, wait=PAGE_CONTRACT_WAIT):
                 km = load_keymap(plan_dir)
                 run_rows(km)["effort"].update(page_contract=theirs, page_contract_at=f"{utc_now():%Y-%m-%dT%H:%M:%SZ}")
                 save_keymap(plan_dir, km)
-    if theirs != contract_hash():
+    if theirs and theirs != contract_hash():
         return [("note", "doctor @effort -: page contract differs; run wg doctor")]
     return []
 

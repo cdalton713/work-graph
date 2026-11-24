@@ -6476,6 +6476,10 @@ class DoctorTests(DirTests):
             level, text = wg.doctor_key("home")()
         self.assertEqual(level, "FAIL")
         self.assertIn("mode 644", text)
+        key_file.chmod(0o700)  # an owner bit that differs from 600 also fails
+        with patch.object(wg, "key_source", return_value=("k", key_file)), patch.object(wg, "gql") as gql:
+            self.assertEqual(wg.doctor_key("home")(), ("FAIL", f"key home: {key_file} has mode 700, not 600; chmod 600 it"))
+        gql.assert_not_called()
         key_file.chmod(0o600)
 
         def answer(query, variables=None):
@@ -6520,11 +6524,18 @@ class DoctorTests(DirTests):
             self.assertEqual(wg.doctor_tick()[0], "warn")
             plist = self.d / "Library/LaunchAgents" / (wg.TICK_LABEL + ".plist")
             plist.parent.mkdir(parents=True)
-            plist.write_text("x")
+            plist.write_bytes(wg.plistlib.dumps({"Label": wg.TICK_LABEL, "StartCalendarInterval": wg.TICK_TRIGGER}))
             with patch.object(wg, "command", return_value=done_proc(code=113)):
                 self.assertIn("not loaded", wg.doctor_tick()[1])
             with patch.object(wg, "command", return_value=done_proc()):
                 self.assertEqual(wg.doctor_tick()[0], "ok")
+                # A loaded job whose calendar trigger is gone or changed does not run as wg tick --install made it.
+                plist.write_bytes(wg.plistlib.dumps({"Label": wg.TICK_LABEL}))
+                self.assertEqual(wg.doctor_tick()[0], "FAIL")
+                plist.write_bytes(wg.plistlib.dumps({"Label": wg.TICK_LABEL, "StartCalendarInterval": [{"Minute": 0}]}))
+                self.assertEqual(wg.doctor_tick()[0], "FAIL")
+                plist.write_text("not a plist")
+                self.assertEqual(wg.doctor_tick()[0], "warn")
         with patch.object(wg.sys, "platform", "linux"):
             self.assertEqual(wg.doctor_tick()[0], "warn")
 
@@ -6534,9 +6545,13 @@ class DoctorTests(DirTests):
         km = wg.load_keymap(self.d)
         wg.run_rows(km)["effort"]["autostart"] = "auto1"
         wg.save_keymap(self.d, km)
-        shown = json.dumps({"result": {"automation": {"id": "auto1", "enabled": False}}})
-        with patch.object(wg, "command", return_value=done_proc(shown)):
-            self.assertEqual(wg.doctor_autostart([self.d])()[0][0], "warn")
+        def shown(**automation):
+            return done_proc(json.dumps({"result": {"automation": {"id": "auto1", **automation}}}))
+        for automation, level in (({"enabled": False}, "warn"), ({"rrule": "FREQ=MINUTELY;INTERVAL=5"}, "ok"),
+                                  ({"trigger": "*/5 * * * *"}, "ok"), ({"rrule": "FREQ=DAILY;BYHOUR=9"}, "FAIL"),
+                                  ({"trigger": "0 * * * *"}, "FAIL"), ({}, "warn")):
+            with self.subTest(automation=automation), patch.object(wg, "command", return_value=shown(**automation)):
+                self.assertEqual(wg.doctor_autostart([self.d])()[0][0], level)
         with patch.object(wg, "command", return_value=done_proc(code=1, stderr="not found")):
             level, text = wg.doctor_autostart([self.d])()[0]
         self.assertEqual(level, "FAIL")
@@ -6578,18 +6593,19 @@ class DoctorTests(DirTests):
         self.assertEqual(lines, [("FAIL", f"worktree a: {gone} does not exist")])
         self.assertEqual(wg.doctor_worktrees(self.d, {"a": "Done", "mp": "Done"})()[0], "ok")
 
-    def test_link_sends_a_hello_of_its_own_session_and_closes(self):
+    def test_link_opens_the_socket_and_closes_it_with_no_hello(self):
         self.keymap()
         ws = FakeSocket()
         client = Mock(connect=Mock(return_value=ws))
         modules = {"websockets": Mock(), "websockets.sync": Mock(client=client), "websockets.sync.client": client}
         with patch.dict(sys.modules, modules), patch.dict(os.environ, {"WG_LINK": ""}):
-            self.assertEqual(wg.doctor_link(self.d, self.p)()[0], "ok")
-            _, _, session, _ = wg.link_target(self.d, self.p)
-            self.assertEqual([m["type"] for m in ws.sent], ["hello"])
-            self.assertEqual(ws.sent[0]["payload"]["session"], f"doctor-{session}")
-            client.connect.return_value = FakeSocket(closed=ConnectionError("1008 send hello first"))
-            self.assertEqual(wg.doctor_run("link", wg.doctor_link(self.d, self.p)), [("FAIL", "link: 1008 send hello first")])
+            level, text = wg.doctor_link(self.d, self.p)()
+            self.assertEqual(level, "ok")
+            self.assertIn("the connection only; no hello sent", text)
+            # No hello: the server registers no coordinator, so the page does not change.
+            self.assertEqual(ws.sent, [])
+            client.connect.side_effect = ConnectionError("HTTP 403")
+            self.assertEqual(wg.doctor_run("link", wg.doctor_link(self.d, self.p)), [("FAIL", "link: HTTP 403")])
         self.assertEqual(wg.doctor_link(self.d, self.p)()[0], "warn")  # WG_LINK=off in the tests
 
     def test_doctor_prints_each_line_and_exits_1_on_a_fail(self):
@@ -6615,6 +6631,12 @@ class DoctorTests(DirTests):
             self.assertEqual(out.splitlines()[-4:], ["ok plan: wg check is clean", "FAIL keymap x", "ok worktrees", "ok link"])
             out, _ = self.call(wg.doctor, str(self.d / "nothing"), code=1)
             self.assertIn("FAIL plan: no plan.json", out)
+            # A plan that is not an object, or a phase with no key: one FAIL line, not a traceback.
+            for bad in ([], {**self.p, "phases": [{"name": "no key", "target": "main"}]}):
+                with self.subTest(bad=bad):
+                    wg.save_json(self.d / "plan.json", bad)
+                    out, _ = self.call(wg.doctor, str(self.d), code=1)
+                    self.assertTrue(out.splitlines()[-1].startswith("FAIL plan: "), out)
 
     def test_the_doctor_note_of_wg_next_reads_the_contract_once_in_ten_minutes(self):
         self.keymap()
@@ -6631,10 +6653,13 @@ class DoctorTests(DirTests):
             self.assertEqual(PAGE_CONTRACT_NOTE(self.d), [])
         self.assertEqual(get.call_count, 1)
         km = wg.load_keymap(self.d)
-        wg.run_rows(km)["effort"].pop("page_contract")
+        wg.run_rows(km)["effort"]["page_contract_at"] = "2026-01-01T00:00:00Z"  # stale
         wg.save_keymap(self.d, km)
-        with patch.object(wg, "page_get", side_effect=OSError("down")):
+        with patch.object(wg, "page_get", side_effect=TimeoutError("timed out")) as get:
             self.assertEqual(PAGE_CONTRACT_NOTE(self.d), [])
+            self.assertEqual(PAGE_CONTRACT_NOTE(self.d), [])  # a page that is down is cached too: no second GET
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(get.call_args.kwargs["timeout"], wg.PAGE_CONTRACT_WAIT)
 
     def test_wg_next_prints_the_doctor_note(self):
         lines = wg.terminal_lines(self.d, [("note", "doctor @effort -: page contract differs; run wg doctor")])

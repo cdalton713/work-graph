@@ -27,7 +27,10 @@ export interface LinkRoom {
 export interface LinkRoomState {
   read(ref: ProjectRef): Promise<LinkRoom | null>;
   rooms(): Promise<LinkRoom[]>;
-  /** Atomically edit a room, creating it if needed. The callback can be retried and must have no external effects. */
+  /**
+   * Atomically edit a room, creating it if needed. The callback can be retried and must have no external effects.
+   * An edit does not schedule a save of the queue or asks. Use the methods below to change those fields.
+   */
   edit<T>(ref: ProjectRef, change: (room: LinkRoom) => T): Promise<T>;
   append(ref: ProjectRef, message: Envelope): Promise<LinkRoom>;
   ack(ref: ProjectRef, ids: string[]): Promise<LinkRoom>;
@@ -84,6 +87,7 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
       const before = room.queue.length;
       room.queue = room.queue.filter((message) => !received.has(message.id));
       if (room.queue.length !== before) save();
+      // Flush at once so a restart does not replay an acknowledged message.
       // A full queue can drop a message that the file still holds.
       store?.flush();
       return structuredClone(room);

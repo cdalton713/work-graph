@@ -50,6 +50,27 @@ const msg = (type: string, payload: unknown = {}) => JSON.stringify({ v: 1, type
 const hello = (session: string) => msg("hello", { plan: "/plans/a", session, host: "mac", wg: "1" });
 
 describe("LinkHub", () => {
+  it("applies room updates in flight from a replaced coordinator", async () => {
+    const hub = new LinkHub();
+    const page = peer(), old = peer();
+    await hub.joinPage(page, A);
+    const first = await hub.joinCoordinator(old, A);
+    await first.receive(hello("s"));
+    const pending = await hub.publish(A, "command", { name: "next", key: null, issue: null });
+    const replacement = await hub.joinCoordinator(peer(), A);
+    await replacement.receive(hello("s"));
+    expect(old.closed).toHaveLength(1);
+
+    await first.receive(msg("ack", { ids: [pending.id] }));
+    expect((await hub.presence(A)).queued).toBe(0);
+    await first.receive(msg("asks", { asks: [{ id: "q", body: "Which branch?" }] }));
+    expect(await hub.ask(A, "q")).toMatchObject({ body: "Which branch?" });
+    await first.receive(msg("progress", { nodes: [{ key: "work" }] }));
+    expect(page.of("progress").at(-1)?.payload).toMatchObject({ nodes: [{ key: "work" }] });
+    await first.receive(msg("state", { mode: "working", head: "old head" }));
+    expect((await hub.presence(A)).coordinators[0]).toMatchObject({ head: null, connected: true });
+  });
+
   it("sends viewers only reduced presence and change notices for shared rooms", async () => {
     const hub = new LinkHub();
     const viewer = peer(), overview = peer(), owner = peer();
@@ -587,7 +608,12 @@ describe("/api/link over a real socket", () => {
     expect(await response.json()).toEqual({ ok: true, queued: 1 });
     const command = await wg.next("command");
     expect(command.payload).toMatchObject({ name: "next" });
+    await vi.waitFor(() => expect(notices.at(-1)).toMatchObject({ type: "presence", payload: { queued: 1 } }));
+    const beforeAck = notices.length;
     wg.ws.send(msg("ack", { ids: [command.id] }));
+    await vi.waitFor(() => expect(notices.slice(beforeAck)).toContainEqual(expect.objectContaining({
+      type: "presence", payload: expect.objectContaining({ queued: 0 }),
+    })));
     await vi.waitFor(async () => {
       const presence = await b.app.request("/api/projects/p1/presence", { headers });
       expect(await presence.json()).toMatchObject({ queued: 0, waiting: 0 });

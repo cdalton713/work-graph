@@ -8,7 +8,10 @@ export type LinkEvent =
   | { kind: "ended"; session: string };
 
 export interface LinkBus {
-  /** Publish this batch in order. Subscribers include the instance that sent it. */
+  /**
+   * Publish this batch in order to every subscriber, including the publisher's own instance.
+   * Resolution confirms publication. A subscriber can receive the batch later.
+   */
   publish(events: readonly LinkEvent[]): Promise<void>;
   subscribe(receive: (event: LinkEvent) => void): Promise<() => void | Promise<void>>;
 }

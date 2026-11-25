@@ -21,7 +21,7 @@ export interface Peer {
   send: (text: string) => void; close: (code?: number, reason?: string) => void;
   ping?: () => void; terminate?: () => void; session?: string;
 }
-/** What the transport calls for each connection. `pong`: the socket answered a ping. */
+/** The transport waits for each receive to finish before it calls receive again. A pong answers a ping. */
 export interface Connection { receive: (text: string) => Promise<void>; closed: () => Promise<void>; pong: () => void }
 
 /** How long the page still shows a coordinator that went away. */
@@ -86,12 +86,14 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 const text = (v: unknown, max = 20_000) => (typeof v === "string" ? v.slice(0, max) : "");
 
 export class LinkHub {
+  /** Each open page or coordinator socket, with its pong deadline. */
   private sockets = new Map<string, Socket>();
   private stopBeat: (() => void) | null = null;
   /** Set at shutdown. The hub takes no new socket and drains when its last socket closes. */
   private stopping: { drained: () => void; done: Promise<boolean> } | null = null;
   private readonly unsubscribe: Promise<() => void | Promise<void>>;
   private readonly now: () => Date;
+  /** A coordinator's wrote notice clears the graph cache before the pages reload it. */
   private readonly onWrote: (ref: ProjectRef) => void;
   private readonly timers: Timers;
   private readonly shared: LinkRoomState;
@@ -101,6 +103,7 @@ export class LinkHub {
     now: () => Date = () => new Date(),
     onWrote: (ref: ProjectRef) => void = () => {},
     timers: Timers = realTimers,
+    // The default state uses the file store to keep queued messages and asks across restarts.
     store: Store | null = null,
     shared: LinkRoomState = memoryLinkState(store),
     bus: LinkBus = memoryLinkBus(),
@@ -357,7 +360,10 @@ export class LinkHub {
     });
   }
 
-  /** Queue a message until an acknowledgment. Send it to the connected coordinators too. */
+  /**
+   * Send a message to each connected coordinator and keep it in the queue until acknowledgment,
+   * so a busy coordinator can pick it up at its next wg next. Send changed notices to project pages too.
+   */
   async publish<T extends keyof ToCoordinator>(ref: ProjectRef, type: T, payload: ToCoordinator[T]): Promise<Envelope<T, ToCoordinator[T]>> {
     const message = this.envelope(ref, type, payload);
     const room = await this.shared.append(ref, message);
@@ -371,6 +377,7 @@ export class LinkHub {
 
   /** A page of one project, or the overview (no project). It gets the current state at once. */
   joinPage(peer: Peer, ref: ProjectRef | null): Promise<Connection> {
+    // A page only listens. It changes things through the HTTP API, which checks the origin and writes Linear.
     return this.joinPageSocket(peer, ref);
   }
 
@@ -392,6 +399,7 @@ export class LinkHub {
         continue;
       }
       messages.push(this.envelope(room.ref, "presence", presence));
+      // The overview counts worker questions as moves for the human, so it gets asks from every project.
       if (ref || room.asks.length) messages.push(this.envelope(room.ref, "asks", { asks: room.asks }));
       if (ref) messages.push(this.envelope(room.ref, "progress", { nodes: room.progress }));
       if (room.agents) messages.push(this.envelope(room.ref, "agents", room.agents));
@@ -460,6 +468,7 @@ export class LinkHub {
         if (message.type === "hello") {
           const hello: Hello = { plan: text(payload.plan, 200), session: text(payload.session, 200) || randomUUID(), host: text(payload.host, 200), wg: text(payload.wg, 50) };
           // A reconnect replaces the socket of the same session, including on another hub.
+          // A socket that sends hello for a different session releases its previous session.
           const joined = await this.shared.edit(ref, (room) => {
             if (!room.sockets.has(socket.id)) return null;
             if (session !== hello.session) release(room, at);
@@ -485,13 +494,11 @@ export class LinkHub {
         }
         if (!session) return fail("send hello first");
         const sessionId = session;
-        const attached = await this.shared.edit(ref, (room) => {
+        await this.shared.edit(ref, (room) => {
           const current = room.coordinators.get(sessionId);
-          if (current?.socket !== socket.id) return false;
-          current.lastSeen = at;
-          return true;
+          if (current?.socket === socket.id) current.lastSeen = at;
         });
-        if (!attached) return;
+        // A replaced socket can still have room updates in flight before the transport closes it.
         const type = message.type as keyof FromCoordinator;
         if (type === "state") {
           const lines = Array.isArray(payload.lines) ? payload.lines.filter(isObject).slice(0, 200).map((l) => ({ level: text(l.level, 20), text: text(l.text, 2000) })) : [];

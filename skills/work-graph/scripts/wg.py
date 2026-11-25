@@ -24,6 +24,7 @@ that Python, and without it `wg next` polls Linear.
   wg run set   <dir> <key|@effort> <field>=<value>...
   wg run show  <dir> [<key>|@effort] [--json]
   wg run reset <dir> <key>
+  wg usage     <dir> [--json] [--since <time>] [--all]
   wg evidence  <dir> <key|@full-PHASE>
   wg verify    <dir> <key>
   wg owns overlap <dir> <key>...
@@ -656,6 +657,392 @@ def log_command(plan_dir, plan, key, since, count, times):
         print("no journal entry")
     for entry in entries[-count:]:
         print(log_line(entry))
+    return 0
+
+
+# ---------------------------------------------------------------- usage
+
+USAGE_SHOWN = 15  # the sessions that `wg usage` prints without --all
+USAGE_WORKER = "You are working inside Orca, a multi-agent IDE. You are a dispatched worker."
+# A short utility session: its first message asks for a chat name, a branch name, or a commit message.
+USAGE_UTILITY = re.compile(r"\b(chat|session|conversation|thread|tab)(?:'s)? (name|title)\b|\bbranch name\b|"
+                           r"\bcommit message\b|^\s*reply with ok\b", re.I)
+# The first user messages of a Codex rollout that its harness writes, not the person or the coordinator.
+CODEX_PREAMBLES = ("# AGENTS.md instructions", "<environment_context", "<INSTRUCTIONS", "<user_instructions",
+                   "<permissions instructions", "<skills_instructions")
+USAGE_FIELDS = ("calls", "fresh", "cache_write", "cache_read", "input", "output")
+
+
+def usage_paths(plan_dir):
+    """{worktree path: node key or None} of an effort: the plan directory (None), and each worktree path that a
+    run row or the journal records. A removed worktree keeps its transcripts, so the journal's old paths count."""
+    paths = {}
+
+    def add(key, value):
+        if not isinstance(value, str) or not value:
+            return
+        path = value.partition("::")[2] if "::" in value else value  # an Orca worktree id: <repo>::<path>
+        for p in {os.path.expanduser(path), str(Path(path).expanduser().resolve())}:
+            paths.setdefault(p, key)
+
+    add(None, str(plan_dir))
+    km = load_keymap(plan_dir)
+    for key, row in run_rows(km)["nodes"].items():
+        add(key, row.get("path"))
+        add(key, row.get("worktree"))
+    for entry in journal_entries(plan_dir):
+        if entry.get("kind", "run") != "run" or entry.get("key") in (None, "@effort"):
+            continue
+        for field in ("path", "worktree"):
+            for value in entry["changes"].get(field) or ():
+                add(entry["key"], value)
+    return paths
+
+
+# A call of a coordinator: a `wg next` command, or a read of the work-graph skill.
+USAGE_COORDINATING = re.compile(r"\bwg(?:\.py)?\s+next\b|work-graph/SKILL\.md")
+
+
+def usage_role(first, coordinating):
+    """coordinator, worker, or other. A worker starts with the worker preamble. A session in the plan directory is
+    the coordinator only when it ran `wg next` or loaded the work-graph skill: a session of the human there, with an
+    ordinary request, is other."""
+    text = (first or "").lstrip()
+    if text.startswith(USAGE_WORKER):
+        return "worker"
+    if USAGE_UTILITY.search(text[:300]):
+        return "other"
+    return "coordinator" if coordinating else "other"
+
+
+def usage_numbers(record, fields):
+    """The integer values of `fields` in a usage record, with 0 for a missing one. None when one is not an integer:
+    that record does not count."""
+    values = [record.get(f, 0) if record.get(f) is not None else 0 for f in fields]
+    if any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in values):
+        return None
+    return values
+
+
+def claude_coordinating(message):
+    """Does one assistant message of Claude Code run `wg next` or load the work-graph skill?"""
+    for block in message.get("content") or []:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        tool = block.get("input") if isinstance(block.get("input"), dict) else {}
+        if block.get("name") == "Skill" and str(tool.get("skill", "")).rpartition(":")[2] == "work-graph":
+            return True
+        if USAGE_COORDINATING.search(json.dumps(tool)):
+            return True
+    return False
+
+
+def usage_session(agent, file, key, coordinator):
+    return {"agent": agent, "session": file.stem, "file": str(file), "key": key, "coordinator": coordinator,
+            "coordinating": False, "cwd": None,
+            "role": None, "model": None, "models": Counter(), "calls": 0, "fresh": 0, "cache_write": 0,
+            "cache_read": 0, "output": 0, "max_context": 0, "start_context": None, "first": None, "last": None,
+            "first_message": None, "subagents": 0}
+
+
+def usage_time(session, stamp):
+    if stamp:
+        session["first"] = min(session["first"] or stamp, stamp)
+        session["last"] = max(session["last"] or stamp, stamp)
+
+
+def usage_lines(file):
+    """The lines of a file as bytes, one at a time, so that a transcript of hundreds of megabytes is not read at
+    once. A file that cannot be read gives no line."""
+    try:
+        with open(file, "rb") as f:
+            yield from f
+    except OSError:
+        return
+
+
+def claude_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return next((b.get("text") for b in content if isinstance(b, dict) and b.get("type") == "text"), None)
+    return None
+
+
+def claude_usage(session, file, since, seen, main=True):
+    """Add the calls of one Claude Code transcript to `session`. A message id counts one time (`seen`), at the time
+    of its first record: a later line of the same call does not move it past --since. The main transcript also
+    gives the session's first user message, the cwd that its lines record, and whether it coordinated."""
+    for line in usage_lines(file):
+        want_user = main and session["first_message"] is None and b'"user"' in line
+        want_cwd = main and session["cwd"] is None and b'"cwd"' in line
+        # Each user record can hold the /work-graph command, not only the first one.
+        want_command = main and not session["coordinating"] and b"/work-graph</command-name>" in line
+        if b'"usage"' not in line and not want_user and not want_cwd and not want_command:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if want_cwd and isinstance(entry.get("cwd"), str):
+            session["cwd"] = entry["cwd"]
+        message = entry.get("message")
+        if entry.get("type") == "user":
+            if want_user and not entry.get("isMeta") and isinstance(message, dict):
+                session["first_message"] = claude_text(message.get("content"))
+            if main and isinstance(message, dict) and "<command-name>/work-graph</command-name>" in (
+                    claude_text(message.get("content")) or ""):
+                session["coordinating"] = True
+            continue
+        if entry.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        # Each line of a call holds one content block, so each line can hold the command.
+        if main and not session["coordinating"] and claude_coordinating(message):
+            session["coordinating"] = True
+        usage, ident, model = message.get("usage"), message.get("id"), message.get("model")
+        if not isinstance(usage, dict) or model == "<synthetic>" or (ident and ident in seen):
+            continue
+        values = usage_numbers(usage, ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+                                       "output_tokens"))
+        if values is None:
+            continue  # an invalid record: a later valid record of the same id still counts
+        if ident:
+            seen.add(ident)  # the first valid record gives the time of the call, also when --since skips it
+        stamp = entry.get("timestamp")
+        if since and (not usage_epoch(stamp) or usage_epoch(stamp) < since):
+            continue
+        session["calls"] += 1
+        session["fresh"] += values[0]
+        session["cache_write"] += values[1]
+        session["cache_read"] += values[2]
+        session["output"] += values[3]
+        if model:
+            session["models"][model] += 1
+        if main:
+            context = sum(values[:3])
+            session["max_context"] = max(session["max_context"], context)
+            if session["start_context"] is None:
+                session["start_context"] = context
+        usage_time(session, stamp)
+
+
+def usage_epoch(stamp):
+    """The epoch seconds of a transcript time, or None for a time that is not valid."""
+    try:
+        return parse_utc(stamp).timestamp() if isinstance(stamp, str) else None
+    except ValueError:
+        return None
+
+
+CODEX_TOTALS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens")
+CODEX_CALLS = ("function_call", "custom_tool_call", "local_shell_call")
+
+
+def codex_usage(session, file, since):
+    """Add one Codex rollout to `session`. The token totals are cumulative, and the last total of the rollout is
+    the session's (a total that goes down is not added to the one before it). With `since`, the session's part is
+    the last total less the last total before `since`. Each token_count event with a new total is one call."""
+    last, base, final = None, None, None
+    for line in usage_lines(file):
+        want_user = session["first_message"] is None and b'"user' in line
+        want_call = not session["coordinating"] and b"_call" in line and (b"next" in line or b"SKILL" in line)
+        if b'"token_count"' not in line and b'"turn_context"' not in line and not want_user and not want_call:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        payload = entry.get("payload") if isinstance(entry, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        kind = payload.get("type")
+        if entry.get("type") == "turn_context" and payload.get("model"):
+            session["model_now"] = payload["model"]
+            continue
+        if want_call and kind in CODEX_CALLS:
+            if USAGE_COORDINATING.search(json.dumps([payload.get(f) for f in ("arguments", "input", "action")])):
+                session["coordinating"] = True
+            continue
+        if want_user and kind == "user_message" and isinstance(payload.get("message"), str):
+            session["first_message"] = payload["message"]
+            continue
+        if want_user and kind == "message" and payload.get("role") == "user":
+            text = next((b.get("text") for b in payload.get("content") or []
+                         if isinstance(b, dict) and b.get("type") == "input_text"), None) or ""
+            if not text.startswith(CODEX_PREAMBLES):
+                session["first_message"] = text
+            continue
+        info = payload.get("info") if kind == "token_count" else None
+        total = info.get("total_token_usage") if isinstance(info, dict) else None
+        values = usage_numbers(total, CODEX_TOTALS) if isinstance(total, dict) else None
+        if values is None or values == last:
+            continue
+        last = values
+        stamp = entry.get("timestamp")
+        if since and (not usage_epoch(stamp) or usage_epoch(stamp) < since):
+            base = values
+            continue
+        final = values
+        session["calls"] += 1
+        if session.get("model_now"):
+            session["models"][session["model_now"]] += 1
+        call = info.get("last_token_usage")
+        context = (usage_numbers(call, ("input_tokens",)) or [0])[0] if isinstance(call, dict) else 0
+        session["max_context"] = max(session["max_context"], context)
+        if session["start_context"] is None:
+            session["start_context"] = context
+        usage_time(session, stamp)
+    if final is None:
+        return
+    # By decision: a total below the one before it (none in 536 real rollouts) is not added to it. The last total
+    # is the session's, as Codex writes it.
+    inp, cached, written, out = (max(f - b, 0) for f, b in zip(final, base or [0] * len(final)))
+    session["fresh"] += max(inp - cached - written, 0)
+    session["cache_read"] += cached
+    session["cache_write"] += written
+    session["output"] += out
+
+
+def claude_dirs(path):
+    """The Claude Code transcript folders of a worktree path: each character that is not a letter or a digit is
+    a "-". Claude Code shortens a long name and adds a hash, so a long one also matches by its first 200 characters."""
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser() / "projects"
+    name = re.sub(r"[^A-Za-z0-9]", "-", path)
+    if len(name) <= 200:
+        return [root / name]
+    return sorted(root.glob(glob_escape(name[:200]) + "*")) if root.is_dir() else []
+
+
+def glob_escape(text):
+    return re.sub(r"([*?\[])", r"[\1]", text)
+
+
+def codex_cwd(file):
+    """The cwd of a Codex rollout: its first line, the session_meta."""
+    try:
+        with open(file, "rb") as f:
+            first = f.readline()
+        payload = json.loads(first).get("payload") or {}
+        return payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def effort_usage(plan_dir, since=None):
+    """The sessions of an effort with their token use, largest input first. Reads transcripts only."""
+    paths = usage_paths(plan_dir)
+    core = {p for p, key in paths.items() if key is None}
+    sessions, seen, done = [], set(), set()
+    for path, key in paths.items():
+        for folder in claude_dirs(path):
+            if folder in done or not folder.is_dir():
+                continue
+            done.add(folder)
+            for file in sorted(folder.glob("*.jsonl")):
+                s = usage_session("claude", file, key, path in core)
+                claude_usage(s, file, since, seen)
+                # Each character that is not a letter or a digit is a "-", so the folders a-b and a_b share one
+                # slug. A session belongs to the cwd that it records: a tracked one gives its node, another one
+                # is of another folder. By decision, a session with no cwd on any line (real transcripts record
+                # it) counts under the tracked path of the folder.
+                if s["cwd"] is not None:
+                    owner = next((p for p in (s["cwd"], str(Path(s["cwd"]).resolve())) if p in paths), None)
+                    if owner is None:
+                        continue
+                    s["key"], s["coordinator"] = paths[owner], owner in core
+                for sub in sorted((folder / file.stem / "subagents").glob("*.jsonl")):
+                    s["subagents"] += 1
+                    claude_usage(s, sub, since, seen, main=False)
+                sessions.append(s)
+    codex = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser() / "sessions"
+    for file in sorted(codex.rglob("*.jsonl")) if codex.is_dir() else ():
+        cwd = codex_cwd(file)
+        if cwd is None or (cwd not in paths and str(Path(cwd).resolve()) not in paths):
+            continue
+        key = paths.get(cwd, paths.get(str(Path(cwd).resolve())))
+        s = usage_session("codex", file, key, key is None)
+        codex_usage(s, file, since)
+        sessions.append(s)
+    kept = []
+    for s in sessions:
+        if not s["calls"]:
+            continue
+        core_session = s.pop("coordinator")
+        s["role"] = usage_role(s.pop("first_message"), core_session and s.pop("coordinating"))
+        s.pop("coordinating", None)
+        s.pop("cwd", None)
+        s["model"] = s.pop("models").most_common(1)[0][0] if s["models"] else None
+        s.pop("model_now", None)
+        s["input"] = s["fresh"] + s["cache_write"] + s["cache_read"]
+        s["start_context"] = s["start_context"] or 0
+        kept.append(s)
+    kept.sort(key=lambda s: (-s["input"], s["first"] or ""))
+    return kept
+
+
+def usage_sum(sessions):
+    out = {"sessions": len(sessions)}
+    for f in USAGE_FIELDS:
+        out[f] = sum(s[f] for s in sessions)
+    return out
+
+
+def short_count(n):
+    """570.4M, 98.6K, 912: a token count on the terminal."""
+    units = ((10 ** 3, "K"), (10 ** 6, "M"), (10 ** 9, "B"))
+    for i in range(len(units) - 1, -1, -1):
+        size, unit = units[i]
+        if abs(n) >= size:
+            if abs(round(n / size, 1)) >= 1000 and i + 1 < len(units):  # 999999 is 1.0M, not 1000.0K
+                size, unit = units[i + 1]
+            return f"{n / size:.1f}{unit}"
+    return str(n)
+
+
+def usage_stamp(text):
+    return parse_utc(text).strftime("%m-%d %H:%M") if text else "-"
+
+
+def usage_command(plan_dir, as_json, since, everything):
+    """`wg usage <plan-dir>`: the token use of each session of an effort. It reads files only."""
+    if not (Path(plan_dir) / "plan.json").is_file():
+        die(f"no plan.json in {plan_dir}")
+    start = since_time(since) if since else None
+    sessions = effort_usage(plan_dir, start)
+    roles = {r: usage_sum([s for s in sessions if s["role"] == r]) for r in ("coordinator", "worker", "other")}
+    total = usage_sum(sessions)
+    if as_json:
+        rows = [{k: v for k, v in s.items()} for s in sessions]
+        print(json.dumps({"plan_dir": str(plan_dir), "since": since, "sessions": rows, "roles": roles,
+                          "total": total}, indent=2))
+        return 0
+    if not sessions:
+        print("no session transcript of this effort")
+        return 0
+    head = ("role", "node", "agent", "model", "calls", "fresh", "c.write", "c.read", "output", "max ctx", "start",
+            "first", "last")
+    table = [head]
+    shown = sessions if everything else sessions[:USAGE_SHOWN]
+    for s in shown:
+        table.append((s["role"], s["key"] or "-", s["agent"], s["model"] or "-", str(s["calls"]),
+                      *(short_count(s[f]) for f in ("fresh", "cache_write", "cache_read", "output", "max_context",
+                                                    "start_context")),
+                      usage_stamp(s["first"]), usage_stamp(s["last"])))
+    widths = [max(len(row[i]) for row in table) for i in range(len(head))]
+    for row in table:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    rest = sessions[len(shown):]
+    if rest:
+        more = usage_sum(rest)
+        print(f"and {len(rest)} more sessions: input {short_count(more['input'])}, output {short_count(more['output'])}")
+    print()
+    for name, part in [*roles.items(), ("total", total)]:
+        if part["sessions"] or name == "total":
+            print(f"{name:<12} {part['sessions']:>4} sessions  {part['calls']:>6} calls  input {short_count(part['input'])} "
+                  f"(fresh {short_count(part['fresh'])}, cache write {short_count(part['cache_write'])}, "
+                  f"cache read {short_count(part['cache_read'])})  output {short_count(part['output'])}")
     return 0
 
 
@@ -7557,6 +7944,10 @@ def cli_parser():
     lg.add_argument("--since", help="a duration back from now (2h, 3d) or an ISO time")
     lg.add_argument("-n", type=int, default=30, help="the number of entries, newest last (default 30)")
     lg.add_argument("--times", action="store_true", help="per task: dispatch to code done, code done to merged, wait")
+    us = add(sub, "usage")
+    us.add_argument("--json", action="store_true", help="exact integers and each session")
+    us.add_argument("--since", help="only calls after this: a duration back from now (2h, 3d) or an ISO time")
+    us.add_argument("--all", action="store_true", help="print each session, not the largest 15")
     add(sub, "evidence").add_argument("key")
     add(sub, "autonomy").add_argument("level", nargs="?", choices=AUTONOMY_LEVELS)
     add(sub, "review-effort").add_argument("level", nargs="?", choices=REVIEW_LEVELS)
@@ -7702,6 +8093,8 @@ def main(argv):
             else:
                 sys.stdout.write(contract_text())
             return 0
+        if ns.cmd == "usage":  # reads transcripts only: no plan lock, no Linear, no write to flush
+            return usage_command(ns.dir, ns.json, ns.since, ns.all)
         if ns.cmd == "tick":
             return tick_command(ns)
         if ns.cmd == "agents":

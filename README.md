@@ -143,6 +143,21 @@ Each Linear team of a plan needs the statuses Triage, Backlog, Todo, Ready, In P
 In Review, Ready to Merge, Merged, Verifying, Done, Canceled, and Duplicate
 (`skills/work-graph/references/setup.md`).
 
+### Token use
+
+`wg usage <plan-dir>` prints how many tokens the sessions of one effort used. It reads the session transcripts
+of Claude Code (`~/.claude/projects`, or `CLAUDE_CONFIG_DIR`) and Codex (`~/.codex/sessions`, or `CODEX_HOME`) of
+the plan directory and of each worktree that a run row or the journal records, also a worktree that was removed.
+A session that starts with the worker preamble is a `worker`. A session in the plan directory that ran `wg next`
+or loaded the work-graph skill is the `coordinator`. Each other session (a session of the human, or a short
+utility session for a chat name, a branch name, or a commit message) is `other`. A session that records the cwd
+of another folder does not count. Each line shows the role,
+the node key, the agent, the model, the calls, the input tokens (fresh, cache write, cache read), the output
+tokens, the largest context, the start size (the context of the first call), and the first and last time. Then
+come the totals per role and one grand total. It prints the 15 largest sessions; `--all` prints each one.
+`--json` gives exact integers, and `--since <2h|3d|UTC time>` counts only the calls after that time. It makes no
+Linear, GitHub, or Orca call and writes nothing.
+
 ## Run the page on this machine
 
 `wg ui` builds and starts it from this repository (or from `WG_UI_DIR`). By hand:

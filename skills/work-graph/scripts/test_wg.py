@@ -6947,6 +6947,248 @@ class JournalTests(DirTests):
         self.assertNotIn("a\t", out)
 
 
+class UsageTests(DirTests):
+    """`wg usage`: the token use of each session of an effort, from the transcripts of Claude Code and Codex."""
+
+    def setUp(self):
+        super().setUp()
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = Path(home.name).resolve()
+        self.d = self.d.resolve()
+        self.worker = self.home / "effort-1"     # a worktree that exists
+        self.removed = self.home / "effort-2"    # a removed worktree: only the journal has its path
+        self.worker.mkdir()
+        self.keymap(rows={"a": {"path": str(self.worker), "state": "running"}})
+        wg.journal(self.d, "started", "mp", {"path": [None, str(self.removed)]})
+        patcher = patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.home / "claude"),
+                                          "CODEX_HOME": str(self.home / "codex")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def claude(self, cwd, name, first, calls, extra=(), sub=None, ran=None):
+        """A Claude Code transcript. Each call is (message id, time, input, cache write, cache read, output). Each
+        line records `cwd`. With `ran`, a second line of the first call holds a Bash tool call of that command."""
+        folder = self.home / "claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+        folder.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps({"type": "user", "isMeta": True, "message": {"content": "<local-command-caveat>"}}),
+                 json.dumps({"type": "user", "cwd": str(cwd),
+                             "message": {"content": [{"type": "text", "text": first}]}})]
+        for ident, at, fresh, write, read, out in calls:
+            lines.append(json.dumps({"type": "assistant", "timestamp": at, "cwd": str(cwd), "message": {
+                "id": ident, "model": "claude-test", "usage": {
+                    "input_tokens": fresh, "cache_creation_input_tokens": write,
+                    "cache_read_input_tokens": read, "output_tokens": out}}}))
+        if ran:
+            ident, at, fresh, write, read, out = calls[0]
+            lines.append(json.dumps({"type": "assistant", "timestamp": at, "cwd": str(cwd), "message": {
+                "id": ident, "model": "claude-test", "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": ran}}], "usage": {
+                    "input_tokens": fresh, "cache_creation_input_tokens": write,
+                    "cache_read_input_tokens": read, "output_tokens": out}}}))
+        lines += list(extra)
+        (folder / f"{name}.jsonl").write_text("\n".join(lines) + "\n")
+        if sub:
+            (folder / name / "subagents").mkdir(parents=True)
+            (folder / name / "subagents" / "agent-1.jsonl").write_text("\n".join(
+                json.dumps({"type": "assistant", "timestamp": at, "message": {
+                    "id": ident, "model": "claude-small", "usage": {
+                        "input_tokens": fresh, "cache_creation_input_tokens": write,
+                        "cache_read_input_tokens": read, "output_tokens": out}}})
+                for ident, at, fresh, write, read, out in sub) + "\n")
+
+    def codex(self, cwd, name, first, totals, ran=None):
+        """A Codex rollout. Each total is (time, input, cached, output, the input of the last call)."""
+        folder = self.home / "codex/sessions/2026/01/01"
+        folder.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps({"type": "session_meta", "payload": {"id": name, "cwd": str(cwd)}}),
+                 json.dumps({"type": "turn_context", "payload": {"model": "gpt-test"}}),
+                 json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                     {"type": "input_text", "text": "# AGENTS.md instructions for the repo"}]}}),
+                 json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                     {"type": "input_text", "text": first}]}})]
+        for at, inp, cached, out, last in totals:
+            lines.append(json.dumps({"timestamp": at, "type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": inp, "cached_input_tokens": cached, "output_tokens": out,
+                                      "reasoning_output_tokens": 0},
+                "last_token_usage": {"input_tokens": last}}}}))
+        if ran:
+            lines.append(json.dumps({"type": "response_item", "payload": {
+                "type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": ran})}}))
+        (folder / f"rollout-{name}.jsonl").write_text("\n".join(lines) + "\n")
+
+    def fixtures(self):
+        worker = wg.USAGE_WORKER + "\nYour task ID is: task_1"
+        # The coordinator: one API call on two lines (m1), one invalid line, and a second call.
+        self.claude(self.d, "coord", "/work-graph resume the effort", [
+            ("m1", "2026-01-01T10:00:00Z", 10, 1000, 0, 50),
+            ("m1", "2026-01-01T10:00:00Z", 10, 1000, 0, 50),
+            ("m2", "2026-01-01T12:00:00Z", 5, 200, 1000, 70)], extra=['{"type": "assistant", "message": {"usage"'],
+            ran=f"wg next {self.d}")
+        self.claude(self.d, "title", "Generate a chat name for this conversation", [
+            ("u1", "2026-01-01T10:05:00Z", 30, 0, 0, 5)])
+        # A worker of node a, with one subagent call.
+        self.claude(self.worker, "w1", worker, [("w1", "2026-01-01T11:00:00Z", 3, 500, 0, 20),
+                                                ("w2", "2026-01-01T11:30:00Z", 2, 100, 600, 30)],
+                    sub=[("s1", "2026-01-01T11:10:00Z", 1, 50, 0, 9)])
+        # A worker of node mp, whose worktree was removed.
+        self.claude(self.removed, "w2", worker, [("r1", "2026-01-01T09:00:00Z", 4, 300, 0, 10)])
+        # A Codex worker of node a: a repeated total is not a new call.
+        self.codex(self.worker, "c1", worker, [("2026-01-01T11:00:00Z", 1000, 800, 40, 1000),
+                                               ("2026-01-01T11:00:01Z", 1000, 800, 40, 1000),
+                                               ("2026-01-01T12:00:00Z", 2500, 2000, 90, 1500)])
+        # Sessions of other folders do not count.
+        self.claude(self.home / "elsewhere", "x", "hello", [("x1", "2026-01-01T10:00:00Z", 9, 9, 9, 9)])
+        self.codex(self.home / "elsewhere", "c2", "hello", [("2026-01-01T10:00:00Z", 99, 0, 9, 99)])
+
+    def usage(self, *flags):
+        out, _ = self.call(wg.main, ["wg", "usage", str(self.d), "--json", *flags])
+        return json.loads(out)
+
+    def test_counts_each_call_one_time_and_gives_each_session_its_role_and_node(self):
+        self.fixtures()
+        got = self.usage()
+        rows = {s["session"]: s for s in got["sessions"]}
+        self.assertEqual(set(rows), {"coord", "title", "w1", "w2", "rollout-c1"})
+        coord = rows["coord"]
+        self.assertEqual((coord["role"], coord["key"], coord["agent"], coord["model"], coord["calls"]),
+                         ("coordinator", None, "claude", "claude-test", 2))
+        self.assertEqual((coord["fresh"], coord["cache_write"], coord["cache_read"], coord["output"]),
+                         (15, 1200, 1000, 120))
+        self.assertEqual((coord["max_context"], coord["start_context"]), (1205, 1010))
+        self.assertEqual((coord["first"], coord["last"]), ("2026-01-01T10:00:00Z", "2026-01-01T12:00:00Z"))
+        self.assertEqual(rows["title"]["role"], "other")
+        w1 = rows["w1"]
+        self.assertEqual((w1["role"], w1["key"], w1["calls"], w1["subagents"], w1["input"], w1["output"]),
+                         ("worker", "a", 3, 1, 3 + 500 + 2 + 100 + 600 + 1 + 50, 59))
+        self.assertEqual(w1["max_context"], 702)  # the subagent's context is not the session's
+        self.assertEqual((rows["w2"]["role"], rows["w2"]["key"], rows["w2"]["input"]), ("worker", "mp", 304))
+        c1 = rows["rollout-c1"]
+        self.assertEqual((c1["role"], c1["key"], c1["agent"], c1["model"], c1["calls"]),
+                         ("worker", "a", "codex", "gpt-test", 2))
+        self.assertEqual((c1["fresh"], c1["cache_write"], c1["cache_read"], c1["output"]), (500, 0, 2000, 90))
+        self.assertEqual((c1["max_context"], c1["start_context"]), (1500, 1000))
+        self.assertEqual(got["sessions"][0]["session"], "rollout-c1")  # the largest input first
+        self.assertEqual(got["roles"]["worker"]["sessions"], 3)
+        self.assertEqual(got["total"], {"sessions": 5, "calls": 9, "fresh": 555, "cache_write": 2150,
+                                        "cache_read": 3600, "input": 6305, "output": 284})
+
+    def test_since_counts_only_the_calls_after_it(self):
+        self.fixtures()
+        got = self.usage("--since", "2026-01-01T11:15:00Z")
+        rows = {s["session"]: s for s in got["sessions"]}
+        self.assertEqual(set(rows), {"coord", "w1", "rollout-c1"})
+        self.assertEqual((rows["coord"]["calls"], rows["coord"]["input"]), (1, 1205))
+        self.assertEqual((rows["w1"]["calls"], rows["w1"]["input"]), (1, 702))
+        self.assertEqual((rows["rollout-c1"]["calls"], rows["rollout-c1"]["input"]), (1, 1500))
+
+    def test_the_terminal_shows_short_numbers_and_the_largest_sessions(self):
+        self.fixtures()
+        for n in range(20):
+            self.claude(self.d, f"more{n:02}", "/work-graph resume", [(f"n{n}", "2026-01-01T10:00:00Z", 1, 0, 0, 1)],
+                        ran="wg next .")
+        self.claude(self.d, "big", "/work-graph resume", [("b1", "2026-01-01T10:00:00Z", 0, 98_600, 570_400_000, 1)],
+                    ran="wg next .")
+        out, _ = self.call(wg.main, ["wg", "usage", str(self.d)])
+        lines = out.splitlines()
+        self.assertTrue(lines[0].startswith("role"))
+        self.assertRegex(lines[1], r"^coordinator\s+-\s+claude\s+claude-test\s+1\s+0\s+98\.6K\s+570\.4M\s+1\s+570\.5M")
+        self.assertEqual(len([line for line in lines[1:] if re.match(r"(coordinator|worker|other) ", line)]),
+                         wg.USAGE_SHOWN + 3)  # the 15 sessions and the 3 role totals
+        self.assertIn("and 11 more sessions: input 11, output 11", out)
+        self.assertRegex(out, r"\ntotal\s+26 sessions\s+30 calls\s+input 570\.5M")
+        out, _ = self.call(wg.main, ["wg", "usage", str(self.d), "--all"])
+        self.assertNotIn("more sessions", out)
+
+    def test_a_folder_of_the_same_slug_does_not_count(self):
+        """a-b and a_b share one Claude Code folder name: a session that records the cwd a_b is not a-b's."""
+        self.fixtures()
+        foreign = self.home / "effort_1"
+        folder = self.home / "claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(foreign))
+        self.assertTrue(folder.is_dir())  # the folder of effort-1
+        (folder / "foreign.jsonl").write_text(json.dumps({"type": "assistant", "cwd": str(foreign),
+            "timestamp": "2026-01-01T10:00:00Z", "message": {"id": "f1", "model": "claude-test", "usage": {
+                "input_tokens": 7, "cache_creation_input_tokens": 7, "cache_read_input_tokens": 7,
+                "output_tokens": 7}}}) + "\n")
+        self.assertNotIn("foreign", {s["session"] for s in self.usage()["sessions"]})
+
+    def test_a_call_counts_at_the_time_of_its_first_record(self):
+        self.claude(self.d, "late", "/work-graph resume", [("m1", "2026-01-01T10:00:00Z", 1, 2, 3, 4),
+                                                         ("m1", "2026-01-01T11:00:00Z", 1, 2, 3, 4)], ran="wg next .")
+        self.assertEqual(self.usage("--since", "2026-01-01T10:30:00Z")["sessions"], [])
+        self.assertEqual(self.usage()["total"]["calls"], 1)
+
+    def test_the_last_codex_total_is_the_session_total(self):
+        self.codex(self.worker, "c3", wg.USAGE_WORKER, [("2026-01-01T10:00:00Z", 1000, 0, 10, 1000),
+                                                        ("2026-01-01T11:00:00Z", 500, 0, 5, 500)])
+        row = self.usage()["sessions"][0]
+        self.assertEqual((row["calls"], row["input"], row["output"]), (2, 500, 5))
+
+    def test_a_core_session_is_the_coordinator_only_when_it_coordinated(self):
+        self.claude(self.d, "human", "please fix the typo in the README", [("h1", "2026-01-01T10:00:00Z", 1, 0, 0, 1)])
+        self.claude(self.d, "coord", "please go on", [("c1", "2026-01-01T10:00:00Z", 1, 0, 0, 1)],
+                    ran="~/.local/bin/wg next ~/Projects/x-core --wait")
+        folder = self.home / "claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.d))
+        (folder / "skill.jsonl").write_text(json.dumps({"type": "assistant", "timestamp": "2026-01-01T10:00:00Z",
+            "message": {"id": "k1", "model": "claude-test", "content": [
+                {"type": "tool_use", "name": "Skill", "input": {"skill": "work-graph"}}],
+                "usage": {"input_tokens": 1, "output_tokens": 1}}}) + "\n")
+        self.codex(self.d, "cx", "resume the effort", [("2026-01-01T10:00:00Z", 10, 0, 1, 10)],
+                   ran="cat ~/.claude/skills/work-graph/SKILL.md")
+        self.codex(self.d, "cy", "what is this repo", [("2026-01-01T10:00:00Z", 10, 0, 1, 10)])
+        roles = {s["session"]: s["role"] for s in self.usage()["sessions"]}
+        self.assertEqual(roles, {"human": "other", "coord": "coordinator", "skill": "coordinator",
+                                 "rollout-cx": "coordinator", "rollout-cy": "other"})
+
+    def test_a_usage_value_that_is_not_a_number_is_skipped(self):
+        self.claude(self.d, "bad", "x", [("b1", "2026-01-01T10:00:00Z", "bad", 0, 0, 1),
+                                         ("b2", "2026-01-01T10:01:00Z", 1, 2, 3, 4)])
+        self.codex(self.worker, "cb", wg.USAGE_WORKER, [("2026-01-01T10:00:00Z", "bad", 0, 1, 10),
+                                                        ("2026-01-01T10:01:00Z", 20, 0, 2, 20)])
+        rows = {s["session"]: s for s in self.usage()["sessions"]}
+        self.assertEqual((rows["bad"]["calls"], rows["bad"]["input"]), (1, 6))
+        self.assertEqual((rows["rollout-cb"]["calls"], rows["rollout-cb"]["input"]), (1, 20))
+
+    def test_a_session_belongs_to_the_tracked_path_that_it_records(self):
+        """With a-b and a_b both tracked, the transcript of a_b (one Claude Code folder for both) is a_b's."""
+        other = self.home / "effort_1"
+        self.keymap(rows={"a": {"path": str(self.worker)}, "sp": {"path": str(other)}})
+        worker = wg.USAGE_WORKER
+        self.claude(self.worker, "dash", worker, [("d1", "2026-01-01T10:00:00Z", 1, 0, 0, 1)])
+        self.claude(other, "under", worker, [("u1", "2026-01-01T10:00:00Z", 2, 0, 0, 1)])
+        keys = {s["session"]: s["key"] for s in self.usage()["sessions"]}
+        self.assertEqual(keys, {"dash": "a", "under": "sp"})
+
+    def test_a_later_work_graph_command_makes_the_coordinator(self):
+        self.claude(self.d, "later", "what changed today", [("l1", "2026-01-01T10:00:00Z", 1, 0, 0, 1)], extra=[
+            json.dumps({"type": "user", "cwd": str(self.d), "message": {"content":
+                "<command-message>work-graph</command-message>\n<command-name>/work-graph</command-name>"}})])
+        self.assertEqual(self.usage()["sessions"][0]["role"], "coordinator")
+
+    def test_an_invalid_first_record_does_not_hide_a_valid_one_of_the_same_id(self):
+        self.claude(self.d, "retry", "x", [("r1", "2026-01-01T10:00:00Z", "bad", 0, 0, 1),
+                                           ("r1", "2026-01-01T10:00:00Z", 5, 0, 0, 1)])
+        row = self.usage()["sessions"][0]
+        self.assertEqual((row["calls"], row["input"]), (1, 5))
+
+    def test_short_count_moves_up_a_unit_at_1000(self):
+        self.assertEqual([wg.short_count(n) for n in (999, 98_600, 999_949, 999_999, 999_999_999, 1_500_000_000)],
+                         ["999", "98.6K", "999.9K", "1.0M", "1.0B", "1.5B"])
+
+    def test_no_transcript_and_no_plan(self):
+        out, _ = self.call(wg.main, ["wg", "usage", str(self.d)])
+        self.assertEqual(out, "no session transcript of this effort\n")
+        self.call(wg.main, ["wg", "usage", str(self.home)], code=2)
+
+    def test_reads_no_network_and_writes_nothing(self):
+        self.fixtures()
+        before = sorted((p, p.stat().st_mtime_ns) for p in self.d.rglob("*"))
+        with patch.object(wg, "command", side_effect=AssertionError("no command")), \
+                patch.object(urllib.request, "urlopen", side_effect=AssertionError("no network")):
+            self.usage()
+        self.assertEqual(sorted((p, p.stat().st_mtime_ns) for p in self.d.rglob("*")), before)
+
+
 def done_proc(stdout="", code=0, stderr=""):
     return subprocess.CompletedProcess([], code, stdout, stderr)
 

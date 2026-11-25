@@ -88,7 +88,7 @@ DEFAULT_CONFIG = {"human": "Human", "page_url": None, "github_user": None, "tick
                   "tick_label": "dev.work-graph.tick", "test_runner": None, "branch_prefix": "wg/",
                   "release_branch": "release", "rules": "~/.config/work-graph/rules.md",
                   "notify": [], "agent_merge": [], "health_interval": 6, "health_agent": "codex",
-                  "worker_settings": {}, "context_limit": 250000, "workspaces": [DEFAULT_WORKSPACE]}
+                  "worker_settings": {}, "coordinator_settings": {}, "context_limit": 250000, "workspaces": [DEFAULT_WORKSPACE]}
 # The session settings file of each agent in a worker worktree (config worker_settings). wg dispatch merges the
 # values of the worker's agent into this file before the worker starts.
 WORKER_SETTINGS_FILES = {"claude": ".claude/settings.local.json", "codex": ".codex/config.toml"}
@@ -117,10 +117,11 @@ def read_config(path=CONFIG_PATH):
         raise SystemExit(f"{path}: health_interval must be a number of hours from 1 to 168")
     if not isinstance(config["health_agent"], str) or not re.fullmatch(r"[a-z0-9-]+", config["health_agent"]):
         raise SystemExit(f"{path}: health_agent must be an Orca agent id, such as codex or claude")
-    settings = config["worker_settings"]
-    if not isinstance(settings, dict) or not all(a in WORKER_SETTINGS_FILES and isinstance(v, dict)
-                                                 for a, v in settings.items()):
-        raise SystemExit(f"{path}: worker_settings must map {' or '.join(WORKER_SETTINGS_FILES)} to a JSON object")
+    for key in ("worker_settings", "coordinator_settings"):
+        settings = config[key]
+        if not isinstance(settings, dict) or not all(a in WORKER_SETTINGS_FILES and isinstance(v, dict)
+                                                     for a, v in settings.items()):
+            raise SystemExit(f"{path}: {key} must map {' or '.join(WORKER_SETTINGS_FILES)} to a JSON object")
     limit = config["context_limit"]
     if isinstance(limit, bool) or not isinstance(limit, int) or (limit and limit < CONTEXT_LIMIT_MIN):
         raise SystemExit(f"{path}: context_limit must be 0 (off) or a token count of {CONTEXT_LIMIT_MIN} or more")
@@ -2164,24 +2165,59 @@ def context_settings(plan_dir):
 
 
 def loaded_effort(path):
-    """`path` is the plan directory of a loaded effort: it has plan.json and keymap.json (as tick_plans)."""
-    return (Path(path) / "plan.json").is_file() and (Path(path) / "keymap.json").is_file()
-
-
-def set_context_limit(plan_dir, apply, changes):
-    """Merge config `context_limit` as `autoCompactWindow` into the core worktree's local settings file through
-    merge_claude_settings: other keys stay, the file stays out of git (also when the value is already there), and
-    wg writes through no symlink. Limit 0: nothing."""
-    limit = CONFIG["context_limit"]
-    if not limit:
-        return
+    """`path` is the plan directory of a loaded effort: plan.json is a JSON object, and keymap.json is a JSON
+    object with at least one node. Only then does `wg doctor --fix` write its session settings."""
     try:
-        if context_settings(plan_dir).get(CONTEXT_KEY) != limit:
-            changes.append(f"set {CONTEXT_KEY} {limit} in {Path(plan_dir) / CONTEXT_SETTINGS}")
-        if apply:
-            merge_claude_settings(plan_dir, {CONTEXT_KEY: limit})
-    except (ReadError, OSError, ValueError, subprocess.SubprocessError) as e:
-        print(f"warn: the context limit is not set ({one_line(e, 160)})", file=sys.stderr)
+        plan = json.loads((Path(path) / "plan.json").read_text())
+        km = json.loads((Path(path) / "keymap.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(plan, dict) and isinstance(km, dict) and isinstance(km.get("nodes"), dict) and bool(km["nodes"])
+
+
+def core_settings():
+    """{agent: values} that wg merges into the core worktree: config `coordinator_settings`, and for claude the
+    context limit as `autoCompactWindow`. A context limit that is not 0 replaces an `autoCompactWindow` of
+    `coordinator_settings.claude`."""
+    values = {agent: dict(v) for agent, v in CONFIG["coordinator_settings"].items() if v}
+    if limit := CONFIG["context_limit"]:
+        values["claude"] = values.get("claude", {}) | {CONTEXT_KEY: limit}
+    return values
+
+
+def settings_have(plan_dir, agent, values):
+    """The settings file of `agent` in `plan_dir` has `values`: a merge would change nothing. ValueError when the
+    file does not parse."""
+    path = Path(plan_dir) / WORKER_SETTINGS_FILES[agent]
+    if not path.exists():
+        return False
+    try:
+        old = json.loads(path.read_text()) if agent == "claude" else tomllib.loads(path.read_text())
+    except (json.JSONDecodeError, tomllib.TOMLDecodeError) as e:
+        raise ValueError(f"{path}: does not parse ({e})")
+    return isinstance(old, dict) and same_settings(merged_settings(old, values), old)
+
+
+def set_core_settings(plan_dir, apply, changes):
+    """Merge core_settings() into the session settings files of the core worktree through the writer of
+    `worker_settings` (merge_claude_settings, merge_codex_config): other keys stay, each file stays out of git
+    (also when its values are already there), and wg writes through no symlink. Returns the refusals as text;
+    each one also prints one warning."""
+    problems = []
+    for agent, values in core_settings().items():
+        path = Path(plan_dir) / WORKER_SETTINGS_FILES[agent]
+        try:
+            if not settings_have(plan_dir, agent, values):
+                what = [f"coordinator_settings.{agent}"] if CONFIG["coordinator_settings"].get(agent) else []
+                if agent == "claude" and CONFIG["context_limit"]:
+                    what.append(f"{CONTEXT_KEY} {CONFIG['context_limit']}")
+                changes.append(f"set {' and '.join(what)} in {path}")
+            if apply:
+                (merge_claude_settings if agent == "claude" else merge_codex_config)(plan_dir, values)
+        except (ReadError, OSError, ValueError, subprocess.SubprocessError) as e:
+            problems.append(one_line(e, 200))
+            print(f"warn: the coordinator settings are not set ({problems[-1]})", file=sys.stderr)
+    return problems
 
 
 def session_context_tokens(dirs):
@@ -2274,7 +2310,7 @@ def load(plan_dir, plan, apply, prune, adopt=False):
             km["project"] = p["projectCreate"]["project"]
             save_keymap(plan_dir, km)
     name_coordinator(plan_dir, eff["name"], apply, changes)
-    set_context_limit(plan_dir, apply, changes)
+    set_core_settings(plan_dir, apply, changes)
     if eff.get("initiative"):
         sync_initiative(team_id, (km.get("project") or {}).get("id"), eff["initiative"].strip(), apply, changes,
                         team_scoped=team_labels(plan))
@@ -6166,36 +6202,40 @@ def doctor_health(plans):
 
 
 def doctor_context(plans, fix):
-    """Each effort's core worktree has config `context_limit` as `autoCompactWindow` in its local Claude Code
-    settings. With fix, write the missing ones."""
+    """Each effort's core worktree has core_settings(): config `coordinator_settings` and the context limit. With
+    fix, write them; a refusal of the writer is the result."""
     def check():
-        limit = CONFIG["context_limit"]
-        if not limit:
-            return "ok", "context: off (config context_limit is 0)"
+        values = core_settings()
+        if not values:
+            return "ok", "settings: off (no coordinator_settings, context_limit 0)"
         lines = []
         for path in plans:
             if not loaded_effort(path):
                 if fix:
-                    lines.append(("warn", f"context {path}: not the plan directory of a loaded effort (plan.json "
+                    lines.append(("warn", f"settings {path}: not the plan directory of a loaded effort (plan.json "
                                   "and keymap.json); nothing written"))
                 continue
-            try:
-                if context_settings(path).get(CONTEXT_KEY) == limit:
-                    if fix:
-                        set_context_limit(path, True, [])  # the value is there; this keeps the file out of git
-                    continue
-            except (OSError, ValueError) as e:
-                lines.append(("FAIL", f"context {path}: {one_line(e, 200)}"))
-                continue
+            # Each agent on its own: a file that does not parse stops only that agent.
+            missing, broken = [], []
+            for agent, v in values.items():
+                try:
+                    if not settings_have(path, agent, v):
+                        missing.append(WORKER_SETTINGS_FILES[agent])
+                except (OSError, ValueError) as e:
+                    broken.append(one_line(e, 200))
             if not fix:
-                lines.append(("warn", f"context {path}: no {CONTEXT_KEY} {limit} in {CONTEXT_SETTINGS}; "
-                              f"wg doctor {shlex.quote(str(path))} --fix"))
+                lines += [("FAIL", f"settings {path}: {e}") for e in broken]
+                if missing:
+                    lines.append(("warn", f"settings {path}: {', '.join(missing)} lacks the configured values; "
+                                  f"wg doctor {shlex.quote(str(path))} --fix"))
                 continue
-            set_context_limit(path, True, [])
-            done = context_settings(path).get(CONTEXT_KEY) == limit
-            lines.append(("ok" if done else "FAIL", f"context {path}: {CONTEXT_KEY} {limit} "
-                          + ("set; a new session compacts at it" if done else "not set")))
-        return lines or [("ok", f"context: each loaded effort compacts its coordinator at {limit} tokens")]
+            # Also when nothing is missing: the exclude step. One line for each refusal.
+            lines += [("warn", f"settings {path}: not written: {problem}") for problem in set_core_settings(path, True, [])]
+            done = [WORKER_SETTINGS_FILES[a] for a, v in values.items()
+                    if WORKER_SETTINGS_FILES[a] in missing and settings_have(path, a, v)]
+            if done:
+                lines.append(("ok", f"settings {path}: {', '.join(done)} set; a new session uses them"))
+        return lines or [("ok", "settings: each loaded effort's core worktree has the coordinator settings")]
     return check
 
 
@@ -6267,7 +6307,7 @@ def doctor_link(plan_dir, plan):
 
 def doctor_lines(plan_dir=None, fix=False):
     """Each (level, text) line of `wg doctor [<dir>]`, as each check ends: the checks of this machine and, with a
-    plan directory, of that effort. It changes nothing; with fix, it writes the context limit of each loaded
+    plan directory, of that effort. It changes nothing; with fix, it writes the coordinator settings of each loaded
     effort."""
     plans = set(tick_plans())
     checks = [("python", doctor_python), ("websockets", doctor_websockets), ("checkout", doctor_checkout)]
@@ -6278,7 +6318,7 @@ def doctor_lines(plan_dir=None, fix=False):
     if plan_dir:
         plans.add(Path(plan_dir).resolve())
     checks += [("autostart", doctor_autostart(sorted(plans))), ("health", doctor_health(sorted(plans)))]
-    checks.append(("context", doctor_context(sorted(plans), fix)))
+    checks.append(("settings", doctor_context(sorted(plans), fix)))
     for name, step in checks:
         yield from doctor_run(name, step)
     if not plan_dir:
@@ -6306,7 +6346,7 @@ def doctor_lines(plan_dir=None, fix=False):
 
 def doctor(plan_dir=None, fix=False):
     """`wg doctor [<dir>] [--fix]`: one ok, warn, or FAIL line for each check of this machine and, with a plan
-    directory, of that effort. It changes nothing; with fix, it writes the context limit of each loaded effort.
+    directory, of that effort. It changes nothing; with fix, it writes the coordinator settings of each loaded effort.
     Exit 1 on a FAIL."""
     failed = False
     for level, text in doctor_lines(plan_dir, fix):
@@ -7961,7 +8001,7 @@ def cli_parser():
     e.add_argument("verb", nargs="?")
     d = sub.add_parser("doctor", help="check this machine and, with a plan directory, that effort; changes nothing")
     d.add_argument("dir", nargs="?")
-    d.add_argument("--fix", action="store_true", help="also write the context limit of each loaded effort")
+    d.add_argument("--fix", action="store_true", help="also write the coordinator settings and context limit of each loaded effort")
     sub.add_parser("config", help="print the config of this machine (no keys) and the local rules file")
     c = sub.add_parser("contract", help="print what the page must agree with; --write updates contract.json")
     c.add_argument("--write", action="store_true")

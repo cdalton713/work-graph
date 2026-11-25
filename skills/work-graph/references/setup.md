@@ -59,6 +59,8 @@ Linear's Free plan holds 250 issues in a workspace; archived issues do not count
 
 A worker session loads the full setup of the machine: all plugins, MCP servers, skills, and tools. Most of it is not necessary for a worker. A worker needs Bash, the file tools, git, `gh`, `wg`, the Orca CLI and the Orca status hooks, and the Linear MCP server (the worker spec reads and writes Linear through it). Put the settings that turn off the rest in the config `worker_settings` (README "Config"). `wg dispatch` writes them into each new worker worktree before the worker starts. Do not turn off hooks as a group: the Orca status hooks are hooks. A Codex project file has an effect only when Codex trusts the repository.
 
+A coordinator session needs more than a worker: also the Linear MCP server, `AskUserQuestion`, `SendMessage`, `ListAgents`, auto memory, and the skills that the loop names (`work-graph`, `orchestration`, `orca-cli`, `stax`, `code-review`, `resolving-merge-conflicts`, `diagnosing-bugs`). Put the settings that turn off the rest in the config `coordinator_settings`; `wg load --apply` and `wg doctor --fix` write them into the core worktree, and a new coordinator session uses them.
+
 To see the effect of a change, compare `wg usage <plan-dir>` of an effort before the change with one after it. It prints the tokens of each session (coordinator, worker, other) and the start size: the context of its first call. It reads the transcripts of Claude Code and Codex only, and writes nothing.
 
 ## Autostart

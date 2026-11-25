@@ -59,8 +59,8 @@ wg.page_contract_note = lambda plan_dir: []
 # ContextLimitTests use the real ones.
 CONTEXT_NOTE = wg.context_note
 wg.context_note = lambda plan_dir: []
-SET_CONTEXT_LIMIT = wg.set_context_limit
-wg.set_context_limit = lambda plan_dir, apply, changes: None
+SET_CONTEXT_LIMIT = wg.set_core_settings
+wg.set_core_settings = lambda plan_dir, apply, changes: []
 
 SHA = "a" * 40
 OTHER = "b" * 40
@@ -7279,7 +7279,7 @@ class ContextLimitTests(LaneTests):
     def test_load_runs_the_step_and_a_dry_run_names_it(self):
         self.keymap()
         live = {n["key"]: live_issue(title=n["title"]) for n in self.p["nodes"]}
-        with patch.object(wg, "team_info", return_value=("cd", {}, {})), patch.object(wg, "set_context_limit",
+        with patch.object(wg, "team_info", return_value=("cd", {}, {})), patch.object(wg, "set_core_settings",
                                                                                  SET_CONTEXT_LIMIT), \
              patch.object(wg, "fetch_nodes", return_value=live), patch.object(wg, "_relations"), \
              patch.object(wg, "project_entries", return_value=[]), patch.object(wg, "sync_card", return_value=False), \
@@ -7297,13 +7297,13 @@ class ContextLimitTests(LaneTests):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             SET_CONTEXT_LIMIT(self.d, True, [])
-        self.assertIn("warn: the context limit is not set", stderr.getvalue())
+        self.assertIn("warn: the coordinator settings are not set", stderr.getvalue())
         self.assertEqual((self.d / ".claude/settings.local.json").read_text(), "{bad")
         # Not a git worktree: wg cannot keep the file out of git, so it writes nothing.
         (self.d / ".claude/settings.local.json").unlink()
         with contextlib.redirect_stderr(io.StringIO()) as stderr:
             SET_CONTEXT_LIMIT(self.d, True, [])
-        self.assertIn("warn: the context limit is not set", stderr.getvalue())
+        self.assertIn("warn: the coordinator settings are not set", stderr.getvalue())
         self.assertFalse((self.d / ".claude/settings.local.json").exists())
 
     def test_load_step_writes_through_no_symlink(self):
@@ -7338,12 +7338,12 @@ class ContextLimitTests(LaneTests):
         other.mkdir()
         self.git_repo(other)
         (other / "plan.json").write_text("{}")
-        (other / "keymap.json").write_text("{}")
+        (other / "keymap.json").write_text(json.dumps({"nodes": {"a": {"id": "a"}}}))
         (other / ".claude").mkdir()
         (other / ".claude/settings.local.json").write_text('{"autoCompactWindow": 250000}')
-        with patch.object(wg, "set_context_limit", SET_CONTEXT_LIMIT):
+        with patch.object(wg, "set_core_settings", SET_CONTEXT_LIMIT):
             self.assertEqual(wg.doctor_context([other], True)(),
-                             [("ok", "context: each loaded effort compacts its coordinator at 250000 tokens")])
+                             [("ok", "settings: each loaded effort's core worktree has the coordinator settings")])
         self.assertTrue(self.ignored(other))
 
     def test_the_session_size_is_the_last_main_call_at_the_end_of_the_transcript(self):
@@ -7405,12 +7405,12 @@ class ContextLimitTests(LaneTests):
         checkout = self.d / "main-checkout"  # a repository with no plan
         checkout.mkdir()
         self.git_repo(checkout)
-        with patch.object(wg, "set_context_limit", SET_CONTEXT_LIMIT):
+        with patch.object(wg, "set_core_settings", SET_CONTEXT_LIMIT):
             self.assertEqual(wg.doctor_context([checkout], True)(),
-                             [("warn", f"context {checkout}: not the plan directory of a loaded effort (plan.json and "
+                             [("warn", f"settings {checkout}: not the plan directory of a loaded effort (plan.json and "
                                        "keymap.json); nothing written")])
             self.assertEqual(wg.doctor_context([checkout], False)(),
-                             [("ok", "context: each loaded effort compacts its coordinator at 250000 tokens")])
+                             [("ok", "settings: each loaded effort's core worktree has the coordinator settings")])
         self.assertFalse((checkout / ".claude").exists())
         # wg doctor <dir> --fix passes fix to this check only.
         with patch.object(wg, "doctor_context", return_value=lambda: ("ok", "context")) as context, \
@@ -7425,22 +7425,129 @@ class ContextLimitTests(LaneTests):
         other.mkdir()
         self.git_repo(other)
         (other / "plan.json").write_text("{}")
-        (other / "keymap.json").write_text("{}")
+        (other / "keymap.json").write_text(json.dumps({"nodes": {"a": {"id": "a"}}}))
         (other / ".claude").mkdir()
         (other / ".claude/settings.local.json").write_text('{"autoCompactWindow": 250000}')
         check = wg.doctor_context([self.d, other], False)
-        self.assertEqual(check(), [("warn", f"context {self.d}: no autoCompactWindow 250000 in "
-                                            f".claude/settings.local.json; wg doctor {shlex.quote(str(self.d))} --fix")])
+        self.assertEqual(check(), [("warn", f"settings {self.d}: .claude/settings.local.json lacks the configured values; "
+                                            f"wg doctor {shlex.quote(str(self.d))} --fix")])
         self.assertFalse((self.d / ".claude").exists())  # without fix, doctor changes nothing
-        with patch.object(wg, "set_context_limit", SET_CONTEXT_LIMIT), patch.object(wg, "merge_claude_settings",
+        with patch.object(wg, "set_core_settings", SET_CONTEXT_LIMIT), patch.object(wg, "merge_claude_settings",
                                                                                   wraps=wg.merge_claude_settings) as merge:
             self.assertEqual(wg.doctor_context([self.d, other], True)(),
-                             [("ok", f"context {self.d}: autoCompactWindow 250000 set; a new session compacts at it")])
+                             [("ok", f"settings {self.d}: .claude/settings.local.json set; a new session uses them")])
         merge.assert_any_call(self.d, {"autoCompactWindow": 250000})  # the shared writer of worker_settings
         self.assertEqual(self.settings(), {"autoCompactWindow": 250000})
-        self.assertEqual(check(), [("ok", "context: each loaded effort compacts its coordinator at 250000 tokens")])
+        self.assertEqual(check(), [("ok", "settings: each loaded effort's core worktree has the coordinator settings")])
         with patch.dict(wg.CONFIG, {"context_limit": 0}):
-            self.assertEqual(check(), ("ok", "context: off (config context_limit is 0)"))
+            self.assertEqual(check(), ("ok", "settings: off (no coordinator_settings, context_limit 0)"))
+
+    def loaded_repo(self):
+        self.keymap()
+        self.git_repo()
+
+    def test_doctor_fix_reports_a_refusal_of_the_writer_when_the_value_is_already_right(self):
+        self.loaded_repo()
+        (self.d / ".gitignore").write_text("!/.claude/settings.local.json\n")  # a negation keeps the file in git status
+        (self.d / ".claude").mkdir()
+        (self.d / ".claude/settings.local.json").write_text('{"autoCompactWindow": 250000}')
+        with patch.object(wg, "set_core_settings", SET_CONTEXT_LIMIT), contextlib.redirect_stderr(io.StringIO()):
+            lines = wg.doctor_context([self.d], True)()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0][0], "warn")
+        self.assertIn(f"settings {self.d}: not written: git does not ignore .claude/settings.local.json", lines[0][1])
+        self.assertFalse(self.ignored())
+
+    def test_the_config_takes_coordinator_settings_of_the_worker_settings_shape(self):
+        def config(data):
+            path = self.d / "config.json"
+            path.write_text(json.dumps(data))
+            return wg.read_config(path)
+        self.assertEqual(config({})["coordinator_settings"], {})
+        self.assertEqual(config({"coordinator_settings": {"claude": {"a": 1}}})["coordinator_settings"], {"claude": {"a": 1}})
+        for bad in ([], {"gemini": {}}, {"claude": []}):
+            with self.assertRaises(SystemExit):
+                config({"coordinator_settings": bad})
+
+    def test_load_step_merges_coordinator_settings_and_the_context_limit_wins(self):
+        self.git_repo()
+        (self.d / ".claude").mkdir()
+        (self.d / ".claude/settings.local.json").write_text(json.dumps({"permissions": {"deny": ["Artifact"]}, "x": 1}))
+        settings = {"claude": {"autoMemoryEnabled": True, "autoCompactWindow": 500000,
+                               "permissions": {"deny": ["Workflow", "Artifact"]}},
+                    "codex": {"features": {"apps": False}}}
+        with patch.dict(wg.CONFIG, {"coordinator_settings": settings}):
+            changes = []
+            self.assertEqual(SET_CONTEXT_LIMIT(self.d, False, changes), [])
+            self.assertEqual(changes, [
+                f"set coordinator_settings.claude and autoCompactWindow 250000 in {self.d / '.claude/settings.local.json'}",
+                f"set coordinator_settings.codex in {self.d / '.codex/config.toml'}"])
+            self.assertEqual(SET_CONTEXT_LIMIT(self.d, True, []), [])
+            self.assertEqual(self.settings(), {"permissions": {"deny": ["Artifact", "Workflow"]}, "x": 1,
+                                               "autoMemoryEnabled": True, "autoCompactWindow": 250000})
+            self.assertEqual(wg.tomllib.loads((self.d / ".codex/config.toml").read_text()), {"features": {"apps": False}})
+            self.assertTrue(self.ignored())
+            changes = []
+            SET_CONTEXT_LIMIT(self.d, True, changes)
+            self.assertEqual(changes, [])  # each value is there
+            # Context limit 0: the value of coordinator_settings applies.
+            with patch.dict(wg.CONFIG, {"context_limit": 0}):
+                SET_CONTEXT_LIMIT(self.d, True, [])
+        self.assertEqual(self.settings()["autoCompactWindow"], 500000)
+
+    def test_without_coordinator_settings_and_with_limit_0_wg_writes_nothing(self):
+        self.loaded_repo()
+        with patch.dict(wg.CONFIG, {"context_limit": 0}):
+            self.assertEqual(SET_CONTEXT_LIMIT(self.d, True, []), [])
+            self.assertEqual(wg.doctor_context([self.d], True)(), ("ok", "settings: off (no coordinator_settings, context_limit 0)"))
+        self.assertFalse((self.d / ".claude").exists())
+        self.assertFalse((self.d / ".codex").exists())
+
+    def test_doctor_fix_writes_nothing_for_a_plan_that_is_not_json_or_a_keymap_with_no_nodes(self):
+        self.git_repo()
+        (self.d / "plan.json").write_text("{not json")
+        (self.d / "keymap.json").write_text("")
+        with patch.object(wg, "set_core_settings", SET_CONTEXT_LIMIT):
+            lines = wg.doctor_context([self.d], True)()
+            self.assertEqual([level for level, _ in lines], ["warn"])
+            self.assertIn("not the plan directory of a loaded effort", lines[0][1])
+            (self.d / "plan.json").write_text("{}")
+            (self.d / "keymap.json").write_text('{"nodes": {}}')  # loaded keymaps have a node
+            self.assertIn("nothing written", wg.doctor_context([self.d], True)()[0][1])
+        self.assertFalse((self.d / ".claude").exists())
+        self.assertFalse((self.d / ".codex").exists())
+
+    def test_a_claude_file_that_does_not_parse_does_not_stop_the_codex_file(self):
+        self.loaded_repo()
+        (self.d / ".claude").mkdir()
+        (self.d / ".claude/settings.local.json").write_text("{bad")
+        settings = {"claude": {"autoMemoryEnabled": True}, "codex": {"features": {"apps": False}}}
+        with patch.dict(wg.CONFIG, {"coordinator_settings": settings}), \
+             patch.object(wg, "set_core_settings", SET_CONTEXT_LIMIT), contextlib.redirect_stderr(io.StringIO()):
+            read = wg.doctor_context([self.d], False)()
+            self.assertEqual([level for level, _ in read], ["FAIL", "warn"])
+            self.assertIn(".codex/config.toml lacks the configured values", read[1][1])
+            lines = wg.doctor_context([self.d], True)()
+        self.assertEqual([level for level, _ in lines], ["warn", "ok"])
+        self.assertIn("not written:", lines[0][1])
+        self.assertIn(".claude/settings.local.json", lines[0][1])
+        self.assertEqual(lines[1][1], f"settings {self.d}: .codex/config.toml set; a new session uses them")
+        self.assertEqual(wg.tomllib.loads((self.d / ".codex/config.toml").read_text()), {"features": {"apps": False}})
+        self.assertEqual((self.d / ".claude/settings.local.json").read_text(), "{bad")
+
+    def test_doctor_reports_a_core_worktree_without_the_coordinator_settings(self):
+        self.loaded_repo()
+        (self.d / ".claude").mkdir()
+        (self.d / ".claude/settings.local.json").write_text('{"autoCompactWindow": 250000}')
+        with patch.dict(wg.CONFIG, {"coordinator_settings": {"claude": {"autoMemoryEnabled": True}}}), \
+             patch.object(wg, "set_core_settings", SET_CONTEXT_LIMIT):
+            self.assertEqual(wg.doctor_context([self.d], False)(),
+                             [("warn", f"settings {self.d}: .claude/settings.local.json lacks the configured values; "
+                                       f"wg doctor {shlex.quote(str(self.d))} --fix")])
+            self.assertEqual(wg.doctor_context([self.d], True)()[0][0], "ok")
+            self.assertEqual(wg.doctor_context([self.d], False)(),
+                             [("ok", "settings: each loaded effort's core worktree has the coordinator settings")])
+        self.assertTrue(self.settings()["autoMemoryEnabled"])
 
 
 class DoctorTests(DirTests):

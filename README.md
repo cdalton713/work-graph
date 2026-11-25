@@ -29,8 +29,8 @@ wg doctor                                                                    # o
 PATH and each skill link point at one checkout and that checkout is not behind its `origin/main`, each workspace
 key (present, mode 600, accepted by Linear) with the request budget that is left, `gh auth`, `st`, the Orca CLI,
 the page server (`/healthz`, and the contract of `/api/config`), the `tick`, `autostart`, and `health` schedules, and
-the context limit of each loaded effort (config `context_limit`). `wg doctor --fix` writes a context limit that is
-missing; it changes nothing else.
+the session settings of each loaded effort's core worktree (config `coordinator_settings` and `context_limit`).
+`wg doctor --fix` writes those settings; it changes nothing else.
 `wg doctor <plan-dir>` also checks that effort: `wg check`, `keymap.json` against Linear (an issue that is gone, a
 claim label with no live job, a job start that is stuck for more than 30 minutes, a status that the run row
 contradicts), each worktree path of the run rows, and the link (connect, `hello`, close). It exits 1 on a `FAIL`.
@@ -86,6 +86,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | `github_user` | The `gh` login that `wg tick --install` requires for the scheduled job. |
 | `agent_merge` | The GitHub owners (`ada`) or repositories (`ada/tool`) where agents may merge. At autonomy level `full` there, `wg next` prints `do merge` in place of `ask-merge`: the merge is the coordinator's step, not the human's move. Default: none. |
 | `context_limit` | The context size in tokens at which Claude Code compacts a coordinator session. `wg load --apply` and `wg doctor --fix` write it as `autoCompactWindow` into `.claude/settings.local.json` of the core worktree. They write it as `worker_settings` does: the other keys of the file stay, the file stays out of git, and `wg` writes through no symlink. `wg doctor --fix` writes only into the plan directory of a loaded effort. Claude Code reads the file when a session starts, and takes no value below 100000. `wg next` prints a `note context` line when its session is over the limit. `0` turns this off. Default: 250000. |
+| `coordinator_settings` | The session settings of the coordinator, per agent, in the shape of `worker_settings` and with its merge rules. `wg load --apply` and `wg doctor --fix` merge them into the core worktree's `.claude/settings.local.json` and `.codex/config.toml`, in the same step as `context_limit`, and `wg doctor` reports a core worktree whose files do not have the values. A `context_limit` that is not 0 wins over an `autoCompactWindow` in `coordinator_settings.claude`. A coordinator needs more than a worker (`skills/work-graph/references/setup.md` "Worker sessions"). Default: none, and `wg` writes no file for it. |
 | `tick_label`, `tick_roots` | The launchd label of `wg tick --install`, and the folders where `wg tick` looks for `*-core/plan.json`. |
 | `notify` | The channels that tell `human` that a move is theirs (see "Notices" below). Default: none. |
 | `health_interval`, `health_agent` | The status check (`wg health`, `skills/work-graph/references/health.md`): the hours from one check to the next (1 to 168, default 6), and the Orca agent that does the check (default `codex`). |

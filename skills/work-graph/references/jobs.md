@@ -5,7 +5,7 @@ The coordinator starts each worker job with one `wg` command, and ends it with `
 <!-- explain: dispatch -->
 ## Dispatch
 
-Use one command: `wg dispatch <plan-dir> <key> --run [--agent codex|claude] [--model <id>]`. It checks the node: ready (the node below it in the lane is code done), and in the wave. Then it does each step that the printed form below lists: the claim and the move to `In Progress`, the lane parent when `orca worktree list` does not show it, the child worktree and its display name, `st branch track` for a stax branch, the worktree checks, the worker spec, `worker-start --environment local`, and the record of `wg started`. `--agent` and `--model` apply from this first call. It prints at most 3 lines:
+Use one command: `wg dispatch <plan-dir> <key> --run [--agent codex|claude] [--model <id>] [--effort <level>]`. It checks the node: ready (the node below it in the lane is code done), and in the wave. Then it does each step that the printed form below lists: the claim and the move to `In Progress`, the lane parent when `orca worktree list` does not show it, the child worktree and its display name, `st branch track` for a stax branch, the worktree checks, the worker spec, `worker-start --environment local`, and the record of `wg started`. Set the launch flags on this first call. Fields without flags come from the worker role in the plan, then the config. It prints at most 3 lines:
 
 - `claimed <identifier> agent:<agent>`
 - `started <key> dispatch=<id> worktree=<path>`
@@ -61,6 +61,8 @@ A worker that reports `--outcome failed`: `wg done <plan-dir> <key> --dispatch <
 
 <!-- explain: review,restack -->
 ## Follow-up jobs
+
+`wg claim` accepts `--agent`, `--model`, and `--effort`. For each field, the flag wins over the last job's run row, then the plan and config. When the launch settings change, Orca starts a new worker in the same worktree.
 
 Review fixes, CI fixes, thread fixes, and restack jobs. Write the work of the job to a file first: the findings, the failed check with its first error, or the threads. Then use one command: `wg claim <plan-dir> <key> <review|ci|threads|restack> --send --work-file <file>`. It refuses a second job on the node, a fourth live worker, and a second restack job in the effort. Then it adds the claim, writes the job header and the work text to `<plan-dir>/specs/<key>-<job>.md`, runs `orca orchestration send` to the node's dispatch (or `worker-start` in the recorded worktree when the node has no dispatch), and records the receipt. A send to a finished worker gives a new dispatch and task; `wg` records those. It prints `claimed …`, the restack line of a restack job, and `started <key> dispatch=<id> job=<job>`.
 

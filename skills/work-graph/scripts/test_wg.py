@@ -2232,6 +2232,8 @@ class NextTests(LaneTests):
             (None, done | {"review_round": "1"}, "do review a CD-1: #7 round 2"),  # the default is thorough
             ("thorough", done | {"review_round": "1"}, "do review a CD-1: #7 round 2"),
             ("standard", done, "do review a CD-1: #7 round 1"),
+            ("thorough", done | {"agent": "claude"}, "do review a CD-1: #7 round 1, agent codex"),
+            ("standard", done | {"agent": "codex"}, "do review a CD-1: #7 round 1, agent claude"),
             ("standard", done | {"review_round": "1", "review_dispatch": "r1"}, "wait reviewer a CD-1: #7 round 1"),
             # After the one fix job: no round 2, the coordinator checks the fix.
             ("standard", done | {"review_round": "1", "review_head": OTHER},
@@ -2706,8 +2708,8 @@ class JobTests(LaneTests):
                          ("sync/z-p1", "origin/main", "main", "z-p1-sync", "z-p1-sync-00-sync"))
 
     def worktree(self, *, branch="wg/ex-one-00-a", dirty="", ancestor=True, parent="main", effort=None, code=0,
-                 linear=None):
-        rows = {"a": BRANCH | {"state": "creating", "job": "dispatch", "agent": "claude"}}
+                 linear=None, launch=None):
+        rows = {"a": BRANCH | {"state": "creating", "job": "dispatch", "agent": "claude"} | (launch or {})}
         (self.d / "specs" / "a.md").unlink(missing_ok=True)
         values = {("branch", "--show-current"): branch, ("rev-parse", "HEAD"): SHA, ("status", "--porcelain"): dirty,
                   ("rev-parse", "--git-common-dir"): "/repo/.git"}
@@ -2732,6 +2734,10 @@ class JobTests(LaneTests):
                 self.assertIn("CD-1: no worker spec", err)
                 self.assertEqual(self.row("a")["state"], "creating")
                 self.assertFalse((self.d / "specs" / "a.md").exists())
+
+    def test_printed_dispatch_uses_the_recorded_model_and_effort(self):
+        out, _ = self.worktree(launch={"model": "example", "effort": "high"})
+        self.assertIn("--agent claude --model example --effort high --json", out)
 
     def test_dispatch_writes_the_spec_and_prints_the_worker_start(self):
         out, _ = self.worktree(effort={"baseline": f"{OTHER[:10]}: frontend:test"})
@@ -2809,6 +2815,15 @@ class JobTests(LaneTests):
         self.assertIn("worker-spec.md: no value for {other_name}", err)
         sections = wg.spec_sections()
         self.assertEqual(set(sections), {"task", "submit lane", "submit hotfix", "submit sync", "spike", "job"})
+
+    def test_claim_launches_with_recorded_settings_and_a_flag_override(self):
+        row = BRANCH | {"pr": "7", "agent": "claude", "model": "opus", "effort": "high"}
+        with patch.dict(wg.CONFIG, {"agents": {"worker": {"agent": "codex", "model": "other"}}}):
+            out, _ = self.job(wg.claim, "a", "review", None, False, None, None, "low",
+                              live={"a": "In Review", "s": "Done"}, rows={"a": row})
+        self.assertIn("--agent claude --model opus --effort low --json", out)
+        self.assertEqual(self.row("a")["effort"], "low")
+        self.assertEqual(self.updates, [("a", {"addedLabelIds": ["L-claude"]})])
 
     def test_claim_starts_a_follow_up_job_on_the_same_dispatch(self):
         row = BRANCH | {"pr": "7", "dispatch": "d1", "review_dispatch": "r1", "review_patch": "p1"}
@@ -3380,6 +3395,16 @@ class OneCommandTests(LaneTests):
                          ["refs/heads/wg/ex-core", "refs/heads/wg/ex-one", "refs/heads/wg/ex-one-00-a"])
         self.assertEqual(state["jobs"], 1)  # one worker
         self.assertEqual(state["names"], {f"repo::{self.d / 'trees' / 'ex-one-00-a'}": "00 a"})
+
+    def test_dispatch_run_resolves_each_worker_setting(self):
+        self.fake()
+        self.p["effort"]["agents"] = {"worker": {"agent": "claude"}}
+        with patch.dict(wg.CONFIG, {"agents": {"worker": {"agent": "codex", "model": "base", "effort": "high"}}}):
+            self.job(wg.dispatch_run, "a", None, "flag",
+                     live={"s": "Done", "a": "Todo"}, rows={"a": {"approved": "x"}},
+                     effort={"wave": "a"})
+        self.assertIn("--agent claude --environment local --model flag --effort high --json", self.calls()[-1])
+        self.assertEqual(self.row("a")["effort"], "high")
 
     def test_dispatch_run_does_every_step_and_prints_two_lines(self):
         self.status = ("Todo", [])
@@ -4328,7 +4353,7 @@ class RehearsalTests(unittest.TestCase):
         # code done: the review of a and the dispatch of b, which stacks on a, start at the same time
         self.assertEqual(self.issues["b"]["state"], "Ready")
         self.assertEqual(self.next(), ["phase 1: 2 tasks, 1 code done, 0 reviewed, 0 merged; wave a,b",
-                                       "do review a CD-1: #1 round 1", "do dispatch b CD-2"])
+                                       "do review a CD-1: #1 round 1, agent claude", "do dispatch b CD-2"])
         self.wg("run", "set", "a", "review_round=1", "review_dispatch=r1")
         self.assertEqual(self.next()[1:], ["do dispatch b CD-2", "wait reviewer a CD-1: #1 round 1"])
         self.assertIn("branch wg/ex-one-01-b on wg/ex-one-00-a, stax parent wg/ex-one-00-a", self.wg("dispatch", "b"))
@@ -4458,7 +4483,7 @@ class RehearsalTests(unittest.TestCase):
         self.push("a", path, "1", "main")
         out = self.wg("done", "a", "--dispatch", "d5")
         self.assertIn("code done: a #1 ", out)
-        self.assertEqual(self.next()[1], "do review a CD-1: #1 round 2")
+        self.assertEqual(self.next()[1], "do review a CD-1: #1 round 2, agent claude")
         row = wg.run_row(wg.load_keymap(self.d), "a")
         self.assertEqual((row.get("state"), row["job"], row["dispatch"]), (None, "ci", "d5"))
 
@@ -8261,6 +8286,33 @@ class DoctorTests(DirTests):
                 self.assertEqual(wg.doctor_tick()[0], "warn")
         with patch.object(wg.sys, "platform", "linux"):
             self.assertEqual(wg.doctor_tick()[0], "warn")
+
+    def test_autostart_installs_the_coordinator_settings(self):
+        self.keymap()
+        self.p["effort"]["agents"] = {"coordinator": {"agent": "codex", "model": "example", "effort": "high"}}
+        results = [{"worktree": {"id": "core"}}, {"automation": {"id": "auto1"}}]
+        with patch.object(wg, "command", side_effect=[done_proc(json.dumps({"result": r})) for r in results]) as orca:
+            self.call(wg.autostart_command, self.d, self.p, True, False)
+        args = orca.call_args.args
+        self.assertEqual(args[args.index("--provider") + 1], "codex")
+        self.assertIn("--extra-agent-args=--model example --effort high", args)
+
+    def test_check_and_doctor_name_invalid_agent_settings(self):
+        for settings, field in (
+            ({"unknown": {}}, "agents.unknown"),
+            ({"worker": {"unknown": "x"}}, "agents.worker.unknown"),
+            ({"worker": {"agent": "unknown"}}, "agents.worker.agent"),
+            ({"coordinator": {"effort": "high"}}, "agents.coordinator.effort"),
+        ):
+            with self.subTest(field=field):
+                self.p["effort"]["agents"] = settings
+                self.assertTrue(any(f"effort.{field}:" in error for error in wg.check(self.p)))
+                config = self.d / "agent-config.json"
+                config.write_text(json.dumps({"agents": settings}))
+                result = subprocess.run([sys.executable, wg.__file__, "doctor"],
+                                        env=os.environ | {"WG_CONFIG": str(config)}, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"{field}:", result.stderr)
 
     def test_autostart_schedule_of_each_effort(self):
         self.keymap()

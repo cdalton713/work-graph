@@ -38,6 +38,10 @@ the session settings of each loaded effort's core worktree (config `coordinator_
 claim label with no live job, a job start that is stuck for more than 30 minutes, a status that the run row
 contradicts), each worktree path of the run rows, and the link (connect, `hello`, close). It exits 1 on a `FAIL`.
 
+For a new Linear team, run `wg setup --team WG --name "Work Graph"` to see what the team needs.
+Add `--apply` to create missing items. See [Linear setup](skills/work-graph/references/setup.md#linear)
+for workspace keys, team privacy, and label scope.
+
 ## Config
 
 `wg` and the page server read `~/.config/work-graph/config.json` (or the file `WG_CONFIG`; the server also takes

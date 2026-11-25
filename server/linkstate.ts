@@ -11,6 +11,7 @@ export interface Coordinator {
   since: string;
   lastSeen: string;
   lost?: boolean;
+  reconnectUntil?: number;
 }
 
 export interface LinkRoom {
@@ -37,7 +38,7 @@ export interface LinkRoomState {
   ack(ref: ProjectRef, ids: string[]): Promise<LinkRoom>;
   setAsks(ref: ProjectRef, asks: Ask[]): Promise<LinkRoom>;
   removeAsk(ref: ProjectRef, id: string): Promise<LinkRoom | null>;
-  prune(cutoff: number): Promise<void | LinkRoom[]>;
+  prune(cutoff: number, now?: number): Promise<void | LinkRoom[]>;
   endSession(id: string, expiresAt: number, now: number): Promise<void>;
   sessionEnded(id: string, now: number): Promise<boolean>;
   flush(): Promise<boolean>;
@@ -115,10 +116,13 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
       save();
       return structuredClone(room);
     },
-    async prune(cutoff) {
+    async prune(cutoff, now) {
+      const changed: LinkRoom[] = [];
       for (const [key, room] of rooms) {
         if (!pruneRoom(room, cutoff)) rooms.delete(key);
+        else if (now !== undefined && expireReconnectGrace(room, now)) changed.push(structuredClone(room));
       }
+      return changed;
     },
     async endSession(id, expiresAt, now) {
       for (const [session, expiry] of ended) if (expiry <= now) ended.delete(session);
@@ -131,6 +135,17 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
       return store?.flush() ?? true;
     },
   };
+}
+
+export function expireReconnectGrace(room: LinkRoom, now: number): boolean {
+  let expired = false;
+  for (const coordinator of room.coordinators.values()) {
+    if (coordinator.reconnectUntil !== undefined && coordinator.reconnectUntil <= now) {
+      delete coordinator.reconnectUntil;
+      expired = true;
+    }
+  }
+  return expired;
 }
 
 export function pruneRoom(room: LinkRoom, cutoff: number): boolean {

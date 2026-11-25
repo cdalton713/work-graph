@@ -16,7 +16,7 @@ import { serializeSigned } from "hono/utils/cookie";
 import type { Rules } from "./access.ts";
 import { SLOW_MS, contractHash, createApp } from "./app.ts";
 import { setTransport } from "./linear.ts";
-import { DEAD_MS, PING_MS, RESTART_CODE, stopOnSignals, type Timers } from "./link.ts";
+import { DEAD_MS, linkSettings, PING_MS, RESTART_CODE, stopOnSignals, type Timers } from "./link.ts";
 import { memoryLinkBus } from "./linkbus.ts";
 import { memoryLinkState } from "./linkstate.ts";
 
@@ -24,6 +24,22 @@ const rules: Rules = { port: 4747, tailnet: null };
 const local = { host: "127.0.0.1:4747" };
 const write = { ...local, origin: "http://127.0.0.1:4747", "content-type": "application/json" };
 let dist: string;
+
+it("uses defaults for blank link settings and accepts valid limits", () => {
+  expect(linkSettings({ WG_LINK_MAX_AGE: " ", WG_LINK_PONG_MS: "" }))
+    .toEqual({ linkMaxAgeMs: undefined, linkPongMs: undefined });
+  expect(linkSettings({ WG_LINK_MAX_AGE: "60", WG_LINK_PONG_MS: "25000" }))
+    .toEqual({ linkMaxAgeMs: 60_000, linkPongMs: 25_000 });
+  expect(linkSettings({ WG_LINK_MAX_AGE: "0", WG_LINK_PONG_MS: "0" }))
+    .toEqual({ linkMaxAgeMs: 0, linkPongMs: 0 });
+});
+
+it.each([
+  ["WG_LINK_MAX_AGE", "59"], ["WG_LINK_MAX_AGE", "bad"], ["WG_LINK_MAX_AGE", "Infinity"],
+  ["WG_LINK_PONG_MS", "24999"], ["WG_LINK_PONG_MS", "300001"], ["WG_LINK_PONG_MS", "bad"],
+])("rejects an invalid %s value of %s", (name, value) => {
+  expect(() => linkSettings({ [name]: value })).toThrow(name);
+});
 
 beforeAll(async () => {
   dist = (await mkdtemp(join(tmpdir(), "wg-ui-"))) + sep;

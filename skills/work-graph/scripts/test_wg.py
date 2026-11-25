@@ -5500,7 +5500,7 @@ class LinkTests(unittest.TestCase):
     """`wg next` and the page server (`/api/link`, protocol wg-link/1)."""
 
     def setUp(self):
-        import threading
+        from websockets.exceptions import ConnectionClosed
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.d = self.tmp.name
@@ -5510,22 +5510,43 @@ class LinkTests(unittest.TestCase):
         self.got, self.requests, self.to_send, self.conns = [], [], [], []
         self.event = threading.Event()
         self.reject_token = False
+        self.recycle_code = None
+        self.replay_before_close = False
+        self.quick_closes = False
+        self.restart_until = 0
+        self.restart_rejections = 0
+        self.restart_downtime = 0
 
         def process_request(conn, request):
+            if time.monotonic() < self.restart_until:
+                self.restart_rejections += 1
+                return conn.respond(503, "the link is unavailable")
             if self.reject_token:
                 return conn.respond(401, "coordinator token required")
 
         def handler(conn):
             self.requests.append(conn.request)
             self.conns.append(conn)
-            for raw in conn:
-                m = json.loads(raw)
-                self.got.append(m)
-                self.event.set()
-                if m["type"] == "state" and m["payload"]["mode"] == "waiting":
-                    while self.to_send:
-                        conn.send(json.dumps(self.to_send.pop(0)))
+            with contextlib.suppress(ConnectionClosed):
+                for raw in conn:
+                    m = json.loads(raw)
+                    self.got.append(m)
+                    self.event.set()
+                    if self.quick_closes and m["type"] == "hello":
+                        conn.close(4001)
+                        return
+                    if m["type"] == "state" and m["payload"]["mode"] == "waiting":
+                        if self.recycle_code is not None:
+                            if self.replay_before_close:
+                                conn.send(json.dumps(self.to_send[0]))
+                            code, self.recycle_code = self.recycle_code, None
+                            self.restart_until = time.monotonic() + self.restart_downtime
+                            conn.close(code)
+                            return
+                        while self.to_send:
+                            conn.send(json.dumps(self.to_send.pop(0)))
         self.server = ws_server.serve(handler, "127.0.0.1", 0, process_request=process_request)
+        self.handler = handler
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.shutdown)
         port = self.server.socket.getsockname()[1]
@@ -5661,6 +5682,88 @@ class LinkTests(unittest.TestCase):
         self.assertIn("do dispatch a CD-1", out)
         self.assertEqual(err.count("warn link:"), 1)
         self.assertIn("Polling Linear instead", err)
+
+    def test_planned_close_reconnects_while_next_waits(self):
+        for code in (4001, 1012):
+            with self.subTest(code=code):
+                self.recycle_code = code
+                self.to_send.append({"v": 1, "type": "answer", "id": str(code),
+                                     "payload": {"issue": "WG-1", "key": "a", "body": "go ahead"}})
+                out, err, took = self.run_next([("phase 1", [("wait", "worker a")])] * 2, wait=True)
+                self.assertEqual(out.count("go ahead"), 1)
+                self.assertEqual(err, "")
+                self.assertLess(took, 4)
+
+    def test_restart_retries_without_warning_while_the_port_is_closed(self):
+        listener = self.server
+        port = listener.socket.getsockname()[1]
+        errors = []
+
+        def restart():
+            try:
+                if not self.event.wait(3):
+                    raise AssertionError("the coordinator did not connect")
+                listener.shutdown()
+                self.conns[0].close(1012)
+                time.sleep(2)
+                self.to_send.append({"v": 1, "type": "answer", "id": "restart",
+                                     "payload": {"issue": "WG-1", "key": "a", "body": "back online"}})
+                with ws_server.serve(self.handler, "127.0.0.1", port) as replacement:
+                    self.replacement = replacement
+                    replacement.serve_forever()
+            except Exception as error:
+                errors.append(error)
+
+        self.replacement = None
+        server = threading.Thread(target=restart, daemon=True)
+        server.start()
+        try:
+            out, err, took = self.run_next([("phase 1", [("wait", "worker a")]),
+                                           ("phase 1", [("do", "dispatch a WG-1")])], wait=True, interval=5)
+            self.assertEqual(errors, [])
+            self.assertIn("back online", out)
+            self.assertEqual(err, "")
+            self.assertLess(took, 5)
+        finally:
+            if self.replacement:
+                self.replacement.shutdown()
+            server.join(3)
+
+    def test_repeated_quick_planned_closes_back_off(self):
+        self.quick_closes = True
+        link = wg.Link.open(self.d, self.p)
+        self.addCleanup(link.close)
+        link.wait(0.5)
+        self.assertEqual(self.types(), ["hello", "hello"])
+        link.wait(1)
+        self.assertEqual(self.types(), ["hello", "hello", "hello"])
+
+    def test_restart_retries_while_the_server_returns_503(self):
+        self.recycle_code = 1012
+        self.restart_downtime = 2
+        self.to_send.append({"v": 1, "type": "answer", "id": "503",
+                             "payload": {"issue": "WG-1", "key": "a", "body": "writes recovered"}})
+        out, err, took = self.run_next([("phase 1", [("wait", "worker a")]),
+                                       ("phase 1", [("do", "dispatch a WG-1")])], wait=True, interval=5)
+        self.assertGreater(self.restart_rejections, 0)
+        self.assertIn("writes recovered", out)
+        self.assertNotIn("warn link:", err)
+        self.assertLess(took, 5)
+
+    def test_next_prints_an_answer_once_if_it_arrives_before_close_and_on_replay(self):
+        self.recycle_code = 4001
+        self.replay_before_close = True
+        self.to_send.append({"v": 1, "type": "answer", "id": "replay",
+                             "payload": {"issue": "WG-1", "key": "a", "body": "go ahead"}})
+        link = wg.Link.open(self.d, self.p)
+        self.addCleanup(link.close)
+        link.send("state", {"mode": "waiting", "head": "phase 1", "lines": []})
+        with link.cond:
+            self.assertTrue(link.cond.wait_for(lambda: len(link.inbox) == 2, timeout=3))
+        with patch.object(wg.Link, "open", return_value=link):
+            out, err, _ = self.run_next([("phase 1", [])], wait=True)
+        self.assertEqual(out.count("go ahead"), 1)
+        self.assertEqual(err, "")
 
     def wait_for(self, kind):
         for _ in range(100):

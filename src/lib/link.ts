@@ -6,6 +6,23 @@ import type { SiteConfig } from "./types";
 import { type Signal, ageText } from "./graph.ts";
 
 export const LINK_VERSION = 1;
+export const RESTART_CODE = 1012;
+export const RECYCLE_CODE = 4001;
+export const RECONNECT_GRACE_MS = 15_000;
+
+export function reconnectImmediately(code: number): boolean {
+  return code === RESTART_CODE || code === RECYCLE_CODE;
+}
+
+export function plannedReconnect(lifetimeMs: number, previousQuickCloses: number) {
+  const quickCloses = lifetimeMs < 10_000 ? Math.min(previousQuickCloses + 1, 7) : 0;
+  const delay = quickCloses < 2 ? 0 : Math.min(1000 * 2 ** (quickCloses - 2), 30_000);
+  return { quickCloses, delay };
+}
+
+export function plannedRetryAfterFailure(now: number, until: number, delay: number): number | null {
+  return now < until ? Math.min(until - now, delay, 5000) : null;
+}
 /** The message types of each direction, and the commands. contract.json `link` must hold the same lists. */
 export const LINK_TO_COORDINATOR = ["changed", "answer", "reply", "command"] as const;
 export const LINK_FROM_COORDINATOR = ["hello", "state", "asks", "progress", "ack", "wrote", "agents"] as const;

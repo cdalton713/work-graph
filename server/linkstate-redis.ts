@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Envelope, ProjectRef } from "../src/lib/link.ts";
-import { emptyRoom, pruneRoom, QUEUE_MAX, type Coordinator, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
+import { emptyRoom, expireReconnectGrace, pruneRoom, QUEUE_MAX, type Coordinator, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
 import { LINK_PREFIX, type RedisLink } from "./redis.ts";
 import { ASKS_MAX } from "./store.ts";
 
@@ -62,7 +62,7 @@ function socketIds(room: LinkRoom): Set<string> {
   return ids;
 }
 
-export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs = 60_000): LinkRoomState {
+export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs = 60_000, reconnectGraceMs = 0): LinkRoomState {
   const roomPrefix = prefix + "room:";
   const pagePrefix = prefix + "pages:";
   const refKey = ({ workspace, id }: ProjectRef) => JSON.stringify([workspace, id]);
@@ -117,6 +117,13 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
       if (seen && seen > coordinator.lastSeen) coordinator.lastSeen = seen;
       if (!active.has(socket)) {
         Object.assign(coordinator, { socket: null, lost: true });
+        // When the transport cannot report the close, the last renewal and lease length
+        // give the expiry. Reading again must not restart the grace period.
+        const expiry = Date.parse(coordinator.lastSeen) + leaseMs;
+        if (reconnectGraceMs > 0 && Number.isFinite(expiry)) {
+          coordinator.lastSeen = new Date(expiry).toISOString();
+          coordinator.reconnectUntil = expiry + reconnectGraceMs;
+        }
         expired = true;
       }
     }
@@ -256,7 +263,7 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
         return room;
       });
     },
-    async prune(cutoff) {
+    async prune(cutoff, now) {
       const changed: LinkRoom[] = [];
       const keys = await roomKeys();
       const min = keys.length ? await pageCutoff() : "+inf";
@@ -265,7 +272,8 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
         const pages = await redis.run((client) => client.zcount(pageKey, min, "+inf"));
         const result = await update(roomKey, null, (room, expired) => {
           if (!pruneRoom(room, cutoff) && pages === 0) return false;
-          return expired ? room : true;
+          const graceExpired = now !== undefined && expireReconnectGrace(room, now);
+          return expired || graceExpired ? room : true;
         }, { prune: true });
         if (result && result !== true) changed.push(result);
       }

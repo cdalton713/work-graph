@@ -57,6 +57,17 @@ to the page. On a page with sign-in, the token permits API reads. The viewer's w
 - `wg next` sends its status and lines, the open Orca questions of the effort's workers, and the job and test evidence of each node. The page shows the coordinator as `coordinator listening`, `coordinator working · <age>`, or `coordinator not listening · <age>`.
 - The server sends `wg next` each change that the page makes, and each change in Linear for a project with a connected coordinator (about every 30 seconds). It also sends the human's answers, their replies to worker questions, and their commands: **Run wg next now**, **Dispatch**, **Pause**, **Resume**, and an **Autonomy** change (`command` `autonomy`, with `level`). The server sets the project label first; `wg next` reads it and prints `do autonomy`. A **Review** change sets the review label, then sends the command `next`: `wg next` reads the label and prints `do review`. "Lines from the page" below lists the lines.
 - The server keeps the messages of each project until a `wg next` acknowledges them. Any number of coordinators of different projects can connect at the same time.
+- Close code 4001 asks clients to reconnect. Close code 1012 signals a server restart. The page and
+  `wg next --wait` make the first reconnect attempt at once. Repeated closes on sockets that lasted
+  less than 10 seconds cause longer waits between attempts, up to 30 seconds. If the page server is
+  still starting, `wg next --wait` makes short retries for up to 15 seconds before it warns.
+  The page keeps its display while it reconnects and checks the project graph when it rejoins.
+  The coordinator sends hello and its last state, asks, and progress again. The server sends the
+  unacknowledged queue again.
+- With `WG_LINK_MAX_AGE` set, the server allows 15 seconds for the same coordinator session to
+  reconnect. The page and the presence API still show the coordinator as connected during that time.
+  The same rule applies across instances that share Redis. If the session does not return, its
+  last-seen time is the time the socket closed.
 - Linear stays the record. An answer and a reply are comments on the issue. A dispatch is a comment on the issue. An answer also gets the issue label `answered`, so `wg next` finds it after a server restart. Pause is the project label `paused`. The server's queue is in memory and only wakes `wg next` sooner.
 - Without the link (no server, no `websockets` package, or `WG_LINK=off`), `wg next` prints one `warn link:` line and polls Linear.
 

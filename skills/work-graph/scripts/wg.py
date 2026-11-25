@@ -2558,7 +2558,8 @@ def contract():
         "statuses": list(CONTRACT_STATUSES),
         "satisfied": edges,
         "link": {"version": LINK_VERSION, "path": "/api/link", "to_coordinator": list(LINK_TO_COORDINATOR),
-                 "from_coordinator": list(LINK_FROM_COORDINATOR), "commands": list(LINK_COMMANDS)},
+                 "from_coordinator": list(LINK_FROM_COORDINATOR), "commands": list(LINK_COMMANDS),
+                 "close_codes": LINK_CLOSE_CODES},
     }
 
 
@@ -4286,6 +4287,8 @@ def publish(plan_dir, plan, head, lines, wait_interval=None, *, expected=None):
 # ---------------------------------------------------------------- link to the page server
 
 LINK_VERSION = 1  # the protocol `wg-link/1` (src/lib/link.ts of the page)
+LINK_CLOSE_CODES = {"restart": 1012, "recycle": 4001}
+LINK_RECONNECT_GRACE = 15
 LINK_OPEN_TIMEOUT = 3
 LINK_TO_COORDINATOR = ("changed", "answer", "reply", "command")
 LINK_FROM_COORDINATOR = ("hello", "state", "asks", "progress", "ack", "wrote", "agents")
@@ -4395,7 +4398,11 @@ class Link:
         self.workspace = workspace
         self.inbox, self.ws, self.reader = [], None, None
         self.cond = __import__("threading").Condition()
+        self.connection_lock = __import__("threading").RLock()
         self.retry_at = 0.0
+        self.planned_until = 0.0
+        self.retry_delay = 1
+        self.quick_closes = 0
         self.warned = False
         # The last state, asks and progress, sent again after each hello: a restarted server forgets them.
         self.last = {}
@@ -4417,20 +4424,36 @@ class Link:
         return link_envelope(self.session, self.project, kind, payload)
 
     def connect(self):
+        with self.connection_lock:
+            return self._connect()
+
+    def _connect(self):
+        from websockets.exceptions import ConnectionClosed
+
         if self.ws or time.monotonic() < self.retry_at:
             return self.ws is not None
         stack = contextlib.ExitStack()
+        opened_at = None
         try:
-            self.ws = stack.enter_context(link_socket(self.url, workspace=self.workspace, max_size=2**22))
-            self.ws.stack = stack
-            self.ws.send(self.envelope("hello", self.hello))
+            ws = stack.enter_context(link_socket(self.url, workspace=self.workspace, max_size=2**22))
+            opened_at = time.monotonic()
+            ws.stack = stack
+            ws.send(self.envelope("hello", self.hello))
             for kind, payload in self.last.items():
-                self.ws.send(self.envelope(kind, payload))
-        except Exception as e:  # any failure only means: poll as before
+                ws.send(self.envelope(kind, payload))
+        except Exception as e:
             with contextlib.suppress(Exception):
                 stack.close()
-            self.ws = None
-            self.retry_at = time.monotonic() + 30
+            now = time.monotonic()
+            if opened_at is not None and isinstance(e, ConnectionClosed) and self._planned(e):
+                self._schedule_planned_close(opened_at, now)
+                return False
+            if now < self.planned_until:
+                self.retry_at = min(now + self.retry_delay, self.planned_until)
+                self.retry_delay = min(self.retry_delay * 2, 5)
+                return False
+            self.quick_closes = 0
+            self.retry_at = now + 30
             if isinstance(e, (LinkUnauthorized, LinkTokenError)):
                 problem = link_unauthorized_message(self.workspace) if isinstance(e, LinkUnauthorized) else e
                 warn_link_token(problem, self.workspace, polling=True)
@@ -4440,12 +4463,28 @@ class Link:
                 self.warned = True
             return False
         self.warned = False
-        ws = self.ws
-        self.reader = __import__("threading").Thread(target=self.read, args=(ws,), daemon=True)
+        self.planned_until = 0
+        self.ws = ws
+        self.reader = __import__("threading").Thread(target=self.read, args=(ws, opened_at), daemon=True)
         self.reader.start()
         return True
 
-    def read(self, ws):
+    @staticmethod
+    def _planned(error):
+        return error.rcvd is not None and error.rcvd.code in LINK_CLOSE_CODES.values()
+
+    def _schedule_planned_close(self, opened_at, now):
+        self.quick_closes = min(self.quick_closes + 1, 7) if now - opened_at < 10 else 0
+        delay = min(2 ** (self.quick_closes - 2), 30) if self.quick_closes >= 2 else 0
+        self.retry_at = now + delay
+        # A deliberate backoff can outlast presence grace. Allow short retries after that first attempt too.
+        self.planned_until = self.retry_at + LINK_RECONNECT_GRACE
+        self.retry_delay = 1
+
+    def read(self, ws, opened_at):
+        from websockets.exceptions import ConnectionClosed
+
+        planned = False
         try:
             for raw in ws:
                 try:
@@ -4456,28 +4495,40 @@ class Link:
                     with self.cond:
                         self.inbox.append(message)
                         self.cond.notify_all()
+        except ConnectionClosed as error:
+            planned = self._planned(error)
         except Exception:
             pass
-        with self.cond:
+        with self.connection_lock:
             if self.ws is ws:
-                self.ws = None
-                self.retry_at = time.monotonic() + 5
-            self.cond.notify_all()
+                with self.cond:
+                    self.ws = None
+                    now = time.monotonic()
+                    if planned:
+                        self._schedule_planned_close(opened_at, now)
+                    else:
+                        self.quick_closes = 0
+                        self.retry_at = now + 5
+                    self.cond.notify_all()
+                if planned:
+                    self._connect()
+        with contextlib.suppress(Exception):
+            ws.stack.close()
 
     def send(self, kind, payload):
-        fresh = self.ws is None
-        if kind in LINK_REPLAYED:
-            self.last[kind] = payload
-        if not self.connect():
-            return False
-        if fresh and kind in LINK_REPLAYED:
-            return True  # connect sent it after hello
-        try:
-            self.ws.send(self.envelope(kind, payload))
-            return True
-        except Exception:
-            self.ws = None
-            return False
+        with self.connection_lock:
+            fresh = self.ws is None
+            if kind in LINK_REPLAYED:
+                self.last[kind] = payload
+            if not self._connect():
+                return False
+            if fresh and kind in LINK_REPLAYED:
+                return True  # connect sent it after hello
+            try:
+                self.ws.send(self.envelope(kind, payload))
+                return True
+            except Exception:
+                return False  # the reader handles the close and the retry
 
     def take(self, timeout=0.0):
         """The messages that came, after waiting up to `timeout` seconds for the first one."""
@@ -4485,9 +4536,10 @@ class Link:
         with self.cond:
             while not self.inbox and (left := deadline - time.monotonic()) > 0:
                 if self.ws is None:
-                    self.cond.wait(min(left, max(0.0, self.retry_at - time.monotonic()) or 1.0))
-                    if self.ws is None and time.monotonic() >= self.retry_at:
+                    until_retry = self.retry_at - time.monotonic()
+                    if until_retry <= 0:
                         break
+                    self.cond.wait(min(left, until_retry))
                 else:
                     self.cond.wait(left)
             taken, self.inbox = self.inbox, []
@@ -4506,7 +4558,8 @@ class Link:
         return []
 
     def close(self):
-        ws, self.ws = self.ws, None
+        with self.connection_lock:
+            ws, self.ws = self.ws, None
         if ws:
             with contextlib.suppress(Exception):
                 ws.stack.close()
@@ -4871,11 +4924,14 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
     print each `wait` and `note` line in full (terminal_lines)."""
     link = Link.open(plan_dir, plan)
     messages = link.take() if link else []
+    handled = set()
     try:
         while True:
             try:
                 keys = {e.get("identifier"): k for k, e in load_keymap(plan_dir).get("nodes", {}).items()}
-                extra, settled = link_lines(messages, keys, plan_dir)
+                unique = {m["id"]: m for m in messages}
+                extra, settled = link_lines([m for mid, m in unique.items() if mid not in handled], keys, plan_dir)
+                settled.extend(mid for mid in unique if mid in handled)
                 answers = answer_lines(plan_dir)
                 # An answer in Linear and its message give one line; the label also holds after a server restart.
                 marked = {text.split(":", 1)[0] for level, text in answers if level == "do"}
@@ -4911,6 +4967,7 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                     notify_effort(plan_dir, plan, lines, paused)
                     return 0
                 if link and settled:  # a `changed` that did not wake the coordinator is still read
+                    handled.update(settled)
                     link.send("ack", {"ids": settled})
                 notify_effort(plan_dir, plan, lines, paused)
             except (ReadError, OSError, json.JSONDecodeError) as e:

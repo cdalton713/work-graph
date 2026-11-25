@@ -3,6 +3,7 @@ import { join, sep } from "node:path";
 import { createAdaptorServer } from "@hono/node-server";
 import { Hono } from "hono";
 import { createApp } from "./app.ts";
+import { NEWER_SCHEMA_ERROR } from "./db/migrations.ts";
 import { linkSettings } from "./link.ts";
 import { readConfig } from "./workspaces.ts";
 import { readLinearAuth, serviceSetting } from "./linearauth.ts";
@@ -132,6 +133,7 @@ function createVercelService(env: NodeJS.ProcessEnv) {
       version: env.WG_VERSION || env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "dev",
       serviceReady: () => directory().then(() => true, (error: unknown) => {
         const message = error instanceof Error ? error.message : "";
+        if (message === NEWER_SCHEMA_ERROR) return "schema-too-new";
         return ["WG_DATA_KEY", "WG_DATA_KEY_OLD"].find((name) => message.startsWith(name + " ")) ?? false;
       }),
     });

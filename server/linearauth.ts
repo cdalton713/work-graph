@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
-import { cookie, localUrl, pack, SESSION_COOKIE, SESSION_S, STATE_COOKIE, STATE_S, unpack, type Session } from "./auth.ts";
+import { clearSessionCookie, cookie, localUrl, pack, SESSION_COOKIE, SESSION_S, STATE_COOKIE, STATE_S, unpack, type Session } from "./auth.ts";
 import type { createAccounts } from "./db/accounts.ts";
 
 export interface LinearAuth {
@@ -70,6 +70,21 @@ async function requestToken(auth: LinearAuth, params: Record<string, string>, no
 export const refreshLinearToken = (auth: LinearAuth, token: string, now: () => number) =>
   requestToken(auth, { grant_type: "refresh_token", refresh_token: token }, now);
 
+export async function revokeLinearToken(refreshToken: string): Promise<boolean> {
+  try {
+    const response = await fetch("https://api.linear.app/oauth/revoke", {
+      method: "POST",
+      body: new URLSearchParams({ token: refreshToken, token_type_hint: "refresh_token" }),
+      signal: AbortSignal.timeout(2_000),
+      redirect: "error",
+    });
+    void response.body?.cancel().catch(() => {});
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function identity(key: string): Promise<Identity | null> {
   try {
     const response = await fetch("https://api.linear.app/graphql", {
@@ -122,9 +137,12 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
       code, code_verifier: flow.verifier, redirect_uri: redirectUri(), grant_type: "authorization_code",
     }, now).catch(() => null);
     const data = credential && await identity(credential.key);
-    if (!data) return c.json({ error: "Linear did not complete the sign-in: open the page again" }, 502);
+    if (!credential || !data) return c.json({ error: "Linear did not complete the sign-in: open the page again" }, 502);
     const { viewer, organization, teams } = data;
-    if (auth.allowedOrgs && !auth.allowedOrgs.includes(organization.urlKey.toLowerCase())) {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (auth.allowedOrgs && !auth.allowedOrgs.some((entry) =>
+      entry.toLowerCase() === (uuid.test(entry) ? organization.id : organization.urlKey).toLowerCase())) {
+      await revokeLinearToken(credential.refreshToken);
       return c.text("This service is not open for your workspace.", 403);
     }
     const accountId = await save({ linearUserId: viewer.id, linearOrgId: organization.id, name: viewer.name, email: viewer.email }, {
@@ -139,7 +157,7 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
   routes.get("/logout", async (c) => {
     const session = await linearSessionOf(c, auth, now);
     if (session) await onLogout(session);
-    deleteCookie(c, SESSION_COOKIE, { path: "/", secure: true, prefix: "host" });
+    clearSessionCookie(c);
     return c.redirect(`${origin()}/`, 302);
   });
   return routes;

@@ -18,7 +18,7 @@ databaseSuites((open) => {
     const sql = await database();
     await Promise.all([migrate(sql), migrate(sql)]);
     await migrate(sql);
-    expect(await sql.query("SELECT version FROM schema_migrations ORDER BY version")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    expect(await sql.query("SELECT version FROM schema_migrations ORDER BY version")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
     for (const table of ["users", "tenants", "linear_connections", "coordinator_tokens"]) {
       expect(await sql.query(`SELECT * FROM ${table}`)).toEqual([]);
     }
@@ -29,5 +29,26 @@ databaseSuites((open) => {
     await migrate(sql);
     await sql.query("INSERT INTO schema_migrations (version) VALUES (999)");
     await expect(migrate(sql)).rejects.toThrow("Database schema is newer than this server");
+  });
+
+  test("disables the statement timeout only during migrations", async () => {
+    const sql = await database();
+    const original = await sql.query("SHOW statement_timeout");
+    const timeouts: unknown[] = [];
+    await migrate({
+      query: sql.query,
+      transaction: (run) => sql.transaction(async ({ query }) => {
+        await query("SET LOCAL statement_timeout = 1000");
+        return run({ query: async (statement, params) => {
+          if (statement.startsWith("SELECT pg_advisory_xact_lock")) {
+            timeouts.push(await query("SHOW statement_timeout"));
+          }
+          return query(statement, params);
+        } });
+      }),
+    });
+    expect(timeouts).toHaveLength(5);
+    for (const timeout of timeouts) expect(timeout).toEqual([{ statement_timeout: "0" }]);
+    expect(await sql.query("SHOW statement_timeout")).toEqual(original);
   });
 });

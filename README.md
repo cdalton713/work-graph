@@ -245,6 +245,17 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
 - `WG_LINK_MAX_AGE` (optional): maximum link socket age in seconds, measured from the socket join.
   Use 60 to 2147483 seconds. The server closes each socket slightly earlier with code 4001 so clients
   can reconnect. Set the host's limit at least 20 seconds above this setting to allow time for the join.
+
+On the coordinator's machine, run `wg login https://wg.example.com` and enter the coordinator
+token at the prompt. If the config already names the page, run `wg login --workspace <id>`.
+The command checks the token with the page and stores it in a private file for that page.
+It shows the workspaces the page serves and the config entries to add. Run `wg doctor`
+to check the token and `wg logout [<page-url>]` to remove the saved copy.
+
+For a workspace with its own page, the client checks `WG_<ID>_LINK_TOKEN` and then
+`<id>-link-token`. For a workspace that uses the top-level page, it checks `WG_LINK_TOKEN`
+and then `link-token`. If neither source exists, it checks the token saved for that page
+by `wg login`.
   Leave the setting blank or set it to 0 to turn off the age limit. With a limit set, the page and the
   presence API show a coordinator as connected for up to 15 seconds after any close, including a
   deliberate exit. Autostart uses the queued work count and the Orca agent list to decide when to start.

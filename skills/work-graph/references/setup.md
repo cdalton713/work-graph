@@ -56,8 +56,24 @@ Agents use the human's API key, so Linear shows them as the author of each agent
 The config lists the Linear workspaces. Set `effort.workspace` to the id of the workspace that owns the work; a plan without it uses the first one. `effort.team` defaults to the workspace's `team`. A workspace with `teams` accepts only those teams, and a team that another workspace names stops `wg`. Choose from the work's owner, not the current shell key. Do not copy issues from one workspace into another.
 
 Set `page_url` on a workspace to use a separate page for its plans. Other workspaces use the
-top-level `page_url`. Set `WG_UI_URL` to override either setting for a command. See "Link" in
-[page.md](page.md) for token setup.
+top-level `page_url`. Set `WG_UI_URL` to override either setting for a command.
+
+## Coordinator token
+
+Run `wg login https://wg.example.com` to connect to a hosted page. For a page in your
+config, run `wg login --workspace <id>`. Without a workspace id, the command selects
+the first workspace. Enter the coordinator token at the prompt. For scripts, use
+`--token-stdin` to read the token from standard input.
+
+`wg login` checks the token with the page and saves it in a mode-600 file under
+`~/.config/work-graph/pages/`. It shows the workspaces on the page and the config
+entries to add. Use HTTPS. The command also accepts HTTP for a loopback or tailnet
+URL already in your config.
+
+Run `wg doctor` to check the token for each page in your config. Use
+`wg logout [<page-url>]` to remove the saved token. Use the page settings to revoke it.
+
+## Linear keys
 
 `wg` selects the key for every command from the plan: `LINEAR_<ID>_API_KEY`, then the workspace's `key_env` names, then the private file `~/.config/work-graph/<id>-linear-api-key` (mode 600). A missing key stops the command; it never uses the key of another workspace. Keep keys out of plans, comments, and command arguments.
 

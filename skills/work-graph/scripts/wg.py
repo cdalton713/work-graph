@@ -35,6 +35,8 @@ that Python, and without it `wg next` polls Linear.
   wg autostart <dir> [--install | --uninstall]
   wg health    <dir> [--install | --uninstall | --due | --report <file>]
   wg doctor    [<dir>]
+  wg login     [<page-url>] [--workspace <id>] [--token-stdin]
+  wg logout    [<page-url>]
   wg config
   wg contract  [--write]
   wg ui        [--port N] [--project <name>] [--no-open] [--no-tailnet]
@@ -51,9 +53,11 @@ import copy
 import email.utils
 import fcntl
 import fnmatch
+import getpass
 import hashlib
 import http.client
 import io
+import ipaddress
 import json
 import math
 import os
@@ -72,6 +76,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from collections import Counter
 from datetime import date as datetime_date, datetime, time as datetime_time, timezone
 from pathlib import Path
@@ -4693,21 +4698,51 @@ def link_token_env(workspace):
     return "WG_LINK_TOKEN"
 
 
-def link_token(workspace=None):
-    """Read the environment or a private file. Never include the value in an error."""
-    source = link_token_env(workspace)
-    token = os.environ.get(source)
-    if token is None:
-        source = LINK_TOKEN_FILE.with_name(f"{workspace}-link-token") if workspace_page(workspace) else LINK_TOKEN_FILE
-        try:
-            with source.open(encoding="utf-8") as file:
-                if stat.S_IMODE(os.fstat(file.fileno()).st_mode) != 0o600:
-                    raise LinkTokenError(f"{source} must have mode 600")
-                token = file.read().removesuffix("\n")
-        except FileNotFoundError:
-            return ""
-        except (OSError, UnicodeError):
-            raise LinkTokenError(f"{source} cannot be read") from None
+def page_origin(url):
+    """Validate the URL before using it in a request or deriving a file name."""
+    problem = "use a page URL with HTTPS, or configured HTTP on loopback or a tailnet"
+    if not url or "?" in url or "#" in url or any(char.isspace() or ord(char) < 32 for char in url):
+        raise LinkTokenError(problem)
+    try:
+        target = urllib.parse.urlsplit(url)
+        host, port = target.hostname, target.port
+    except ValueError:
+        raise LinkTokenError(problem) from None
+    if (target.scheme not in ("http", "https", "ws", "wss") or not host
+            or not re.fullmatch(r"[a-z0-9.:-]+", host) or target.username is not None):
+        raise LinkTokenError(problem)
+    if len(host) > 253:
+        raise LinkTokenError("the page host must have at most 253 characters")
+    return target.scheme, host, port
+
+
+def private_page_host(host):
+    if host == "localhost" or host.endswith(".ts.net"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (address.is_loopback or address in ipaddress.ip_network("100.64.0.0/10")
+            or address in ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+
+
+def configured_pages():
+    urls = [CONFIG.get("page_url"), *(workspace_page(w) for w in WORKSPACES)]
+    return {url.rstrip("/") for url in urls if url}
+
+
+def page_token_path(url):
+    _, host, port = page_origin(url)
+    # Colons in IPv6 literals are valid on the systems that run wg.
+    name = f"{host}_{port}" if port is not None else host
+    filename = f"{name}-token"
+    if len(filename) > 255:
+        raise LinkTokenError("the page host and port are too long for a token file")
+    return LINK_TOKEN_FILE.parent / "pages" / filename
+
+
+def clean_link_token(token, source):
     if "\n" in token or "\r" in token:
         raise LinkTokenError(f"{source} must contain one line")
     if any(not (" " <= char <= "~") for char in token):
@@ -4715,13 +4750,207 @@ def link_token(workspace=None):
     return token.strip()
 
 
+def link_token(workspace=None, *, url=None):
+    """Read the first credential source that exists. An empty source disables the token."""
+    source = link_token_env(workspace)
+    if source in os.environ:
+        return clean_link_token(os.environ[source], source)
+    path = LINK_TOKEN_FILE.with_name(f"{workspace}-link-token") if workspace_page(workspace) else LINK_TOKEN_FILE
+    token = read_link_token_file(path)
+    if token is not None:
+        return token
+    page_url = (workspace_page(workspace) or PAGE_URL).rstrip("/")
+    if url:
+        scheme, host, port = page_origin(url)
+        scheme = {"ws": "http", "wss": "https"}.get(scheme, scheme)
+        if (scheme, host, port) != page_origin(page_url):
+            return ""
+    return read_link_token_file(page_token_path(page_url)) or ""
+
+
+def read_link_token_file(source):
+    try:
+        with source.open(encoding="utf-8") as file:
+            if stat.S_IMODE(os.fstat(file.fileno()).st_mode) != 0o600:
+                raise LinkTokenError(f"{source} must have mode 600")
+            token = file.read().removesuffix("\n")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError):
+        raise LinkTokenError(f"{source} cannot be read") from None
+    return clean_link_token(token, source)
+
+
 def link_token_for(url, workspace=None):
-    token = link_token(workspace)
+    # Only the origin identifies the token. Request paths can contain queries.
+    target = urllib.parse.urlsplit(url)
+    base = target._replace(path="", query="", fragment="").geturl()
+    token = link_token(workspace, url=base)
     if token:
-        target = urllib.parse.urlsplit(url)
-        if target.scheme not in ("https", "wss") and target.hostname not in ("127.0.0.1", "localhost", "::1"):
-            raise LinkTokenError("the link token requires HTTPS for a page outside loopback")
+        scheme, host, port = page_origin(base)
+        trusted_tailnet = private_page_host(host) and any(
+            page_origin(page) == ("http", host, port) for page in configured_pages() if page.startswith("http:"))
+        if scheme not in ("https", "wss") and host not in ("127.0.0.1", "localhost", "::1") and not trusted_tailnet:
+            raise LinkTokenError("the link token requires HTTPS for a page outside loopback or the configured tailnet")
     return token
+
+
+def retry_page_request(request, response_error):
+    """Retry only 503. response_error extracts the HTTP status and headers for this transport."""
+    for attempt in range(4):
+        try:
+            return request()
+        except Exception as error:
+            status, headers = response_error(error)
+            if status != 503 or attempt == 3:
+                raise
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
+            delay = headers.get("Retry-After", "1") if headers is not None else "1"
+            try:
+                seconds = int(delay)
+            except (TypeError, ValueError):
+                try:
+                    seconds = (email.utils.parsedate_to_datetime(delay) - datetime.now(timezone.utc)).total_seconds()
+                except (TypeError, ValueError, OverflowError):
+                    seconds = 1
+            time.sleep(max(0, min(5, seconds)))
+
+
+def ws_response_error(error):
+    response = getattr(error, "response", None)
+    return getattr(response, "status_code", None), getattr(response, "headers", None)
+
+
+def open_page_request(request, timeout):
+    def response_error(error):
+        if isinstance(error, urllib.error.HTTPError):
+            return error.code, error.headers
+        return None, None
+
+    return retry_page_request(lambda: urllib.request.urlopen(request, timeout=timeout), response_error)
+
+
+def login_page_url(url, workspace):
+    default = workspace_page(workspace) or CONFIG.get("page_url")
+    url = (url if url is not None else default or "").rstrip("/")
+    scheme, host, _ = page_origin(url)
+    if scheme != "https" and (scheme != "http" or url not in configured_pages() or not private_page_host(host)):
+        raise LinkTokenError("use HTTPS unless the page has a configured HTTP loopback or tailnet URL")
+    return url
+
+
+def token_page_request(url, path, token="", *, expected_error=()):
+    request = urllib.request.Request(f"{url}{path}")
+    if token:
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
+    try:
+        with open_page_request(request, 10) as response:
+            if response.geturl() != request.full_url:
+                raise LinkTokenError("the page redirected the token check")
+            if response.status != 200:
+                raise LinkTokenError(f"the page answered HTTP {response.status}")
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            if error.geturl() != request.full_url:
+                raise LinkTokenError("the page redirected the token check") from None
+            if error.code in expected_error:
+                return error.code
+            if error.code in (401, 403):
+                raise LinkTokenError(f"the page refused the token (HTTP {error.code})") from None
+            raise LinkTokenError(f"the page answered HTTP {error.code}") from None
+    except (OSError, http.client.HTTPException) as error:
+        reason = getattr(error, "reason", error)
+        raise LinkTokenError(f"connection failed ({type(reason).__name__})") from None
+    except ValueError:
+        raise LinkTokenError("the page returned an invalid token check response") from None
+
+
+def check_page_token(url, token):
+    config = token_page_request(url, "/api/config", token)
+    if not isinstance(config, dict) or not isinstance(config.get("auth"), bool):
+        raise LinkTokenError("the page did not report whether sign-in is enabled")
+    if not config["auth"]:
+        # The coordinator must name a project after it passes the link's token check.
+        path = "/api/link?role=coordinator"
+        with_token = token_page_request(url, path, token, expected_error=(400,))
+        without_token = token_page_request(url, path, expected_error=(400, 401, 403))
+        if with_token != 400 or without_token not in (401, 403):
+            raise LinkTokenError("the page did not confirm the token")
+    return token_page_request(url, "/api/status", token)
+
+
+def save_page_token(path, token):
+    try:
+        directory = path.parent
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if directory.is_symlink() or stat.S_IMODE(directory.stat().st_mode) != 0o700:
+            raise LinkTokenError(f"{directory} must be a directory with mode 700")
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as file:
+            temporary = Path(file.name)
+            try:
+                os.fchmod(file.fileno(), 0o600)
+                file.write(token + "\n")
+                file.close()
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+    except OSError as error:
+        reason = error.strerror or type(error).__name__
+        raise LinkTokenError(f"cannot save the page token at {path}: {reason}") from None
+
+
+def page_login(ns):
+    url = login_page_url(ns.page_url, ns.workspace)
+    path = page_token_path(url)
+    if ns.token_stdin:
+        raw = sys.stdin.readline().removesuffix("\n")
+    else:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                raw = getpass.getpass("Page coordinator token: ")
+        except (getpass.GetPassWarning, EOFError):
+            raise LinkTokenError("cannot read the token without echo; use --token-stdin") from None
+    token = clean_link_token(raw, "the token")
+    if not token:
+        raise LinkTokenError("the token is empty")
+    status = check_page_token(url, token)
+    rows = status.get("workspaces", []) if isinstance(status, dict) else []
+    save_page_token(path, token)
+
+    def report(message):
+        # The page controls workspace names. Do not print the token even if a page echoes it.
+        print(message.replace(token, "[redacted]"))
+
+    report(f"Saved the coordinator token for {url}.")
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            continue
+        workspace = row["id"]
+        if not re.fullmatch(r"[a-z0-9-]+", workspace):
+            continue
+        name = one_line(row.get("name") or workspace, 120)
+        current = (workspace_page(workspace) or CONFIG.get("page_url") or "").rstrip("/")
+        if workspace in WORKSPACES and current == url:
+            report(f"{workspace} ({name}): configured")
+        else:
+            report(f"{workspace} ({name}): set this entry in workspaces")
+            report(json.dumps({"id": workspace, "name": name, "page_url": url}))
+    return 0
+
+
+def page_logout(url):
+    url = login_page_url(url, DEFAULT_WORKSPACE_ID)
+    path = page_token_path(url)
+    try:
+        path.unlink()
+        print(f"Removed the saved token for {url}.")
+    except FileNotFoundError:
+        print(f"There was no saved token for {url}.")
+    print("Use the page settings to revoke the token on the page.")
+    return 0
 
 
 class LinkResponseError(ReadError):
@@ -4754,7 +4983,9 @@ def link_socket(url, *, workspace, **options):
     if token:
         options["additional_headers"] = {"Authorization": f"Bearer {token}"}
     try:
-        ws = connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1, **options)
+        ws = retry_page_request(
+            lambda: connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1, **options), ws_response_error,
+        )
     except Exception as error:
         if token:
             status = getattr(getattr(error, "response", None), "status_code", None)
@@ -6671,7 +6902,7 @@ def page_get(path, timeout=10, headers=None, *, use_token=True, workspace=None):
         # Do not forward the credential on a redirect.
         request.add_unredirected_header("Authorization", f"Bearer {token}")
     try:
-        response = urllib.request.urlopen(request, timeout=timeout)
+        response = open_page_request(request, timeout)
     except urllib.error.HTTPError as error:
         if token and error.code == 401:
             warn_link_token(link_unauthorized_message(workspace), workspace)
@@ -6686,31 +6917,13 @@ def page_get(path, timeout=10, headers=None, *, use_token=True, workspace=None):
 
 
 def doctor_link_token(workspace=None):
-    if not link_token_for(page_base(workspace), workspace):
-        return "ok", "link token: not set"
-    config = page_get("/api/config", workspace=workspace)
-    if config.get("readOnly") and not config.get("auth"):
-        return "warn", "link token: set, this page has no sign-in or coordinator link"
-    # With no project, the link request reaches the project check without an upgrade or a Linear lookup.
-    path = "/api/status" if config.get("auth") else "/api/link?role=coordinator"
-    try:
-        page_get(path, workspace=workspace)
-    except urllib.error.HTTPError as error:
-        with error:
-            if error.code == 401:
-                return "FAIL", "link token: set, rejected by the page (HTTP 401)"
-            if path == "/api/status" or error.code != 400:
-                return "FAIL", f"link token: set, the page did not confirm it (HTTP {error.code})"
-    if path != "/api/status":
-        # A server with no token configured also lets the request reach the project check.
-        try:
-            page_get(path, use_token=False, workspace=workspace)
-        except urllib.error.HTTPError as error:
-            with error:
-                if error.code == 401:
-                    return "ok", "link token: set, accepted by the page"
-        return "warn", "link token: set, the page did not confirm it"
-    return "ok", "link token: set, accepted by the page"
+    url = (workspace_page(workspace) or PAGE_URL).rstrip("/")
+    label = f"link token for {url}"
+    token = link_token_for(url, workspace)
+    if not token:
+        return "ok", f"{label}: no token"
+    check_page_token(url, token)
+    return "ok", f"{label}: accepted"
 
 
 def doctor_page(workspace=None):
@@ -6967,9 +7180,14 @@ def doctor_lines(plan_dir=None, fix=False):
     checks += [(f"key {w}", doctor_key(w, team=(effort_team if w == workspace else None) or config["team"]))
                for w, config in WORKSPACES.items()]
     checks += [(name, doctor_tool(name, args)) for name, args in TOOL_CHECKS.items()]
-    checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", lambda: doctor_page(workspace)),
-               ("link token", lambda: doctor_link_token(workspace)), ("tick", doctor_tick),
-               ("agents", doctor_watch)]
+    checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", lambda: doctor_page(workspace))]
+    pages = {}
+    for w in dict.fromkeys(([workspace] if workspace else []) + list(WORKSPACES)):
+        pages.setdefault((workspace_page(w) or PAGE_URL).rstrip("/"), w)
+    if CONFIG.get("page_url"):
+        pages.setdefault(PAGE_URL.rstrip("/"), None)
+    checks += [(f"link token for {url}", lambda w=w: doctor_link_token(w)) for url, w in pages.items()]
+    checks += [("tick", doctor_tick), ("agents", doctor_watch)]
     if plan_dir:
         plans.add(Path(plan_dir).resolve())
     checks += [("autostart", doctor_autostart(sorted(plans))), ("health", doctor_health(sorted(plans)))]
@@ -8506,7 +8724,7 @@ def approve(plan_dir, plan, keys, quote):
 def ui_running(port):
     """Does this port already serve the page? Its health check says so."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as response:
+        with open_page_request(f"http://127.0.0.1:{port}/healthz", timeout=2) as response:
             return json.load(response) == {"ok": True}
     except (OSError, ValueError):
         return False
@@ -8697,6 +8915,11 @@ def cli_parser():
     mode.add_argument("--once", action="store_true")
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--uninstall", action="store_true")
+    login = sub.add_parser("login")
+    login.add_argument("page_url", nargs="?")
+    login.add_argument("--workspace", choices=tuple(WORKSPACES), default=DEFAULT_WORKSPACE_ID)
+    login.add_argument("--token-stdin", action="store_true")
+    sub.add_parser("logout").add_argument("page_url", nargs="?")
     u = sub.add_parser("ui")
     u.add_argument("--workspace", choices=tuple(WORKSPACES), default=DEFAULT_WORKSPACE_ID)
     u.add_argument("--port", type=int, default=4747)
@@ -8801,6 +9024,10 @@ def main(argv):
         args, given = args[:split], args[split + 1:]
     ns = cli_parser().parse_args(args)
     try:
+        if ns.cmd == "login":
+            return page_login(ns)
+        if ns.cmd == "logout":
+            return page_logout(ns.page_url)
         if ns.cmd == "config":
             return show_config(load_plan(ns.dir, strict=True) if ns.dir else None)
         if ns.cmd == "explain":

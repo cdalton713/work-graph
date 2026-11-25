@@ -1,3 +1,4 @@
+import { ownerWords } from "./words.ts";
 import { site } from "./site.ts";
 import type { Card, GraphData, Issue, Kind, Label, Project, State } from "./types";
 
@@ -75,7 +76,10 @@ export function reviewOf(issue: Issue, card: Card | null): { wave: boolean; merg
 /** The mark beside the PR number of a node, with what it means. The human's mark stands for both reviews. */
 export function reviewMark(issue: Issue, card: Card | null): { text: string; title: string } | null {
   const { wave, merge, marked } = reviewOf(issue, card);
-  if (marked) return { text: "✓ you", title: "You marked this PR reviewed. It counts as the wave review and the merge review." };
+  if (marked) {
+    const words = ownerWords();
+    return { text: `✓ ${words.owner}`, title: words.reviewCredit };
+  }
   if (merge) return { text: "✓✓", title: `Merge review: ${card!.merge_review}. The PR can go to its merge request.` };
   if (wave) return { text: "✓", title: `Wave review: ${card!.review}. The merge review is still to come.` };
   return null;
@@ -291,20 +295,19 @@ export function parseStatus(content: string | null | undefined): EffortStatus | 
   }
 }
 
-const ASK: Record<string, string> = { "ask-merge": "Merge", "ask-ready": "Mark the PR ready:", ask: "Your step:" };
-
 /**
  * What the human must do for a node, from what `wg next` last said about it (the card field `next`),
  * or null when the node does not wait on them. `wg next` says `wait human: <why>` and
  * `do ask…: <what>`; it names a merge only for the PR that can merge now, the lowest open one of its lane.
  */
-export function yourMove(next: string | undefined): string | null {
+export function yourMove(next: string | undefined, words = ownerWords()): string | null {
+  const ask: Record<string, string> = { "ask-merge": "Merge", "ask-ready": "Mark the PR ready:", ask: words.step };
   // One line for each thing that wg next said about the node.
   const parts = (next ?? "").split("\n").flatMap((part) => {
     const m = part.match(/^(do|wait) (\S+?)(?:: ([\s\S]*))?$/);
     if (!m) return [];
-    if (m[1] === "wait" && m[2] === "human") return [m[3] || "It waits on you."];
-    if (m[1] === "do" && m[2] in ASK) return [`${ASK[m[2]]}${m[3] ? ` ${m[3]}` : ""}`.replace(/:$/, "")];
+    if (m[1] === "wait" && m[2] === "human") return [m[3] || words.waitReason];
+    if (m[1] === "do" && m[2] in ask) return [`${ask[m[2]]}${m[3] ? ` ${m[3]}` : ""}`.replace(/:$/, "")];
     return [];
   });
   return parts.length ? parts.join(" ") : null;
@@ -369,7 +372,7 @@ export function projectGroups(projects: Project[]): { open: Project[]; closed: P
 export type BoardGroupId = "you" | "running" | "review" | "next" | "waiting" | "merged" | "closed";
 export interface BoardGroup { id: BoardGroupId; title: string; hint: string; nodes: GNode[] }
 const BOARD: [BoardGroupId, string, string][] = [
-  ["you", "Your move", "Triage, a status that waits on you, a PR that wg next asks you to merge, or an issue where wg next waits on you."],
+  ["you", "", ""],
   ["running", "Running", "A worker runs on it, or it is In Progress."],
   ["review", "In review", "In Review, Verifying, or Ready to Merge while the coordinator acts first."],
   ["next", "Can start", "Ready to start with no open blockers."],
@@ -413,7 +416,15 @@ export function boardGroups(graph: Graph, asked?: Set<string>): BoardGroup[] {
   const groups = new Map<BoardGroupId, GNode[]>(BOARD.map(([id]) => [id, []]));
   for (const n of graph.nodes) groups.get(groupOf(n))!.push(n);
   const order = (a: GNode, b: GNode) => depthOf(a.id) - depthOf(b.id) || a.issue.sortOrder - b.issue.sortOrder;
-  return BOARD.map(([id, title, hint]) => ({ id, title, hint, nodes: groups.get(id)!.sort(order) }));
+  const words = ownerWords();
+  return BOARD.map(([id, title, hint]) => ({
+    id,
+    title: id === "you" ? words.move : title,
+    hint: id === "you"
+      ? `Triage, a status that waits ${words.onOwner}, a PR that wg next asks ${words.owner} to merge, or an issue where wg next waits ${words.onOwner}.`
+      : hint,
+    nodes: groups.get(id)!.sort(order),
+  }));
 }
 
 /** The issues in board order: the groups top to bottom, each in run order. `j` and `k` step through it. */

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ownerWords } from "../lib/words";
 import { type BoardGroupId, type GNode, type Graph, agentStep, boardGroups, reviewOf, runTime, satisfied, yourMove } from "../lib/graph";
 import { Lamp, PrLinks } from "./ui";
 
@@ -23,6 +24,7 @@ export interface BoardProps {
  * centres it on the canvas. The find field takes an id or words of a title; `/` puts the focus in it.
  */
 export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked, live }: BoardProps) {
+  const copy = ownerWords();
   const groups = useMemo(() => boardGroups(graph, asked), [graph, asked]);
   const [query, setQuery] = useState("");
   const [folded, setFolded] = useState<Set<BoardGroupId>>(() => new Set(FOLDED));
@@ -58,7 +60,7 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
         <button type="button" className={`board-row${n.id === selectedId ? " is-selected" : ""}`} aria-current={n.id === selectedId || undefined}
           onClick={() => onPick(n.id)} onMouseEnter={() => onHover(n.id)} onMouseLeave={() => onHover(null)}>
           <Lamp signal={n.signal} pulse={!!worker} />
-          <span className="board-id mono">{n.issue.identifier}{asked?.has(n.issue.identifier) && <b className="board-ask" title="The worker asks you a question. Open the issue to reply.">asks you</b>}</span>
+          <span className="board-id mono">{n.issue.identifier}{asked?.has(n.issue.identifier) && <b className="board-ask" title={`The worker asks ${copy.owner} a question. Open the issue to reply.`}>asks {copy.owner}</b>}</span>
           <span className="board-title">{n.issue.title}</span>
           <span className={`board-status sig-fg-${n.signal}`}>
             {n.status === "Backlog" ? n.status : worker ?? (holder ? `after ${holder.issue.identifier}` : groupId === "running" ? "" : groupId === "review" ? (n.status === "Ready to Merge" && agentStep(n.card?.next) ? `${n.status} · wg: ${agentStep(n.card?.next)}` : "") : n.status)}
@@ -93,7 +95,7 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
         {!query && <kbd aria-hidden>/</kbd>}
       </div>
       <div className="board-scroll">
-        {!matches && !groups.some((g) => g.id === "you" && g.nodes.length) && <p className="board-clear"><Lamp signal="done" />Nothing waits on you.</p>}
+        {!matches && !groups.some((g) => g.id === "you" && g.nodes.length) && <p className="board-clear"><Lamp signal="done" />{copy.clear}</p>}
         {matches ? (
           <section className="board-group">
             <h3 className="board-head"><span>Matches</span><b className="mono">{matches.length}</b></h3>

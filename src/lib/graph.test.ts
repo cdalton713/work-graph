@@ -428,3 +428,23 @@ describe("another human name (config `human`)", () => {
     expect(yourMove("wait human: merge PR #7")).toBe("merge PR #7");
   });
 });
+
+describe("viewer wording", () => {
+  afterEach(() => configureSite({ human: DEFAULT_HUMAN, readOnly: false }));
+
+  it("names the owner in the board group and generated reasons", () => {
+    configureSite({ human: "Ada", readOnly: true });
+    const [group] = boardGroups(buildGraph(data([], [])));
+    expect(group.title).toBe("Ada's move");
+    expect(group.hint).toBe("Triage, a status that waits on Ada, a PR that wg next asks Ada to merge, or an issue where wg next waits on Ada.");
+    expect(yourMove("wait human\ndo ask: Decide.")).toBe("It waits on Ada. Ada's step: Decide.");
+  });
+
+  it("credits the owner on a reviewed PR", () => {
+    configureSite({ human: "Ada", readOnly: true });
+    const reviewed = { id: "r", name: "reviewed", color: "", group: null };
+    expect(reviewMark(issue("a", { labels: [reviewed] }), null)).toMatchObject({
+      text: "✓ Ada", title: "Ada marked this PR reviewed. It counts as the wave review and the merge review.",
+    });
+  });
+});

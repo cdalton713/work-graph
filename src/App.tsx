@@ -11,6 +11,7 @@ import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "
 import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./lib/health";
 import { agentsFresh, liveJob, presenceText } from "./lib/link";
 import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, summaryKey } from "./lib/overview";
+import { ownerWords } from "./lib/words";
 import { site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
 import type { GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
@@ -231,6 +232,7 @@ export function App() {
 
   // The viewer (a read-only page) shows the same graph with no control that writes.
   const viewer = site.readOnly;
+  const words = ownerWords();
   // Share with the viewer: the project label `shared` is the record. The link opens the project on the viewer of
   // its workspace (config `share_url`), which names the workspace with the same id. It has the id of the project,
   // not its name: two projects can have one name.
@@ -399,7 +401,7 @@ export function App() {
     .map(({ p }) => {
       const closed = p.statusType === "completed" || p.statusType === "canceled";
       const mine = yours.get(summaryKey(p)) ?? 0;
-      const hint = [mine ? `${mine} for you` : "", p.statusType === "started" ? "" : p.status].filter(Boolean).join(" · ");
+      const hint = [mine ? `${mine} ${words.forOwner}` : "", p.statusType === "started" ? "" : p.status].filter(Boolean).join(" · ");
       return {
         id: `${p.workspace}:${p.id}`, label: p.name, dim: closed,
         group: [directory && directory.workspaces.length > 1 ? name : "", p.initiative ?? (initiatives ? "No initiative" : "")].filter(Boolean).join(" · ") || undefined,
@@ -420,8 +422,8 @@ export function App() {
       <header className="bar">
         <span className="brand">work-graph</span>
         {(project || missing) && (
-          <button type="button" className="bar-home" onClick={home} title="All projects: which ones wait on you, and how far each one is.">
-            Overview{waitingTotal > 0 && <b className="bar-home-count mono" aria-label={`${waitingTotal} issues wait on you`}>{waitingTotal}</b>}
+          <button type="button" className="bar-home" onClick={home} title={`All projects: which ones wait ${words.onOwner}, and how far each one is.`}>
+            Overview{waitingTotal > 0 && <b className="bar-home-count mono" aria-label={`${waitingTotal} issues wait ${words.onOwner}`}>{waitingTotal}</b>}
           </button>
         )}
         <Picker value={project ? [`${project.workspace}:${project.id}`] : []} onChange={([id]) => {
@@ -433,7 +435,7 @@ export function App() {
         {project && <CopyButton text={project.name} label="Copy the project name" />}
         {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
           <Picker wide value={[autonomy]} onChange={([level]) => void setAutonomy(level as AutonomyLevel)} disabled={autonomyBusy || viewer}
-            title={`Autonomy level: what the coordinator may do without you.${project.autonomy ? "" : " No label on the project: standard."} A change tells the coordinator at once.`}
+            title={`Autonomy level: what the coordinator may do without ${words.owner}.${project.autonomy ? "" : " No label on the project: standard."} A change tells the coordinator at once.`}
             options={AUTONOMY_LEVELS.map((level) => ({ id: level, label: level, hint: AUTONOMY_HINTS[level] }))}>
             <span className={`bar-autonomy auto-${autonomy}`}>{autonomyBusy ? "Autonomy…" : <>Autonomy <b>{autonomy}</b></>}</span><span className="caret">▾</span>
           </Picker>
@@ -547,7 +549,7 @@ export function App() {
         <div className="keys" role="dialog" aria-label="Keyboard keys">
           <header><b>Keys</b><button type="button" className="ghost" onClick={() => setKeys(false)} aria-label="Close">✕</button></header>
           <dl>
-            <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Next or previous issue, in board order: Your move first</dd>
+            <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Next or previous issue, in board order: {words.move} first</dd>
             <dt><kbd>o</kbd></dt><dd>Open the issue in Linear</dd>
             <dt><kbd>p</kbd></dt><dd>Open the PR of the issue in GitHub</dd>
             <dt><kbd>b</kbd></dt><dd>Show or hide the board</dd>

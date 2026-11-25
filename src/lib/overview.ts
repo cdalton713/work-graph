@@ -1,5 +1,6 @@
 // The overview of all projects: one summary for each open project, made from its graph by the
 // same rules as the Board. The server makes the summaries, so the page does not load each graph.
+import { ownerWords } from "./words.ts";
 import { type Signal, boardGroups, buildGraph, parseStatus, projectGroups, statusTiming, yourMove } from "./graph.ts";
 import { type Agents, type Ask, agentName, agentNeeds, agentsWaiting } from "./link.ts";
 import type { GraphData, Project, ProjectList, PullRequest } from "./types.ts";
@@ -32,6 +33,18 @@ export interface ProjectSummary {
 }
 export interface OverviewData extends ProjectList { summaries: ProjectSummary[] }
 
+const summaryWords = ownerWords({ human: "", readOnly: false });
+
+/** Adapt the generated parts of a reason from an overview response for display. */
+export function overviewMoveReason(reason: string): string {
+  if (!site.readOnly) return reason;
+  const words = ownerWords();
+  if (reason === summaryWords.step.slice(0, -1)) return words.step.slice(0, -1);
+  return reason
+    .replaceAll(summaryWords.waitReason, () => words.waitReason)
+    .replaceAll(summaryWords.step, () => words.step);
+}
+
 export function summarize(data: GraphData, workspace: string, now = Date.now()): ProjectSummary {
   const graph = buildGraph(data);
   const groups = new Map(boardGroups(graph).map((g) => [g.id, g.nodes]));
@@ -48,7 +61,7 @@ export function summarize(data: GraphData, workspace: string, now = Date.now()):
     planned: graph.nodes.filter((n) => n.status !== "Canceled").length,
     done: graph.nodes.filter((n) => n.status === "Done").length,
     counts,
-    you: (groups.get("you") ?? []).map((n) => ({ identifier: n.issue.identifier, title: n.issue.title, why: yourMove(n.card?.next) ?? n.status, pullRequests: n.issue.pullRequests, updatedAt: n.issue.updatedAt })),
+    you: (groups.get("you") ?? []).map((n) => ({ identifier: n.issue.identifier, title: n.issue.title, why: yourMove(n.card?.next, summaryWords) ?? n.status, pullRequests: n.issue.pullRequests, updatedAt: n.issue.updatedAt })),
     running: groups.get("running")?.length ?? 0,
     review: groups.get("review")?.length ?? 0,
     ready: groups.get("next")?.length ?? 0,

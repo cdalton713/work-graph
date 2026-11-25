@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import re
+import shlex
 import subprocess
 import threading
 import sys
@@ -54,6 +55,12 @@ wg.pr_batch = lambda numbers, cwd=None: {}
 # No test may read the page server's contract; DoctorTests use the real page_contract_note.
 PAGE_CONTRACT_NOTE = wg.page_contract_note
 wg.page_contract_note = lambda plan_dir: []
+# No test may read the transcript of the session that runs the tests, or write the context limit at each wg load;
+# ContextLimitTests use the real ones.
+CONTEXT_NOTE = wg.context_note
+wg.context_note = lambda plan_dir: []
+SET_CONTEXT_LIMIT = wg.set_context_limit
+wg.set_context_limit = lambda plan_dir, apply, changes: None
 
 SHA = "a" * 40
 OTHER = "b" * 40
@@ -6963,6 +6970,235 @@ class FakeSocket:
         if self.closed:
             raise self.closed
         raise TimeoutError
+
+
+class ContextLimitTests(LaneTests):
+    """Config `context_limit`: `wg load` and `wg doctor --fix` write it into the core worktree's local Claude Code
+    settings, `wg doctor` reports a worktree without it, and `wg next` notes a session that is over it."""
+
+    def settings(self):
+        return json.loads((self.d / ".claude/settings.local.json").read_text())
+
+    def transcript(self, lines, sid="s-1", cwd=None, pad=0):
+        root = self.d / "claude"
+        folder = root / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd or self.d))
+        folder.mkdir(parents=True, exist_ok=True)
+        text = "".join(json.dumps(line) + "\n" for line in lines) + ("x" * pad + "\n" if pad else "")
+        (folder / f"{sid}.jsonl").write_text(text)
+        return {"CLAUDE_CONFIG_DIR": str(root), "CLAUDE_CODE_SESSION_ID": sid}
+
+    @staticmethod
+    def call_line(tokens, sidechain=False):
+        usage = {"input_tokens": 2, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": tokens - 1002,
+                 "output_tokens": 50}
+        return {"type": "assistant", "isSidechain": sidechain, "message": {"role": "assistant", "usage": usage}}
+
+    def test_the_config_takes_0_or_a_token_count_of_100000_or_more(self):
+        def config(data):
+            path = self.d / "config.json"
+            path.write_text(json.dumps(data))
+            return wg.read_config(path)
+        self.assertEqual(config({})["context_limit"], 250000)
+        self.assertEqual(config({"context_limit": 0})["context_limit"], 0)
+        self.assertEqual(config({"context_limit": 400000})["context_limit"], 400000)
+        for bad in (50000, "250k", True, None):
+            with self.assertRaises(SystemExit):
+                config({"context_limit": bad})
+
+    def git_repo(self, path=None):
+        # No global git config: its ignore file can already ignore the settings file.
+        git_env = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "XDG_CONFIG_HOME": str(self.d / "xdg")}
+        patcher = patch.dict(os.environ, git_env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        subprocess.run(["git", "init", "-q", str(path or self.d)], check=True)
+
+    def ignored(self, path=None):
+        return subprocess.run(["git", "check-ignore", "-q", ".claude/settings.local.json"], cwd=path or self.d).returncode == 0
+
+    def test_load_step_merges_the_limit_into_the_settings_file_and_keeps_it_out_of_git(self):
+        self.git_repo()
+        (self.d / ".claude").mkdir()
+        (self.d / ".claude/settings.local.json").write_text(json.dumps({"env": {"A": "1"}, "autoCompactWindow": 500000}))
+        changes = []
+        SET_CONTEXT_LIMIT(self.d, False, changes)
+        self.assertEqual(changes, [f"set autoCompactWindow 250000 in {self.d / '.claude/settings.local.json'}"])
+        self.assertEqual(self.settings()["autoCompactWindow"], 500000)  # a dry run writes nothing
+        SET_CONTEXT_LIMIT(self.d, True, [])
+        self.assertEqual(self.settings(), {"env": {"A": "1"}, "autoCompactWindow": 250000})
+        self.assertTrue(self.ignored())
+        # The value is there: no change, and info/exclude gets no second line.
+        changes = []
+        SET_CONTEXT_LIMIT(self.d, True, changes)
+        self.assertEqual(changes, [])
+        exclude = (self.d / ".git/info/exclude").read_text()
+        self.assertEqual(exclude.count("/.claude/settings.local.json"), 1)
+
+    def test_load_runs_the_step_and_a_dry_run_names_it(self):
+        self.keymap()
+        live = {n["key"]: live_issue(title=n["title"]) for n in self.p["nodes"]}
+        with patch.object(wg, "team_info", return_value=("cd", {}, {})), patch.object(wg, "set_context_limit",
+                                                                                 SET_CONTEXT_LIMIT), \
+             patch.object(wg, "fetch_nodes", return_value=live), patch.object(wg, "_relations"), \
+             patch.object(wg, "project_entries", return_value=[]), patch.object(wg, "sync_card", return_value=False), \
+             patch.object(wg, "gql", return_value={"viewer": {"id": "me"}}):
+            dry, _ = self.call(wg.load, self.d, self.p, False, False)
+            self.assertIn(f"set autoCompactWindow 250000 in {self.d / '.claude/settings.local.json'}", dry)
+        self.assertFalse((self.d / ".claude").exists())  # a dry run writes nothing
+
+    def test_load_step_writes_nothing_at_limit_0_or_into_a_file_that_is_not_json(self):
+        with patch.dict(wg.CONFIG, {"context_limit": 0}):
+            SET_CONTEXT_LIMIT(self.d, True, [])
+        self.assertFalse((self.d / ".claude").exists())
+        (self.d / ".claude").mkdir()
+        (self.d / ".claude/settings.local.json").write_text("{bad")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            SET_CONTEXT_LIMIT(self.d, True, [])
+        self.assertIn("warn: the context limit is not set", stderr.getvalue())
+        self.assertEqual((self.d / ".claude/settings.local.json").read_text(), "{bad")
+        # Not a git worktree: wg cannot keep the file out of git, so it writes nothing.
+        (self.d / ".claude/settings.local.json").unlink()
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            SET_CONTEXT_LIMIT(self.d, True, [])
+        self.assertIn("warn: the context limit is not set", stderr.getvalue())
+        self.assertFalse((self.d / ".claude/settings.local.json").exists())
+
+    def test_load_step_writes_through_no_symlink(self):
+        self.git_repo()
+        target = self.d / "elsewhere"
+        target.mkdir()
+        (self.d / ".claude").symlink_to(target)  # the folder is a symlink
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            SET_CONTEXT_LIMIT(self.d, True, [])
+        self.assertIn("is a symlink; wg does not write through it", stderr.getvalue())
+        self.assertEqual(list(target.iterdir()), [])
+        (self.d / ".claude").unlink()
+        (self.d / ".claude").mkdir()
+        (target / "real.json").write_text("{}")
+        (self.d / ".claude/settings.local.json").symlink_to(target / "real.json")  # the file is a symlink
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            SET_CONTEXT_LIMIT(self.d, True, [])
+        self.assertIn("is a symlink", stderr.getvalue())
+        self.assertEqual((target / "real.json").read_text(), "{}")
+
+    def test_the_exclude_step_runs_also_when_the_value_is_already_right(self):
+        self.git_repo()
+        (self.d / ".claude").mkdir()
+        (self.d / ".claude/settings.local.json").write_text('{"autoCompactWindow": 250000}')
+        self.assertFalse(self.ignored())
+        changes = []
+        SET_CONTEXT_LIMIT(self.d, True, changes)
+        self.assertEqual(changes, [])
+        self.assertTrue(self.ignored())
+        # wg doctor --fix does the same for a loaded effort.
+        other = self.d / "two-core"
+        other.mkdir()
+        self.git_repo(other)
+        (other / "plan.json").write_text("{}")
+        (other / "keymap.json").write_text("{}")
+        (other / ".claude").mkdir()
+        (other / ".claude/settings.local.json").write_text('{"autoCompactWindow": 250000}')
+        with patch.object(wg, "set_context_limit", SET_CONTEXT_LIMIT):
+            self.assertEqual(wg.doctor_context([other], True)(),
+                             [("ok", "context: each loaded effort compacts its coordinator at 250000 tokens")])
+        self.assertTrue(self.ignored(other))
+
+    def test_the_session_size_is_the_last_main_call_at_the_end_of_the_transcript(self):
+        env = self.transcript([self.call_line(300000), {"type": "user", "message": {"content": "x"}},
+                               self.call_line(310000), self.call_line(900000, sidechain=True),
+                               {"type": "system", "subtype": "stop_hook_summary"}])
+        with patch.dict(os.environ, env):
+            self.assertEqual(wg.session_context_tokens([self.d]), 310000)
+        # The last call is before the first 64 KB of the end; a larger part of the end has it.
+        env = self.transcript([self.call_line(120000)], pad=200000)
+        with patch.dict(os.environ, env):
+            self.assertEqual(wg.session_context_tokens([self.d]), 120000)
+        # One line of 4 MiB with no usage after the last call: a larger part of the end has the call.
+        env = self.transcript([self.call_line(140000), {"type": "user", "message": {"content": "y" * (4 << 20)}}])
+        with patch.dict(os.environ, env):
+            self.assertEqual(wg.session_context_tokens([self.d]), 140000)
+        # The session started in another folder: the transcript is found by its session id.
+        env = self.transcript([self.call_line(130000)], sid="s-2", cwd="/elsewhere")
+        with patch.dict(os.environ, env):
+            self.assertEqual(wg.session_context_tokens([self.d]), 130000)
+        for bad in ({"CLAUDE_CODE_SESSION_ID": ""}, {"CLAUDE_CODE_SESSION_ID": "s-9"},
+                    {"CLAUDE_CODE_SESSION_ID": "../x"}):
+            with patch.dict(os.environ, env | bad):
+                self.assertIsNone(wg.session_context_tokens([self.d]))
+
+    def test_next_notes_a_session_over_the_limit_once_and_short(self):
+        def note(tokens, settings=None):
+            if settings is not None:
+                (self.d / ".claude").mkdir(exist_ok=True)
+                (self.d / ".claude/settings.local.json").write_text(settings)
+            with patch.dict(os.environ, self.transcript([self.call_line(tokens)])):
+                return CONTEXT_NOTE(self.d)
+        here = shlex.quote(str(self.d.resolve()))
+        self.assertEqual(note(240000), [])
+        self.assertEqual(note(512000), [f"note context @effort -: this session holds 512K tokens, limit 250K; "
+                                        f"run wg doctor {here} --fix, then ask Human to run /compact"])
+        # With the setting in place, Claude Code compacts at the next call: a line only at 20% over the limit.
+        self.assertEqual(note(290000, '{"autoCompactWindow": 250000}'), [])
+        self.assertEqual(note(310000), ["note context @effort -: this session holds 310K tokens, limit 250K; "
+                                        "ask Human to run /compact"])
+        # A failure, or limit 0: no line.
+        self.assertEqual(note(512000, "{bad"), [])
+        with patch.dict(wg.CONFIG, {"context_limit": 0}):
+            self.assertEqual(note(900000), [])
+        with patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": ""}):
+            self.assertEqual(CONTEXT_NOTE(self.d), [])
+
+    def test_next_prints_the_note_after_its_lines(self):
+        self.keymap()
+        line = "note context @effort -: this session holds 512K tokens, limit 250K; ask Human to run /compact"
+        with patch.object(wg, "fetch_nodes", return_value=self.issues({})), \
+             patch.object(wg, "project_entries", return_value=[]), \
+             patch.object(wg, "context_note", return_value=[line]), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(wg.next_command(self.d, self.p, False, 1), 0)
+        printed = out.getvalue().splitlines()
+        self.assertEqual(printed[-2:], [line, f"note page {wg.page_link(self.p)}"])
+
+    def test_doctor_fix_writes_nothing_outside_the_plan_directory_of_a_loaded_effort(self):
+        checkout = self.d / "main-checkout"  # a repository with no plan
+        checkout.mkdir()
+        self.git_repo(checkout)
+        with patch.object(wg, "set_context_limit", SET_CONTEXT_LIMIT):
+            self.assertEqual(wg.doctor_context([checkout], True)(),
+                             [("warn", f"context {checkout}: not the plan directory of a loaded effort (plan.json and "
+                                       "keymap.json); nothing written")])
+            self.assertEqual(wg.doctor_context([checkout], False)(),
+                             [("ok", "context: each loaded effort compacts its coordinator at 250000 tokens")])
+        self.assertFalse((checkout / ".claude").exists())
+        # wg doctor <dir> --fix passes fix to this check only.
+        with patch.object(wg, "doctor_context", return_value=lambda: ("ok", "context")) as context, \
+             patch.object(wg, "tick_plans", return_value=[]), patch.object(wg, "doctor_run", return_value=[]):
+            list(wg.doctor_lines(None, True))
+        context.assert_called_once_with([], True)
+
+    def test_doctor_reports_a_core_worktree_without_the_limit_and_fix_writes_it(self):
+        self.keymap()
+        self.git_repo()
+        other = self.d / "other-core"
+        other.mkdir()
+        self.git_repo(other)
+        (other / "plan.json").write_text("{}")
+        (other / "keymap.json").write_text("{}")
+        (other / ".claude").mkdir()
+        (other / ".claude/settings.local.json").write_text('{"autoCompactWindow": 250000}')
+        check = wg.doctor_context([self.d, other], False)
+        self.assertEqual(check(), [("warn", f"context {self.d}: no autoCompactWindow 250000 in "
+                                            f".claude/settings.local.json; wg doctor {shlex.quote(str(self.d))} --fix")])
+        self.assertFalse((self.d / ".claude").exists())  # without fix, doctor changes nothing
+        with patch.object(wg, "set_context_limit", SET_CONTEXT_LIMIT), patch.object(wg, "merge_claude_settings",
+                                                                                  wraps=wg.merge_claude_settings) as merge:
+            self.assertEqual(wg.doctor_context([self.d, other], True)(),
+                             [("ok", f"context {self.d}: autoCompactWindow 250000 set; a new session compacts at it")])
+        merge.assert_any_call(self.d, {"autoCompactWindow": 250000})  # the shared writer of worker_settings
+        self.assertEqual(self.settings(), {"autoCompactWindow": 250000})
+        self.assertEqual(check(), [("ok", "context: each loaded effort compacts its coordinator at 250000 tokens")])
+        with patch.dict(wg.CONFIG, {"context_limit": 0}):
+            self.assertEqual(check(), ("ok", "context: off (config context_limit is 0)"))
 
 
 class DoctorTests(DirTests):

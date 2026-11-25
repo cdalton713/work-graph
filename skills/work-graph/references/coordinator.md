@@ -35,9 +35,9 @@ A `wait` line needs no action from you. `human`: The human must act, and your st
 1. Post the status line ("Report progress"). For each `wait human` line, say once what they must do.
 2. Start `wg next <plan-dir> --wait` as a background command with the longest time limit that the harness allows, and end the turn. It exits when a `do` line appears: a merge, a status that the human changed, a new review, a soak that passed, or a message from the page (page.md "Link"). With the link, a change on the page wakes it in about 1 second, and a change in Linear in about 30 seconds. Without the link, it reads Linear at each `--interval`.
 3. If the harness stops the command at its time limit, end the turn and do not start it again. In a session with no Stop hook and no goal, a wait of hours or days never holds the session open. The human's next message, or a new session, starts at `wg next`. After the command ends, changes on the page or in Linear do not wake you, including a change to the `reviewed` label. The page shows `last ran <age>` when the last report is stale.
-4. Exception to step 3. If a Stop hook or a goal keeps the session open and every open line is a `wait` line, keep one `wg next <plan-dir> --wait` in the background while you wait. Say once what you wait for. Do not start work in the human's place.
+4. Exception to step 3. If a Stop hook or a goal keeps the session open and every open line is a `wait` line, keep one `wg next <plan-dir> --wait` in the background while you wait, and no heartbeat of your own. Say once what you wait for. Do not start work in the human's place.
 
-An Orca message, the end of `wg next --wait`, or a message from the human wakes the coordinator.
+An Orca message, the end of `wg next --wait`, or a message from the human wakes the coordinator. Run `orca orchestration check` only for an Orca message.
 <!-- /explain -->
 
 <!-- explain: human -->
@@ -48,6 +48,14 @@ The coordinator often runs where nobody sees a prompt: a background session, an 
 - Inside the loop, never use `AskUserQuestion` or any other tool that waits for an answer. The one exception is the question for the autonomy level and the review effort at the start of a run in a foreground session (autonomy.md).
 - Ask through Linear: `wg move <plan-dir> <key> "Needs <human>"` with a comment that gives the question, the options with their costs, your recommendation, and the page link. A question that is not a node goes to a `decision` node (recovery.md "Replan"). Then act on the other lines and Wait. Their answer arrives as `do answer` (page) or as a status change.
 - When a permission check refuses a tool call, do not retry it and do not work around it. Write the step that needs their approval to `Needs <human>` and continue with the other lines.
+<!-- /explain -->
+
+<!-- explain: context -->
+## After a compaction
+
+Run `wg next <plan-dir>`: its lines, not old messages, are the state. Run `wg explain <verb>` again.
+
+`note context`: the session is over `context_limit`; with the setting in place, over 120%, because Claude Code compacts at the limit. `/compact` is the human's.
 <!-- /explain -->
 
 ### One coordinator per effort

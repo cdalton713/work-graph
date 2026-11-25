@@ -79,13 +79,15 @@ from pathlib import Path
 # The local config of this machine (README "Config"). No file: one Linear workspace with LINEAR_API_KEY, the
 # human "Human", no hosted page, and no default test runner.
 CONFIG_PATH = Path(os.environ.get("WG_CONFIG") or Path.home() / ".config/work-graph/config.json").expanduser()
+# Claude Code does not take an auto-compact window below this many tokens.
+CONTEXT_LIMIT_MIN = 100000
 DEFAULT_WORKSPACE = {"id": "default", "name": "Linear", "team": None, "teams": None,
                      "key_env": ["LINEAR_API_KEY"], "team_labels": True}
 DEFAULT_CONFIG = {"human": "Human", "page_url": None, "github_user": None, "tick_roots": ["~/Projects"],
                   "tick_label": "dev.work-graph.tick", "test_runner": None, "branch_prefix": "wg/",
                   "release_branch": "release", "rules": "~/.config/work-graph/rules.md",
                   "notify": [], "agent_merge": [], "health_interval": 6, "health_agent": "codex",
-                  "worker_settings": {}, "workspaces": [DEFAULT_WORKSPACE]}
+                  "worker_settings": {}, "context_limit": 250000, "workspaces": [DEFAULT_WORKSPACE]}
 # The session settings file of each agent in a worker worktree (config worker_settings). wg dispatch merges the
 # values of the worker's agent into this file before the worker starts.
 WORKER_SETTINGS_FILES = {"claude": ".claude/settings.local.json", "codex": ".codex/config.toml"}
@@ -118,6 +120,9 @@ def read_config(path=CONFIG_PATH):
     if not isinstance(settings, dict) or not all(a in WORKER_SETTINGS_FILES and isinstance(v, dict)
                                                  for a, v in settings.items()):
         raise SystemExit(f"{path}: worker_settings must map {' or '.join(WORKER_SETTINGS_FILES)} to a JSON object")
+    limit = config["context_limit"]
+    if isinstance(limit, bool) or not isinstance(limit, int) or (limit and limit < CONTEXT_LIMIT_MIN):
+        raise SystemExit(f"{path}: context_limit must be 0 (off) or a token count of {CONTEXT_LIMIT_MIN} or more")
     if problem := notify_problem(config["notify"]):
         raise SystemExit(f"{path}: notify: {problem}")
     return config | {"workspaces": workspaces}
@@ -1748,6 +1753,102 @@ def name_coordinator(plan_dir, name, apply, changes):
         print(f"warn load: Orca did not name the coordinator worktree ({one_line(e, 120)})", file=sys.stderr)
 
 
+# ---------------------------------------------------------------- the context limit of the coordinator session
+
+# Config `context_limit`: Claude Code compacts a coordinator session at this many tokens. The core worktree's local
+# settings file holds it as `autoCompactWindow`; Claude Code reads the file when a session starts.
+CONTEXT_SETTINGS = WORKER_SETTINGS_FILES["claude"]
+CONTEXT_KEY = "autoCompactWindow"
+# Bytes: `wg next` reads this much of the end of the transcript, a larger part only when it finds no call there.
+CONTEXT_TAIL = (1 << 16, 1 << 20, 1 << 22, 1 << 24, 1 << 26)
+CONTEXT_USAGE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def context_settings(plan_dir):
+    """The core worktree's local Claude Code settings: {} when the file does not exist. ValueError when it is not
+    a JSON object: then wg does not write it."""
+    try:
+        data = json.loads((Path(plan_dir) / CONTEXT_SETTINGS).read_text())
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{CONTEXT_SETTINGS} is not a JSON object")
+    return data
+
+
+def loaded_effort(path):
+    """`path` is the plan directory of a loaded effort: it has plan.json and keymap.json (as tick_plans)."""
+    return (Path(path) / "plan.json").is_file() and (Path(path) / "keymap.json").is_file()
+
+
+def set_context_limit(plan_dir, apply, changes):
+    """Merge config `context_limit` as `autoCompactWindow` into the core worktree's local settings file through
+    merge_claude_settings: other keys stay, the file stays out of git (also when the value is already there), and
+    wg writes through no symlink. Limit 0: nothing."""
+    limit = CONFIG["context_limit"]
+    if not limit:
+        return
+    try:
+        if context_settings(plan_dir).get(CONTEXT_KEY) != limit:
+            changes.append(f"set {CONTEXT_KEY} {limit} in {Path(plan_dir) / CONTEXT_SETTINGS}")
+        if apply:
+            merge_claude_settings(plan_dir, {CONTEXT_KEY: limit})
+    except (ReadError, OSError, ValueError, subprocess.SubprocessError) as e:
+        print(f"warn: the context limit is not set ({one_line(e, 160)})", file=sys.stderr)
+
+
+def session_context_tokens(dirs):
+    """The context size of the last call of the Claude Code session that runs this command: the input, cache
+    write and cache read tokens of the last `assistant` line of its transcript. Only the end of the file is read.
+    None when there is no CLAUDE_CODE_SESSION_ID or no transcript. `dirs`: where the session can have started."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if not re.fullmatch(r"[A-Za-z0-9-]+", sid):
+        return None
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser() / "projects"
+    names = dict.fromkeys(re.sub(r"[^A-Za-z0-9]", "-", str(p)) for d in dirs for p in (Path(d), Path(d).resolve()))
+    path = next((root / n / f"{sid}.jsonl" for n in names if (root / n / f"{sid}.jsonl").is_file()), None)
+    path = path or next(root.glob(f"*/{sid}.jsonl"), None)
+    if not path:
+        return None
+    with path.open("rb") as f:
+        size = f.seek(0, os.SEEK_END)
+        for tail in CONTEXT_TAIL:
+            f.seek(max(0, size - tail))
+            lines = f.read().split(b"\n")[(1 if size > tail else 0):]  # the first line can be a part of a line
+            for line in reversed(lines):
+                if b'"assistant"' not in line or b'"usage"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                usage = (entry.get("message") or {}).get("usage") if entry.get("type") == "assistant" else None
+                if isinstance(usage, dict) and not entry.get("isSidechain"):
+                    return sum(int(usage.get(k) or 0) for k in CONTEXT_USAGE)
+            if size <= tail:
+                break
+    return None
+
+
+def context_note(plan_dir):
+    """The `note context` line of `wg next` when the session that runs it is over config `context_limit`. With
+    the setting in place, Claude Code compacts at the next call, so the line waits for 20% more. A failure gives
+    no line."""
+    limit = CONFIG["context_limit"]
+    if not limit:
+        return []
+    try:
+        tokens = session_context_tokens([plan_dir, Path.cwd()])
+        in_place = context_settings(plan_dir).get(CONTEXT_KEY) == limit
+    except Exception:
+        return []
+    if not tokens or tokens <= (limit * 6 // 5 if in_place else limit):
+        return []
+    fix = "" if in_place else f"run wg doctor {shlex.quote(str(Path(plan_dir).resolve()))} --fix, then "
+    return [f"note context @effort -: this session holds {tokens // 1000}K tokens, limit {limit // 1000}K; "
+            f"{fix}ask {HUMAN} to run /compact"]
+
+
 @journaled("load")
 def load(plan_dir, plan, apply, prune, adopt=False):
     errs = check(plan)
@@ -1786,6 +1887,7 @@ def load(plan_dir, plan, apply, prune, adopt=False):
             km["project"] = p["projectCreate"]["project"]
             save_keymap(plan_dir, km)
     name_coordinator(plan_dir, eff["name"], apply, changes)
+    set_context_limit(plan_dir, apply, changes)
     if eff.get("initiative"):
         sync_initiative(team_id, (km.get("project") or {}).get("id"), eff["initiative"].strip(), apply, changes,
                         team_scoped=team_labels(plan))
@@ -4180,6 +4282,7 @@ EXPLAIN = {
     "human": "wait: the human must act",
     "health": "the last status check found faults (note health)",
     "health-check": "the checks of the status check agent (wg health)",
+    "context": "note: this session is over the context limit; after a compaction",
 }
 EXPLAIN_MAX_LINES = 60
 
@@ -4259,6 +4362,8 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                 if done:
                     print(head)
                     for line in terminal_lines(plan_dir, lines, everything, [n["key"] for n in plan["nodes"]]):
+                        print(line, flush=True)
+                    for line in context_note(plan_dir):
                         print(line, flush=True)
                     if head != COMPLETE:
                         print(f"note page {page_link(plan)}", flush=True)
@@ -5673,6 +5778,40 @@ def doctor_health(plans):
     return check
 
 
+def doctor_context(plans, fix):
+    """Each effort's core worktree has config `context_limit` as `autoCompactWindow` in its local Claude Code
+    settings. With fix, write the missing ones."""
+    def check():
+        limit = CONFIG["context_limit"]
+        if not limit:
+            return "ok", "context: off (config context_limit is 0)"
+        lines = []
+        for path in plans:
+            if not loaded_effort(path):
+                if fix:
+                    lines.append(("warn", f"context {path}: not the plan directory of a loaded effort (plan.json "
+                                  "and keymap.json); nothing written"))
+                continue
+            try:
+                if context_settings(path).get(CONTEXT_KEY) == limit:
+                    if fix:
+                        set_context_limit(path, True, [])  # the value is there; this keeps the file out of git
+                    continue
+            except (OSError, ValueError) as e:
+                lines.append(("FAIL", f"context {path}: {one_line(e, 200)}"))
+                continue
+            if not fix:
+                lines.append(("warn", f"context {path}: no {CONTEXT_KEY} {limit} in {CONTEXT_SETTINGS}; "
+                              f"wg doctor {shlex.quote(str(path))} --fix"))
+                continue
+            set_context_limit(path, True, [])
+            done = context_settings(path).get(CONTEXT_KEY) == limit
+            lines.append(("ok" if done else "FAIL", f"context {path}: {CONTEXT_KEY} {limit} "
+                          + ("set; a new session compacts at it" if done else "not set")))
+        return lines or [("ok", f"context: each loaded effort compacts its coordinator at {limit} tokens")]
+    return check
+
+
 def row_age(plan_dir, key, field, value, entries, now):
     """Seconds since the run row field got its value: the last journal entry that set it, else the time of
     keymap.json (the row did not change after it)."""
@@ -5739,9 +5878,10 @@ def doctor_link(plan_dir, plan):
     return check
 
 
-def doctor_lines(plan_dir=None):
+def doctor_lines(plan_dir=None, fix=False):
     """Each (level, text) line of `wg doctor [<dir>]`, as each check ends: the checks of this machine and, with a
-    plan directory, of that effort. It changes nothing."""
+    plan directory, of that effort. It changes nothing; with fix, it writes the context limit of each loaded
+    effort."""
     plans = set(tick_plans())
     checks = [("python", doctor_python), ("websockets", doctor_websockets), ("checkout", doctor_checkout)]
     checks += [(f"key {w}", doctor_key(w)) for w in WORKSPACES]
@@ -5751,6 +5891,7 @@ def doctor_lines(plan_dir=None):
     if plan_dir:
         plans.add(Path(plan_dir).resolve())
     checks += [("autostart", doctor_autostart(sorted(plans))), ("health", doctor_health(sorted(plans)))]
+    checks.append(("context", doctor_context(sorted(plans), fix)))
     for name, step in checks:
         yield from doctor_run(name, step)
     if not plan_dir:
@@ -5776,11 +5917,12 @@ def doctor_lines(plan_dir=None):
             LINEAR_WORKSPACE.reset(token)
 
 
-def doctor(plan_dir=None):
-    """`wg doctor [<dir>]`: one ok, warn, or FAIL line for each check of this machine and, with a plan
-    directory, of that effort. It changes nothing. Exit 1 on a FAIL."""
+def doctor(plan_dir=None, fix=False):
+    """`wg doctor [<dir>] [--fix]`: one ok, warn, or FAIL line for each check of this machine and, with a plan
+    directory, of that effort. It changes nothing; with fix, it writes the context limit of each loaded effort.
+    Exit 1 on a FAIL."""
     failed = False
-    for level, text in doctor_lines(plan_dir):
+    for level, text in doctor_lines(plan_dir, fix):
         print(f"{level} {text}", flush=True)
         failed |= level == "FAIL"
     return int(failed)
@@ -7426,7 +7568,9 @@ def cli_parser():
     o_diff.add_argument("base")
     e = sub.add_parser("explain", help="print what to do for a verb of wg next; with no verb, list the verbs")
     e.add_argument("verb", nargs="?")
-    sub.add_parser("doctor", help="check this machine and, with a plan directory, that effort; changes nothing").add_argument("dir", nargs="?")
+    d = sub.add_parser("doctor", help="check this machine and, with a plan directory, that effort; changes nothing")
+    d.add_argument("dir", nargs="?")
+    d.add_argument("--fix", action="store_true", help="also write the context limit of each loaded effort")
     sub.add_parser("config", help="print the config of this machine (no keys) and the local rules file")
     c = sub.add_parser("contract", help="print what the page must agree with; --write updates contract.json")
     c.add_argument("--write", action="store_true")
@@ -7551,7 +7695,7 @@ def main(argv):
         if ns.cmd == "explain":
             return explain_command(ns.verb)
         if ns.cmd == "doctor":
-            return doctor(ns.dir)
+            return doctor(ns.dir, ns.fix)
         if ns.cmd == "contract":
             if ns.write:
                 (Path(__file__).resolve().parent.parent / "contract.json").write_text(contract_text())

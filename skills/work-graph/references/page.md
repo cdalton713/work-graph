@@ -41,13 +41,18 @@ The `work-graph status` document gives the status, wave, and result lines. Its `
 `wg next` connects to the page server over a WebSocket (`/api/link`, protocol `wg-link/1`, `contract.json` `link`). The server is `WG_UI_URL`, the plan workspace's `page_url`, or the top-level `page_url`, in that order.
 
 Set `WG_LINK_TOKEN` on the hosted server to require a bearer token on coordinator sockets. Use a secret
-with at least 32 characters. Set the same value in the coordinator's environment or put it in
-`~/.config/work-graph/link-token` with mode 600. The environment takes precedence. Set the variable to an empty value to use no token.
-For a workspace with its own `page_url`, set `WG_<ID>_LINK_TOKEN` or use
-`~/.config/work-graph/<id>-link-token` with mode 600. In the environment variable, use uppercase
-and replace hyphens with underscores. A workspace with its own page uses only its own token.
-When you set `WG_UI_URL`, `wg` uses the token selected for the plan workspace.
-`wg` sends tokens only over HTTPS or to a loopback address.
+with at least 32 characters. On the coordinator's machine, run `wg login <page-url>` and enter the token.
+See [Coordinator token](setup.md#coordinator-token) for the commands.
+
+For a workspace with its own `page_url`, `WG_<ID>_LINK_TOKEN` takes precedence. Use uppercase
+and replace hyphens with underscores in the variable name. Next, `wg` checks `WG_LINK_TOKEN`,
+then the mode-600 files `<id>-link-token` and `link-token` in `~/.config/work-graph`.
+If these sources are absent, `wg` reads the token that `wg login` saved for the destination
+page. When you set `WG_UI_URL`, the override is the destination. An empty environment
+variable disables the token.
+
+`wg` sends tokens over HTTPS, to a loopback address, or to a tailnet address configured
+as the page URL.
 `wg` sends the token on the link, on the short connections for writes and agent state, and on HTTP requests
 to the page. On a page with sign-in, the token permits API reads. The viewer's write limit still applies.
 `wg doctor <plan-dir>` checks the plan's page and reports if it accepts the token.

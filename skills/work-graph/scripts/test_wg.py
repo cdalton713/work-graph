@@ -8059,6 +8059,164 @@ class ContextLimitTests(LaneTests):
         self.assertTrue(self.settings()["autoMemoryEnabled"])
 
 
+class PageLoginTests(unittest.TestCase):
+    def setUp(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.legacy = Path(directory) / "link-token"
+        self.enterContext(patch.object(wg, "LINK_TOKEN_FILE", self.legacy))
+        self.enterContext(patch.dict(os.environ, {}, clear=True))
+        self.answers = [200]
+        self.requests = []
+        self.secret = "example-private-coordinator-token"
+        test = self
+
+        class Page(BaseHTTPRequestHandler):
+            def do_GET(self):
+                test.requests.append((self.path, self.headers.get("Authorization")))
+                status = test.answers.pop(0)
+                self.send_response(status)
+                if status == 503:
+                    self.send_header("Retry-After", "9" if len(test.requests) == 1 else "invalid")
+                self.end_headers()
+                body = {"ok": True} if self.path == "/healthz" else {"workspaces": [
+                    {"id": "work", "name": "Work"}, {"id": "home", "name": "Home"},
+                ]}
+                self.wfile.write(json.dumps(body).encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_port
+        self.url = f"http://127.0.0.1:{port}"
+        self.path = self.legacy.parent / "pages" / f"127.0.0.1_{port}-token"
+        self.enterContext(patch.dict(wg.WORKSPACES["work"], {"page_url": self.url + "/"}))
+        self.output = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+        self.errors = self.enterContext(contextlib.redirect_stderr(io.StringIO()))
+        self.enterContext(patch.object(sys, "stdin", io.StringIO(self.secret + "\n")))
+
+    def command(self, *args):
+        try:
+            return wg.main(["wg", *args])
+        finally:
+            self.assertNotIn(self.secret, self.output.getvalue() + self.errors.getvalue())
+
+    def test_login_and_logout(self):
+        self.assertEqual(self.command("login", "--token-stdin"), 0)
+        self.assertEqual(self.requests, [("/api/status", "Bearer " + self.secret)])
+        self.assertEqual(self.path.read_text(), self.secret + "\n")
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertIn("work (Work): configured", self.output.getvalue())
+        self.assertIn(f'"page_url": "{self.url}"', self.output.getvalue())
+        self.assertIn('"id": "home"', self.output.getvalue())
+        self.assertEqual(self.command("logout", self.url), 0)
+        self.assertFalse(self.path.exists())
+        self.assertIn("revoke", self.output.getvalue())
+        self.assertEqual(self.command("logout", self.url), 0)
+        self.assertIn("no saved token", self.output.getvalue())
+
+    def test_interactive_login_reads_the_token_with_getpass(self):
+        with patch("getpass.getpass", return_value=self.secret) as prompt:
+            self.assertEqual(self.command("login", "--workspace", "work"), 0)
+        prompt.assert_called_once()
+        self.assertTrue(self.path.exists())
+
+    def test_refused_token_and_other_errors_store_nothing(self):
+        for status, message in ((401, "the page refused the token"), (403, "the page refused the token"),
+                                (404, "HTTP 404")):
+            with self.subTest(status=status):
+                self.answers[:] = [status]
+                with patch.object(sys, "stdin", io.StringIO(self.secret)), self.assertRaises(SystemExit):
+                    self.command("login", "--token-stdin")
+                self.assertFalse(self.path.parent.exists())
+                self.assertIn(message, self.errors.getvalue())
+        with patch("urllib.request.urlopen", side_effect=OSError("unavailable")), \
+                patch.object(sys, "stdin", io.StringIO(self.secret)), self.assertRaises(SystemExit):
+            self.command("login", "--token-stdin")
+        self.assertFalse(self.path.exists())
+        self.assertIn("connection failed", self.errors.getvalue())
+
+    def test_requires_https_except_for_a_configured_local_page(self):
+        for url in ("http://example.com", "http://localhost:1234"):
+            with self.subTest(url=url), self.assertRaises(SystemExit):
+                self.command("login", url, "--token-stdin")
+        self.assertIn("HTTPS", self.errors.getvalue())
+        self.assertEqual(self.requests, [])
+
+    def test_doctor_checks_the_effective_token_in_lookup_order(self):
+        self.assertIn("no token", wg.doctor_link_token("work")[1])
+        self.assertEqual(self.command("login", "--token-stdin"), 0)
+        scoped = self.legacy.with_name("work-link-token")
+        for file, value in ((self.legacy, "shared"), (scoped, "workspace")):
+            file.write_text(value)
+            file.chmod(0o600)
+        self.answers[:] = [200, 200, 200, 403]
+        with patch.dict(os.environ, {"WG_LINK_TOKEN": "environment"}):
+            self.assertIn("accepted", wg.doctor_link_token("work")[1])
+        self.assertIn("accepted", wg.doctor_link_token("work")[1])
+        scoped.unlink()
+        self.assertIn("accepted", wg.doctor_link_token("work")[1])
+        self.legacy.unlink()
+        self.assertIn("refused", wg.doctor_run("link token", lambda: wg.doctor_link_token("work"))[0][1])
+        self.assertEqual([auth for _, auth in self.requests[1:]],
+                         ["Bearer environment", "Bearer workspace", "Bearer shared", "Bearer " + self.secret])
+        self.path.chmod(0o644)
+        with self.assertRaisesRegex(wg.LinkTokenError, "must have mode 600"):
+            wg.doctor_link_token("work")
+
+    def test_page_retries_503_before_reporting_failure(self):
+        with patch.object(wg.time, "sleep") as sleep:
+            self.answers[:] = [503, 200]
+            self.assertEqual(self.command("login", "--token-stdin"), 0)
+            self.assertEqual(sleep.call_args_list, [unittest.mock.call(5)])
+            self.assertEqual(self.errors.getvalue(), "")
+            sleep.reset_mock()
+            self.requests.clear()
+            self.answers[:] = [503] * 4
+            with self.assertRaises(wg.urllib.error.HTTPError) as error:
+                wg.page_get("/api/status", workspace="work")
+            error.exception.close()
+            self.assertEqual(error.exception.code, 503)
+            self.assertEqual(len(self.requests), 4)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 1, 1])
+
+
+    def test_socket_retries_503_before_the_existing_failure_path(self):
+        from types import ModuleType, SimpleNamespace
+
+        error = OSError("unavailable")
+        error.response = SimpleNamespace(status_code=503, headers={"Retry-After": "0"})
+        socket = unittest.mock.MagicMock()
+        connect = Mock(side_effect=[error, socket, error, error, error, error])
+        client = ModuleType("websockets.sync.client")
+        client.connect = connect
+        url = self.url.replace("http:", "ws:") + "/api/link"
+        with patch.dict(sys.modules, {"websockets.sync.client": client}), patch.object(wg.time, "sleep") as sleep:
+            with wg.link_socket(url, workspace="work") as ws:
+                self.assertIs(ws, socket)
+            self.assertEqual(self.errors.getvalue(), "")
+            self.assertEqual(connect.call_count, 2)
+            with self.assertRaises(OSError) as failure:
+                with wg.link_socket(url, workspace="work"):
+                    self.fail("unexpected upgrade")
+            self.assertIs(failure.exception, error)
+            self.assertEqual(connect.call_count, 6)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [0, 0, 0, 0])
+
+    def test_local_page_probe_retries_503(self):
+        self.answers[:] = [503, 200]
+        with patch.object(wg.time, "sleep") as sleep:
+            self.assertTrue(wg.ui_running(urllib.parse.urlsplit(self.url).port))
+        sleep.assert_called_once_with(5)
+
+
 class DoctorTests(DirTests):
     """`wg doctor`: each check with fakes, and the `note doctor` line of `wg next`."""
 
@@ -8229,11 +8387,14 @@ class DoctorTests(DirTests):
         work = {"effort": {"workspace": "work"}}
 
         def response(request, timeout):
-            return io.StringIO(json.dumps({"waiting": 2, "ok": True, "contract": wg.contract_hash(), "auth": True}))
+            body = io.StringIO(json.dumps({"waiting": 2, "ok": True, "contract": wg.contract_hash(), "auth": True}))
+            body.status = 200
+            body.geturl = lambda: request.full_url
+            return body
 
         with patch.dict(wg.WORKSPACES["home"], {"page_url": "https://home.example.com/"}), \
                 patch.object(wg, "LINK_TOKEN_FILE", directory / "link-token"), \
-                patch.dict(os.environ, {"WG_LINK_TOKEN": "shared-token"}, clear=True), \
+                patch.dict(os.environ, {}, clear=True), \
                 patch.object(wg.urllib.request, "urlopen", side_effect=response) as open_url:
             self.assertEqual(wg.page_waiting(home, "p1"), 2)
             req = open_url.call_args.args[0]
@@ -8257,8 +8418,9 @@ class DoctorTests(DirTests):
             self.assertIsNone(open_url.call_args.args[0].get_header("Authorization"))
             self.assertEqual(err.getvalue().count("warn link:"), 1)
             self.assertIn("home-link-token must have mode 600", err.getvalue())
-            self.assertEqual(wg.page_waiting(work, "p1"), 2)
-            self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer shared-token")
+            with patch.dict(os.environ, {"WG_LINK_TOKEN": "shared-token"}):
+                self.assertEqual(wg.page_waiting(work, "p1"), 2)
+                self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer shared-token")
             path.chmod(0o600)
             with patch.dict(os.environ, {"WG_UI_URL": "https://override.example.com"}):
                 self.assertEqual(wg.page_waiting(home, "p1"), 2)
@@ -8280,18 +8442,6 @@ class DoctorTests(DirTests):
                     self.assertEqual(wg.page_waiting(home, "p1"), 0)
                 self.assertIn("WG_HOME_LINK_TOKEN must contain one line", err.getvalue())
                 self.assertNotIn("secret", err.getvalue())
-
-    def test_doctor_reports_whether_the_page_accepted_the_token(self):
-        token = "test-token-with-at-least-32-characters"
-        with patch.dict(os.environ, {"WG_LINK_TOKEN": token}), patch.object(wg, "page_get") as get:
-            get.side_effect = [{"auth": True}, {}]
-            self.assertEqual(wg.doctor_link_token(), ("ok", "link token: set, accepted by the page"))
-            get.side_effect = [{"auth": True}, wg.urllib.error.HTTPError("", 401, "", {}, None)]
-            self.assertEqual(wg.doctor_link_token(), ("FAIL", "link token: set, rejected by the page (HTTP 401)"))
-            get.side_effect = [{}, *(wg.urllib.error.HTTPError("", code, "", {}, None) for code in (400, 401))]
-            self.assertEqual(wg.doctor_link_token(), ("ok", "link token: set, accepted by the page"))
-            get.side_effect = [{}, *(wg.urllib.error.HTTPError("", 400, "", {}, None) for _ in range(2))]
-            self.assertEqual(wg.doctor_link_token(), ("warn", "link token: set, the page did not confirm it"))
 
     def test_page_health_and_contract(self):
         def server(contract, ok=True):

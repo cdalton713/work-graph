@@ -404,6 +404,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       return c.json<SiteConfig>({
         human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version,
         readOnly: viewer, auth: !!auth, user: session?.email ?? null, role,
+        ...(!readOnly && { linkStore: redis ? "redis" : "memory" }),
         link: !readOnly && role ? "/api/link" : null,
       });
     }
@@ -418,6 +419,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const rooms = (readOnly && redis) || (!readOnly && c.var.viewer) ? [] : await linkRead(() => hub.counts(), []);
     return c.json<ServerStatus>({
       version, contract, uptime: Math.floor((clock() - started) / 1000),
+      ...{ readOnly: c.var.viewer, link: readOnly ? null : "/api/link" },
       workspaces: workspaces.map(({ id, name }) => {
         const budget = linearBudget(id);
         return { id, name, requestsRemaining: budget?.requestsRemaining ?? null, requestsLimit: budget?.requestsLimit ?? null,

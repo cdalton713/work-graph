@@ -295,6 +295,32 @@ On a full page with sign-in, the coordinator token alone allows GET requests to 
 `/api/projects/<id>/presence`. The token also opens the coordinator socket. Page sockets need a session.
 `/api/config` and `/healthz` are open.
 
+### Vercel
+
+`vercel.json` serves `dist/` as static files. It routes `/api/*`, `/auth/*`, and `/healthz` to the
+function in `api/index.ts`. Enable Fluid Compute for the full page so that the function can accept WebSockets.
+
+| Environment value | Read-only viewer | Full page |
+| --- | --- | --- |
+| `WG_READ_ONLY` | Unset or `1`. | `0`. |
+| `WG_HOSTED` | The host name of the deployment. Set the preview host name in the preview environment. | Same as the viewer. |
+| `WG_CONFIG_JSON` | The page config with its workspaces and optional `auth`. | The page config with its workspaces and `auth` with at least one owner. |
+| `LINEAR_<ID>_API_KEY` | The Linear key for each workspace, or a key from its `key_env` list. | Same as the viewer. |
+| `WG_AUTH_CLIENT_ID`, `WG_AUTH_CLIENT_SECRET`, `WG_SESSION_SECRET` | Required with `auth`. | Required. |
+| `WG_LINK_TOKEN` | Optional. Permits the viewer's bearer-token reads. | Required. Use the same token for the coordinator. |
+| `WG_REDIS_URL`, `WG_REDIS_PREFIX` | Optional. | The Redis URL is required. Use the same prefix on all instances of this page. |
+| `WG_LINK_MAX_AGE` | No link socket. | Optional. The default is 270 seconds. |
+| `WG_LINK_PONG_MS` | No link socket. | Optional. Set to `0` to turn off the pong deadline. Keep a finite socket age. |
+
+The function has a 300-second limit in `vercel.json`. The socket age gives clients time to reconnect
+before that limit. On a plan with a higher limit, raise `maxDuration` and set `WG_LINK_MAX_AGE`
+at least 30 seconds below it. Redis lets a client reconnect to a different function instance.
+
+Live Vercel checks remain for the upgrade through the function, ping and pong frames, and the Linear
+check timer when an instance holds only a socket. If pong frames do not reach the app, set
+`WG_LINK_PONG_MS=0` and keep the socket age limit so clients still reconnect. The timer runs while the
+instance lives. `wg next --wait` also polls Linear, so a missed check can delay an update.
+
 ## Host a read-only viewer
 
 A viewer is a second deployment of the page for other people: they sign in and read the projects that you
@@ -336,12 +362,7 @@ shared, and they can change nothing. Your own page stays where it is, and each c
   graph of the viewer for at most 5 minutes (the full reload of a graph in memory). A page that a person has open
   keeps what it loaded before. To take a project away from the viewers sooner, stop its share.
 
-On Vercel: `vercel.json` builds the page (`dist/`) as static files and sends `/api/*`, `/auth/*`, and `/healthz` to
-the function `api/index.ts`, which is always read-only. Set these environment values in the Vercel project:
-`WG_HOSTED` (the production name, for example `view.example.com`), `WG_CONFIG_JSON` (`human`, the shared
-`workspaces`, and `auth`), the Linear key of each workspace, and the three sign-in values. A preview deployment
-has another name, so its API answers 403 (`bad host`) unless `WG_HOSTED` of the preview environment names it.
-The full page does not run on Vercel: the link needs one process that lives as long as its sockets.
+For Vercel settings, see [Vercel](#vercel).
 
 With the `Dockerfile`: the same container with `WG_READ_ONLY=1`, `WG_HOSTED`, and the same values.
 

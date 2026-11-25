@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
@@ -29,6 +29,8 @@ it("returns 404 for every account route in config mode", async () => {
     for (const [method, path] of [
       ["GET", root], ["POST", attach], ["PUT", attach + "/id/key"], ["PATCH", attach + "/id"],
       ["GET", attach + "/id/teams"], ["DELETE", attach + "/id"],
+      ["PATCH", root], ["DELETE", root], ["POST", root + "/onboarding"],
+      ["POST", root + "/tokens"], ["DELETE", root + "/tokens/id"],
     ]) {
       expect((await app.request(path, { method, headers: { host } })).status).toBe(404);
     }
@@ -59,7 +61,15 @@ databaseSuites((open) => {
     for (const level of ["log", "warn", "error"] as const) vi.spyOn(console, level).mockImplementation((...args) => output.push(args.join(" ")));
     const identities = new Map<string, { org: string; teams: string[] }>();
     const revoked = new Set<string>();
+    const revocations: string[] = [];
     const fetch = vi.fn(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/oauth/token")) {
+        return Response.json({ access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 });
+      }
+      if (url.endsWith("/oauth/revoke")) {
+        revocations.push((init.body as URLSearchParams).get("token")!);
+        return new Response(null, { status: revoked.has("oauth") ? 503 : 200 });
+      }
       expect(url).toBe("https://api.linear.app/graphql");
       const token = new Headers(init.headers).get("authorization")!;
       const { query, variables } = JSON.parse(String(init.body));
@@ -75,25 +85,163 @@ databaseSuites((open) => {
         } }] } } });
       }
       return Response.json({ data: {
-        viewer: { name: "Ada" },
+        viewer: { id: "ada", name: "Ada", email: "ada@example.com" },
         organization: { id: identity.org + "-id", name: "Workspace", urlKey: identity.org },
         teams: { nodes: identity.teams.map((team) => ({ key: team, name: team })), pageInfo: { hasNextPage: false } },
       } });
     });
     vi.stubGlobal("fetch", fetch);
     return {
-      app, owner, output, identities, revoked, fetch, tenants,
+      app, owner, output, identities, revoked, fetch, tenants, sql, revocations,
       async request(path: string, cookie: string, method = "GET", body?: object, extra?: Record<string, string>) {
         const response = await app.request(path, {
           method, headers: { host, cookie, origin: "https://" + host, "content-type": "application/json", ...extra },
           body: body && JSON.stringify(body),
         });
-        output.push(await response.clone().text());
+        if (method !== "POST" || path !== root + "/tokens") output.push(await response.clone().text());
         return response;
       },
       async close() { app.link.stop(); tenants.close(); await sql.close(); },
     };
   }
+
+  it("saves the name and onboarding steps through the account routes", async () => {
+    const t = await setup();
+    try {
+      const { cookie } = await t.owner("ada");
+      const account = async () => (await t.request(root, cookie)).json();
+      expect(await account()).toMatchObject({
+        pageUrl: "https://" + host,
+        onboarding: { name: false, workspaces: true, teams: true, token: false, connected: false, skipped: false },
+      });
+      for (const human of [" ", "a".repeat(41), "Ada\n", "A\u0085da", null]) {
+        expect((await t.request(root, cookie, "PATCH", { human })).status).toBe(400);
+      }
+      const response = await t.request(root, cookie, "PATCH", { human: "  Grace  " });
+      expect(await response.json()).toMatchObject({ human: "Grace", message: expect.stringContaining("wg") });
+      expect(await (await t.request("/api/config", cookie)).json()).toMatchObject({ human: "Grace" });
+      expect((await t.request(root + "/onboarding", cookie, "POST", { name: true })).status).toBe(200);
+      expect((await t.request(root + "/onboarding", cookie, "POST", { skipped: true })).status).toBe(200);
+      expect((await account()).onboarding).toMatchObject({ name: true, skipped: true });
+      expect((await t.request(root + "/onboarding", cookie, "POST", { skipped: false })).status).toBe(200);
+      const personal = key();
+      t.identities.set(personal, { org: "personal", teams: ["HOME", "SIDE"] });
+      const { connection } = await (await t.request(attach, cookie, "POST", { key: personal })).json();
+      expect((await account()).onboarding).toMatchObject({ name: true, skipped: false, teams: false });
+      expect((await t.request(attach + "/" + connection.id, cookie, "PATCH", { team: "HOME" })).status).toBe(200);
+      expect((await account()).onboarding.teams).toBe(true);
+    } finally { await t.close(); }
+  });
+
+  async function coordinatorSocket(app: ReturnType<typeof createApp>, token: string) {
+    const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
+    app.injectWebSocket(server as Parameters<typeof app.injectWebSocket>[0]);
+    if (!server.listening) await once(server, "listening");
+    const { port } = server.address() as AddressInfo;
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=coordinator&project=work-project`, {
+      headers: { host, authorization: "Bearer " + token },
+    });
+    const close = async () => {
+      socket.terminate();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    };
+    try {
+      await once(socket, "open");
+      return { socket, close };
+    } catch (error) {
+      await close();
+      throw error;
+    }
+  }
+
+  it("shows a coordinator token once, records use, and closes its link at revoke", async () => {
+    const t = await setup();
+    try {
+      const { accountId, cookie } = await t.owner("ada");
+      const other = await t.owner("other");
+      const path = root + "/tokens";
+      const created = await t.request(path, cookie, "POST", { name: "Desk" });
+      expect(created.status).toBe(201);
+      expect(created.headers.get("cache-control")).toBe("no-store");
+      const { id, token, name } = await created.json();
+      expect(name).toBe("Desk");
+      const bearer = { authorization: "Bearer " + token };
+      const account = async () => (await t.request(root, cookie)).json();
+      expect((await account()).onboarding).toMatchObject({ token: true, connected: false });
+      expect((await t.request("/api/status", "", "GET", undefined, bearer)).status).toBe(200);
+      for (const [method, route] of [["GET", root], ["PATCH", root], ["DELETE", root],
+        ["POST", path], ["DELETE", path + "/" + id], ["POST", root + "/onboarding"]]) {
+        expect((await t.request(route, "", method, undefined, bearer)).status).toBe(401);
+      }
+      expect((await t.request(path + "/" + id, other.cookie, "DELETE")).status).toBe(404);
+      expect((await account()).tokens).toEqual([{ id, name, createdAt: expect.any(String), lastUsedAt: expect.any(String) }]);
+      const link = await coordinatorSocket(t.app, token);
+      try {
+        const closed = once(link.socket, "close");
+        expect((await t.request(path + "/" + id, cookie, "DELETE")).status).toBe(200);
+        expect((await closed)[0]).toBe(RESTART_CODE);
+      } finally { await link.close(); }
+      expect((await t.request("/api/status", "", "GET", undefined, bearer)).status).toBe(401);
+      expect(await account()).toMatchObject({ tokens: [], onboarding: { token: false, connected: true } });
+      for (let i = 0; i < 10; i++) expect((await t.request(path, cookie, "POST", { name: "Desk" })).status).toBe(201);
+      expect((await t.request(path, cookie, "POST", { name: "Desk" })).status).toBe(409);
+      const viewer = createApp(rules, { ...options, linearAuth: auth, tenants: {
+        ...t.tenants, async fromSession() {
+          const tenant = await t.tenants.byId(accountId);
+          return tenant ? { tenant, role: "viewer" } : null;
+        },
+      } });
+      try {
+        expect((await viewer.request(root, { headers: { host, cookie } })).status).toBe(403);
+      } finally { viewer.link.stop(); }
+      const output = t.output.join("\n");
+      expect(output).not.toContain(token);
+      expect(output).not.toContain(createHash("sha256").update(token).digest("hex"));
+    } finally { await t.close(); }
+  });
+
+  it.each([false, true])("deletes the account when Linear revoke fails = %s", async (fails) => {
+    const t = await setup();
+    try {
+      const { accountId, cookie } = await t.owner("ada");
+      const personal = key();
+      t.identities.set(personal, { org: "personal", teams: ["HOME"] });
+      expect((await t.request(attach, cookie, "POST", { key: personal })).status).toBe(201);
+      const { token } = await (await t.request(root + "/tokens", cookie, "POST", { name: "Desk" })).json();
+      expect((await t.request(root, cookie, "DELETE", { confirm: "wrong" })).status).toBe(400);
+      expect((await t.request(root, cookie, "DELETE", { confirm: "delete" }, { origin: "https://other.example.com" })).status).toBe(403);
+      expect(t.revocations).toEqual([]);
+      if (fails) t.revoked.add("oauth");
+      const link = await coordinatorSocket(t.app, token);
+      try {
+        const closed = once(link.socket, "close");
+        const response = await t.request(root, cookie, "DELETE", { confirm: "delete" });
+        expect(response.status).toBe(200);
+        expect(response.headers.get("set-cookie")).toMatch(/__Host-wg_session=;.*Max-Age=0/);
+        expect(await response.json()).toMatchObject({ ok: true, revoked: !fails, ...(fails ? { message: expect.stringContaining("Linear") } : {}) });
+        expect((await closed)[0]).toBe(RESTART_CODE);
+      } finally { await link.close(); }
+      expect(t.revocations).toEqual(["test-access"]);
+      expect((await t.request(root, cookie)).status).toBe(401);
+      for (const table of ["users", "tenants", "linear_connections", "coordinator_tokens"]) {
+        expect(await t.sql.query("SELECT id FROM " + table)).toEqual([]);
+      }
+      const login = await t.request("/auth/login", "");
+      const state = new URL(login.headers.get("location")!).searchParams.get("state");
+      const flow = login.headers.getSetCookie()[0].split(";")[0];
+      const callback = await t.request("/auth/callback?code=test-code&state=" + state, flow);
+      expect(callback.status).toBe(302);
+      const nextCookie = callback.headers.getSetCookie().find((value) => value.startsWith("__Host-wg_session="))!.split(";")[0];
+      const tenants = await t.sql.query<{ id: string }>("SELECT id FROM tenants");
+      expect(tenants).toHaveLength(1);
+      expect(tenants[0].id).not.toBe(accountId);
+      expect(await (await t.request(root, nextCookie)).json()).toMatchObject({
+        connections: [{ kind: "oauth" }], tokens: [], onboarding: { connected: false, name: false, skipped: false },
+      });
+      expect((await t.request(root, cookie)).status).toBe(401);
+      for (const secret of [personal, token, "test-access", "test-refresh"]) expect(t.output.join("\n")).not.toContain(secret);
+    } finally { await t.close(); }
+  });
 
   it("attaches a private workspace, checks its team, and removes it", async () => {
     const t = await setup();

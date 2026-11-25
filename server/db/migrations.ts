@@ -60,6 +60,10 @@ const migrations = [
     `UPDATE linear_connections c SET owner_name = u.name FROM tenants t JOIN users u ON u.id = t.owner_user_id
       WHERE c.tenant_id = t.id AND c.kind = 'oauth'`,
   ],
+  [
+    `ALTER TABLE tenants ADD COLUMN name_confirmed boolean NOT NULL DEFAULT false,
+      ADD COLUMN onboarding_skipped boolean NOT NULL DEFAULT false`,
+  ],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

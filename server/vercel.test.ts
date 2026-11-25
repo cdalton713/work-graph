@@ -56,6 +56,23 @@ it.each(["WG_DATA_KEY", "WG_DATA_KEY_OLD"])("reports an invalid %s without readi
   }
 });
 
+it("reports a database connection failure without exposing the connection string", async () => {
+  const open = vi.spyOn(tenantService, "openServiceTenants").mockRejectedValue(new Error("Database connection failed"));
+  const { app } = createVercelApp({
+    ...env, DATABASE_URL: "postgres://example.com/database",
+    WG_DATA_KEY: Buffer.alloc(32).toString("base64"), WG_LINEAR_CLIENT_ID: "linear-client",
+    WG_LINEAR_CLIENT_SECRET: "linear-client-secret",
+  });
+  try {
+    const response = await app.request("/healthz");
+    expect(response.status).toBe(503);
+    expect(await response.text()).toBe("The database did not answer.");
+  } finally {
+    if ("link" in app) app.link.stop();
+    open.mockRestore();
+  }
+});
+
 it("waits for service migrations and starts without the config installation", async () => {
   const sql = await pgliteSql();
   const serviceEnv = {

@@ -24,6 +24,10 @@ interface SessionValue { email: string; hd: string; exp: number; id?: string }
 /** The path that starts a sign-in. A 401 of the API names it. */
 export const LOGIN_PATH = "/auth/login";
 export const SESSION_COOKIE = "wg_session";
+
+export function clearSessionCookie(c: Context) {
+  deleteCookie(c, SESSION_COOKIE, { path: "/", secure: true, prefix: "host" });
+}
 export const STATE_COOKIE = "wg_signin";
 /** How long a session lasts, and how long a sign-in may take, in seconds. */
 export const SESSION_S = 7 * 24 * 3600;
@@ -140,7 +144,7 @@ export function authRoutes(auth: Auth, origin: () => string, now: () => number, 
   routes.get("/logout", async (c) => {
     const session = await sessionOf(c, auth, now);
     if (session) await onLogout(session);
-    deleteCookie(c, SESSION_COOKIE, { path: "/", secure: true, prefix: "host" });
+    clearSessionCookie(c);
     return c.redirect(`${origin()}/`, 302);
   });
   return routes;

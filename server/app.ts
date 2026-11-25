@@ -16,7 +16,7 @@ import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from ".
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal } from "./access.ts";
 import { accountRoutes } from "./account.ts";
-import { type Auth, type Session, LOGIN_PATH, authRoutes, sessionOf } from "./auth.ts";
+import { type Auth, type Session, LOGIN_PATH, authRoutes, clearSessionCookie, sessionOf } from "./auth.ts";
 import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
@@ -177,7 +177,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const app = new Hono();
   if (serviceReady) app.use(async (c, next) => {
     const ready = await serviceReady();
-    if (ready !== true) return c.text(`Vercel full page requires ${ready || "DATABASE_URL"}`, 500);
+    if (ready === false) return c.text("The database did not answer.", 503);
+    if (typeof ready === "string") return c.text(`Vercel full page requires ${ready}`, 500);
     await next();
   });
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
@@ -919,6 +920,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   if (accountStore) {
     app.route("/api/account", accountRoutes({
       now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX,
+      pageUrl: rules.hosted ? `https://${rules.hosted.host}` : `http://localhost:${rules.port}`,
+      async endSession(c, session) {
+        await signOut(session);
+        clearSessionCookie(c);
+      },
       async access(c) {
         const reason = refusal(c.req.method, (name) => c.req.header(name), rules);
         if (reason) return c.json({ error: reason }, 403);
@@ -926,11 +932,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const read = c.req.method === "GET" || c.req.method === "HEAD";
         const session = signed && await sessionActive(signed, read) ? signed : null;
         const membership = session ? await directory.fromSession(session) : null;
-        if (!membership) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+        if (!session || !membership) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
         if (readOnly || membership.role !== "owner") return c.json({ error: "Account access requires the owner" }, 403);
         const accounts = await accountStore();
         if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
-        return { accounts, tenant: membership.tenant };
+        return { accounts, tenant: membership.tenant, session };
       },
     }));
   }

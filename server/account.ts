@@ -4,17 +4,20 @@ import { bodyLimit } from "hono/body-limit";
 import type { createAccounts } from "./db/accounts.ts";
 import { LinearError, readLinearTeams } from "./linear.ts";
 import { RedisCommandFailed, RedisUnavailable, type RedisLink } from "./redis.ts";
-import { LinearSignInRequired } from "./linearauth.ts";
+import { LinearSignInRequired, revokeLinearToken } from "./linearauth.ts";
+import type { Session } from "./auth.ts";
 import type { Tenant } from "./tenants.ts";
 
 type Accounts = ReturnType<typeof createAccounts>;
 type Connection = NonNullable<Awaited<ReturnType<Accounts["readTenant"]>>>["connections"][number];
-type Scope = { accounts: Accounts; tenant: Tenant };
+type Scope = { accounts: Accounts; tenant: Tenant; session: Session };
 type Options = {
   access: (c: Context) => Scope | Response | Promise<Scope | Response>;
   redis?: RedisLink;
   prefix: string;
   now: () => number;
+  pageUrl: string;
+  endSession: (c: Context, session: Session) => Promise<void>;
 };
 const windowMs = 600_000;
 const maxAttempts = 10;
@@ -69,6 +72,12 @@ async function body(c: Context): Promise<Record<string, unknown>> {
   return value as Record<string, unknown>;
 }
 
+function displayName(value: unknown) {
+  if (typeof value !== "string" || /\p{Cc}|\p{Cs}/u.test(value)) return null;
+  const name = value.trim();
+  return name && [...name].length <= 40 ? name : null;
+}
+
 function findConnection(rows: Connection[], id: string) {
   const row = uuid.test(id) && rows.find((connection) => connection.id === id.toLowerCase());
   if (!row) throw new LinearError("Workspace connection not found", 404);
@@ -101,11 +110,12 @@ export function accountRoutes(options: Options) {
   routes.use(async (c, next) => {
     const access = await options.access(c);
     if (access instanceof Response) return access;
-    const { accounts, tenant } = access;
+    const { accounts, tenant, session } = access;
     const account = await accounts.readTenant(tenant.id);
     if (!account) return c.json({ error: "Account not found" }, 404);
     c.set("accounts", accounts);
     c.set("tenant", tenant);
+    c.set("session", session);
     c.set("account", account);
     await next();
   });
@@ -125,9 +135,11 @@ export function accountRoutes(options: Options) {
       }
     }
     switch (error.message) {
-      case "Connection not found":
-      case "Account not found": return c.json({ error: "Workspace connection not found" }, 404);
+      case "Connection not found": return c.json({ error: "Workspace connection not found" }, 404);
+      case "Account not found": return c.json({ error: "Account not found" }, 404);
       case "Connection limit reached": return c.json({ error: "Workspace connection limit reached" }, 409);
+      case "Coordinator token limit reached": return c.json({ error: error.message }, 409);
+      case "Coordinator token not found": return c.json({ error: error.message }, 404);
       case "Database record already exists": return c.json({ error: "This Linear workspace is already connected" }, 409);
       case "Invalid connection position": return c.json({ error: "Invalid workspace position" }, 400);
       case "The workspace credential changed. Try again.": return c.json({ error: error.message }, 409);
@@ -149,9 +161,59 @@ export function accountRoutes(options: Options) {
     return { ...result, credential: { kind: "api_key" as const, key } };
   }
 
-  routes.get("/", (c) => {
-    const { human, connections } = c.var.account;
-    return c.json({ human, connections: connections.map(publicConnection) });
+  routes.get("/", async (c) => {
+    const { accounts, account } = c.var;
+    const { id, human, connections, nameConfirmed, onboardingSkipped } = account;
+    const { tokens, connected } = await accounts.tokenSummary(id);
+    return c.json({
+      human, connections: connections.map(publicConnection), tokens, pageUrl: options.pageUrl,
+      onboarding: {
+        name: nameConfirmed, workspaces: true, teams: connections.every(({ team }) => !!team),
+        token: tokens.length > 0, connected, skipped: onboardingSkipped,
+      },
+    });
+  });
+
+  routes.patch("/", async (c) => {
+    const human = displayName((await body(c)).human);
+    if (!human) return c.json({ error: "Enter a name of 1 to 40 characters without control characters" }, 400);
+    await c.var.accounts.setHuman(c.var.account.id, human);
+    return c.json({ human, message: "Set the same human name in your wg config." });
+  });
+
+  routes.post("/tokens", async (c) => {
+    const name = displayName((await body(c)).name);
+    if (!name) return c.json({ error: "Enter a token name of 1 to 40 characters without control characters" }, 400);
+    const { id, token } = await c.var.accounts.createToken(c.var.account.id, name);
+    c.header("Cache-Control", "no-store");
+    return c.json({ id, name, token }, 201);
+  });
+
+  routes.delete("/tokens/:id", async (c) => {
+    const id = c.req.param("id");
+    if (!uuid.test(id)) return c.json({ error: "Coordinator token not found" }, 404);
+    await c.var.accounts.revokeToken(c.var.account.id, id);
+    return c.json({ ok: true });
+  });
+
+  routes.post("/onboarding", async (c) => {
+    const { name, skipped } = await body(c);
+    if ((name !== undefined && name !== true) || (skipped !== undefined && typeof skipped !== "boolean") ||
+        (name === undefined && skipped === undefined)) {
+      return c.json({ error: "Send name: true or a boolean skipped value" }, 400);
+    }
+    await c.var.accounts.setOnboarding(c.var.account.id, name, skipped);
+    return c.json({ ok: true });
+  });
+
+  routes.delete("/", async (c) => {
+    if ((await body(c)).confirm !== "delete") return c.json({ error: "Enter delete to confirm account deletion" }, 400);
+    const { accounts, account, session } = c.var;
+    const revoked = await accounts.deleteAccount(account.id, revokeLinearToken);
+    await options.endSession(c, session);
+    return c.json(revoked ? { ok: true, revoked } : {
+      ok: true, revoked, message: "You can remove the app under Authorized applications in Linear's settings.",
+    });
   });
 
   routes.post("/workspaces", async (c) => {

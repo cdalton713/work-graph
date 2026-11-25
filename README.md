@@ -392,6 +392,8 @@ To limit sign-up, set `WG_ALLOWED_ORGS` to the Linear workspace URL keys, separa
 
 After you sign in, you can attach more Linear workspaces with personal API keys. If a key can read more than one team, select a team for that workspace. The service encrypts each key and only uses it for your account. Projects in an attached workspace stay private. If Linear refuses a key later, replace it in your account to restore the workspace.
 
+Use Linear organization IDs in `WG_ALLOWED_ORGS` for a stable sign-up list. Workspace URL keys can change and another workspace can take an old key. In your account, you can set your name, complete or skip onboarding, and create or revoke coordinator tokens for `wg login`. Copy each token when you create it. If you change your name, set the same `human` in the `wg` config. If you delete your account and Linear cannot revoke its access, remove the app in Linear's settings.
+
 ## Host a read-only viewer
 
 A viewer is a second deployment of the page for other people: they sign in and read the projects that you

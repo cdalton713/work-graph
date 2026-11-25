@@ -190,8 +190,9 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
     async readTenant(tenant: string) {
       requireUuid(tenant);
       return sql.transaction(async ({ query }) => {
-        const [account] = await query<{ id: string; human: string; user: User }>(`
-          SELECT t.id, t.human, json_build_object('linearUserId', u.linear_user_id,
+        const [account] = await query<{ id: string; human: string; nameConfirmed: boolean; onboardingSkipped: boolean; user: User }>(`
+          SELECT t.id, t.human, t.name_confirmed AS "nameConfirmed", t.onboarding_skipped AS "onboardingSkipped",
+            json_build_object('linearUserId', u.linear_user_id,
             'linearOrgId', u.linear_org_id, 'email', u.email, 'name', u.name) AS "user"
           FROM tenants t JOIN users u ON u.id = t.owner_user_id WHERE t.id = $1 FOR SHARE OF t`, [tenant]);
         if (!account) return null;
@@ -199,6 +200,35 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
           WHERE tenant_id = $1 ORDER BY position, id`, [tenant]);
         return { ...account, connections };
       });
+    },
+
+    setHuman(tenant: string, human: string) {
+      return change(tenant, async (query) => {
+        await query("UPDATE tenants SET human = $2 WHERE id = $1", [tenant, human]);
+      });
+    },
+
+    setOnboarding(tenant: string, name: true | undefined, skipped: boolean | undefined) {
+      return change(tenant, async (query) => {
+        await query(`UPDATE tenants SET name_confirmed = coalesce($2, name_confirmed),
+          onboarding_skipped = coalesce($3, onboarding_skipped) WHERE id = $1`, [tenant, name ?? null, skipped ?? null]);
+      });
+    },
+
+    async tokenSummary(tenant: string) {
+      requireUuid(tenant);
+      const rows = await sql.query<(Token | { id: null }) & { connected: boolean }>(`
+        SELECT ${tokenFields}, EXISTS (
+          SELECT 1 FROM coordinator_tokens WHERE tenant_id = $1 AND last_used_at IS NOT NULL
+        ) AS connected FROM (SELECT 1) account
+        LEFT JOIN coordinator_tokens ON tenant_id = $1 AND revoked_at IS NULL
+        ORDER BY created_at, id`, [tenant]);
+      return {
+        connected: rows[0]?.connected ?? false,
+        tokens: rows.filter((row): row is Token & { connected: boolean } => row.id !== null)
+          .map(({ id, name, createdAt, lastUsedAt }) =>
+          ({ id, name, createdAt, lastUsedAt })),
+      };
     },
 
     async readCredential(tenant: string, connection: string): Promise<ConnectionCredential | null> {
@@ -346,9 +376,19 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       });
     },
 
-    deleteAccount(tenant: string) {
+    deleteAccount(tenant: string, revoke?: (token: string) => Promise<boolean>) {
       return change(tenant, async (query, { owner }) => {
+        let revoked = false;
+        if (revoke) {
+          // Lock the OAuth row so a refresh cannot replace the token during revocation.
+          const [row] = await query<EncryptedConnection>(`SELECT ${encryptedFields} FROM linear_connections
+            WHERE tenant_id = $1 AND kind = 'oauth' FOR UPDATE`, [tenant]);
+          if (row?.credential) {
+            try { revoked = await revoke(decrypt(row).key); } catch { /* Delete even if we cannot revoke. */ }
+          }
+        }
         await query("DELETE FROM users WHERE id = $1", [owner]);
+        return revoked;
       });
     },
   };

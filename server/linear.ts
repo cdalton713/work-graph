@@ -5,6 +5,7 @@ import { serverSite } from "./site.ts";
 import { ANSWERED_LABEL, AUTONOMY_GROUP, type AutonomyLevel, autonomyOf, PAUSED_LABEL, pausedOf, SHARED_LABEL, sharedOf } from "../src/lib/autonomy.ts";
 import { REVIEW_GROUP, type ReviewEffort, reviewLabel, reviewOf } from "../src/lib/review.ts";
 import { linearWorkspace } from "./workspaces.ts";
+import { LinearSignInRequired } from "./linearauth.ts";
 
 const ENDPOINT = "https://api.linear.app/graphql";
 export const CARD_PREFIX = "**work-graph node card**";
@@ -213,25 +214,35 @@ function transportFailure(error: unknown): { failure: Failure; error: LinearErro
 interface GraphQLError { message: string; extensions?: { code?: string } }
 
 export async function gql(query: string, variables: Record<string, unknown> = {}): Promise<Data> {
-  const { key } = workspaceOf();
+  const { key, kind, oauthKey, needsKey } = workspaceOf();
   currentCache();
   serverSite();
+  if (needsKey) throw new LinearSignInRequired();
   if (!key) throw new LinearError("LINEAR_API_KEY is not set", 500);
   const mutation = isMutation(query);
-  const init = (): RequestInit => ({
+  const init = (credential: string): RequestInit => ({
     method: "POST",
-    headers: { Authorization: key, "Content-Type": "application/json" },
+    headers: { Authorization: kind === "oauth" ? `Bearer ${credential}` : credential, "Content-Type": "application/json" },
     body: JSON.stringify({ query, variables }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   for (let tryNumber = 1; ; tryNumber++) {
     // The slot is held for one try only, not during the delay before the next try.
     const result = await slot(async (): Promise<{ data: Data } | { failure: Failure; error: LinearError; retryAfter: string | null }> => {
-      let response: Response;
-      try {
-        response = await transport.fetch(ENDPOINT, init());
-      } catch (error) {
-        return transportFailure(error);
+      const credential = oauthKey ? await oauthKey() : key;
+      const failed = (error: unknown) => {
+        const result = transportFailure(error);
+        return kind === "oauth" ? { ...result, error: new LinearError("Linear request failed") } : result;
+      };
+      const send = async (value: string) => {
+        try { return await transport.fetch(ENDPOINT, init(value)); } catch (error) { return failed(error); }
+      };
+      let response = await send(credential);
+      if ("failure" in response) return response;
+      if (response.status === 401 && oauthKey) {
+        await response.body?.cancel().catch(() => {});
+        response = await send(await oauthKey(credential));
+        if ("failure" in response) return response;
       }
       keepBudget(response.headers);
       let body: { data?: Data; errors?: GraphQLError[] } | null;
@@ -241,11 +252,11 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         // Text that is not JSON is Linear's answer. A timeout or a dropped connection while the body
         // arrives is a failed transport, the same as one before the headers. HTTP 429 is known from the
         // headers already: it stays a rate limit, so a mutation tries again after its Retry-After.
-        if (!(error instanceof SyntaxError) && response.status !== 429) return transportFailure(error);
+        if (!(error instanceof SyntaxError) && response.status !== 429) return failed(error);
         body = null;
       }
       if (response.ok && body && !body.errors) return { data: body.data };
-      const detail = body?.errors?.map((e) => e.message).join("; ") ?? `HTTP ${response.status}`;
+      const detail = (kind !== "oauth" ? body?.errors?.map((e) => e.message).join("; ") : undefined) ?? `HTTP ${response.status}`;
       const rated = response.status === 429 || !!body?.errors?.some((e) => e.extensions?.code === "RATELIMITED");
       const failure: Failure = rated ? "rate" : response.status >= 500 ? "server" : "final";
       const retryAfter = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;

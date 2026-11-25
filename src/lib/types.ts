@@ -104,6 +104,7 @@ export interface SiteConfig {
   link: string | null;
   /** The page has a sign-in. Then `user` is the email of the session, or null. */
   auth: boolean;
+  signIn?: "linear";
   user: string | null;
 }
 /** The counts of one link room. No message text. */

@@ -5,6 +5,9 @@ import { Hono } from "hono";
 import { createApp } from "./app.ts";
 import { linkSettings } from "./link.ts";
 import { readConfig } from "./workspaces.ts";
+import { credentialCrypto } from "./db/crypto.ts";
+import { readLinearAuth, serviceSetting } from "./linearauth.ts";
+import { openServiceTenants, type Tenants } from "./tenants.ts";
 
 export const VERCEL_MAX_DURATION = 300;
 
@@ -25,6 +28,7 @@ function unavailable(setting: string) {
 }
 
 export function createVercelApp(env: NodeJS.ProcessEnv) {
+  if (env.DATABASE_URL) return createVercelService(env);
   const readOnly = env.WG_READ_ONLY !== "0";
   const hostedName = env.WG_HOSTED;
   if (!readOnly) {
@@ -84,6 +88,57 @@ export function createVercelApp(env: NodeJS.ProcessEnv) {
   if (readOnly) return { app, entry: { fetch: (request: Request) => app.fetch(request) } };
 
   // Vercel dispatches HTTP requests and upgrades to the exported server.
+  const server = createAdaptorServer({ fetch: app.fetch }) as Server;
+  app.injectWebSocket(server);
+  return { app, entry: server };
+}
+
+function createVercelService(env: NodeJS.ProcessEnv) {
+  const missing = serviceSetting(env, true);
+  if (missing) return unavailable(missing);
+  try { credentialCrypto(env); } catch (error) {
+    return unavailable(error instanceof Error && error.message.startsWith("WG_DATA_KEY_OLD") ? "WG_DATA_KEY_OLD" : "WG_DATA_KEY");
+  }
+  let socketSettings: ReturnType<typeof linkSettings>;
+  try { socketSettings = vercelLinkSettings(env); } catch (error) {
+    return unavailable(error instanceof Error && error.message.startsWith("WG_LINK_PONG_MS") ? "WG_LINK_PONG_MS" : "WG_LINK_MAX_AGE");
+  }
+
+  const linearAuth = readLinearAuth(env);
+  // The function must export a server immediately, including for upgrades. Its first request waits for migrations.
+  let opening: ReturnType<typeof openServiceTenants> | undefined;
+  const listeners = new Set<(id: string) => void>();
+  const directory = () => opening ??= openServiceTenants(env, linearAuth).then((tenants) => {
+    tenants.onChange((id) => { for (const listener of listeners) listener(id); });
+    return tenants;
+  }).catch((error) => {
+    opening = undefined;
+    throw error;
+  });
+  const tenants: Tenants = {
+    fromSession: async (session) => (await directory()).fromSession(session),
+    fromToken: async (authorization) => (await directory()).fromToken(authorization),
+    byId: async (id) => (await directory()).byId(id),
+    signIn: async (user, first) => (await directory()).signIn(user, first),
+    onChange(listener) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
+  const root = process.cwd();
+  let app: ReturnType<typeof createApp>;
+  try {
+    app = createApp({ port: 443, tailnet: null, hosted: { host: env.WG_HOSTED!.trim().toLowerCase() } }, {
+      team: "", workspaces: [], readOnly: false, dist: join(root, "dist") + sep, ...socketSettings, linearAuth, tenants,
+      redisUrl: env.WG_REDIS_URL, redisPrefix: env.WG_REDIS_PREFIX || undefined,
+      contractFile: join(root, "skills/work-graph/contract.json"),
+      version: env.WG_VERSION || env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "dev",
+      serviceReady: () => directory().then(() => true, () => false),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "invalid Redis link configuration") return unavailable("WG_REDIS_URL");
+    throw error;
+  }
   const server = createAdaptorServer({ fetch: app.fetch }) as Server;
   app.injectWebSocket(server);
   return { app, entry: server };

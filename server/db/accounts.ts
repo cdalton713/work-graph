@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Tenant } from "../tenants.ts";
+import type { Workspace } from "../workspaces.ts";
+import { LinearSignInRequired, type OAuthCredential } from "../linearauth.ts";
 import { coordinatorToken, tokenHash, type CredentialCrypto } from "./crypto.ts";
 import type { Query, Sql } from "./sql.ts";
 
@@ -9,14 +11,14 @@ export const MAX_LIVE_TOKENS = 10;
 type User = { linearUserId: string; linearOrgId: string; name: string; email: string };
 export type ConnectionCredential =
   | { kind: "api_key"; key: string }
-  | { kind: "oauth"; key: string; refreshToken: string; expiresAt: Date };
+  | OAuthCredential;
 type Settings = { name: string; team: string; teamLabels: boolean };
 export type NewConnection = Settings & { workspaceId: string; linearOrgId: string; credential: ConnectionCredential };
 type Connection = Settings & {
   id: string; workspaceId: string; linearOrgId: string; position: number;
   kind: ConnectionCredential["kind"]; status: "ok" | "needs_key"; expiresAt: Date | null;
 };
-type EncryptedConnection = Connection & { tenantId: string; credential: string; refreshToken: string | null };
+type EncryptedConnection = Connection & { tenantId: string; credential: string | null; refreshToken: string | null };
 type Token = { id: string; name: string; createdAt: Date; lastUsedAt: Date | null; revokedAt: Date | null };
 
 const connectionFields = `id, workspace_id AS "workspaceId", linear_org_id AS "linearOrgId",
@@ -44,6 +46,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
 
   function decrypt(row: EncryptedConnection): ConnectionCredential {
     const tenant = row.tenantId;
+    if (row.credential === null) throw new Error("Incomplete database credential");
     const key = crypto.decrypt(row.credential, { tenant, connection: row.id, field: "credential" });
     if (row.kind === "api_key") return { kind: row.kind, key };
     if (!row.refreshToken || !row.expiresAt) throw new Error("Incomplete database credential");
@@ -96,6 +99,72 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
   }
 
   return {
+    async signIn(user: User, first: NewConnection) {
+      const tenant = await sql.transaction(async ({ query }) => {
+        // A concurrent first callback waits on the unique identity. For an existing
+        // account, take the tenant lock before updating the user, as account deletion does.
+        const [created] = await query<{ id: string }>(`INSERT INTO users (id, linear_user_id, linear_org_id, email, name)
+          VALUES ($1, $2, $3, $4, $5) ON CONFLICT (linear_user_id, linear_org_id)
+          DO NOTHING RETURNING id`,
+        [randomUUID(), user.linearUserId, user.linearOrgId, user.email, user.name]);
+        if (created) {
+          const [{ id }] = await query<{ id: string }>(
+            "INSERT INTO tenants (id, owner_user_id, human) VALUES ($1, $2, $3) RETURNING id",
+            [randomUUID(), created.id, user.name]);
+          await insertConnection(query, id, first, 0);
+          return id;
+        }
+        const [account] = await query<{ id: string; owner: string }>(`SELECT t.id, u.id AS owner
+          FROM tenants t JOIN users u ON u.id = t.owner_user_id
+          WHERE u.linear_user_id = $1 AND u.linear_org_id = $2 FOR UPDATE OF t`, [user.linearUserId, user.linearOrgId]);
+        if (!account) throw new Error("Account not found");
+        const { id, owner } = account;
+        await query("UPDATE users SET email = $2, name = $3 WHERE id = $1", [owner, user.email, user.name]);
+        const [connection] = await query<{ id: string }>(`SELECT id FROM linear_connections
+          WHERE tenant_id = $1 AND linear_org_id = $2`, [id, first.linearOrgId]);
+        if (connection) {
+          await query(`UPDATE linear_connections SET kind = $3, credential = $4, refresh_token = $5,
+            expires_at = $6, status = 'ok' WHERE tenant_id = $1 AND id = $2`,
+          [id, connection.id, ...encrypt(id, connection.id, first.credential)]);
+        } else {
+          const rows = await orderedIds(query, id);
+          if (rows.length >= MAX_CONNECTIONS) throw new Error("Connection limit reached");
+          await insertConnection(query, id, first, rows.length);
+        }
+        return id;
+      });
+      await notify(tenant);
+      return tenant;
+    },
+
+    async refreshCredential(tenant: string, connection: string, rejected: string | undefined, now: () => number,
+      refresh: (token: string) => Promise<OAuthCredential | null>): Promise<OAuthCredential> {
+      requireUuid(tenant);
+      requireUuid(connection);
+      const result = await sql.transaction(async ({ query }) => {
+        const [row] = await query<EncryptedConnection>(`SELECT ${encryptedFields} FROM linear_connections
+          WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, [tenant, connection]);
+        if (!row || row.status !== "ok" || row.kind !== "oauth") return { credential: null };
+        const current = decrypt(row) as OAuthCredential;
+        if (current.key !== rejected && current.expiresAt.getTime() - now() >= 300_000) {
+          return { credential: current };
+        }
+        const credential = await refresh(current.refreshToken);
+        if (!credential) {
+          await query(`UPDATE linear_connections SET status = 'needs_key', credential = NULL, refresh_token = NULL,
+            expires_at = NULL WHERE tenant_id = $1 AND id = $2`, [row.tenantId, row.id]);
+          return { credential, changedTenant: row.tenantId };
+        }
+        await query(`UPDATE linear_connections SET kind = $3, credential = $4, refresh_token = $5,
+          expires_at = $6 WHERE tenant_id = $1 AND id = $2`,
+        [row.tenantId, row.id, ...encrypt(row.tenantId, row.id, credential)]);
+        return { credential };
+      });
+      if (result.changedTenant) await notify(result.changedTenant);
+      if (!result.credential) throw new LinearSignInRequired();
+      return result.credential;
+    },
+
     async createAccount(user: User, human: string, first: NewConnection): Promise<string> {
       const tenant = randomUUID(), owner = randomUUID();
       await sql.transaction(async ({ query }) => {
@@ -127,27 +196,31 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       requireUuid(connection);
       const [row] = await sql.query<EncryptedConnection>(`SELECT ${encryptedFields} FROM linear_connections
         WHERE tenant_id = $1 AND id = $2`, [tenant, connection]);
-      return row ? decrypt(row) : null;
+      return row?.credential != null ? decrypt(row) : null;
     },
 
-    async resolveTenant(tenant: string): Promise<Tenant | null> {
+    async resolveTenant(tenant: string, oauthKey?: (id: string, initial: OAuthCredential) => (rejected?: string) => Promise<string>): Promise<Tenant | null> {
       requireUuid(tenant);
       return sql.transaction(async ({ query }) => {
         const [account] = await query<{ id: string; human: string }>(
           "SELECT id, human FROM tenants WHERE id = $1 FOR SHARE", [tenant]);
         if (!account) return null;
         const connections = await query<EncryptedConnection>(`SELECT ${encryptedFields} FROM linear_connections
-          WHERE tenant_id = $1 AND status = 'ok' ORDER BY position, id`, [tenant]);
+          WHERE tenant_id = $1 AND (status = 'ok' OR ($2 AND kind = 'oauth')) ORDER BY position, id`, [tenant, !!oauthKey]);
         return {
           ...account,
-          workspaces: connections.flatMap((row) => {
+          workspaces: connections.flatMap<Workspace>((row) => {
+            const workspace = { id: row.workspaceId, name: row.name, team: row.team, teamLabels: row.teamLabels };
+            if (row.status === "needs_key") return [{ ...workspace, kind: row.kind, key: "", needsKey: true }];
+            let credential: ConnectionCredential;
             try {
-              const { key } = decrypt(row);
-              return [{ id: row.workspaceId, name: row.name, team: row.team, teamLabels: row.teamLabels, key }];
+              credential = decrypt(row);
             } catch {
               console.error(`Cannot decrypt database credential for connection ${row.id}`);
               return [];
             }
+            if (credential.kind === "api_key") return [{ ...workspace, key: credential.key }];
+            return [{ ...workspace, kind: credential.kind, key: credential.key, oauthKey: oauthKey?.(row.id, credential) }];
           }),
         };
       });

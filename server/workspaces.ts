@@ -10,6 +10,9 @@ export interface Workspace {
   name: string;
   team: string;
   key: string;
+  kind?: "api_key" | "oauth";
+  oauthKey?: (rejected?: string) => Promise<string>;
+  needsKey?: boolean;
   /** Project labels are per team (Linear's Business plan). False: workspace labels. */
   teamLabels: boolean;
   /** The address of the read-only viewer of this workspace (`share_url`), with no `/` at its end. None: no viewer. */

@@ -7,6 +7,11 @@ import { WebSocket } from "ws";
 import { startTestRedis, testRedis } from "./testing/redis.ts";
 import vercelConfig from "../vercel.json";
 import { createVercelApp, VERCEL_MAX_DURATION, vercelLinkSettings } from "./vercel.ts";
+import * as tenantService from "./tenants.ts";
+import { dbTenants } from "./db/tenants.ts";
+import { credentialCrypto } from "./db/crypto.ts";
+import { migrate } from "./db/migrations.ts";
+import { pgliteSql } from "./testing/sql.ts";
 
 const host = "page.example.com";
 const headers = { host };
@@ -22,6 +27,47 @@ const env = {
   WG_REDIS_URL: "redis://:test-redis-password@example.com",
   WG_READ_ONLY: "0",
 };
+
+it.each(["WG_HOSTED", "WG_DATA_KEY", "WG_SESSION_SECRET", "WG_LINEAR_CLIENT_ID", "WG_LINEAR_CLIENT_SECRET", "WG_REDIS_URL"])(
+  "refuses to start the service without %s", async (name) => {
+    const { app } = createVercelApp({
+      ...env, DATABASE_URL: "postgres://example.com/database",
+      WG_DATA_KEY: Buffer.alloc(32).toString("base64"), WG_LINEAR_CLIENT_ID: "linear-client",
+      WG_LINEAR_CLIENT_SECRET: "linear-client-secret", [name]: undefined,
+    });
+    const response = await app.request("/healthz");
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe(`Vercel full page requires ${name}`);
+  },
+);
+
+it("waits for service migrations and starts without the config installation", async () => {
+  const sql = await pgliteSql();
+  const serviceEnv = {
+    ...env, DATABASE_URL: "postgres://example.com/database", WG_CONFIG_JSON: "{",
+    WG_DATA_KEY: Buffer.alloc(32).toString("base64"), WG_LINEAR_CLIENT_ID: "linear-client",
+    WG_LINEAR_CLIENT_SECRET: "linear-client-secret", WG_LINK_TOKEN: undefined,
+  };
+  const open = vi.spyOn(tenantService, "openServiceTenants").mockImplementation(async (_env, linearAuth) => {
+    await migrate(sql);
+    const tenants = dbTenants(sql, credentialCrypto(serviceEnv), { linearAuth });
+    return { ...tenants, close: async () => { tenants.close(); } };
+  });
+  const { app, entry } = createVercelApp(serviceEnv);
+  try {
+    expect(entry).toBeInstanceOf(Server);
+    const [configResponse, login] = await Promise.all([app.request("/api/config", { headers }), app.request("/auth/login", { headers })]);
+    expect(await configResponse.json()).toMatchObject({ auth: true, signIn: "linear", user: null, readOnly: false });
+    expect(new URL(login.headers.get("location")!).origin).toBe("https://linear.app");
+    expect(await sql.query("SELECT id FROM tenants")).toEqual([]);
+    expect(open).toHaveBeenCalledTimes(1);
+  } finally {
+    if ("link" in app) app.link.stop();
+    if (open.mock.results[0]) await (await open.mock.results[0].value).close();
+    open.mockRestore();
+    await sql.close();
+  }
+});
 
 it.each([undefined, "1", "", "true", "false", " 0", "00"])("serves the viewer with WG_READ_ONLY=%s", async (mode) => {
   const { app, entry } = createVercelApp({ WG_HOSTED: host, WG_CONFIG_JSON: JSON.stringify(config), WG_READ_ONLY: mode });

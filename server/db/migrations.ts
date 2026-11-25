@@ -45,6 +45,16 @@ const migrations = [
     )`,
     "CREATE INDEX coordinator_tokens_tenant_id ON coordinator_tokens (tenant_id)",
   ],
+  [
+    "ALTER TABLE linear_connections DROP CONSTRAINT linear_connections_check, ALTER COLUMN credential DROP NOT NULL",
+    `ALTER TABLE linear_connections ADD CHECK (
+      (status = 'needs_key' AND credential IS NULL AND refresh_token IS NULL AND expires_at IS NULL)
+      OR (credential IS NOT NULL AND (
+        (kind = 'oauth' AND refresh_token IS NOT NULL AND expires_at IS NOT NULL)
+        OR (kind = 'api_key' AND refresh_token IS NULL AND expires_at IS NULL)
+      ))
+    )`,
+  ],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

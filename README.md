@@ -15,6 +15,9 @@ The skill expects these tools: [Linear](https://linear.app), the GitHub CLI (`gh
 [stax](https://github.com/cesarferreira/stax) (`st`) for stacked branches, [Orca](https://github.com/stablyai/orca)
 for worker agents and worktrees, and [uv](https://docs.astral.sh/uv/) to run `wg`. The page needs Node 24 and pnpm.
 
+Each user who runs an effort needs access to Linear and these tools on their own machine,
+including an agent CLI (Claude Code or Codex). A hosted deployment serves only the page and its API.
+
 ## Install the skill
 
 ```sh
@@ -180,6 +183,10 @@ network error, a timeout, HTTP 429, HTTP 5xx, or Linear's `RATELIMITED` error. I
 HTTP 429 or `RATELIMITED`, because Linear can have applied a mutation that timed out.
 
 ## Host the page
+
+**What a host does not do.** The host serves only the page and its API. The coordinator and
+workers run on the user's machine. Each user who runs an effort needs access to Linear and
+local copies of `gh`, `st`, Orca, `uv`, and an agent CLI (Claude Code or Codex).
 
 The `Dockerfile` builds the page and its server. Run the container behind a proxy that serves HTTPS, and set:
 

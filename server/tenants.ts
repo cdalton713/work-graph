@@ -15,6 +15,7 @@ type Lookup<T> = T | null | Promise<T | null>;
 
 export interface Tenants {
   signIn?: ReturnType<typeof import("./db/accounts.ts").createAccounts>["signIn"];
+  accountStore?: () => Lookup<ReturnType<typeof import("./db/accounts.ts").createAccounts>>;
   fromSession(session: Session | null): Lookup<{ tenant: Tenant; role: TenantRole }>;
   fromToken(authorization: string | undefined): Lookup<Tenant>;
   byId(id: string): Lookup<Tenant>;

@@ -111,6 +111,7 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
 
   return {
     accounts,
+    accountStore: () => accounts,
     signIn: accounts.signIn,
     async fromSession(session) {
       const tenant = session ? await byId(session.accountId ?? session.id) : null;

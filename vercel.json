@@ -4,7 +4,7 @@
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
   "functions": {
-    "api/index.ts": { "includeFiles": "skills/work-graph/contract.json", "maxDuration": 60 }
+    "api/index.ts": { "includeFiles": "skills/work-graph/contract.json", "maxDuration": 300 }
   },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api" },

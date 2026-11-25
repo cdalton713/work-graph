@@ -281,7 +281,8 @@ must keep a WebSocket open for longer than 20 s with no data.
 
 Set `auth.domains` to the Google Workspace domains that may sign in. Add the owner emails in
 `auth.owners`, for example `["ada@example.com"]`. Set the sign-in environment values from the
-next section and set `WG_LINK_TOKEN`. Leave `WG_READ_ONLY` unset. The server needs at least one
+next section and set `WG_LINK_TOKEN`. Leave `WG_READ_ONLY` unset for the container. On Vercel,
+set `WG_READ_ONLY=0`. The server needs at least one
 owner and a link token to start with sign-in on a full page.
 
 An owner can read and edit all projects of the page. Other accounts can read only the projects
@@ -294,6 +295,40 @@ Set `WG_READ_ONLY` to give each account viewer access and turn off the link.
 On a full page with sign-in, the coordinator token alone allows GET requests to `/api/status` and
 `/api/projects/<id>/presence`. The token also opens the coordinator socket. Page sockets need a session.
 `/api/config` and `/healthz` are open.
+
+### Vercel
+
+`vercel.json` serves `dist/` as static files. It routes `/api/*`, `/auth/*`, and `/healthz` to the
+function in `api/index.ts`. Enable Fluid Compute for the full page so that the function can accept WebSockets.
+Set `WG_HOSTED` to the preview host name in the preview environment. When the host name differs from
+`WG_HOSTED`, the API returns 403 (`bad host`).
+
+| Environment value | Read-only viewer | Full page |
+| --- | --- | --- |
+| `WG_READ_ONLY` | Unset or any value other than the exact text `0`. | `0`. |
+| `WG_HOSTED` | The host name of the deployment. | Same as the viewer. |
+| `WG_CONFIG_JSON` | The page config with its workspaces and optional `auth`. | The page config with its workspaces and `auth` with at least one owner. |
+| `LINEAR_<ID>_API_KEY` | The Linear key for each workspace, or a key from its `key_env` list. | Same as the viewer. |
+| `WG_AUTH_CLIENT_ID`, `WG_AUTH_CLIENT_SECRET`, `WG_SESSION_SECRET` | Required with `auth`. | Required. |
+| `WG_LINK_TOKEN` | Optional. Permits the viewer's bearer-token reads. | Required. Use the same token for the coordinator. |
+| `WG_REDIS_URL`, `WG_REDIS_PREFIX` | Optional. | The Redis URL is required. Use the same prefix on all instances of this page. |
+| `WG_LINK_MAX_AGE` | No link socket. | Use 60 to 280 seconds. A blank or unset value uses 270 seconds. |
+| `WG_LINK_PONG_MS` | No link socket. | Use 25000 to 300000 milliseconds, or `0` to turn off the pong deadline. A blank or unset value uses 45000. |
+
+The 300-second function limit applies to both modes. The socket age starts at the join. While the socket
+timer runs, the server closes the socket in time for the client to reconnect. On a plan with a higher
+limit, raise `maxDuration` in `vercel.json` and `VERCEL_MAX_DURATION` in `server/vercel.ts` together.
+Keep a custom `WG_LINK_MAX_AGE` at least 20 seconds below the function limit. The default keeps 30 seconds.
+
+The full page has had no live test on Vercel. Live checks cover the WebSocket upgrade through the function,
+ping and pong frames, and timers in an instance that holds only a socket. If pong frames do not reach the
+app, set `WG_LINK_PONG_MS=0`. The function has no stop hook. If the host ends the instance before the
+planned close, clients reconnect and Redis keeps the link state. `wg next --wait` also polls Linear, so a
+missed timer check can delay an update.
+
+`GET /healthz` checks that the configured server runs. Use the coordinator token on `GET /api/status`
+to check the mode (`readOnly` and `link`) and Redis (`linkStore` and `redisReady`). Redis can be
+unavailable while `/healthz` returns 200.
 
 ## Host a read-only viewer
 
@@ -336,14 +371,10 @@ shared, and they can change nothing. Your own page stays where it is, and each c
   graph of the viewer for at most 5 minutes (the full reload of a graph in memory). A page that a person has open
   keeps what it loaded before. To take a project away from the viewers sooner, stop its share.
 
-On Vercel: `vercel.json` builds the page (`dist/`) as static files and sends `/api/*`, `/auth/*`, and `/healthz` to
-the function `api/index.ts`, which is always read-only. Set these environment values in the Vercel project:
-`WG_HOSTED` (the production name, for example `view.example.com`), `WG_CONFIG_JSON` (`human`, the shared
-`workspaces`, and `auth`), the Linear key of each workspace, and the three sign-in values. A preview deployment
-has another name, so its API answers 403 (`bad host`) unless `WG_HOSTED` of the preview environment names it.
-The full page does not run on Vercel: the link needs one process that lives as long as its sockets.
+For Vercel settings, see [Vercel](#vercel).
 
-With the `Dockerfile`: the same container with `WG_READ_ONLY=1`, `WG_HOSTED`, and the same values.
+For the `Dockerfile`, set `WG_READ_ONLY=1`, `WG_HOSTED`, and the workspace and sign-in values in
+the [Vercel settings table](#vercel).
 
 Checks of a viewer: `GET /healthz` gives `{"ok":true}`; `GET /api/config` gives `"readOnly":true,"auth":true`;
 `GET /api/projects` without a session gives 401; a `POST` to any API path gives 405.

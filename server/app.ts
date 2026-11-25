@@ -401,9 +401,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const reason = refusal(method, header, rules);
     if (reason) return c.json({ error: reason }, 403);
     if (c.req.path === "/api/config" && (method === "GET" || method === "HEAD")) {
-      return c.json<SiteConfig>({
+      return c.json<SiteConfig & { linkStore?: ServerStatus["linkStore"] }>({
         human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version,
         readOnly: viewer, auth: !!auth, user: session?.email ?? null, role,
+        linkStore: readOnly ? undefined : redis ? "redis" : "memory",
         link: !readOnly && role ? "/api/link" : null,
       });
     }
@@ -416,8 +417,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
   api.get("/status", async (c) => {
     const rooms = (readOnly && redis) || (!readOnly && c.var.viewer) ? [] : await linkRead(() => hub.counts(), []);
-    return c.json<ServerStatus>({
+    return c.json<ServerStatus & Pick<SiteConfig, "readOnly" | "link">>({
       version, contract, uptime: Math.floor((clock() - started) / 1000),
+      readOnly: c.var.viewer, link: readOnly ? null : "/api/link",
       workspaces: workspaces.map(({ id, name }) => {
         const budget = linearBudget(id);
         return { id, name, requestsRemaining: budget?.requestsRemaining ?? null, requestsLimit: budget?.requestsLimit ?? null,

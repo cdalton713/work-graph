@@ -1602,7 +1602,7 @@ def setup_labels(kind, team_id):
     scope = {"id": {"eq": team_id}} if team_id else {"null": True}
     query = f"""query($f:{kind[0].upper() + kind[1:]}Filter!,$after:String){{
         {field}(first:100,after:$after,filter:$f){{
-            nodes{{id name isGroup groupType parent{{id}} retiredAt}} pageInfo{{hasNextPage endCursor}} }} }}"""
+            nodes{{id name isGroup groupType parent{{id name}} retiredAt}} pageInfo{{hasNextPage endCursor}} }} }}"""
     return list(setup_pages(lambda after: gql(query, {"f": {"team": scope}, "after": after})[field]))
 
 
@@ -1671,12 +1671,23 @@ def setup_private_team(key, team, new_team):
 def setup_workflow(team, apply, report):
     team_id = team["id"] if team else None
     states = setup_states(team_id) if team else {}
+
+    def find(rows, name):
+        return rows.get(name) or next((row for key, row in rows.items()
+                                      if key.casefold() == name.casefold()), None)
+
+    def report_state(name, state, expected):
+        actual = state.get("type", expected)
+        if "name" in state and state["name"] != name:
+            report(f"status {name}", "warn", f" (exists as {state['name']!r}. Rename it in Linear.)")
+        elif actual != expected:
+            report(f"status {name}", "warn", f" ({actual}, expected {expected})")
+        else:
+            report(f"status {name}", "exists", f" ({actual})")
+
     for name, expected in setup_status_types().items():
-        state = states.get(name)
-        if state:
-            actual = state["type"]
-            report(f"status {name}", "exists" if actual == expected else "warn",
-                   f" ({actual})" if actual == expected else f" ({actual}, expected {expected})")
+        if state := find(states, name):
+            report_state(name, state, expected)
             continue
         report(f"status {name}", "missing", f" ({expected})")
         if not apply:
@@ -1686,36 +1697,60 @@ def setup_workflow(team, apply, report):
                 state["type"] == "triage" for state in states.values()):
             setup_update_team(team_id, {"triageEnabled": True})
             states = setup_states(team_id)
-            if states.get(name, {}).get("type") == expected:
-                print(f"created status {name}")
+            if state := find(states, name):
+                if state["name"] == name and state["type"] == expected:
+                    print(f"created status {name}")
+                else:
+                    report_state(name, state, expected)
                 continue
         if expected in {"triage", "duplicate"}:
             print(f"warn status {name}: Linear manages this status. Check the team's workflow in Linear.")
             continue
         state = setup_create("workflowState", {"name": name, "type": expected, "teamId": team_id,
-                                              "color": "#5E6AD2"}, lambda: setup_states(team_id).get(name))
-        if state.get("type", expected) != expected:
-            report(f"status {name}", "warn", f" ({state['type']}, expected {expected})")
+                                              "color": "#5E6AD2"}, lambda: find(setup_states(team_id), name))
+        if "name" in state:
+            report_state(name, state, expected)
 
 
-def setup_label_scope(kind, team_id, groups, plain, apply, report, *, missing_team=False):
-    labels = [] if missing_team else setup_labels(kind, team_id)
-    owner = {"teamId": team_id} if team_id else {}
+def setup_label_scope(kind, team_id, groups, plain, apply, report, *, team_scoped):
+    def read_labels():
+        rows = [dict(row, team_scoped=False) for row in setup_labels(kind, None)]
+        if team_id:
+            rows.extend(dict(row, team_scoped=True) for row in setup_labels(kind, team_id))
+        return rows
+
+    labels = read_labels()
+    owner = {"teamId": team_id} if team_scoped else {}
     label_kind = "issue label" if kind == "issueLabel" else "project label"
 
     def ensure(name, parent=None, group=False):
+        def matches_location(row):
+            return row["team_scoped"] == team_scoped and (row.get("parent") or {}).get("id") == parent
+
         def match(rows):
-            return next((row for row in rows if row["name"].casefold() == name.casefold()
-                         and (row.get("parent") or {}).get("id") == parent), None)
+            named = [row for row in rows if row["name"].casefold() == name.casefold()]
+            return next((row for row in named if matches_location(row)),
+                        named[0] if named else None)
 
         description = f"{label_kind}{' group' if group else ''} {name}"
-        if found := match(labels):
+        def use(found):
+            if not matches_location(found):
+                location = "team scope" if found["team_scoped"] else "workspace scope"
+                if found_parent := found.get("parent"):
+                    location += f" under {found_parent.get('name') or found_parent['id']!r}"
+                else:
+                    location += " at the top level"
+                report(description, "warn", f" (exists in {location})")
+                return None
             if (bool(found.get("isGroup")) != group or found.get("retiredAt") or (not group and found["name"] != name)
                     or (group and found.get("groupType") != "singleSelect")):
                 report(description, "warn", " (check its type and availability in Linear)")
                 return None
             report(description, "exists")
             return found["id"]
+
+        if found := match(labels):
+            return use(found), False
         report(description, "missing")
         if apply:
             item = {"name": name, **owner}
@@ -1723,17 +1758,18 @@ def setup_label_scope(kind, team_id, groups, plain, apply, report, *, missing_te
                 item.update(isGroup=True, groupType="singleSelect")
             if parent:
                 item["parentId"] = parent
-            return setup_create(kind, item, lambda: match(setup_labels(kind, team_id)))["id"]
-        return None
+            created = setup_create(kind, item, lambda: match(read_labels()))
+            return (use(created) if "team_scoped" in created else created["id"]), True
+        return None, True
 
     for name in plain:
         ensure(name)
     for group, children in groups:
-        group_id = ensure(group, group=True)
+        group_id, missing = ensure(group, group=True)
         for child in children:
             if group_id:
                 ensure(child, parent=group_id)
-            elif not apply:
+            elif missing and not apply:
                 report(f"{label_kind} {child} in {group}", "missing")
 
 
@@ -1787,12 +1823,12 @@ def setup_command(ns):
         team_id = team["id"] if team else None
         scoped = bool(config["team_labels"])
         setup_label_scope("issueLabel", team_id, (), (*KIND_LABEL.values(), REVIEWED_LABEL, ANSWERED_LABEL),
-                          ns.apply, report, missing_team=team is None)
-        setup_label_scope("issueLabel", None, (("agent", AGENT_LABELS),), (), ns.apply, report)
+                          ns.apply, report, team_scoped=True)
+        setup_label_scope("issueLabel", team_id, (("agent", AGENT_LABELS),), (), ns.apply, report, team_scoped=False)
         groups = ((INITIATIVE_GROUP, ()), (AUTONOMY_GROUP, AUTONOMY_LEVELS),
                   (REVIEW_GROUP, tuple(review_label(level) for level in REVIEW_LEVELS)))
-        setup_label_scope("projectLabel", team_id if scoped else None, groups, (PAUSED_LABEL, "shared"),
-                          ns.apply, report, missing_team=scoped and team is None)
+        setup_label_scope("projectLabel", team_id, groups, (PAUSED_LABEL, "shared"),
+                          ns.apply, report, team_scoped=scoped)
         if not missing:
             print("nothing is missing")
         elif not ns.apply:
@@ -3348,24 +3384,29 @@ def tool_problem(args, cwd=None):
 
 def linear_workflow_check(team):
     try:
-        team_id, _, labels = team_info(team)
+        team_id, state_ids, labels = team_info(team)
     except ReadError as e:
         if str(e) == f"team {team} not found":
-            return "FAIL", f"{e}. Run wg setup."
+            return [("FAIL", f"{e}. Run wg setup.")]
         raise
-    states = setup_states(team_id)
     agents = set(AGENT_LABELS) - labels.keys()
     if agents:
         agents -= workspace_labels(agents).keys()
     expected_types = setup_status_types()
-    missing = sorted((expected_types.keys() - states.keys()) | agents)
-    wrong = [f"{name} has type {states[name]['type']}, expected {expected}"
-             for name, expected in expected_types.items() if name in states and states[name]["type"] != expected]
-    if missing:
-        wrong.insert(0, "missing " + ", ".join(missing))
-    if wrong:
-        return "FAIL", f"{team} " + ". ".join(wrong) + ". Run wg setup to check the workflow."
-    return "ok", f"{team} workflow and agent labels"
+    optional = {"Triage", "Backlog", "Duplicate"}
+    missing = sorted((expected_types.keys() - optional - state_ids.keys()) | agents)
+    lines = [("FAIL", f"{team} missing {', '.join(missing)}. Run wg setup.")] if missing else [
+        ("ok", f"{team} workflow and agent labels")]
+    try:
+        states = setup_states(team_id)
+    except ReadError as e:
+        return [*lines, ("warn", f"{team} could not check status types. Run wg setup. {e}")]
+    if absent := sorted(optional - states.keys()):
+        lines.append(("warn", f"{team} missing {', '.join(absent)}. Run wg setup."))
+    for name, expected in expected_types.items():
+        if name in states and (actual := states[name]["type"]) != expected:
+            lines.append(("warn", f"{team} {name} has type {actual}, expected {expected}. Run wg setup."))
+    return lines
 
 
 def preflight(plan_dir, plan, phase):
@@ -3385,8 +3426,8 @@ def preflight(plan_dir, plan, phase):
     team = plan_team(plan)
     try:
         gql("{ viewer { id } }")
-        level, message = linear_workflow_check(team)
-        line(level, "linear", message)
+        for level, message in linear_workflow_check(team):
+            line(level, "linear", message)
     except ReadError as e:
         line("FAIL", "linear", str(e).replace("\n", " "))
     stax_phases = [p for p in phases if p.get("target") != RELEASE_BRANCH]
@@ -6492,9 +6533,12 @@ def doctor_key(workspace, *, team=None):
             gql("{ viewer { id } }")
             accepted = ("ok", f"key {workspace}: accepted ({source}); {rate_budget()}")
             if team:
-                workflow = doctor_run(f"Linear workflow {workspace}",
-                                      lambda: linear_workflow_check(team))
-                return [accepted, *workflow]
+                try:
+                    workflow = linear_workflow_check(team)
+                except ReadError as e:
+                    workflow = [("warn", f"{team} could not check the workflow. Run wg setup. {e}")]
+                return [accepted, *(("warn" if level == "FAIL" else level, message)
+                                    for level, message in workflow)]
             return accepted
         finally:
             LINEAR_WORKSPACE.reset(token)

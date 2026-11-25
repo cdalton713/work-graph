@@ -142,6 +142,12 @@ class SetupTests(unittest.TestCase):
                                         "review", "review:light", "review:thorough", "review:standard", "paused", "shared"})
         self.assertTrue(all(label["teamId"] == "team" for label in project.values()))
         self.assertEqual(project["review:light"]["parentId"], project["review"]["id"])
+        for mutation, names in (
+            ("workflowStateCreate", {s["name"] for s in self.states} - {"Triage", "Duplicate"}),
+            ("issueLabelCreate", issue),
+            ("projectLabelCreate", project),
+        ):
+            self.assertCountEqual([item["name"] for verb, item in self.writes if verb == mutation], list(names))
         self.writes.clear()
         self.assertIn("nothing is missing", self.run_setup("--team", "WG", "--apply"))
         self.assertEqual(self.writes, [])
@@ -166,6 +172,34 @@ class SetupTests(unittest.TestCase):
                 self.duplicate = name
                 self.run_setup("--team", "WG", "--name", "Work Graph", "--apply")
                 self.assertEqual(sum(item.get("name") == name for _, item in self.writes), 1)
+
+    def test_setup_skips_labels_with_the_same_name_in_another_scope_or_parent(self):
+        self.team = {"id": "team", "visibility": "public", "triageEnabled": False}
+        self.labels["issueLabels"] = [
+            {"id": "ops", "name": "OPS"},
+            *({"id": agent, "name": f"agent:{agent}", "teamId": "team"}
+              for agent in ("claude", "codex", "coordinator")),
+            {"id": "spike", "name": "spike", "teamId": "team", "parent": {"id": "other", "name": "Other"}},
+        ]
+        self.labels["projectLabels"] = [
+            {"id": "paused", "name": "paused"},
+            {"id": "review", "name": "review", "isGroup": True, "groupType": "singleSelect"},
+        ]
+        out = self.run_setup("--team", "WG", "--apply")
+        for name, location in (("ops", "workspace"), ("spike", "Other"), ("agent:codex", "team"),
+                               ("agent:claude", "team"), ("agent:coordinator", "team"),
+                               ("paused", "workspace"), ("review", "workspace")):
+            self.assertEqual(sum(item.get("name") == name for _, item in self.writes), 0)
+            self.assertRegex(out, rf"(?m)^warn [^\n]*\b{re.escape(name)}\b[^\n]*{location}")
+        self.assertFalse(any(item.get("name", "").startswith("review:") for _, item in self.writes))
+
+    def test_setup_skips_status_with_different_case(self):
+        self.team = {"id": "team", "visibility": "public", "triageEnabled": False}
+        self.states = [{"id": "review", "name": "in review", "type": "started"}]
+        out = self.run_setup("--team", "WG", "--apply")
+        self.assertRegex(out, r"(?m)^warn status In Review[^\n]*in review")
+        self.assertFalse(any(verb == "workflowStateCreate" and item["name"] == "In Review"
+                             for verb, item in self.writes))
 
     def test_private_team_refusal_then_retry_on_same_empty_team(self):
         self.refusal = "Private teams require a paid plan"
@@ -210,8 +244,8 @@ class SetupTests(unittest.TestCase):
              patch.object(wg, "gql"), patch.object(wg, "team_info", return_value=("team", {}, {})), \
              patch.object(wg, "setup_states", return_value={}), patch.object(wg, "workspace_labels", return_value={}):
             lines = wg.doctor_run("key home", wg.doctor_key("home", team="WG"))
-        level, message = lines[-1]
-        self.assertEqual(level, "FAIL")
+        self.assertNotIn("FAIL", {level for level, _ in lines})
+        message = "\n".join(text for level, text in lines if level == "warn")
         for text in ("WG", "Ready to Merge", "agent:codex", "wg setup"):
             self.assertIn(text, message)
 # The other tests mock Linear call by call; AutonomyTests use the real autonomy_lines.
@@ -1353,7 +1387,7 @@ class BaseTests(DirTests):
 
         labels = dict.fromkeys(["agent:codex", "agent:claude", "agent:coordinator"])
         with patch.object(wg, "command", side_effect=local_command), patch.object(wg, "gql"), \
-             patch.object(wg, "team_info", return_value=("cd", {}, labels)), \
+             patch.object(wg, "team_info", return_value=("cd", dict.fromkeys(wg.setup_status_types()), labels)), \
              patch.object(wg, "setup_states", return_value={name: {"type": kind}
                                                           for name, kind in wg.setup_status_types().items()}):
             out, _ = self.cli("preflight", self.p["phases"], code=code)
@@ -1588,6 +1622,19 @@ class LocalTests(DirTests):
         self.assertIn("Ready to Merge", out)
         self.assertIn("agent:claude", out)
         self.assertIn("wg setup", out)
+
+    def test_preflight_accepts_the_existing_workflow_with_setup_warnings(self):
+        names = ("Todo", "Ready", "In Progress", "Needs Human", "In Review", "Ready to Merge",
+                 "Merged", "Verifying", "Done", "Canceled")
+        states = {name: {"type": wg.setup_status_types()[name]} for name in names}
+        states["In Review"]["type"] = "unstarted"
+        labels = dict.fromkeys(("agent:codex", "agent:claude", "agent:coordinator"))
+        with patch.object(wg, "command", return_value=subprocess.CompletedProcess([], 0, "main", "")), \
+             patch.object(wg, "gql"), patch.object(wg, "team_info", return_value=("team", states, labels)), \
+             patch.object(wg, "setup_states", return_value=states):
+            out, _ = self.call(wg.preflight, self.d, plan(), None)
+        self.assertRegex(out, r"(?m)^warn linear: .*Duplicate.*wg setup")
+        self.assertRegex(out, r"(?m)^warn linear: .*In Review.*wg setup")
 
     def verify_row(self, row, patch_id="p1", evidence=True, head=SHA, code=0):
         pr = {"state": "OPEN", "baseRefName": "main", "headRefName": "topic", "headRefOid": SHA}

@@ -96,6 +96,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | `test_runner` | The default test command of `wg evidence`. A node runs the moon test tasks that its diff affects; `@full-<phase>` runs `suite`. `commit_marker` is a regular expression for the line where the runner prints the commit it tests; without it, the exit code is the proof. `lint` is the lint command of the worker spec's push checks, as a list of arguments; each `{lower}` is the node's diff base. Without it, the spec has no lint step. A plan's `effort.lint` replaces it, and a plan with `effort.test` does not use it (`skills/work-graph/references/graph.md`). |
 | `worker_settings` | The session settings of a worker, per agent. Before a worker starts in a worktree, `wg dispatch` and `wg claim` merge `claude` into the worktree's `.claude/settings.local.json` and `codex` into its `.codex/config.toml` (as TOML). The merge keeps the other keys of a file that exists. A value of the config replaces a value of a different type in the file (a `false` replaces a table), and a list gets the config's items that it does not have yet, each one time. `wg` adds the file to the repository's `.git/info/exclude`, so the tree stays clean. It does not change a file that git tracks, a symlink, or a file that a `.gitignore` rule keeps in `git status`; it prints one line and the dispatch continues. Codex reads `.codex/config.toml` only in a project that it trusts. Use it to turn off what a worker does not need (plugins, MCP servers, tools, skills), so that each worker starts with less context. Default: none, and `wg` writes no file (`skills/work-graph/references/setup.md` "Worker sessions"). |
 | `workspaces` | The Linear workspaces. The first is the default. `team` is the default team of a plan; `teams` limits a workspace to those teams; `team_labels: false` makes project labels workspace labels (Linear's team project labels need the Business plan). `share_url` is the address of the read-only viewer of the workspace: with it, the page has a **Share** button on each project ("Host a read-only viewer"). |
+| `workspaces[].page_url` | The page for plans in this workspace. It defaults to the top-level `page_url`. `WG_UI_URL` overrides both. |
 | `auth` | Only in the config of a read-only viewer or a full page with owners: `{"domains": ["example.com"]}` names the Google Workspace domains whose accounts may sign in ("Host a read-only viewer"). `wg` does not read it. |
 | `auth.owners` | The emails of owners on a hosted page with sign-in. See "Give owners and viewers access on one hosted page". |
 
@@ -200,6 +201,11 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
   `~/.config/work-graph/link-token` with mode 600. Use HTTPS for the hosted URL. Run `wg doctor` to check it.
   An empty value on the server leaves token checks off. `wg` sends the token only over HTTPS or to
   a loopback address (`127.0.0.1`, `localhost`, or `::1`).
+  For a workspace with its own `page_url`, set the client token in `WG_<ID>_LINK_TOKEN` or in
+  `~/.config/work-graph/<id>-link-token` with mode 600. Use uppercase and replace hyphens with
+  underscores in the environment variable. The workspace uses only its own token, even when its
+  address equals the top-level `page_url`. When you set `WG_UI_URL`, `wg` sends the selected token
+  to the override address.
 - `WG_STATE_DIR` (optional): a directory where the link keeps the queue of each project and the open worker
   questions over a restart. Without it, a restart loses them: a reply or a command that a coordinator did not get
   yet does not arrive. The server writes one file, `link-state.json` (mode 600), at most 1 s after a change, and

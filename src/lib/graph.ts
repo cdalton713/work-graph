@@ -1,5 +1,5 @@
 import { ownerWords } from "./words.ts";
-import { site } from "./site.ts";
+import { currentSite } from "./site.ts";
 import type { Card, GraphData, Issue, Kind, Label, Project, State } from "./types";
 
 export const CARD_PREFIX = "**work-graph node card**";
@@ -53,7 +53,8 @@ export function kindOf(issue: Issue, card: Card | null): Kind {
 /** One name for each status across teams, the same table as wg.py `norm`. */
 const ALIAS: Record<string, string> = { "Ready for Deploy": "Merged", "External QA": "In Review", "In Dev": "In Progress", "Ready for Eng": "Todo" };
 export function statusName(state: State, labels: Label[] = []): string {
-  if (labels.some((l) => l.name === site.waitLabel)) return site.waitStatus;
+  const { waitLabel, waitStatus } = currentSite();
+  if (labels.some((l) => l.name === waitLabel)) return waitStatus;
   if (state.type === "completed") return "Done";
   if (state.type === "canceled" || state.type === "duplicate") return "Canceled";
   const name = ALIAS[state.name] ?? state.name;
@@ -98,7 +99,7 @@ export function signalOf(status: string, type: State["type"]): Signal {
     case "In Review": case "Ready to Merge": return "review";
     case "Merged": case "Verifying": return "merged";
     case "Done": return "done";
-    case site.waitStatus: return "stop";
+    case currentSite().waitStatus: return "stop";
     case "Canceled": return "off";
   }
   return type === "started" ? "running" : "idle";
@@ -390,7 +391,7 @@ export function boardGroups(graph: Graph, asked?: Set<string>): BoardGroup[] {
     if (n.status === "Triage") return "you";
     if (n.status === "Backlog") return "waiting";
     // wg next can flag a PR that waits on the human while its status is still In Review.
-    if (yourMove(n.card?.next) || n.status === site.waitStatus) return "you";
+    if (yourMove(n.card?.next) || n.status === currentSite().waitStatus) return "you";
     // wg next asks for a merge only for the PR that can merge now (`do ask-merge`). A Ready to Merge PR
     // for which it names another step (`do verify`) waits on the coordinator, not on the human.
     if (n.status === "Ready to Merge" && !agentStep(n.card?.next)) return "you";

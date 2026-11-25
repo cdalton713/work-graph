@@ -1,4 +1,5 @@
 import { api as browserApi } from "../src/api.ts";
+import { configureSite, site } from "../src/lib/site.ts";
 import { connectRedis } from "./redis.ts";
 import { localRedis, startLocalRedis } from "./testing/redis.ts";
 import { createHash } from "node:crypto";
@@ -91,18 +92,27 @@ describe("project links", () => {
       workspaces: [{ id: "work", name: "Work" }, { id: "home", name: "Home" }],
       projects: [project],
     };
-    expect(projectFromQuery(directory, new URLSearchParams("project=p1")).project).toEqual(project);
-    expect(projectFromQuery(directory, new URLSearchParams("project=A+PROJECT")).project).toEqual(project);
-    // A project whose name is the id of another one does not take its link.
-    const named = { ...project, id: "p0", name: "p1" };
-    expect(projectFromQuery({ ...directory, projects: [named, project] }, new URLSearchParams("project=p1")).project).toEqual(project);
-    expect(projectFromQuery(directory, new URLSearchParams("workspace=home&project=A+project"))).toEqual({
-      project: null, missing: 'No project "A project" in Home',
-    });
-    expect(projectFromQuery(directory, new URLSearchParams()).missing).toBeNull();
-    expect(projectFromQuery(directory, new URLSearchParams("project="))).toEqual({ project: null, missing: null });
-    const unavailable = { ...directory, workspaces: [{ id: "home", name: "Home", error: "Unavailable" }] };
-    expect(projectFromQuery(unavailable, new URLSearchParams("workspace=home&project=Unknown"))).toEqual({ project: null, missing: null });
+    const { defaultWorkspace } = site;
+    const page = app();
+    try {
+      const config = await page.request("/api/config", { headers: local });
+      configureSite({ defaultWorkspace: (await config.json()).defaultWorkspace });
+      expect(projectFromQuery(directory, new URLSearchParams("project=p1")).project).toEqual(project);
+      expect(projectFromQuery(directory, new URLSearchParams("project=A+PROJECT")).project).toEqual(project);
+      // A project whose name is the id of another one does not take its link.
+      const named = { ...project, id: "p0", name: "p1" };
+      expect(projectFromQuery({ ...directory, projects: [named, project] }, new URLSearchParams("project=p1")).project).toEqual(project);
+      expect(projectFromQuery(directory, new URLSearchParams("workspace=home&project=A+project"))).toEqual({
+        project: null, missing: 'No project "A project" in Home',
+      });
+      expect(projectFromQuery(directory, new URLSearchParams()).missing).toBeNull();
+      expect(projectFromQuery(directory, new URLSearchParams("project="))).toEqual({ project: null, missing: null });
+      const unavailable = { ...directory, workspaces: [{ id: "home", name: "Home", error: "Unavailable" }] };
+      expect(projectFromQuery(unavailable, new URLSearchParams("workspace=home&project=Unknown"))).toEqual({ project: null, missing: null });
+    } finally {
+      configureSite({ defaultWorkspace });
+      page.link.stop();
+    }
   });
 });
 
@@ -727,6 +737,65 @@ describe("graph cache of the server", () => {
     server.request(`/api/projects/${id}/graph${have ? `?have=${have}` : ""}`, { headers: local });
   const comment = (server: ReturnType<typeof cached>, headers: Record<string, string>) =>
     server.request("/api/issues/i1/comments", { method: "POST", headers: { ...write, ...headers }, body: JSON.stringify({ body: "hi" }) });
+
+  it("keeps each app's site settings while Linear requests interleave", async () => {
+    const { state } = graphLinear();
+    const issue = rawIssue("i1", `${TEAM}-1`, "p1");
+    state.issues.p1 = [{ ...issue, labels: { nodes: [{ name: "needs-ada" }, { name: "needs-grace" }] } }];
+    const respond = vi.mocked(fetch).getMockImplementation()!;
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      const { query, variables } = JSON.parse(init!.body as string);
+      const key = new Headers(init!.headers).get("authorization");
+      if (key === "ada-key" && query.includes("projects(first:50")) {
+        enter();
+        await held;
+      }
+      if (query.includes("issueLabels(first:10") && variables.n === "answered") {
+        return Response.json({ data: { issueLabels: { nodes: [{ id: "answered-id" }] } } });
+      }
+      if (query.includes("addedLabelIds")) {
+        return Response.json({ data: { issueUpdate: { success: true } } });
+      }
+      return respond(url, init);
+    });
+    const page = (human: string, id: string) => createApp(rules, {
+      team: TEAM, dist, watchMs: 0, human, workspaces: [{ ...workspace(), id, key: `${id}-key` }],
+    });
+    const ada = page("Ada", "ada");
+    const grace = page("Grace", "grace");
+    const overview = (server: ReturnType<typeof page>) => server.request("/api/overview", { headers: local });
+    const adaOverview = overview(ada);
+    try {
+      await entered;
+      expect(await (await overview(grace)).json()).toMatchObject({
+        summaries: expect.arrayContaining([expect.objectContaining({
+          workspace: "grace", id: "p1", you: [expect.objectContaining({ why: "Needs Grace" })],
+        })]),
+      });
+      for (const [server, human, defaultWorkspace] of [[ada, "Ada", "ada"], [grace, "Grace", "grace"]] as const) {
+        const config = await server.request("/api/config", { headers: local });
+        expect(await config.json()).toMatchObject({ human, defaultWorkspace });
+        const reply = await comment(server, { "x-project": "p1" });
+        expect(reply.status).toBe(200);
+        expect(await reply.json()).toMatchObject({ answered: true });
+      }
+      release();
+      expect(await (await adaOverview).json()).toMatchObject({
+        summaries: expect.arrayContaining([expect.objectContaining({
+          workspace: "ada", id: "p1", you: [expect.objectContaining({ why: "Needs Ada" })],
+        })]),
+      });
+    } finally {
+      release();
+      await adaOverview;
+      ada.link.stop();
+      grace.link.stop();
+    }
+  });
 
   it("forgets only the graph of the project of the written issue, not the project that the request names", async () => {
     const { asked, state } = graphLinear();

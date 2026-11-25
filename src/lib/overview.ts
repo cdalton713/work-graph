@@ -5,7 +5,7 @@ import { type Signal, boardGroups, buildGraph, parseStatus, projectGroups, statu
 import { type Agents, type Ask, agentName, agentNeeds, agentsWaiting } from "./link.ts";
 import type { GraphData, Project, ProjectList, PullRequest } from "./types.ts";
 
-import { site, statusOrder } from "./site.ts";
+import { currentSite, statusOrder } from "./site.ts";
 
 /** The lamp of a project: its Linear status type. */
 export const PROJECT_LAMP: Record<string, Signal> = { started: "running", paused: "stop", planned: "ready", backlog: "idle", completed: "done", canceled: "off" };
@@ -37,7 +37,7 @@ const summaryWords = ownerWords({ human: "", readOnly: false });
 
 /** Adapt the generated parts of a reason from an overview response for display. */
 export function overviewMoveReason(reason: string): string {
-  if (!site.readOnly) return reason;
+  if (!currentSite().readOnly) return reason;
   const words = ownerWords();
   if (reason === summaryWords.step.slice(0, -1)) return words.step.slice(0, -1);
   return reason
@@ -76,7 +76,7 @@ export interface OverviewFilter { text: string; workspace: string | null; mine: 
 export const NO_INITIATIVE = "";
 export interface OverviewRow { project: Project & { workspace: string; workspaceName: string }; summary: ProjectSummary | null }
 
-export const summaryKey = (p: { workspace?: string; id: string }) => `${p.workspace ?? site.defaultWorkspace}:${p.id}`;
+export const summaryKey = (p: { workspace?: string; id: string }) => `${p.workspace ?? currentSite().defaultWorkspace}:${p.id}`;
 
 /**
  * The rows of the overview: the projects that pass the filter. Projects that wait on the human come

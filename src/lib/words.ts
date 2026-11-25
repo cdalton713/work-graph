@@ -1,6 +1,6 @@
-import { site, type Site } from "./site.ts";
+import { currentSite, type Site } from "./site.ts";
 
-export function ownerWords({ human, readOnly }: Pick<Site, "human" | "readOnly"> = site) {
+export function ownerWords({ human, readOnly }: Pick<Site, "human" | "readOnly"> = currentSite()) {
   const owner = readOnly ? human : "you";
   const subject = readOnly ? human : "You";
   const onOwner = `on ${owner}`;

@@ -23,19 +23,28 @@ export interface Site {
   user: string | null;
 }
 
-function make(human: string, defaultWorkspace: string, readOnly = false, user: string | null = null): Site {
+export function createSite(human: string, defaultWorkspace: string, readOnly = false, user: string | null = null): Site {
   return { human, waitStatus: `Needs ${human}`, waitLabel: `needs-${humanSlug(human)}`, defaultWorkspace, readOnly, user };
 }
 
-/** The current settings. Change them only with `configureSite`, before the first render or request. */
-export const site: Site = make(DEFAULT_HUMAN, "default");
+/** The page settings. Change them only with `configureSite`, before the first render. */
+export const site: Site = createSite(DEFAULT_HUMAN, "default");
 
 export function configureSite({ human, defaultWorkspace, readOnly, user }: { human?: string; defaultWorkspace?: string; readOnly?: boolean; user?: string | null }) {
-  Object.assign(site, make(human ?? site.human, defaultWorkspace ?? site.defaultWorkspace, readOnly ?? site.readOnly, user === undefined ? site.user : user));
+  Object.assign(site, createSite(human ?? site.human, defaultWorkspace ?? site.defaultWorkspace, readOnly ?? site.readOnly, user === undefined ? site.user : user));
+}
+
+let siteSource: (() => Site | undefined) | undefined;
+
+export const currentSite = (): Site => siteSource?.() ?? site;
+
+/** Let the server supply the site of the current async context. */
+export function setSiteSource(source: () => Site | undefined): void {
+  siteSource = source;
 }
 
 /** The statuses in the order of a project's flow, for the counts. */
-export const statusOrder = () => ["Triage", "Backlog", "Todo", "Ready", "In Progress", site.waitStatus, "In Review",
+export const statusOrder = () => ["Triage", "Backlog", "Todo", "Ready", "In Progress", currentSite().waitStatus, "In Review",
   "Ready to Merge", "Merged", "Verifying", "Done", "Canceled"];
 
 // The server gives the link path with the signed-in role. Older servers use the default path for the full page.

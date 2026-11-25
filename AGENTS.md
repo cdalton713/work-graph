@@ -4,6 +4,16 @@ This repository is public. Its code and docs name no person, company, team, doma
 names live in that installation's work-graph config (README "Config"): the human's name, workspaces, page URL,
 branch prefix, release branch, and test runner.
 
+## Hosting
+
+A host serves only the page and its API. The coordinator and workers run on the user's machine.
+Each user who runs an effort needs access to Linear and a local installation of `gh`, `st`, Orca,
+`uv`, and an agent CLI (Claude Code or Codex).
+
+The `Dockerfile` supports the full page. Vercel supports the read-only viewer. Keep each new
+hosting feature off by default. Read deployment names from the installation config and
+environment. Keep deployment-specific settings out of the repository.
+
 ## Before each push
 
 1. `pnpm test` and `pnpm build` (the page).

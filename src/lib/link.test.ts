@@ -2,11 +2,29 @@ import { describe, expect, it } from "vitest";
 import contract from "../../skills/work-graph/contract.json";
 import { ANSWERED_LABEL, AUTONOMY_DEFAULT, AUTONOMY_GROUP, AUTONOMY_LEVELS, autonomyOf, PAUSED_LABEL, pausedOf } from "./autonomy";
 import { REVIEW_DEFAULT, REVIEW_GROUP, REVIEW_LEVELS, REVIEW_PREFIX, reviewOf } from "./review";
-import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, agentState, agentsShown, liveJob, presenceText } from "./link";
+import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, agentState, agentsShown, liveJob, presenceText, canCommandCoordinator, pageLinkPath } from "./link";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
 const coordinator = (over: Partial<CoordinatorPresence>): CoordinatorPresence => ({
   session: "s", host: "mac", plan: "/plans/a", connected: true, mode: "waiting", head: "phase 1", since: "2026-11-20T11:00:00Z", lastSeen: "2026-11-20T11:54:00Z", paused: false, ...over,
+});
+
+it("keeps coordinator commands and machine details on the owner page", () => {
+  const presence = { coordinators: [coordinator({})], queued: 0 };
+  const owner = presenceText(presence, now);
+  const viewer = presenceText(presence, now, undefined, true);
+  expect(owner?.title).toContain("mac: /plans/a");
+  expect(viewer?.title).toBe("The coordinator is listening.");
+  expect(canCommandCoordinator(false, owner)).toBe(true);
+  expect(canCommandCoordinator(true, viewer)).toBe(false);
+  expect(canCommandCoordinator(false, null)).toBe(false);
+});
+
+it("opens the server's link path and respects an explicit null", () => {
+  expect(pageLinkPath({ link: "/custom/link", readOnly: true })).toBe("/custom/link");
+  expect(pageLinkPath({ link: null })).toBeNull();
+  expect(pageLinkPath({ readOnly: true })).toBeNull();
+  expect(pageLinkPath({})).toBe("/api/link");
 });
 
 describe("presenceText", () => {

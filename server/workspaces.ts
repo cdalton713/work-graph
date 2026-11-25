@@ -41,9 +41,15 @@ const DOMAIN = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
  * (`WG_AUTH_CLIENT_ID`, `WG_AUTH_CLIENT_SECRET`, `WG_SESSION_SECRET`). It throws when a part is missing: a config
  * that asks for a sign-in must not give a page without one.
  */
-function readAuth(auth: { domains?: unknown }, env: NodeJS.ProcessEnv): Auth {
+function readAuth(auth: { domains?: unknown; owners?: unknown }, env: NodeJS.ProcessEnv): Auth {
   const domains = Array.isArray(auth.domains) ? auth.domains.map((d) => String(d).trim().toLowerCase()) : [];
   if (!domains.length || !domains.every((d) => DOMAIN.test(d))) throw new Error("auth.domains must name one domain or more, for example [\"example.com\"]");
+  const ownerAddresses = auth.owners ?? [];
+  if (!Array.isArray(ownerAddresses) || !ownerAddresses.every((email) =>
+    typeof email === "string" && /^[^@\s]+@[^@\s]+$/.test(email.trim()) && domains.includes(email.trim().toLowerCase().split("@")[1]))) {
+    throw new Error("auth.owners must list email addresses in auth.domains");
+  }
+  const owners = ownerAddresses.map((email: string) => email.trim().toLowerCase());
   const need = (name: string) => {
     const value = env[name]?.trim();
     if (!value) throw new Error(`the sign-in needs ${name} in the environment`);
@@ -51,7 +57,7 @@ function readAuth(auth: { domains?: unknown }, env: NodeJS.ProcessEnv): Auth {
   };
   const secret = need("WG_SESSION_SECRET");
   if (secret.length < 32) throw new Error("WG_SESSION_SECRET must have 32 characters or more");
-  return { domains, clientId: need("WG_AUTH_CLIENT_ID"), clientSecret: need("WG_AUTH_CLIENT_SECRET"), secret };
+  return { domains, ...(owners.length ? { owners } : {}), clientId: need("WG_AUTH_CLIENT_ID"), clientSecret: need("WG_AUTH_CLIENT_SECRET"), secret };
 }
 
 /**
@@ -63,7 +69,7 @@ function readAuth(auth: { domains?: unknown }, env: NodeJS.ProcessEnv): Auth {
 export function readConfig(team: string | undefined, env: NodeJS.ProcessEnv = process.env, home = homedir()): Config {
   const dir = join(home, ".config/work-graph");
   const text = env.WG_CONFIG_JSON ?? readText(env.WG_CONFIG ?? join(dir, "config.json"));
-  const data = (text ? JSON.parse(text) : {}) as { human?: string; workspaces?: WorkspaceEntry[]; auth?: { domains?: unknown } };
+  const data = (text ? JSON.parse(text) : {}) as { human?: string; workspaces?: WorkspaceEntry[]; auth?: { domains?: unknown; owners?: unknown } };
   const entries: WorkspaceEntry[] = data.workspaces?.length ? data.workspaces
     : [{ id: "default", name: "Linear", team: null, key_env: ["LINEAR_API_KEY"], team_labels: true }];
   const workspaces = entries.map((w, at) => {

@@ -84,6 +84,7 @@ export class LinkHub {
   private rooms = new Map<string, Room>();
   /** Pages with no project: the overview. They get the presence and the asks of every project. */
   private watchers = new Set<Peer>();
+  private viewers = new Map<Peer, { ref: ProjectRef | null; allows: (project: ProjectRef) => boolean }>();
   private now: () => Date;
   /** wg changed Linear (`wrote`): the server forgets its cached graph before the pages load it again. */
   private onWrote: (ref: ProjectRef) => void;
@@ -233,6 +234,11 @@ export class LinkHub {
     const message = JSON.stringify(this.envelope(room.ref, type, payload));
     for (const page of room.pages) page.send(message);
     if (overview) for (const page of this.watchers) page.send(message);
+    if (this.viewers.size && (type === "presence" || type === "changed")) {
+      const reduced = type === "presence" ? this.viewerPresence(room.ref) : { ...(payload as ToPage["changed"]), issues: [] };
+      const notice = JSON.stringify(this.envelope(room.ref, type, reduced));
+      for (const peer of this.viewers.keys()) this.sendViewer(peer, room.ref, notice);
+    }
   }
 
   private announce(room: Room) {
@@ -255,12 +261,39 @@ export class LinkHub {
     return { coordinators, queued: room.queue.length };
   }
 
+  /** Presence without coordinator identity, paths, work details, or queue counts. */
+  viewerPresence(ref: ProjectRef): Presence {
+    return {
+      queued: 0,
+      coordinators: this.presence(ref).coordinators.map((c, index) => ({
+        ...c, session: String(index), host: "", plan: "", head: null,
+      })),
+    };
+  }
+
+  private sendViewer(peer: Peer, ref: ProjectRef, notice: string) {
+    const viewer = this.viewers.get(peer);
+    if (!viewer || (viewer.ref && projectKey(viewer.ref) !== projectKey(ref))) return;
+    if (!this.closing && viewer.allows(ref)) peer.send(notice);
+  }
+
+  /** A viewer receives notices only while the server confirms the project is shared. */
+  joinViewer(peer: Peer, ref: ProjectRef | null, allows: (project: ProjectRef) => boolean): Connection {
+    if (this.closing) return this.refuse(peer);
+    this.viewers.set(peer, { ref, allows });
+    const rooms = ref ? [this.room(ref)] : this.rooms.values();
+    for (const { ref: project } of rooms) {
+      this.sendViewer(peer, project, JSON.stringify(this.envelope(project, "presence", this.viewerPresence(project))));
+    }
+    return this.track(peer, ref, () => { this.viewers.delete(peer); });
+  }
+
   /** For each room: the counts of connected coordinators, pages, queued messages, and asks (`/api/status`). No text. */
   counts(): RoomCounts[] {
     return [...this.rooms.values()].map((r) => ({
       workspace: r.ref.workspace, project: r.ref.id,
       coordinators: [...r.coordinators.values()].filter((c) => c.peer).length,
-      pages: r.pages.size, queued: r.queue.length, asks: r.asks.length,
+      pages: r.pages.size + [...this.viewers.values()].filter(({ ref }) => ref && projectKey(ref) === projectKey(r.ref)).length, queued: r.queue.length, asks: r.asks.length,
     }));
   }
 

@@ -37,3 +37,6 @@ export function configureSite({ human, defaultWorkspace, readOnly, user }: { hum
 /** The statuses in the order of a project's flow, for the counts. */
 export const statusOrder = () => ["Triage", "Backlog", "Todo", "Ready", "In Progress", site.waitStatus, "In Review",
   "Ready to Merge", "Merged", "Verifying", "Done", "Canceled"];
+
+// The server gives the link path with the signed-in role. Older servers use the default path for the full page.
+export const pageLink = { path: "/api/link" as string | null };

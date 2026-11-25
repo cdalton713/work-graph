@@ -48,6 +48,34 @@ const msg = (type: string, payload: unknown = {}) => JSON.stringify({ v: 1, type
 const hello = (session: string) => msg("hello", { plan: "/plans/a", session, host: "mac", wg: "1" });
 
 describe("LinkHub", () => {
+  it("sends viewers only reduced presence and change notices for shared rooms", async () => {
+    const hub = new LinkHub();
+    const viewer = peer(), overview = peer(), owner = peer();
+    const a = hub.joinCoordinator(peer(), A);
+    const b = hub.joinCoordinator(peer(), B);
+    a.receive(hello("private-session"));
+    b.receive(hello("another-session"));
+    hub.joinPage(owner, A);
+    const shared = (ref: typeof A) => ref.id === A.id;
+    hub.joinViewer(viewer, A, shared);
+    hub.joinViewer(overview, null, shared);
+    a.receive(msg("asks", { asks: [{ id: "q", body: "private question" }] }));
+    a.receive(msg("agents", { agents: [{ id: "a", said: "private reply" }] }));
+    a.receive(msg("progress", { nodes: [{ key: "a", evidence: "private evidence" }] }));
+    hub.publish(A, "changed", { by: "page", what: "issue", issues: ["WG-1"] });
+    hub.publish(B, "changed", { by: "page", what: "issue", issues: ["WG-2"] });
+    await vi.waitFor(() => expect(overview.of("changed")).toHaveLength(1));
+    for (const page of [viewer, overview]) {
+      expect(page.sent.every(({ type, project }) => ["presence", "changed"].includes(type) && project.id === A.id)).toBe(true);
+      expect(page.of("presence")[0].payload).toMatchObject({
+        queued: 0, coordinators: [{ session: "0", host: "", plan: "", head: null, connected: true }],
+      });
+      expect(page.of("changed")[0].payload).toMatchObject({ issues: [] });
+    }
+    expect(owner.of("changed")[0].payload).toMatchObject({ issues: ["WG-1"] });
+    expect(owner.of("progress")).toHaveLength(2);
+  });
+
   it("keeps a message for a coordinator until one acknowledges it, and sends the queue on hello", () => {
     const hub = new LinkHub();
     const sent = hub.publish(A, "answer", { issue: "CD-1", key: "a", body: "yes" });

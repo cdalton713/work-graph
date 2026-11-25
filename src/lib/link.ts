@@ -1,3 +1,4 @@
+import type { SiteConfig } from "./types";
 // The protocol `wg-link/1` between the wg-ui server, each coordinator (`wg next` of the work-graph
 // skill), and each open page. Design: CD-192. Linear stays the source of truth: a message here only
 // makes a change known sooner, or shows what a coordinator does now.
@@ -105,9 +106,9 @@ export function agentsWaiting(agents: Agents | undefined, now: number): AgentRow
  * What the page says about the coordinators of a project, or null when none ever connected. With fresh rows
  * of `wg agents`, a coordinator agent that waits on the human says so: the link cannot see a prompt.
  */
-export function presenceText(presence: Presence | undefined, now: number, agents?: Agents):
+export function presenceText(presence: Presence | undefined, now: number, agents?: Agents, viewer = false):
   { state: "listening" | "working" | "gone" | "needs"; text: string; title: string } | null {
-  const waits = agentsWaiting(agents, now).find((a) => a.role === "coordinator");
+  const waits = agentsWaiting(viewer ? undefined : agents, now).find((a) => a.role === "coordinator");
   if (waits) {
     const age = ageText(now - Date.parse(waits.at ?? "")) ?? "";
     return { state: "needs", text: `coordinator ${agentNeeds(waits)}${age ? ` · ${age}` : ""}`, title: `Orca: the coordinator agent (${waits.agent}) is ${waits.state}. Open its terminal in Orca. Last message: ${waits.said || "none"}` };
@@ -116,7 +117,14 @@ export function presenceText(presence: Presence | undefined, now: number, agents
   if (!c) return null;
   const seen = ageText(now - Date.parse(c.lastSeen)) ?? "";
   const where = `${c.host}: ${c.plan}`;
-  if (c.connected && c.mode === "waiting") return { state: "listening", text: "coordinator listening", title: `wg next --wait is connected (${where}). Your change wakes it at once.` };
-  if (c.mode === "working" && !(c.lost && !c.connected)) return { state: "working", text: `coordinator working · ${seen}`, title: `wg next ended ${seen}; the coordinator acts on it (${where}). It gets your changes at its next wg next.` };
-  return { state: "gone", text: `coordinator not listening · ${seen}`, title: `No wg next --wait runs (${where}). Your change waits in the queue; send the coordinator a message to wake it.` };
+  if (c.connected && c.mode === "waiting") return { state: "listening", text: "coordinator listening", title: viewer ? "The coordinator is listening." : `wg next --wait is connected (${where}). Your change wakes it at once.` };
+  if (c.mode === "working" && !(c.lost && !c.connected)) return { state: "working", text: `coordinator working · ${seen}`, title: viewer ? "The coordinator is working." : `wg next ended ${seen}; the coordinator acts on it (${where}). It gets your changes at its next wg next.` };
+  return { state: "gone", text: `coordinator not listening · ${seen}`, title: viewer ? "The coordinator is not listening." : `No wg next --wait runs (${where}). Your change waits in the queue; send the coordinator a message to wake it.` };
+}
+
+export const canCommandCoordinator = (viewer: boolean, coordinator: ReturnType<typeof presenceText>) =>
+  !viewer && coordinator !== null;
+
+export function pageLinkPath(config: Partial<Pick<SiteConfig, "link" | "readOnly">>): string | null {
+  return config.link === undefined ? (config.readOnly ? null : "/api/link") : config.link;
 }

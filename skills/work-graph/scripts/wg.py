@@ -15,8 +15,9 @@ that Python, and without it `wg next` polls Linear.
   wg status    <dir> [--phase P]
   wg next      <dir> [--wait] [--interval <seconds>] [--no-publish]
   wg approve   <dir> <key>... --quote "<the human's words>"
-  wg dispatch  <dir> <key> [--agent codex|claude] [--model <id>] [--run | --worktree <path>]
-  wg claim     <dir> <key> <dispatch|review|ci|threads|restack> [--agent codex|claude] [--send] [--work-file <file>]
+  wg dispatch  <dir> <key> [--agent codex|claude] [--model <id>] [--effort <level>] [--run | --worktree <path>]
+  wg claim     <dir> <key> <dispatch|review|ci|threads|restack> [--agent codex|claude] [--model <id>]
+               [--effort <level>] [--send] [--work-file <file>]
   wg started   <dir> <key> dispatch=<id> [<field>=<value>...]
   wg done      <dir> <key> [--dispatch <id>] [--failed "<error>"] [--worktree <path>]
   wg move      <dir> <key> <status> [--note "<text>"] [--force "<reason>"]
@@ -94,6 +95,80 @@ DEFAULT_CONFIG = {"human": "Human", "page_url": None, "github_user": None, "tick
 WORKER_SETTINGS_FILES = {"claude": ".claude/settings.local.json", "codex": ".codex/config.toml"}
 
 
+AGENT_FIELDS = ("agent", "model", "effort")
+AGENT_DEFAULTS = {"coordinator": {}, "worker": {"agent": "codex"}}
+
+
+def safe_agent_value(value):
+    return (isinstance(value, str) and bool(value) and value.isprintable()
+            and not value.startswith("-") and not any(char.isspace() for char in value))
+
+
+def merge_agent_settings(lower, higher):
+    if lower.get("agent") and higher.get("agent", lower["agent"]) != lower["agent"]:
+        return dict(higher)
+    return lower | higher
+
+
+def agent_setting_errors(settings, field, inherited):
+    if not isinstance(settings, dict):
+        return [f"{field}: must be an object"]
+    errors = []
+    for role, values in settings.items():
+        path = f"{field}.{role}"
+        if role not in AGENT_DEFAULTS:
+            errors.append(f"{path}: unknown role")
+        elif not isinstance(values, dict):
+            errors.append(f"{path}: must be an object")
+        else:
+            for key, value in values.items():
+                if key not in AGENT_FIELDS:
+                    errors.append(f"{path}.{key}: unknown field")
+                elif key == "agent" and value not in ("claude", "codex"):
+                    errors.append(f"{path}.agent: must be claude or codex")
+                elif key != "agent" and not safe_agent_value(value):
+                    errors.append(f"{path}.{key}: must be nonempty text with no leading dash, spaces, or control characters")
+            resolved = merge_agent_settings(AGENT_DEFAULTS[role] | inherited.get(role, {}), values)
+            if resolved.get("effort") and not resolved.get("model"):
+                errors.append(f"{path}.effort: needs a model")
+    return errors
+
+
+def resolve_agent(plan, role, agent=None, model=None, effort=None, row=None):
+    if row and any(row.get(field) for field in ("dispatch", *AGENT_FIELDS)):
+        settings = AGENT_DEFAULTS[role] | {field: row[field] for field in AGENT_FIELDS if field in row}
+    else:
+        settings = AGENT_DEFAULTS[role] | CONFIG.get("agents", {}).get(role, {})
+        settings = merge_agent_settings(settings, plan.get("effort", {}).get("agents", {}).get(role, {}))
+    flags = {field: value for field, value in zip(AGENT_FIELDS, (agent, model, effort)) if value is not None}
+    settings = merge_agent_settings(settings, flags)
+    for field in ("model", "effort"):
+        if field in settings and not safe_agent_value(settings[field]):
+            die(f"agents.{role}.{field}: must be nonempty text with no leading dash, spaces, or control characters")
+    if settings.get("effort") and not settings.get("model"):
+        die(f"agents.{role}.effort: needs a model")
+    return settings
+
+
+def model_args(settings):
+    for field in ("model", "effort"):
+        if field in settings and not safe_agent_value(settings[field]):
+            die(f"{field}: must be nonempty text with no leading dash, spaces, or control characters")
+    return [arg for field in ("model", "effort") if settings.get(field)
+            for arg in (f"--{field}", settings[field])]
+
+
+def automation_model_args(agent, settings):
+    if agent == "codex" and settings.get("effort"):
+        return shlex.join(["--model", settings["model"], "-c", f"model_reasoning_effort={settings['effort']}"])
+    return shlex.join(model_args(settings))
+
+
+def printed_model_args(settings):
+    args = model_args(settings)
+    return f" {shlex.join(args)}" if args else ""
+
+
 def read_config(path=CONFIG_PATH):
     try:
         data = json.loads(Path(path).read_text())
@@ -101,6 +176,8 @@ def read_config(path=CONFIG_PATH):
         data = {}
     if not isinstance(data, dict):
         raise SystemExit(f"{path}: the config must be a JSON object")
+    if errors := agent_setting_errors(data.get("agents", {}), "agents", {}):
+        raise SystemExit(f"{path}: " + "; ".join(errors))
     config = DEFAULT_CONFIG | data
     workspaces = [DEFAULT_WORKSPACE | w for w in config["workspaces"]] or [DEFAULT_WORKSPACE]
     ids = [w["id"] for w in workspaces]
@@ -164,13 +241,14 @@ BRANCH_PREFIX = CONFIG["branch_prefix"]  # the prefix of each branch that wg nam
 RELEASE_BRANCH = CONFIG["release_branch"]
 
 
-def show_config():
+def show_config(plan=None):
     """`wg config`: the config that wg uses, with where it came from, and whether the rules file exists.
     A key is never in the config, so nothing secret prints."""
     rules = Path(CONFIG["rules"]).expanduser()
     print(json.dumps({"path": str(CONFIG_PATH), "exists": CONFIG_PATH.exists(), "rules": str(rules),
                       "rules_exist": rules.exists(), "wait_status": WAIT_STATUS, "wait_label": WAIT_LABEL,
-                      "config": CONFIG}, indent=2))
+                      "config": CONFIG,
+                      "agents": {role: resolve_agent(plan or {}, role) for role in AGENT_DEFAULTS}}, indent=2))
     return 0
 
 
@@ -1126,7 +1204,8 @@ def post_merge(n):
 # ---------------------------------------------------------------- check
 
 def check(plan):
-    errs = []
+    errs = agent_setting_errors(plan.get("effort", {}).get("agents", {}), "effort.agents",
+                                CONFIG.get("agents", {}))
     phases = {str(p["key"]): p for p in plan.get("phases", [])}
     for ph, phase in phases.items():
         if not isinstance(phase.get("target"), str) or not phase["target"].strip():
@@ -4241,6 +4320,11 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
         return (rows[k].get("review") in REVIEW_OK or info.get("isDraft") is False
                 or marked_reviewed(issue(k)))
 
+    def reviewer_round(number, rounds, row):
+        writer = row.get("agent")
+        reviewer = {"claude": "codex", "codex": "claude"}.get(writer)
+        return f"#{number} round {rounds + 1}" + (f", agent {reviewer}" if reviewer else "")
+
     def level_review(k, number, row):
         """The review line at review effort `standard` or `light`, also for a PR that left draft."""
         rounds = int(row.get("review_round") or 0)
@@ -4252,7 +4336,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
             add("do", "review", k, f"#{number}: check the fix since {row['review_head'][:10]}")
         else:
             # No independent review ran, or it started before wg kept the head it read: a reviewer round.
-            add("do", "review", k, f"#{number} round {rounds + 1}")
+            add("do", "review", k, reviewer_round(number, rounds, row))
 
     def startable(k):
         """The same gates as wg dispatch, so each dispatch line can be done."""
@@ -4345,7 +4429,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
                 add("wait", "human", k, f"#{number}: 2 review rounds had blocking findings; only this PR is held "
                     f"(label {REVIEWED_LABEL!r} accepts them, or ask for one more fix)")
             else:
-                add("do", "review", k, f"#{number} round {rounds + 1}")
+                add("do", "review", k, reviewer_round(number, rounds, row))
         else:
             merge(k, s, row, info)
 
@@ -5398,20 +5482,26 @@ def automation_precheck(*args):
                   else f"python3 -I {shlex.quote(script)}") + "".join(f" {shlex.quote(a)}" for a in args)
 
 
-def autostart_command(plan_dir, plan, install, uninstall):
+def autostart_command(plan_dir, plan, install, uninstall, agent=None, model=None, effort=None):
     """`wg autostart <plan-dir> [--install | --uninstall]`: an Orca automation that runs `wg wake` every 5 minutes
     and starts a coordinator agent in this worktree when it says start. Without a flag, print its state."""
     here = str(Path(plan_dir).resolve())
     km = load_keymap(plan_dir)
-    current = run_rows(km)["effort"].get("autostart")
+    run = run_rows(km)["effort"]
+    current = run.get("autostart")
 
-    def save(value):
+    def save(value, configured=False):
         with plan_lock(plan_dir):
             k = load_keymap(plan_dir)
+            row = run_rows(k)["effort"]
             if value:
-                run_rows(k)["effort"]["autostart"] = value
+                row["autostart"] = value
             else:
-                run_rows(k)["effort"].pop("autostart", None)
+                row.pop("autostart", None)
+            if configured:
+                row["autostart_configured"] = True
+            else:
+                row.pop("autostart_configured", None)
             save_keymap(plan_dir, k)
 
     def orca(*args):
@@ -5426,7 +5516,11 @@ def autostart_command(plan_dir, plan, install, uninstall):
             save(None)
         print("autostart off")
         return 0
+    settings = resolve_agent(plan, "coordinator", agent, model, effort)
     if not install:
+        if settings:
+            print("coordinator settings: " + " ".join(f"{field}={shlex.quote(value)}"
+                                                       for field, value in settings.items()))
         if not current:
             print("autostart off")
             return 0
@@ -5434,22 +5528,36 @@ def autostart_command(plan_dir, plan, install, uninstall):
         print(f"autostart {'on' if shown.get('enabled', True) else 'disabled'}: automation {current}, every 5 minutes")
         return 0
     precheck = automation_precheck("wake", here)
+
+    def provider():
+        if settings.get("agent"):
+            return settings["agent"]
+        agents = orca("agent", "installed")["agents"]
+        return next((a["id"] for a in agents if a.get("default")), "claude")
+
     if current:
         # Install again: refresh the precheck and the prompt, and turn the automation on.
-        orca("automations", "edit", current, "--precheck", precheck, "--prompt", autostart_prompt(here), "--enabled")
+        changes = []
+        if settings or run.get("autostart_configured"):
+            agent = provider()
+            changes = ["--provider", agent, f"--extra-agent-args={automation_model_args(agent, settings)}"]
+        orca("automations", "edit", current, "--precheck", precheck, "--prompt", autostart_prompt(here),
+             "--enabled", *changes)
+        if changes:
+            save(current, bool(settings))
         print(f"autostart on: automation {current}, every 5 minutes (updated)")
         return 0
     worktree = orca("worktree", "show", "--worktree", f"path:{here}")["worktree"]["id"]
-    agents = orca("agent", "installed")["agents"]
-    agent = next((a["id"] for a in agents if a.get("default")), "claude")
+    agent = provider()
+    extra = automation_model_args(agent, settings)
     created = orca("automations", "create", "--name", f"wg coordinator: {plan['effort']['name']}",
                    "--trigger", WAKE_SCHEDULE, "--prompt", autostart_prompt(here), "--provider", agent,
                    "--workspace", f"id:{worktree}", "--precheck", precheck, "--precheck-timeout", "120",
-                   "--fresh-session")
+                   "--fresh-session", *([f"--extra-agent-args={extra}"] if extra else []))
     automation = (created.get("automation") or created).get("id")
     if not automation:
         die("orca automations create returned no id")
-    save(automation)
+    save(automation, bool(settings))
     print(f"autostart on: automation {automation}, every 5 minutes, agent {agent}")
     return 0
 
@@ -6681,6 +6789,14 @@ def doctor_autostart(plans):
                 continue
             shown = json.loads(result.stdout)["result"].get("automation") or {}
             name = f"autostart {path}: automation {automation}"
+            if "agentId" in shown or "extraAgentArgs" in shown:
+                settings = resolve_agent(load_plan(path), "coordinator")
+                extra = automation_model_args(settings.get("agent") or shown.get("agentId"), settings)
+                agent_differs = ("agentId" in shown and settings.get("agent")
+                                 and shown["agentId"] != settings["agent"])
+                if agent_differs or (shown.get("extraAgentArgs") or "") != extra:
+                    lines.append(("warn", f"{name} differs from the coordinator settings. "
+                                  f"Run wg autostart {shlex.quote(str(path))} --install"))
             if not shown.get("enabled", True):
                 lines.append(("warn", f"{name} disabled"))
             elif (every5 := wake_trigger(shown)) is None:
@@ -7268,7 +7384,7 @@ def branch_plan(plan, key, nodes, deps, st, rows, recorded=None):
     return names | {"branch": f"{BRANCH_PREFIX}{names['child']}", "lower": lower, "parent": parent, "stax": True}
 
 
-def first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=False, warnings=None):
+def first_claim(plan_dir, plan, key, settings, snap, names, quiet=False, warnings=None):
     """The checks and the claim of a node's first job.
 
     The run row records the claim (`step=claim`) before the label and the move, so a call that stops in between
@@ -7299,10 +7415,9 @@ def first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=False, war
     held = claim_labels(live[entry["id"]])
     if held:
         die(f"{ident}: {held[0]['name']} holds the claim; find its job with wg run show", 1)
-    row.update(state="creating", job="dispatch", agent=agent, step="claim",
+    row.update(state="creating", job="dispatch", step="claim",
                branch=names["branch"], parent=names["parent"], lower=names["lower"])
-    if model:
-        row["model"] = model
+    row.update(settings)
     save_keymap(plan_dir, km)
     claim_steps(plan_dir, plan, key, snap, quiet, warnings)
 
@@ -7370,7 +7485,7 @@ def dispatch_target(plan_dir, plan, key):
 
 
 @journaled("dispatch")
-def dispatch(plan_dir, plan, key, agent, worktree, model=None):
+def dispatch(plan_dir, plan, key, agent, worktree, model=None, effort=None):
     """Start a node's first worker. First call: the claim and the Orca commands. With --worktree: the checks and the spec."""
     snap, node, entry, issue = dispatch_target(plan_dir, plan, key)
     km, live, nodes, st, deps, rows = snap
@@ -7397,16 +7512,15 @@ def dispatch(plan_dir, plan, key, agent, worktree, model=None):
             print(f"warning: {warning}")
         path, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
         spec, task_title = shlex.quote(str(path)), shlex.quote(title)
-        chosen = row.get("model")
         print(f"spec {spec}\nRun these in order. Each <...> is an id from Orca's output:\n"
               f"  orca orchestration worker-start --spec-file {spec} --task-title {task_title} "
               f"--worktree id:<child-id> --agent {row.get('agent', agent)}"
-              + (f" --model {shlex.quote(chosen)}" if chosen else "") + " --json\n"
+              + printed_model_args(row) + " --json\n"
               f"  {wg_command()} started {here} {key} dispatch=<dispatch_id> task=<task_id> "
               f"worktree=<worktree id> run_id=<run_id>")
         return 0
     if not mine:
-        first_claim(plan_dir, plan, key, agent, model, snap, names)
+        first_claim(plan_dir, plan, key, resolve_agent(plan, "worker", agent, model, effort), snap, names)
     elif row.get("step") in ("claim", "status"):
         claim_steps(plan_dir, plan, key, snap)
     lane_base = names["lower"] if names["lower"].startswith("origin/") else f"origin/{phase_of(plan, node)['target']}"
@@ -7624,6 +7738,7 @@ def record_started(plan_dir, plan, key, fields):
         run["effort"]["run_id"] = run_id
     row.update({field: value for field, value in fields.items() if value})
     row.pop("retry_request", None)
+    row.pop("fresh_worker", None)
     row.update(state="running", step="receipt", started_at=utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"))
     save_keymap(plan_dir, km)
     return finish_receipt(plan_dir, plan, key)
@@ -7694,17 +7809,17 @@ def print_warnings(warnings):
 
 
 @journaled("dispatch")
-def dispatch_run(plan_dir, plan, key, agent, model):
+def dispatch_run(plan_dir, plan, key, agent, model, effort=None):
     """`wg dispatch --run`: each step of a first job in one call. The run row records each step before it runs."""
     need_orca_caller("--run", "dispatch")
     warnings = []
     try:
-        return first_job(plan_dir, plan, key, agent, model, warnings)
+        return first_job(plan_dir, plan, key, agent, model, effort, warnings)
     finally:
         print_warnings(warnings)
 
 
-def first_job(plan_dir, plan, key, agent, model, warnings):
+def first_job(plan_dir, plan, key, agent, model, effort, warnings):
     snap, node, entry, issue = dispatch_target(plan_dir, plan, key)
     km, live, nodes, st, deps, rows = snap
     row = rows[key]
@@ -7725,7 +7840,8 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
         return 0
     try:
         if not mine:
-            first_claim(plan_dir, plan, key, agent, model, snap, names, quiet=True, warnings=warnings)
+            first_claim(plan_dir, plan, key, resolve_agent(plan, "worker", agent, model, effort),
+                        snap, names, quiet=True, warnings=warnings)
         elif row.get("step") in ("claim", "status"):
             claim_steps(plan_dir, plan, key, snap, quiet=True, warnings=warnings)
     except (ReadError, OSError, subprocess.SubprocessError) as e:
@@ -7791,8 +7907,7 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
         return 1
     args = ["orchestration", "worker-start", "--spec-file", str(spec), "--task-title", title,
             "--worktree", f"id:{row['worktree']}", "--agent", row.get("agent", agent), "--environment", "local"]
-    if row.get("model"):
-        args += ["--model", row["model"]]
+    args += model_args(row)
     row = start_and_record(plan_dir, plan, key, "start", args, row, warnings, {})
     if row is None:
         return 1
@@ -8101,7 +8216,7 @@ def restack_line(plan_dir, plan, node, row, nodes, deps, st):
 
 
 @journaled("claim")
-def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
+def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=None, effort=None):
     """Start a follow-up job on a node: the checks, the claim, the job header.
 
     The job `dispatch` continues a node that has a branch and no PR: an adopted node, or a first job that failed.
@@ -8125,7 +8240,9 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
         die(f"{key}: wg claim is for a task")
     row = rows.setdefault(key, {})
     here = shlex.quote(str(Path(plan_dir).resolve()))
-    same = send and row.get("job") == job and row.get("agent") == agent
+    settings = resolve_agent(plan, "worker", agent, model, effort, row)
+    agent = settings["agent"]
+    same = send and row.get("job") == job and all(row.get(field) == value for field, value in settings.items())
     if same and row.get("state") == "running" and row.get("step") == "receipt":
         # The job runs; only its claim comment is missing.
         try:
@@ -8150,7 +8267,10 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
     restacking = [k for k in running if rows[k].get("job") == "restack"]
     if job == "restack" and restacking:
         problems.append(f"one restack job at a time: {restacking[0]} is live")
-    fresh = not row.get("dispatch")
+    # A legacy row can lack an agent. Keep its existing dispatch unless a known launch setting changes.
+    changed = (row.get("agent", agent) != agent
+               or any(row.get(field) != settings.get(field) for field in ("model", "effort")))
+    fresh = not row.get("dispatch") or bool(row.get("fresh_worker") if resume else changed)
     if send and fresh and not row.get("worktree") and not row.get("path"):
         problems.append(f"{key}: no worktree in the run row for a new worker")
     if problems:
@@ -8166,7 +8286,12 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
             die(f"{ident}: {held[0]['name']} holds the claim; find its job with wg run show", 1)
         if not send:
             take_claim(plan_dir, plan, key, entry, issue, agent)
-        row.update(state="starting", job=job, agent=agent)
+        row.update(state="starting", job=job)
+        for field in AGENT_FIELDS:
+            row.pop(field, None)
+        row.update(settings)
+        if fresh and row.get("dispatch"):
+            row["fresh_worker"] = True
         row.pop("started_at", None)
         if job == "review":  # the fix job replaces the reviewer of this round
             row.pop("review_dispatch", None)
@@ -8203,14 +8328,13 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
             where = f"id:{row['worktree']}" if row.get("worktree") else f"path:{row['path']}"
             args = ["orchestration", "worker-start", "--spec-file", str(spec_path), "--task-title", task_title,
                     "--worktree", where, "--agent", agent, "--environment", "local"]
-            if row.get("model"):
-                args += ["--model", row["model"]]
+            args += model_args(row)
         else:
             args = ["orchestration", "send", "--to", f"dispatch:{row['dispatch']}", "--subject", subject,
                     "--body-file", str(spec_path)]
         warnings = []
         try:
-            row = start_and_record(plan_dir, plan, key, "send", args, row, warnings, row)
+            row = start_and_record(plan_dir, plan, key, "send", args, row, warnings, {} if fresh else row)
         finally:
             print_warnings(warnings)
         if row is None:
@@ -8221,7 +8345,7 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
                                     "add the work of this job at its end, then:"))
     if fresh:
         print(f"  orca orchestration worker-start --spec-file {spec} --task-title {shlex.quote(task_title)} "
-              f"--worktree id:<child-id> --agent {agent} --json")
+              f"--worktree id:<child-id> --agent {agent}{printed_model_args(row)} --json")
     else:
         print(f"  orca orchestration send --to dispatch:{row['dispatch']} --subject {shlex.quote(subject)} --body \"$(cat {spec})\"")
     print(f"  {wg_command()} started {here} {key} dispatch=<dispatch_id> task=<task_id>"
@@ -8442,6 +8566,18 @@ def ui(port, project, no_open, no_tailnet=False, workspace=DEFAULT_WORKSPACE_ID)
         return 0
 
 
+def agent_flag_value(value):
+    if not safe_agent_value(value):
+        raise argparse.ArgumentTypeError("use nonempty text with no leading dash, spaces, or control characters")
+    return value
+
+
+def add_agent_flags(parser):
+    parser.add_argument("--agent", choices=("codex", "claude"))
+    parser.add_argument("--model", type=agent_flag_value, help="the provider model id")
+    parser.add_argument("--effort", type=agent_flag_value, help="the effort level for the model")
+
+
 def cli_parser():
     parser = argparse.ArgumentParser(description="Validate and manage a work-graph effort.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -8476,20 +8612,20 @@ def cli_parser():
     auto_mode = auto.add_mutually_exclusive_group()
     auto_mode.add_argument("--install", action="store_true")
     auto_mode.add_argument("--uninstall", action="store_true")
+    add_agent_flags(auto)
     a = add(sub, "approve")
     a.add_argument("keys", nargs="+")
     a.add_argument("--quote", required=True)
     d = add(sub, "dispatch")
     d.add_argument("key")
-    d.add_argument("--agent", choices=("codex", "claude"), default="codex")
+    add_agent_flags(d)
     d_mode = d.add_mutually_exclusive_group()
     d_mode.add_argument("--worktree")
     d_mode.add_argument("--run", action="store_true", help="do each Orca step in this call (an Orca terminal only)")
-    d.add_argument("--model", help="the provider model id that worker-start passes to the agent")
     c = add(sub, "claim")
     c.add_argument("key")
     c.add_argument("job", choices=JOBS)
-    c.add_argument("--agent", choices=("codex", "claude"), default="codex")
+    add_agent_flags(c)
     c.add_argument("--send", action="store_true", help="send the job in Orca and record the receipt (an Orca terminal only)")
     c.add_argument("--work-file", help="a file with the work of this job; its text goes at the end of the job spec")
     s = add(sub, "started")
@@ -8546,7 +8682,7 @@ def cli_parser():
     setup.add_argument("--name")
     setup.add_argument("--private", action=argparse.BooleanOptionalAction, default=False)
     setup.add_argument("--apply", action="store_true")
-    sub.add_parser("config", help="print the config of this machine (no keys) and the local rules file")
+    sub.add_parser("config", help="print the config of this machine (no keys) and the local rules file").add_argument("dir", nargs="?")
     c = sub.add_parser("contract", help="print what the page must agree with; --write updates contract.json")
     c.add_argument("--write", action="store_true")
     tick_parser = sub.add_parser("tick", help="refresh the page for each loaded effort")
@@ -8600,19 +8736,19 @@ def run_command(ns, d, plan, given):
     if ns.cmd == "wake":
         return wake_command(d, plan)
     if ns.cmd == "autostart":
-        return autostart_command(d, plan, ns.install, ns.uninstall)
+        return autostart_command(d, plan, ns.install, ns.uninstall, ns.agent, ns.model, ns.effort)
     if ns.cmd == "health":
         return health_command(d, plan, ns.install, ns.uninstall, ns.due, ns.report)
     if ns.cmd == "approve":
         return approve(d, plan, ns.keys, ns.quote)
     if ns.cmd == "dispatch":
         if ns.run:
-            return dispatch_run(d, plan, ns.key, ns.agent, ns.model)
-        return dispatch(d, plan, ns.key, ns.agent, ns.worktree, ns.model)
+            return dispatch_run(d, plan, ns.key, ns.agent, ns.model, ns.effort)
+        return dispatch(d, plan, ns.key, ns.agent, ns.worktree, ns.model, ns.effort)
     if ns.cmd == "claim":
         if ns.send and not ns.work_file:
             die("wg claim --send needs --work-file <file> with the work of the job")
-        return claim(d, plan, ns.key, ns.job, ns.agent, ns.send, ns.work_file)
+        return claim(d, plan, ns.key, ns.job, ns.agent, ns.send, ns.work_file, ns.model, ns.effort)
     if ns.cmd == "started":
         return started(d, plan, ns.key, ns.fields)
     if ns.cmd == "done":
@@ -8666,7 +8802,7 @@ def main(argv):
     ns = cli_parser().parse_args(args)
     try:
         if ns.cmd == "config":
-            return show_config()
+            return show_config(load_plan(ns.dir, strict=True) if ns.dir else None)
         if ns.cmd == "explain":
             return explain_command(ns.verb)
         if ns.cmd == "doctor":

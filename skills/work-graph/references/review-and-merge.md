@@ -7,9 +7,9 @@ A review covers a **patch** (terms.md). `wg done` clears `review` and `merge_rev
 <!-- explain: review -->
 ## Wave review
 
-`wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. This section is the flow at review effort `thorough`; "Review effort" gives the other levels. The reviewer is a different agent from the writer (Claude reviews Codex). Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review ("Mark a PR reviewed").
+`wg next` prints `review <key> #<n> round <k>` when a draft PR is code done. This section is the flow at review effort `thorough`; "Review effort" gives the other levels. The `review` line gives the other agent from the writer in the run row. Use Codex for a Claude writer and Claude for a Codex writer. If the run row has no agent, find the writer before you start the reviewer. Only a **blocking** finding holds the PR, and it holds only that PR's merge request. A PR whose issue has the `reviewed` label gets no review ("Mark a PR reviewed").
 
-1. Start the reviewer in your own worktree: `orca orchestration worker-start --spec-file <review-spec> --worktree current --agent claude --json`. Then `wg run set <plan-dir> <key> review_round=<k> review_dispatch=<dispatch_id>`. Give it the PR, not the worker's report. The spec:
+1. Start the reviewer in your own worktree: `orca orchestration worker-start --spec-file <review-spec> --worktree current --agent <reviewer-agent> --json`. Then `wg run set <plan-dir> <key> review_round=<k> review_dispatch=<dispatch_id>`. Give it the PR, not the worker's report. The spec:
 
    > Load `code-review`. PR #<n> at head `<code_done_head>`: fixed point = its base branch, spec = the Linear issue's description and its `work-graph node card` comment. Read-only. Report two lists. **Blocking:** the change does not meet the acceptance, breaks behavior that worked, loses or exposes data, or breaks a repository rule that `pnpm lint` does not check (name the rule). **Notes:** each other finding. Write the report to `<scratchpad>/review-<key>-<round>.md` and pass `--report-path`.
 

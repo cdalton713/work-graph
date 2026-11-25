@@ -101,7 +101,7 @@ Done when: every `task` of the wave fits one PR and has acceptance and `owns`, `
 
 ### 4. Run and review the wave
 
-Run the coordinator loop in [references/coordinator.md](references/coordinator.md). Workers are Codex in Orca, one per node, each in its own Orca child worktree. `wg dispatch` sets no limit on live workers: dispatch every ready node of the wave.
+Run the coordinator loop in [references/coordinator.md](references/coordinator.md). The `worker` role sets the agent (default Codex). Each node has its own Orca child worktree. `wg dispatch` sets no limit on live workers: dispatch every ready node of the wave.
 
 1. A test that fails in a node's evidence is that node's failure, unless it is a known failure (jobs.md "Known failures").
 2. At each node's code done, start the wave review of that PR and the dispatch of the node above it in the lane, both at once (review-and-merge.md "Wave review"). A review fix on the node below sends a restack job to the node above.

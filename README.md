@@ -169,6 +169,31 @@ come the totals per role and one grand total. It prints the 15 largest sessions;
 `--json` gives exact integers, and `--since <2h|3d|UTC time>` counts only the calls after that time. It makes no
 Linear, GitHub, or Orca call and writes nothing.
 
+### Agent settings
+
+Set the optional `agents` object to choose who starts the coordinator and worker jobs.
+
+```json
+{
+  "agents": {
+    "coordinator": {"agent": "claude"},
+    "worker": {"agent": "codex", "model": "example-model", "effort": "high"}
+  }
+}
+```
+
+Both roles accept `agent`, `model`, and `effort`. Use `claude` or `codex` for
+`agent`. Use a model ID and effort level that Orca accepts. Effort needs a model.
+For each field, a command flag wins over `effort.agents` in the plan, then the
+installation config. Changing the agent drops the model and effort from the
+lower-priority setting for the previous agent. The default worker is Codex. The default coordinator is
+Orca's default agent. `wg config [<plan-dir>]` shows the resolved roles.
+
+A follow-up job uses the settings in the node's run row before the plan and
+config defaults. Command flags can override those settings. To apply changes
+to an installed coordinator automation, run `wg autostart <plan-dir> --install`
+again.
+
 ## Run the page on this machine
 
 `wg ui` builds and starts it from this repository (or from `WG_UI_DIR`). By hand:

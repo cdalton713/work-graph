@@ -108,10 +108,9 @@ def read_config(path=CONFIG_PATH):
         raise SystemExit(f"{path}: each workspace needs a unique id of a-z, 0-9 and -")
     pages = [("page_url", data)] + [(f"workspaces[{i}].page_url", w) for i, w in enumerate(workspaces)]
     for field, source in pages:
-        if "page_url" in source:
-            url = source["page_url"]
-            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-                raise SystemExit(f"{path}: {field} must start with http:// or https://")
+        url = source.get("page_url")
+        if url is not None and (not isinstance(url, str) or not url.startswith(("http://", "https://"))):
+            raise SystemExit(f"{path}: {field} must start with http:// or https://")
     if not isinstance(config["human"], str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9 ]*", config["human"]):
         raise SystemExit(f"{path}: human must be a name of letters, digits and spaces")
     merge = config["agent_merge"]

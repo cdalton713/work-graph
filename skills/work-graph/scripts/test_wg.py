@@ -4353,8 +4353,13 @@ class ConfigTests(unittest.TestCase):
         config = self.config({"workspaces": [{"id": "home", "page_url": page}]})
         self.assertEqual(config["workspaces"][0]["page_url"], page)
 
+    def test_config_accepts_null_page_urls_as_unset(self):
+        config = self.config({"page_url": None, "workspaces": [{"id": "home", "page_url": None}]})
+        self.assertIsNone(config["page_url"])
+        self.assertIsNone(config["workspaces"][0]["page_url"])
+
     def test_config_rejects_invalid_page_urls(self):
-        for value in ("example.com", "ftp://example.com", 7, None):
+        for value in ("example.com", "ftp://example.com", 7):
             for config, field in (({"page_url": value}, "page_url"),
                                   ({"workspaces": [{"id": "home", "page_url": value}]},
                                    r"workspaces\[0\]\.page_url")):

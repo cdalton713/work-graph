@@ -9,7 +9,7 @@ import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdg
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
 import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
 import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./lib/health";
-import { agentsFresh, liveJob, presenceText } from "./lib/link";
+import { agentsFresh, canCommandCoordinator, liveJob, presenceText } from "./lib/link";
 import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, summaryKey } from "./lib/overview";
 import { ownerWords } from "./lib/words";
 import { site, statusOrder } from "./lib/site";
@@ -162,7 +162,8 @@ export function App() {
   const asked = useMemo(() => new Set(link.asks.flatMap((a) => (a.issue ? [a.issue] : []))), [link.asks]);
   const presence = linkRef ? link.presence.get(summaryKey(linkRef)) : undefined;
   const agents = linkRef ? link.agentsBy.get(summaryKey(linkRef)) : undefined;
-  const coordinator = useMemo(() => (linkRef ? presenceText(presence, now, agents) : null), [presence, linkRef, now, agents]);
+  const viewer = site.readOnly;
+  const coordinator = useMemo(() => (linkRef ? presenceText(presence, now, agents, viewer) : null), [presence, linkRef, now, agents, viewer]);
   const stale = useMemo(() => (project ? staleBanner(data, now) : null), [project, data, now]);
   const budget = useMemo(() => budgetWarnings(status, now), [status, now]);
   // The project label `paused` is the record; an older coordinator report stands in until the list has it.
@@ -182,7 +183,8 @@ export function App() {
       setError(`${cmd.name}: ${(e as Error).message}`);
     }
   }, [project, coordinator]);
-  const commands = coordinator && (
+  const canCommand = canCommandCoordinator(viewer, coordinator);
+  const commands = canCommand && (
     <span className="effort-commands">
       {commandNote && <span className="effort-note" role="status">{commandNote}</span>}
       <button type="button" className="ghost" onClick={() => void command({ name: "next" }, "wg next runs again.")} title="The coordinator reads Linear and publishes again at once.">Run wg next now</button>
@@ -230,8 +232,6 @@ export function App() {
   };
   const review = project?.review ?? REVIEW_DEFAULT;
 
-  // The viewer (a read-only page) shows the same graph with no control that writes.
-  const viewer = site.readOnly;
   const words = ownerWords();
   // Share with the viewer: the project label `shared` is the record. The link opens the project on the viewer of
   // its workspace (config `share_url`), which names the workspace with the same id. It has the id of the project,
@@ -579,7 +579,7 @@ export function App() {
           <Panel node={selected} now={now} graph={full} data={data} asks={link.asks.filter((a) => a.issue === selected.issue.identifier)}
             progress={link.progress.find((p) => p.issue === selected.issue.identifier)}
             agent={agentsFresh(agents, now) ? agents.agents.find((a) => a.issue === selected.issue.identifier) : undefined}
-            onDispatch={coordinator ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer}
+            onDispatch={canCommand ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer}
             onGo={(id) => { select(id); setFocus({ id, tick: Date.now() }); }} />
         )}
       </main>

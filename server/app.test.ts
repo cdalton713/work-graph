@@ -9,6 +9,7 @@ import { gunzipSync } from "node:zlib";
 import { serve } from "@hono/node-server";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
+import { serializeSigned } from "hono/utils/cookie";
 import type { Rules } from "./access.ts";
 import { SLOW_MS, contractHash, createApp } from "./app.ts";
 import { setTransport } from "./linear.ts";
@@ -1069,6 +1070,18 @@ describe("server status", () => {
   });
 });
 
+const hostedRoles: Rules = { port: 4747, tailnet: null, hosted: { host: "view.example.com" } };
+const rolesAuth = { domains: ["example.com"], owners: ["ada@example.com"], clientId: "client", clientSecret: "secret", secret: "a-session-secret-of-32-characters" };
+const rolesToken = "a-test-token-with-32-characters-or-more";
+const rolesHost = { host: "view.example.com" };
+const rolesHeaders = async (email: string) => {
+  const value = Buffer.from(JSON.stringify({ email, hd: "example.com", exp: Math.floor(Date.now() / 1000) + 600 })).toString("base64url");
+  return { ...rolesHost, cookie: (await serializeSigned("__Host-wg_session", value, rolesAuth.secret, { secure: true, path: "/" })).split(";")[0] };
+};
+const rolesPage = (now?: () => number) => createApp(hostedRoles, {
+  team: "CD", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth, linkToken: rolesToken, watchMs: 0, now,
+});
+
 describe("read-only viewer", () => {
   const viewer = () => createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true });
 
@@ -1113,7 +1126,7 @@ describe("read-only viewer", () => {
     expect(list.projects).toMatchObject([{ id: "p1", shared: true, paused: true }]);
     expect(calls).toHaveLength(1);
   });
-  it("gives the graph and the comments only for a shared project, with no issue of another project", async () => {
+  it.each([false, true])("reduces the graph, status, overview and comments (signed-in role: %s)", async (mixed) => {
     const asked: string[] = [];
     // The project of each issue in Linear now. i1 moves later.
     const home: Record<string, string> = { i1: "p1", i9: "p9" };
@@ -1156,8 +1169,9 @@ describe("read-only viewer", () => {
       else data = { issueLabels: { nodes: [], pageInfo: { hasNextPage: false } } };
       return { ok: true, json: async () => ({ data }) };
     }));
-    const page = viewer();
-    const get = (path: string, project?: string) => page.request(path, { headers: { ...local, ...(project ? { "x-project": project } : {}) } });
+    const page = mixed ? rolesPage() : viewer();
+    const headers = mixed ? await rolesHeaders("viewer@example.com") : local;
+    const get = (path: string, project?: string) => page.request(path, { headers: { ...headers, ...(project ? { "x-project": project } : {}) } });
     const graph = await get("/api/projects/p1/graph");
     expect(graph.status).toBe(200);
     const text = await graph.text();
@@ -1254,7 +1268,7 @@ describe("read-only viewer", () => {
     hold = false;
     expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(404);
   });
-  it("gives no project while Linear does not confirm that it is shared", async () => {
+  it.each([false, true])("gives no project or stale graph when Linear fails (signed-in role: %s)", async (mixed) => {
     let down = false, graphDown = false;
     vi.stubEnv("LINEAR_API_KEY", "test-key");
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
@@ -1275,28 +1289,30 @@ describe("read-only viewer", () => {
     const start = Date.now();
     const clock = vi.spyOn(Date, "now").mockReturnValue(start);
     try {
-      const page = viewer();
-      expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+      const page = mixed ? rolesPage() : viewer();
+      const headers = mixed ? await rolesHeaders("viewer@example.com") : local;
+      expect((await page.request("/api/projects/p1/graph", { headers })).status).toBe(200);
       // The list is too old now, and Linear is down: the server cannot know that the project is still shared.
       down = true;
       clock.mockReturnValue(start + 61_000);
-      const closed = await page.request("/api/projects/p1/graph", { headers: local });
+      const closed = await page.request("/api/projects/p1/graph", { headers });
       expect(closed.status).toBe(503);
       expect(await closed.json()).toEqual({ error: "Linear did not confirm that this project is shared. Try again." });
-      expect((await page.request("/api/issues/i1/comments", { headers: { ...local, "x-project": "p1" } })).status).toBe(503);
+      expect((await page.request("/api/issues/i1/comments", { headers: { ...headers, "x-project": "p1" } })).status).toBe(503);
       down = false;
       clock.mockReturnValue(start + 70_000);
-      expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+      expect((await page.request("/api/projects/p1/graph", { headers })).status).toBe(200);
       // Linear gives the list but not the graph: the viewer gives no older graph, in which an issue can be that
       // moved to another project since. The full page gives its last graph, marked stale.
-      const owner = app();
-      expect((await owner.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+      const owner = mixed ? page : app();
+      const ownerHeaders = mixed ? await rolesHeaders("ada@example.com") : local;
+      expect((await owner.request("/api/projects/p1/graph", { headers: ownerHeaders })).status).toBe(200);
       graphDown = true;
       clock.mockReturnValue(start + 100_000);
-      const old = await page.request("/api/projects/p1/graph", { headers: local });
+      const old = await page.request("/api/projects/p1/graph", { headers });
       expect(old.status).toBeGreaterThanOrEqual(500);
       expect(await old.json()).not.toHaveProperty("issues");
-      expect(await (await owner.request("/api/projects/p1/graph", { headers: local })).json()).toMatchObject({ stale: true });
+      expect(await (await owner.request("/api/projects/p1/graph", { headers: ownerHeaders })).json()).toMatchObject({ stale: true });
     } finally {
       clock.mockRestore();
     }
@@ -1464,6 +1480,112 @@ describe("sign-in of the viewer", () => {
     expect(() => createApp(rules, { ...options, readOnly: true, auth })).toThrow("the sign-in needs a hosted page");
     expect(() => createApp(hosted, { ...options, auth })).toThrow("auth.owners");
     expect(() => createApp(hosted, { ...options, linkToken: "", auth: { ...auth, owners: ["ada@example.com"] } })).toThrow("WG_LINK_TOKEN");
+  });
+
+  it.each(["expiry", "logout"])("filters real viewer sockets and closes owner sockets on %s", async (endSession) => {
+    let shared = true;
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const list = vi.fn(async () => ({ ok: true, json: async () => ({ data: { teams: { nodes: [{ projects: {
+      nodes: [{ id: "p1", name: "Shared", url: "u", status: null, labels: { nodes: shared ? [{ name: "shared", parent: null }] : [] } },
+        { id: "p2", name: "Private", url: "u", status: null }],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    } }] } } }) }));
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", list);
+    const page = rolesPage(() => now);
+    const http = serve({ fetch: page.fetch, port: 0, hostname: "127.0.0.1" });
+    page.injectWebSocket(http as never);
+    const origin = "https://view.example.com";
+    const owner = { ...await rolesHeaders("ada@example.com"), origin };
+    const viewer = { ...await rolesHeaders("viewer@example.com"), origin };
+    const sockets: WebSocket[] = [];
+    const peer = { send: () => {}, close: () => {} };
+    const ref = { workspace: "work", id: "p1" };
+    const coordinator = page.link.hub.joinCoordinator(peer, ref);
+    const send = (type: string, payload: unknown) => coordinator.receive(JSON.stringify({ v: 1, type, payload }));
+    send("hello", { session: "private-session", host: "private-host", plan: "private-path" });
+    page.link.hub.joinCoordinator({ ...peer }, ref).receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "other-session" } }));
+    send("asks", { asks: [{ id: "q", body: "private question" }] });
+    send("agents", { agents: [{ id: "a", said: "private reply" }] });
+    send("progress", { nodes: [{ key: "a", evidence: "private evidence" }] });
+    try {
+      if (!http.listening) await new Promise<void>((resolve) => http.once("listening", resolve));
+      const connect = async (headers: typeof owner, project = "") => {
+        const url = `ws://127.0.0.1:${(http.address() as AddressInfo).port}/api/link?role=page&workspace=work${project}`;
+        const ws = new WebSocket(url, { headers });
+        sockets.push(ws);
+        const messages: { type: string; project: { id: string }; payload: unknown }[] = [];
+        ws.on("message", (data) => messages.push(JSON.parse(data.toString())));
+        const closed = new Promise<number>((resolve) => ws.once("close", resolve));
+        await new Promise<void>((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
+        return { messages, closed };
+      };
+      const own = await connect(owner, "&project=p1");
+      const view = await connect(viewer, "&project=p1");
+      const overview = await connect(viewer);
+      await vi.waitFor(() => expect(own.messages.map((m) => m.type)).toEqual(["presence", "asks", "progress", "agents"]));
+      expect((await page.request("/api/status", { headers: viewer })).status).toBe(200);
+      expect(await (await page.request("/api/status", { headers: viewer })).json()).toMatchObject({ rooms: [], cache: 0 });
+      expect(await (await page.request("/api/status", { headers: owner })).json()).toMatchObject({ rooms: [{ project: "p1", pages: 2 }] });
+      expect((await page.request("/api/projects/p2/presence", { headers: viewer })).status).toBe(404);
+      const presence = await (await page.request("/api/projects/p1/presence", { headers: viewer })).json();
+      expect(presence).toMatchObject({ queued: 0, waiting: 0, coordinators: [{ host: "", plan: "" }, { host: "", plan: "" }] });
+      expect(new Set(presence.coordinators.map((row: { session: string }) => row.session)).size).toBe(2);
+
+      const calls = list.mock.calls.length;
+      now += 6_000;
+      page.link.hub.publish({ ...ref, id: "p2" }, "changed", { by: "page", what: "issue", issues: ["WG-2"] });
+      send("wrote", { issues: ["WG-1"] });
+      await vi.waitFor(() => expect(overview.messages.map((m) => m.type)).toEqual(["presence", "changed"]));
+      expect(view.messages.map((m) => m.type)).toEqual(["presence", "changed"]);
+      expect(view.messages[1]).toMatchObject({ project: { id: "p1" }, payload: { issues: [] } });
+      expect(JSON.stringify(view.messages)).not.toContain("private-");
+      expect(list).toHaveBeenCalledTimes(calls);
+
+      now += 60_000;
+      send("wrote", { issues: ["WG-1"] });
+      await vi.waitFor(() => expect(own.messages.filter((m) => m.type === "changed")).toHaveLength(2));
+      expect(view.messages).toHaveLength(2);
+      expect(overview.messages).toHaveLength(2);
+      expect(list).toHaveBeenCalledTimes(calls);
+
+      await page.request("/api/projects", { headers: viewer });
+      shared = false;
+      await page.request("/api/projects", { headers: viewer });
+      send("wrote", { issues: ["WG-1"] });
+      await vi.waitFor(() => expect(own.messages.filter((m) => m.type === "changed")).toHaveLength(3));
+      expect(view.messages).toHaveLength(2);
+      expect(overview.messages).toHaveLength(2);
+
+      if (endSession === "logout") await page.request("/auth/logout", { headers: owner });
+      else now += 600_000;
+      send("wrote", { issues: ["WG-1"] });
+      await expect(own.closed).resolves.toBe(1008);
+      expect(own.messages.filter((m) => m.type === "changed")).toHaveLength(3);
+    } finally {
+      for (const ws of sockets) ws.terminate();
+      page.link.stop();
+      http.close();
+      clock.mockRestore();
+    }
+  });
+
+  it("allows only the coordinator reads with a token and no session", async () => {
+    const page = rolesPage();
+    const headers = { ...host, authorization: `Bearer ${rolesToken}` };
+    expect(await (await page.request("/api/config", { headers })).json()).toMatchObject({ role: null, link: null });
+    expect(await (await app().request("/api/config", { headers: local })).json()).toMatchObject({ role: "owner", link: "/api/link" });
+    for (const path of ["/api/status", "/api/projects/p1/presence", "/healthz"]) {
+      expect((await page.request(path, { headers })).status).toBe(200);
+    }
+    for (const path of ["/api/projects", "/api/overview", "/api/projects/p1/graph", "/api/issues/i1/comments"]) {
+      expect((await page.request(path, { headers })).status).toBe(401);
+    }
+    expect((await page.request("/api/projects/p1/commands", {
+      method: "POST", headers: { ...headers, origin: "https://view.example.com", "content-type": "application/json" },
+      body: JSON.stringify({ name: "next" }),
+    })).status).toBe(401);
   });
 
   it("gives owners and viewers different access on the same page", async () => {

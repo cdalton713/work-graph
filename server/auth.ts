@@ -17,9 +17,9 @@ export interface Auth {
   /** The key that signs the cookies (`WG_SESSION_SECRET`), at least 32 characters. */
   secret: string;
 }
-export interface Session { email: string }
+export interface Session { email: string; id: string; expiresAt: number }
 /** What the session cookie holds: the address, the Workspace domain of its account, and the end time (epoch s). */
-interface SessionValue { email: string; hd: string; exp: number }
+interface SessionValue { email: string; hd: string; exp: number; id?: string }
 
 /** The path that starts a sign-in. A 401 of the API names it. */
 export const LOGIN_PATH = "/auth/login";
@@ -54,10 +54,11 @@ const allowed = (auth: Auth, email: string, hd: string) => auth.domains.includes
  * an account that the config no longer lets in.
  */
 export async function sessionOf(c: Context, auth: Auth, now: () => number): Promise<Session | null> {
-  const value = unpack(await getSignedCookie(c, auth.secret, SESSION_COOKIE, "host"));
+  const signed = await getSignedCookie(c, auth.secret, SESSION_COOKIE, "host");
+  const value = unpack(signed);
   if (!value || typeof value.email !== "string" || typeof value.hd !== "string" || typeof value.exp !== "number") return null;
   if (value.exp * 1000 <= now() || !allowed(auth, value.email, value.hd)) return null;
-  return { email: value.email };
+  return { email: value.email, id: typeof value.id === "string" ? value.id : String(signed), expiresAt: value.exp * 1000 };
 }
 
 /**
@@ -98,7 +99,7 @@ export function accountOf(idToken: unknown, auth: Auth, now: () => number): { em
  * The routes `/login`, `/callback`, and `/logout` (under `/auth`). `origin` is the HTTPS origin of the page:
  * Google sends the browser back to `<origin>/auth/callback`, which the OAuth client must name as a redirect URI.
  */
-export function authRoutes(auth: Auth, origin: () => string, now: () => number): Hono {
+export function authRoutes(auth: Auth, origin: () => string, now: () => number, onLogout: (session: Session) => void): Hono {
   const routes = new Hono();
   const redirectUri = () => `${origin()}/auth/callback`;
   routes.get("/login", async (c) => {
@@ -133,10 +134,12 @@ export function authRoutes(auth: Auth, origin: () => string, now: () => number):
     const account = accountOf(token.id_token, auth, now);
     if ("refused" in account) return c.json({ error: account.refused }, 403);
     const exp = Math.floor(now() / 1000) + SESSION_S;
-    await setSignedCookie(c, SESSION_COOKIE, pack({ email: account.email, hd: account.hd, exp } satisfies SessionValue), auth.secret, cookie(SESSION_S));
+    await setSignedCookie(c, SESSION_COOKIE, pack({ email: account.email, hd: account.hd, exp, id: randomBytes(24).toString("base64url") } satisfies SessionValue), auth.secret, cookie(SESSION_S));
     return c.redirect(localUrl(sent.next, origin()), 302);
   });
-  routes.get("/logout", (c) => {
+  routes.get("/logout", async (c) => {
+    const session = await sessionOf(c, auth, now);
+    if (session) onLogout(session);
     deleteCookie(c, SESSION_COOKIE, { path: "/", secure: true, prefix: "host" });
     return c.redirect(`${origin()}/`, 302);
   });

@@ -256,6 +256,9 @@ uses this page as the viewer address when the workspace has no `share_url`.
 
 `GET /api/config` gives the signed-in `role` and the `link` path that the page opens.
 Set `WG_READ_ONLY` to give each account viewer access and turn off the link.
+On a full page with sign-in, the coordinator token alone allows GET requests to `/api/status` and
+`/api/projects/<id>/presence`. The token also opens the coordinator socket. Page sockets need a session.
+`/api/config` and `/healthz` are open.
 
 ## Host a read-only viewer
 
@@ -280,14 +283,13 @@ shared, and they can change nothing. Your own page stays where it is, and each c
   accepts an account only when Google says that its email is verified, and both its Workspace domain (`hd`) and
   the domain of its address are in the list. A personal Google account has no Workspace domain. A session is a
   signed cookie that lasts 7 days. A new `WG_SESSION_SECRET` ends each session, and a domain that leaves the list
-  ends the sessions of its accounts at their next request. Without a
-  session, each API route except `/api/config` gives 401. The server refuses to start a sign-in on a page that
-  is not read-only or not hosted, and with a secret that is missing.
+  ends the sessions of its accounts at their next request. Sign-in needs a hosted page and all sign-in
+  secrets. On a full page, it also needs at least one owner and a link token.
 - **Share a project.** The plain Linear project label `shared` is the record. A viewer lists a project, and
   gives its graph and comments, only for a project that has the label; each other project gives 404. Set the label
-  with the **Share** button of your own page (it needs `share_url` in the config of the workspace), or in Linear.
-  The button then shows the link to copy: `<share_url>/?workspace=<id>&project=<project id>`. The viewer must name
-  the workspace with the same `id`.
+  with the **Share** button on the full page, or in Linear. The button uses the workspace's `share_url`
+  if set. On a full page with sign-in, it otherwise uses that page's address. A full page without sign-in
+  needs `share_url` to show the button. The viewer must name the workspace with the same `id`.
 - **When a share ends.** The viewer decides from its newest project list from Linear. It reads the list for each
   overview poll of each open page, and again when its copy is 60 s old. So a project that loses the label leaves
   the viewer at the next list, in at most 60 s. Each server process has its own list: where a host runs more than

@@ -14,7 +14,7 @@ import { parseCard, statusName } from "../src/lib/graph.ts";
 import { type Changed, type ProjectRef, projectKey } from "../src/lib/link.ts";
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal } from "./access.ts";
-import { type Auth, LOGIN_PATH, authRoutes, sessionOf } from "./auth.ts";
+import { type Auth, type Session, LOGIN_PATH, authRoutes, sessionOf } from "./auth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
@@ -84,8 +84,8 @@ export interface AppOptions {
    */
   readOnly?: boolean;
   /**
-   * The sign-in of a hosted viewer (`server/auth.ts`). With it, the API needs a session, except `/api/config`.
-   * None: the host check is the only gate.
+   * Hosted sign-in (`server/auth.ts`). The API needs a session except for config and coordinator reads.
+   * Without sign-in, the API uses the host and origin checks.
    */
   auth?: Auth | null;
   /** The shared secret for coordinator sockets and API reads. */
@@ -148,6 +148,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (auth && !email) return null;
     if (readOnly || (email && !auth?.owners?.includes(email))) return "viewer";
     return "owner";
+  };
+  const revoked = new Map<string, number>();
+  const sessionActive = (session: Session) => clock() < session.expiresAt && !revoked.has(session.id);
+  const signOut = (session: Session) => {
+    for (const [id, expiresAt] of revoked) if (expiresAt <= clock()) revoked.delete(id);
+    revoked.set(session.id, session.expiresAt);
   };
   // The overview and the graph rules on the server use the same names as the page.
   configureSite({ human, defaultWorkspace: workspaces[0].id });
@@ -246,15 +252,18 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const pageChanged = (ref: ProjectRef | null, what: Changed["what"], issues: string[]) => {
     if (ref) hub.publish(ref, "changed", { by: "page", what, issues });
   };
-  /** The count of the project lists that started, and the number of the list that `names` holds. */
+  /** The count of lists started and the order of the latest list used for shared access. */
   const lists = { started: 0, stored: 0 };
+  // wg doctor uses status. wg wake uses project presence.
+  const coordinatorReads = [/^\/api\/status$/, /^\/api\/projects\/[^/]+\/presence$/];
   const api = new Hono<{ Variables: { viewer: boolean } }>();
   // The API can change Linear with the user's key. Accept only this page as the caller.
   api.use(async (c, next) => {
     const header = (name: string) => c.req.header(name);
     const host = refusal("GET", header, rules);
     if (host) return c.json({ error: host }, 403);
-    const session = auth ? await sessionOf(c, auth, clock) : null;
+    const signed = auth ? await sessionOf(c, auth, clock) : null;
+    const session = signed && sessionActive(signed) ? signed : null;
     const role = roleOf(session?.email);
     const viewer = readOnly || role === "viewer";
     const method = c.req.method;
@@ -268,7 +277,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         link: !readOnly && role ? "/api/link" : null,
       });
     }
-    const tokenRead = method === "GET" && hasLinkToken(header("authorization"));
+    const tokenRead = method === "GET" && (readOnly || coordinatorReads.some((route) => route.test(c.req.path)))
+      && hasLinkToken(header("authorization"));
     if (auth && !session && !tokenRead) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     c.set("viewer", viewer);
     await next();
@@ -305,6 +315,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         : []),
     };
     const shared = { ...list, projects: list.projects.filter((p) => p.shared) };
+    // A slower list that started earlier cannot restore a share removed from the newer list.
     if ((auth || readOnly) && order > lists.stored) {
       lists.stored = order;
       sharedNames.list = shared;
@@ -455,6 +466,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const workspace = linearWorkspace.getStore()!;
     await setShared(c.req.param("id"), shared, workspace.team, workspace.teamLabels);
     names.at = 0;
+    // A viewer can get 404 while the list is empty, until the next list confirms the share.
     sharedNames.at = 0;
     sharedNames.list = null;
     lists.stored = lists.started;
@@ -548,7 +560,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       return c.json({ error: "coordinator token required" }, 401);
     }
     const session = auth && role === "page" ? await sessionOf(c, auth, clock) : null;
-    if (auth && role === "page" && !session) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    if (auth && role === "page" && (!session || !sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     const viewer = role === "page" && roleOf(session?.email) === "viewer";
     // The server stops: it takes no new link socket (also below, for an upgrade that waited for the project).
     const restarting = () => c.json({ error: "the server restarts" }, 503);
@@ -562,23 +574,33 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (hub.closing) return restarting();
     c.set("linkRef" as never, (id ? { workspace, id } : null) as never);
     c.set("linkViewer" as never, viewer as never);
+    c.set("linkSession" as never, session as never);
     return next();
   }, upgradeWebSocket((c) => {
     const ref = c.get("linkRef" as never) as ProjectRef | null;
     const role = c.req.query("role");
     const viewer = c.get("linkViewer" as never) as boolean;
+    const session = c.get("linkSession" as never) as Session | null;
     let connection: Connection | null = null;
     return {
       onOpen: (_event, ws) => {
         // The raw socket of `ws` has the ping frames of the heartbeat, which WSContext does not have.
         const raw = ws.raw as import("ws").WebSocket;
+        const canSend = () => {
+          if (!session || (sessionActive(session) && roleOf(session.email) === (viewer ? "viewer" : "owner"))) return true;
+          ws.close(1008, "session ended");
+          return false;
+        };
         const peer = {
-          send: (text: string) => ws.send(text), close: (code?: number, reason?: string) => ws.close(code, reason),
-          ping: () => raw.ping(), terminate: () => raw.terminate(),
+          send: (text: string) => { if (canSend()) ws.send(text); },
+          close: (code?: number, reason?: string) => ws.close(code, reason),
+          ping: () => { if (canSend()) raw.ping(); },
+          terminate: () => raw.terminate(),
         };
         if (role === "coordinator") connection = hub.joinCoordinator(peer, ref!);
-        else if (viewer) connection = hub.joinViewer(peer, ref, async (project) =>
-          !!(await sessionOf(c, auth!, clock)) && await sharedProject(project.id, project.workspace).then(() => true, () => false));
+        else if (viewer) connection = hub.joinViewer(peer, ref, (project) =>
+          Date.now() - sharedNames.at <= 60_000 && !!sharedNames.list?.projects.some(
+            (p) => p.workspace === project.workspace && p.id === project.id));
         else connection = hub.joinPage(peer, ref);
         raw.on("pong", () => connection?.pong());
       },
@@ -594,7 +616,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       if (reason) return c.json({ error: reason }, 403);
       await next();
     });
-    app.route("/auth", authRoutes(auth, () => `https://${rules.hosted!.host}`, clock));
+    app.route("/auth", authRoutes(auth, () => `https://${rules.hosted!.host}`, clock, signOut));
   }
 
   app.get("*", async (c) => {

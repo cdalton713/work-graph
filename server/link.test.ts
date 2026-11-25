@@ -56,7 +56,7 @@ describe("LinkHub", () => {
     a.receive(hello("private-session"));
     b.receive(hello("another-session"));
     hub.joinPage(owner, A);
-    const shared = async (ref: typeof A) => ref.id === A.id;
+    const shared = (ref: typeof A) => ref.id === A.id;
     hub.joinViewer(viewer, A, shared);
     hub.joinViewer(overview, null, shared);
     a.receive(msg("asks", { asks: [{ id: "q", body: "private question" }] }));
@@ -68,7 +68,7 @@ describe("LinkHub", () => {
     for (const page of [viewer, overview]) {
       expect(page.sent.every(({ type, project }) => ["presence", "changed"].includes(type) && project.id === A.id)).toBe(true);
       expect(page.of("presence")[0].payload).toMatchObject({
-        queued: 0, coordinators: [{ session: "", host: "", plan: "", head: null, connected: true }],
+        queued: 0, coordinators: [{ session: "0", host: "", plan: "", head: null, connected: true }],
       });
       expect(page.of("changed")[0].payload).toMatchObject({ issues: [] });
     }

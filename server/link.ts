@@ -84,7 +84,7 @@ export class LinkHub {
   private rooms = new Map<string, Room>();
   /** Pages with no project: the overview. They get the presence and the asks of every project. */
   private watchers = new Set<Peer>();
-  private viewers = new Map<Peer, { ref: ProjectRef | null; allows: (project: ProjectRef) => Promise<boolean> }>();
+  private viewers = new Map<Peer, { ref: ProjectRef | null; allows: (project: ProjectRef) => boolean }>();
   private now: () => Date;
   /** wg changed Linear (`wrote`): the server forgets its cached graph before the pages load it again. */
   private onWrote: (ref: ProjectRef) => void;
@@ -265,8 +265,8 @@ export class LinkHub {
   viewerPresence(ref: ProjectRef): Presence {
     return {
       queued: 0,
-      coordinators: this.presence(ref).coordinators.map((c) => ({
-        ...c, session: "", host: "", plan: "", head: null,
+      coordinators: this.presence(ref).coordinators.map((c, index) => ({
+        ...c, session: String(index), host: "", plan: "", head: null,
       })),
     };
   }
@@ -274,16 +274,15 @@ export class LinkHub {
   private sendViewer(peer: Peer, ref: ProjectRef, notice: string) {
     const viewer = this.viewers.get(peer);
     if (!viewer || (viewer.ref && projectKey(viewer.ref) !== projectKey(ref))) return;
-    void viewer.allows(ref).then((allowed) => {
-      if (allowed && this.viewers.get(peer) === viewer && !this.closing) peer.send(notice);
-    }, () => {});
+    if (!this.closing && viewer.allows(ref)) peer.send(notice);
   }
 
   /** A viewer receives notices only while the server confirms the project is shared. */
-  joinViewer(peer: Peer, ref: ProjectRef | null, allows: (project: ProjectRef) => Promise<boolean>): Connection {
+  joinViewer(peer: Peer, ref: ProjectRef | null, allows: (project: ProjectRef) => boolean): Connection {
     if (this.closing) return this.refuse(peer);
     this.viewers.set(peer, { ref, allows });
-    for (const project of ref ? [ref] : [...this.rooms.values()].map((room) => room.ref)) {
+    const rooms = ref ? [this.room(ref)] : this.rooms.values();
+    for (const { ref: project } of rooms) {
       this.sendViewer(peer, project, JSON.stringify(this.envelope(project, "presence", this.viewerPresence(project))));
     }
     return this.track(peer, ref, () => { this.viewers.delete(peer); });
@@ -294,7 +293,7 @@ export class LinkHub {
     return [...this.rooms.values()].map((r) => ({
       workspace: r.ref.workspace, project: r.ref.id,
       coordinators: [...r.coordinators.values()].filter((c) => c.peer).length,
-      pages: r.pages.size, queued: r.queue.length, asks: r.asks.length,
+      pages: r.pages.size + [...this.viewers.values()].filter(({ ref }) => ref && projectKey(ref) === projectKey(r.ref)).length, queued: r.queue.length, asks: r.asks.length,
     }));
   }
 

@@ -98,6 +98,7 @@ export interface SiteConfig {
   version: string;
   /** The page hides edit controls for viewers. */
   readOnly: boolean;
+  /** The current page role. Null when a sign-in is required. */
   role: "owner" | "viewer" | null;
   /** The same-origin WebSocket path, when this page can open the link. */
   link: string | null;

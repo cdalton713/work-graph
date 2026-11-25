@@ -5,6 +5,7 @@ import "./styles.css";
 import { App } from "./App";
 import { SignIn } from "./components/SignIn";
 import { configureSite, pageLink } from "./lib/site";
+import { pageLinkPath } from "./lib/link";
 import type { SiteConfig } from "./lib/types";
 
 // The human's name and the default workspace come from the server's config before the first render.
@@ -15,7 +16,7 @@ fetch("/api/config")
   .catch(() => ({}))
   .then((config: Partial<SiteConfig>) => {
     configureSite(config);
-    pageLink.path = config.link === undefined ? (config.readOnly ? null : "/api/link") : config.link;
+    pageLink.path = pageLinkPath(config);
     const signIn = !!config.auth && !config.user;
     createRoot(document.getElementById("root")!).render(<StrictMode>{signIn ? <SignIn /> : <App />}</StrictMode>);
   });

@@ -10,9 +10,10 @@ A host serves only the page and its API. The coordinator and workers run on the 
 Each user who runs an effort needs access to Linear and a local installation of `gh`, `st`, Orca,
 `uv`, and an agent CLI (Claude Code or Codex).
 
-The `Dockerfile` and Vercel support both modes. The full page has had no live test on Vercel. Keep each new
-hosting feature off by default. Read deployment names from the installation config and
-environment. Keep deployment-specific settings out of the repository.
+The `Dockerfile` and Vercel support both modes. A live function test with managed Redis verified the
+bearer-token WebSocket upgrade, ping and pong frames, and the planned socket close before the function
+time limit. Keep each new hosting feature off by default. Read deployment names from the installation
+config and environment. Keep deployment-specific settings out of the repository.
 
 ## Before each push
 

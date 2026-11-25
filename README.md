@@ -215,7 +215,9 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
 - `WG_LINK_PONG_MS` (optional): time in milliseconds to wait for a pong before ending a socket.
   Use 25000 to 300000 milliseconds. A blank value uses the default of 45000.
   Set it to 0 to turn off the deadline if the host drops pong frames.
-  Set a socket age limit when you turn off the pong deadline. These settings have had no live test on Vercel.
+  Set a socket age limit when you turn off the pong deadline. A live function test with managed Redis
+  verified the bearer-token WebSocket upgrade, ping and pong frames, and the planned socket close before
+  the function time limit.
 - `WG_STATE_DIR` (optional): a directory where the link keeps the queue of each project and the open worker
   questions over a restart. Without it, a restart loses them: a reply or a command that a coordinator did not get
   yet does not arrive. The server writes one file, `link-state.json` (mode 600), at most 1 s after a change, and
@@ -320,13 +322,12 @@ timer runs, the server closes the socket in time for the client to reconnect. On
 limit, raise `maxDuration` in `vercel.json` and `VERCEL_MAX_DURATION` in `server/vercel.ts` together.
 Keep a custom `WG_LINK_MAX_AGE` at least 20 seconds below the function limit. The default keeps 30 seconds.
 
-The full page has had no live test on Vercel. Live checks cover the WebSocket upgrade through the function,
-ping and pong frames, and timers in an instance that holds only a socket. If pong frames do not reach the
-app, set `WG_LINK_PONG_MS=0`. The function has no stop hook. If the host ends the instance before the
-planned close, clients reconnect and Redis keeps the link state. `wg next --wait` also polls Linear, so a
-missed timer check can delay an update.
+A live function test with managed Redis verified the WebSocket upgrade with a bearer token from the
+Python link client, ping and pong frames, and the planned socket close before the function time limit.
+If pong frames do not reach the app, set `WG_LINK_PONG_MS=0`. The function has no stop hook. If the host
+ends the instance before the planned close, clients reconnect and Redis keeps the link state.
+`wg next --wait` also polls Linear, so a missed timer check can delay an update.
 
-The live check used a bearer token with the Python link client. A socket stayed open for 30 seconds.
 The server waits up to three seconds for Redis to connect before returning 503 with `Retry-After: 1`.
 After a pause, it checks a timed-out connection with a fresh ping before it reconnects.
 

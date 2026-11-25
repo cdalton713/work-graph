@@ -137,7 +137,11 @@ export function connectRedis(url: string, prefix = LINK_PREFIX, changed: (ready:
             subscribed = true;
             check();
           }, async (error) => {
-            await failure(sub, error, sentAt);
+            const failed = await failure(sub, error, sentAt);
+            if (failed instanceof RedisCommandFailed) {
+              lost();
+              return;
+            }
             // A successful PING alone cannot establish the subscription.
             if (!stopped && sub.status === "ready") sub.disconnect(true);
           });

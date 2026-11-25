@@ -19,7 +19,7 @@ import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
 import { LinearError, addComment, linearBudget, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
-import { type Connection, LinkHub, QUEUE_MAX, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
+import { type Connection, LinkHub, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
 import { redisLinkState } from "./linkstate-redis.ts";
@@ -181,13 +181,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       void flushLogouts();
     } else hub.restartSockets();
   }, readOnly) : null;
-  const redisState = redis ? redisLinkState(redis, redisPrefix) : null;
+  const redisState = redis ? redisLinkState(redis, redisPrefix, undefined, linkMaxAgeMs ? RECONNECT_GRACE_MS : 0) : null;
   if (redis && stateDir) console.log("Redis link store ignores WG_STATE_DIR");
   const store = redis || linkState ? null : linkStore(stateDir, dist, workspaces, (linkTimers ?? realLinkTimers).after);
   const hub = new LinkHub(
     now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers,
-    store, redisState ?? linkState, redis && !readOnly ? redisLinkBus(redis, redisPrefix) : linkBus, rememberEnded,
-    { maxAgeMs: linkMaxAgeMs, pongMs: linkPongMs },
+    store, redisState ?? linkState, redis && !readOnly ? redisLinkBus(redis, redisPrefix) : linkBus,
+    { maxAgeMs: linkMaxAgeMs, pongMs: linkPongMs }, rememberEnded,
   );
   let logoutTimer: ReturnType<typeof setInterval> | undefined;
   let flushing: Promise<void> | undefined;
@@ -727,6 +727,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   }, upgradeWebSocket((c) => {
     const ref = c.get("linkRef" as never) as ProjectRef | null;
     const role = c.req.query("role");
+    const resume = c.req.query("resume") === "1";
     const viewer = c.get("linkViewer" as never) as boolean;
     const session = c.get("linkSession" as never) as Session | null;
     let connection: Connection | null = null;
@@ -772,8 +773,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           connection = role === "coordinator" ? await hub.joinCoordinator(peer, ref!)
             : viewer ? await hub.joinViewer(peer, ref, (project) =>
             Date.now() - sharedNames.at <= 60_000 && !!sharedNames.list?.projects.some(
-              (p) => p.workspace === project.workspace && p.id === project.id))
-            : await hub.joinPage(peer, ref);
+              (p) => p.workspace === project.workspace && p.id === project.id), resume)
+            : await hub.joinPage(peer, ref, resume);
         })().catch(unavailable);
         raw.on("pong", () => connection?.pong());
         if (redis) raw.on("ping", () => connection?.pong());
@@ -827,14 +828,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const check = async () => {
     if (readOnly || !linkAvailable()) return;
     const active = await hub.active({ forCheck: true });
-    for (const key of [...seen.keys()]) if (!active.some((r) => projectKey(r) === key)) seen.delete(key);
+    const present = new Set((linkMaxAgeMs ? await hub.active({ forCheck: true, includeGrace: true }) : active).map(projectKey));
+    for (const key of seen.keys()) if (!present.has(key)) seen.delete(key);
     await checkAll(active);
     for (const ref of active) {
       const workspace = workspaces.find((w) => w.id === ref.workspace);
       if (!workspace) continue;
       // The coordinator can go away while the check of all projects waits for Linear: then no load for it.
       if (!(await hub.active({ forCheck: true })).some((r) => projectKey(r) === projectKey(ref))) {
-        seen.delete(projectKey(ref));
         continue;
       }
       try {

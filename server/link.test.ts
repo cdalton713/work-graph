@@ -28,7 +28,7 @@ function peer() {
   return p;
 }
 /** A clock and timers that move only when the test says so. */
-function fakeTime() {
+function fakeTime(earlyMs = 0) {
   const clock = { at: Date.parse("2026-11-20T00:00:00Z") };
   const jobs: { fn: () => void; at: number; every: number | null; off: boolean }[] = [];
   const add = (fn: () => void, ms: number, every: boolean) => {
@@ -43,7 +43,7 @@ function fakeTime() {
     for (;;) {
       const due = jobs.filter((j) => !j.off && j.at <= end).sort((a, b) => a.at - b.at)[0];
       if (!due) break;
-      clock.at = due.at;
+      clock.at = due.at - earlyMs;
       if (due.every) due.at += due.every; else due.off = true;
       due.fn();
     }
@@ -55,8 +55,53 @@ const msg = (type: string, payload: unknown = {}) => JSON.stringify({ v: 1, type
 const hello = (session: string) => msg("hello", { plan: "/plans/a", session, host: "mac", wg: "1" });
 
 describe("LinkHub", () => {
-  it.each(["timer", "receive", "delivery", "heartbeat"])("recycles an aged socket on %s", async (trigger) => {
+  it("recycles every short-lived page with real timers", async () => {
+    const hub = new LinkHub(undefined, undefined, undefined, null, undefined, undefined, { maxAgeMs: 40 });
+    const pages = Array.from({ length: 300 }, () => peer());
+    const connections = await Promise.all(pages.map((page) => hub.joinPage(page, null)));
+    await vi.waitFor(() => {
+      expect(pages.filter((page) => page.closed[0]?.code === 4001)).toHaveLength(300);
+    });
+    await Promise.all(connections.map((connection) => connection.closed()));
+  });
+
+  it.each(["timer", "heartbeat"])("announces expired shared grace by %s", async (trigger) => {
+    const time = fakeTime(1);
+    const timers = trigger === "timer" ? time.timers : { ...time.timers, after: () => () => {} };
+    const state = memoryLinkState(), bus = memoryLinkBus();
+    const first = new LinkHub(time.now, undefined, timers, null, state, bus, { maxAgeMs: 60_000 });
+    const other = new LinkHub(time.now, undefined, time.timers, null, state, bus);
+    const page = peer();
+    await other.joinPage(page, A);
+    const session = await first.joinCoordinator(peer(), A);
+    await session.receive(hello("s"));
+    await session.closed();
+    expect(await other.active()).toEqual([A]);
+    time.advance(15_000);
+    if (trigger === "heartbeat") await other.beat();
+    await vi.waitFor(() => expect(page.of("presence").at(-1)?.payload).toMatchObject({ coordinators: [{ connected: false }] }));
+  });
+
+  it.each(["receive", "timer", "pong deadline", "restart"])("keeps an ack in flight at %s", async (trigger) => {
     const time = fakeTime();
+    const hub = new LinkHub(time.now, undefined, time.timers, null, undefined, undefined, { maxAgeMs: trigger === "pong deadline" ? 60_000 : 1000 });
+    if (trigger === "pong deadline") hub.start();
+    const client = peer();
+    const session = await hub.joinCoordinator(client, A);
+    await session.receive(hello("s"));
+    const command = await hub.publish(A, "command", { name: "next", key: null, issue: null });
+    if (trigger === "receive") time.clock.at += 1000;
+    if (trigger === "timer") time.advance(1000);
+    if (trigger === "pong deadline") time.advance(DEAD_MS);
+    if (trigger === "restart") hub.restartSockets();
+    await session.receive(msg("ack", { ids: [command.id] }));
+    expect((await hub.presence(A)).queued).toBe(0);
+    expect(client.terminated || client.closed.length === 1).toBe(true);
+    await session.closed();
+  });
+
+  it.each(["timer", "receive", "delivery", "heartbeat"])("recycles an aged socket on %s", async (trigger) => {
+    const time = fakeTime(trigger === "timer" ? 1 : 0);
     const hub = new LinkHub(time.now, undefined, time.timers, null, undefined, undefined, { maxAgeMs: 1000 });
     const client = peer();
     const connection = await hub.joinCoordinator(client, A);
@@ -772,6 +817,36 @@ describe("/api/link over a real socket", () => {
     expect((await app.link.hub.presence(A)).coordinators).toMatchObject([{ connected: true, lastSeen: time.now().toISOString() }]);
   });
 
+  it("sends a graph change to a page joining after a planned close", async () => {
+    fakeLinear("WG");
+    const { port } = await start();
+    const origin = `http://127.0.0.1:${port}`;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=page&workspace=work&project=p1&resume=1`, { headers: { origin } });
+    const notices: Envelope[] = [];
+    closers.push(() => ws.close());
+    ws.on("message", (data) => notices.push(JSON.parse(String(data))));
+    await vi.waitFor(() => expect(notices.map(({ type }) => type)).toEqual(["presence", "asks", "progress", "changed"]));
+  });
+
+  it("keeps the Linear check baseline when it checks during reconnect grace", async () => {
+    const linear = fakeLinear("WG");
+    const time = fakeTime();
+    const { app } = await start(time.clock, time.timers, { linkMaxAgeMs: 60_000 });
+    const hub = app.link.hub;
+    const first = await hub.joinCoordinator(peer(), A);
+    await first.receive(hello("s"));
+    await app.link.check();
+    await first.closed();
+    await app.link.check();
+
+    linear.touch("2026-11-20T03:00:00Z");
+    time.clock.at += 11_000;
+    const next = peer();
+    await (await hub.joinCoordinator(next, A)).receive(hello("s"));
+    await app.link.check();
+    expect(next.of("changed")).toHaveLength(1);
+  });
+
   async function reconnectAcrossHubs(shared: Partial<AppOptions>) {
     fakeLinear("WG");
     const time = fakeTime();
@@ -802,7 +877,12 @@ describe("/api/link over a real socket", () => {
     expect(await presence()).toMatchObject({ coordinators: [{ connected: true, since }] });
     const closedAt = time.now().toISOString();
     await next.closed();
-    time.advance(15_000);
+    if (shared.redisUrl) {
+      time.clock.at += 15_000;
+      await a.app.link.hub.beat();
+    } else {
+      time.advance(15_000);
+    }
     expect(await presence()).toMatchObject({ coordinators: [{ connected: false, lastSeen: closedAt }] });
     await vi.waitFor(() => {
       const gone = page.of("presence").filter(({ payload }) =>
@@ -939,6 +1019,29 @@ describe("/api/link over a real socket", () => {
         { session: "second", connected: true }, { session: "first", connected: false, lost: true },
       ]);
     });
+  });
+
+  it.skipIf(!testRedis)("keeps reconnect grace when a coordinator lease expires before transport close", async () => {
+    const server = await startTestRedis();
+    closers.push(server.close);
+    const prefix = `test:${randomUUID()}:`;
+    const redis = connectRedis(server.url, prefix);
+    closers.push(redis.close);
+    const bus = redisLinkBus(redis, prefix);
+    const state = () => redisLinkState(redis, prefix, 250, 15_000);
+    const first = new LinkHub(undefined, undefined, undefined, null, state(), bus, { maxAgeMs: 60_000 });
+    const second = new LinkHub(undefined, undefined, undefined, null, state(), bus, { maxAgeMs: 60_000 });
+    const conn = await first.joinCoordinator(peer(), A);
+    await conn.receive(hello("s"));
+    const [{ since }] = (await first.presence(A)).coordinators;
+    await vi.waitFor(async () => expect(await first.active({ forCheck: true })).toEqual([]));
+    expect(await first.active({ forCheck: true, includeGrace: true })).toEqual([A]);
+    expect(await second.active()).toEqual([A]);
+    expect((await second.presence(A)).coordinators).toMatchObject([{ session: "s", connected: true }]);
+    await (await second.joinCoordinator(peer(), A)).receive(hello("s"));
+    await conn.closed();
+    expect(await second.active({ forCheck: true })).toEqual([A]);
+    expect((await second.presence(A)).coordinators).toMatchObject([{ session: "s", connected: true, since }]);
   });
 
   it.skipIf(!testRedis)("delivers Redis commands in queue order and suppresses older room snapshots", async () => {

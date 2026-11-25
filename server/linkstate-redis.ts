@@ -62,7 +62,7 @@ function socketIds(room: LinkRoom): Set<string> {
   return ids;
 }
 
-export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs = 60_000): LinkRoomState {
+export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs = 60_000, reconnectGraceMs = 0): LinkRoomState {
   const roomPrefix = prefix + "room:";
   const pagePrefix = prefix + "pages:";
   const refKey = ({ workspace, id }: ProjectRef) => JSON.stringify([workspace, id]);
@@ -117,6 +117,13 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
       if (seen && seen > coordinator.lastSeen) coordinator.lastSeen = seen;
       if (!active.has(socket)) {
         Object.assign(coordinator, { socket: null, lost: true });
+        // When the transport cannot report the close, the last renewal and lease length
+        // give the expiry. Reading again must not restart the grace period.
+        const expiry = Date.parse(coordinator.lastSeen) + leaseMs;
+        if (reconnectGraceMs > 0 && Number.isFinite(expiry)) {
+          coordinator.lastSeen = new Date(expiry).toISOString();
+          coordinator.reconnectUntil = expiry + reconnectGraceMs;
+        }
         expired = true;
       }
     }

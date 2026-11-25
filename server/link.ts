@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import {
   type AgentRow, type CoordinatorPresence, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
-  type Presence, type ProjectRef, type ToCoordinator, type ToPage, projectKey, RECYCLE_CODE, RESTART_CODE,
+  type Presence, type ProjectRef, type ToCoordinator, type ToPage, projectKey, RECYCLE_CODE, RECONNECT_GRACE_MS, RESTART_CODE,
 } from "../src/lib/link.ts";
 import type { RoomCounts } from "../src/lib/types.ts";
 import { memoryLinkBus, type LinkBus, type LinkEvent } from "./linkbus.ts";
@@ -13,7 +13,7 @@ import { RedisCommandFailed, RedisUnavailable } from "./redis.ts";
 import { ASKS_MAX, type LinkState as SavedState, type Store } from "./store.ts";
 
 export { QUEUE_MAX } from "./linkstate.ts";
-export { RECYCLE_CODE, RESTART_CODE } from "../src/lib/link.ts";
+export { RECYCLE_CODE, RECONNECT_GRACE_MS, RESTART_CODE } from "../src/lib/link.ts";
 
 /**
  * One open WebSocket, as the hub uses it. A peer with `ping` takes part in the heartbeat: the hub pings it and
@@ -32,9 +32,23 @@ export const GONE_MS = 24 * 60 * 60_000;
 export const PING_MS = 20_000;
 /** A socket that sent no pong for this long is dead: a machine that sleeps, or a lost network. Messages do not count. */
 export const DEAD_MS = 45_000;
-export const RECONNECT_GRACE_MS = 15_000;
 /** How long `shutdown` waits for the sockets to close. */
 export const SHUTDOWN_MS = 3_000;
+
+export function linkSettings(env: NodeJS.ProcessEnv) {
+  const duration = (name: string, min: number, max: number) => {
+    const raw = env[name]?.trim();
+    if (!raw) return undefined;
+    const value = Number(raw);
+    if (value === 0 || (value >= min && value <= max)) return value;
+    throw new Error(`${name} must be 0 or a number from ${min} to ${max}`);
+  };
+  const ageSeconds = duration("WG_LINK_MAX_AGE", 60, 2_147_483);
+  return {
+    linkMaxAgeMs: ageSeconds === undefined ? undefined : ageSeconds * 1000,
+    linkPongMs: duration("WG_LINK_PONG_MS", PING_MS + 5000, 300_000),
+  };
+}
 
 /** The timers of the hub (tests give fake ones). */
 export interface Timers { every: (fn: () => void, ms: number) => () => void; after: (fn: () => void, ms: number) => () => void }
@@ -55,6 +69,7 @@ interface Socket {
   allows?: (project: ProjectRef) => boolean;
   deadline: (() => void) | null;
   recycleAt: number;
+  recycling: boolean;
   arm: () => void;
   closed: (lost?: boolean) => Promise<void>;
 }
@@ -205,7 +220,7 @@ export class LinkHub {
   }
 
   private sendTo(socket: Socket, message: Envelope, sequence?: number) {
-    if (!this.canUse(socket)) return;
+    if (this.recycleIfDue(socket)) return;
     if (sequence !== undefined) {
       const key = JSON.stringify([projectKey(message.project), message.type]);
       if (sequence <= (socket.lastSent.get(key) ?? -1)) return;
@@ -215,7 +230,7 @@ export class LinkHub {
   }
 
   private sendQueue(socket: Socket, messages: Envelope[], sequence: number, replay = false) {
-    if (!this.canUse(socket)) return;
+    if (this.recycleIfDue(socket)) return;
     const last = socket.lastSent.get("queue") ?? -1;
     const previous = socket.queuedMessages;
     if (sequence <= last) {
@@ -247,7 +262,7 @@ export class LinkHub {
   }
 
   private async renewSockets() {
-    const sockets = [...this.sockets.values()].filter((socket) => socket.ref !== null && socket.leaseReady);
+    const sockets = [...this.sockets.values()].filter((socket) => socket.ref !== null && socket.leaseReady && !socket.recycling);
     const expired = await this.renewDue(sockets, true);
     const coordinators = new Map<string, Socket[]>();
     for (const socket of sockets) {
@@ -289,12 +304,14 @@ export class LinkHub {
 
   /** Ping local sockets and prune expired shared state. */
   async beat() {
-    for (const socket of this.sockets.values()) if (this.canUse(socket)) socket.peer.ping?.();
+    for (const socket of this.sockets.values()) if (!this.recycleIfDue(socket)) socket.peer.ping?.();
     try {
       if (this.shared.recoverWrites) await this.shared.recoverWrites();
       if (this.shared.renew) await this.renewSockets();
     } finally {
       const now = this.now().getTime();
+      // If the instance that armed the grace timer stops, another instance can announce expiry
+      // at its next heartbeat, up to one heartbeat later.
       const changed = await this.shared.prune(now - GONE_MS, now);
       if (changed?.length) await this.send(changed.map((room) => this.announce(room)));
     }
@@ -342,12 +359,12 @@ export class LinkHub {
     const { peer } = socket;
     let done = false;
     const cancelRecycle = Number.isFinite(socket.recycleAt)
-      ? this.timers.after(() => { this.canUse(socket); }, socket.recycleAt - this.now().getTime())
+      ? this.timers.after(() => this.recycle(socket), socket.recycleAt - this.now().getTime())
       : undefined;
     socket.arm = () => {
       socket.deadline?.();
       socket.deadline = null;
-      if (done || !peer.ping || !this.stopBeat || this.stopping || this.pongMs === 0) return;
+      if (done || socket.recycling || !peer.ping || !this.stopBeat || this.stopping || this.pongMs === 0) return;
       socket.deadline = this.timers.after(() => {
         socket.deadline = null;
         if (peer.terminate) peer.terminate();
@@ -373,24 +390,34 @@ export class LinkHub {
     };
     this.sockets.set(socket.id, socket);
     socket.arm();
-    return { receive: async () => { this.canUse(socket); }, closed: () => socket.closed(), pong: () => {
-      if (!this.canUse(socket)) return;
-      socket.arm();
-      if (this.shared.renew && socket.ref && socket.leaseReady && this.sockets.has(socket.id)) void this.renewDue([socket]).catch(reportLinkError);
-    } };
+    return {
+      receive: async () => { this.recycleIfDue(socket); },
+      closed: () => socket.closed(),
+      pong: () => {
+        if (!this.sockets.has(socket.id) || this.recycleIfDue(socket)) return;
+        socket.arm();
+        if (this.shared.renew && socket.ref && socket.leaseReady) void this.renewDue([socket]).catch(reportLinkError);
+      },
+    };
   }
 
-  private canUse(socket: Socket): boolean {
-    if (!this.sockets.has(socket.id)) return false;
-    if (this.closing || this.now().getTime() < socket.recycleAt) return true;
+  private recycleIfDue(socket: Socket): boolean {
+    if (this.now().getTime() >= socket.recycleAt) this.recycle(socket);
+    return socket.recycling;
+  }
+
+  private recycle(socket: Socket) {
+    if (this.closing || socket.recycling || !this.sockets.has(socket.id)) return;
+    socket.recycling = true;
+    socket.deadline?.();
+    socket.deadline = null;
+    // The transport can still receive frames until it reports the close.
     socket.peer.close(RECYCLE_CODE, "reconnect");
-    void socket.closed().catch(reportLinkError);
-    return false;
   }
 
   private socket(peer: Peer, ref: ProjectRef | null, audience: Socket["audience"], allows?: Socket["allows"]): Socket {
     const recycleAt = this.maxAgeMs > 0 ? this.now().getTime() + Math.floor(this.maxAgeMs * (1 - Math.random() / 10)) : Infinity;
-    return { id: randomUUID(), peer, ref, lastSent: new Map(), queuedMessages: new Map(), renewedAt: -Infinity, leaseReady: false, room: ref && projectKey(ref), audience, allows, deadline: null, recycleAt, arm: () => {}, closed: async () => {} };
+    return { id: randomUUID(), peer, ref, lastSent: new Map(), queuedMessages: new Map(), renewedAt: -Infinity, leaseReady: false, room: ref && projectKey(ref), audience, allows, deadline: null, recycleAt, recycling: false, arm: () => {}, closed: async () => {} };
   }
 
   /** An upgrade that the transport admitted while the hub stops also gets a restart close. */
@@ -453,8 +480,8 @@ export class LinkHub {
   }
 
   /** A viewer receives notices only while the server confirms the project is shared. */
-  joinViewer(peer: Peer, ref: ProjectRef | null, allows: (project: ProjectRef) => boolean): Promise<Connection> {
-    return this.joinPageSocket(peer, ref, allows);
+  joinViewer(peer: Peer, ref: ProjectRef | null, allows: (project: ProjectRef) => boolean, resume = false): Promise<Connection> {
+    return this.joinPageSocket(peer, ref, allows, resume);
   }
 
   /** For each room: the counts of connected coordinators, pages, queued messages, and asks. */
@@ -484,10 +511,13 @@ export class LinkHub {
   }
 
   /** The projects that have a connected coordinator. Its first connected socket owns the Linear check. */
-  async active({ forCheck = false } = {}): Promise<ProjectRef[]> {
+  async active({ forCheck = false, includeGrace = !forCheck }: { forCheck?: boolean; includeGrace?: boolean } = {}): Promise<ProjectRef[]> {
+    const now = this.now().getTime();
     return (await this.shared.rooms()).flatMap((room) => {
       const first = [...room.coordinators.values()].find(({ socket }) => socket)?.socket;
-      return first && (!forCheck || this.sockets.has(first)) ? [room.ref] : [];
+      if (first) return !forCheck || this.sockets.has(first) ? [room.ref] : [];
+      const reconnecting = includeGrace && [...room.coordinators.values()].some((c) => (c.reconnectUntil ?? 0) > now);
+      return reconnecting ? [room.ref] : [];
     });
   }
 
@@ -518,12 +548,12 @@ export class LinkHub {
   }
 
   /** A page of one project, or the overview (no project). It gets the current state at once. */
-  joinPage(peer: Peer, ref: ProjectRef | null): Promise<Connection> {
+  joinPage(peer: Peer, ref: ProjectRef | null, resume = false): Promise<Connection> {
     // A page only listens. It changes things through the HTTP API, which checks the origin and writes Linear.
-    return this.joinPageSocket(peer, ref);
+    return this.joinPageSocket(peer, ref, undefined, resume);
   }
 
-  private async joinPageSocket(peer: Peer, ref: ProjectRef | null, allows?: (project: ProjectRef) => boolean): Promise<Connection> {
+  private async joinPageSocket(peer: Peer, ref: ProjectRef | null, allows?: (project: ProjectRef) => boolean, resume = false): Promise<Connection> {
     if (this.closing) return this.refuse(peer);
     const socket = this.socket(peer, ref, allows ? "viewer" : "page", allows);
     const connection = this.track(socket, async () => {
@@ -546,6 +576,7 @@ export class LinkHub {
           if (ref) messages.push(this.envelope(room.ref, "progress", { nodes: room.progress }));
           if (room.agents) messages.push(this.envelope(room.ref, "agents", room.agents));
         }
+        if (ref && resume) messages.push(this.envelope(room.ref, "changed", { by: "page", what: "issue", issues: [] }));
         events.push({ kind: "sockets", sockets: [socket.id], messages, sequence: room.sequence });
       }
       if (events.length) await this.send(events);
@@ -586,7 +617,7 @@ export class LinkHub {
         await this.send([this.announce(room)]);
       } else {
         this.timers.after(() => {
-          void this.shared.edit(ref, (room) => expireReconnectGrace(room, this.now().getTime()) ? room : null)
+          void this.shared.edit(ref, (room) => expireReconnectGrace(room, reconnectUntil) ? room : null)
             .then((expired) => expired && this.send([this.announce(expired)])).catch(reportLinkError);
         }, Math.max(0, reconnectUntil - this.now().getTime()));
       }
@@ -598,104 +629,112 @@ export class LinkHub {
       await connection.closed().catch(reportLinkError);
       throw error;
     }
-    return {
-      pong: connection.pong,
-      closed: connection.closed,
-      receive: async (raw) => {
-        if (!this.canUse(socket)) return;
-        let message: unknown;
-        try { message = JSON.parse(raw); } catch { return fail("message is not JSON"); }
-        if (!isObject(message) || message.v !== LINK_VERSION || typeof message.type !== "string") return fail(`not a wg-link/${LINK_VERSION} message`);
-        const payload = isObject(message.payload) ? message.payload : {};
-        const at = this.now().toISOString();
-        if (message.type === "wrote") {
-          if (session && !this.shared.renew) await this.shared.edit(ref, (room) => {
-            const current = room.coordinators.get(session!);
-            if (current?.socket === socket.id) current.lastSeen = at;
-          });
-          const issues = (Array.isArray(payload.issues) ? payload.issues : []).filter((i): i is string => typeof i === "string").slice(0, 500).map((i) => i.slice(0, 50));
-          const changed = this.envelope(ref, "changed", { by: "coordinator", what: "issue", issues });
-          // Clear each cache before its pages reload the graph. The coordinator needs no queued copy.
-          return this.send([{ kind: "wrote", ref }, {
-            kind: "pages", message: changed, overview: false,
-            viewer: this.envelope(ref, "changed", { ...changed.payload, issues: [] }),
-          }]);
-        }
-        if (message.type === "agents") {
-          const rows: AgentRow[] = (Array.isArray(payload.agents) ? payload.agents.filter(isObject) : []).slice(0, AGENTS_MAX).map((a) => ({
-            id: text(a.id, 200), role: a.role === "coordinator" ? "coordinator" as const : "worker" as const, key: text(a.key, 200) || null,
-            issue: text(a.issue, 50) || null, agent: text(a.agent, 50), state: text(a.state, 50), title: text(a.title, 200),
-            said: text(a.said, SAID_MAX), at: text(a.at, 50) || null,
-          })).filter((a) => a.id);
-          const agents = { at, agents: rows };
-          const room = await this.shared.edit(ref, (room) => { room.agents = agents; return room; });
-          return this.send([this.pages(room, "agents", agents, true)]);
-        }
-        if (message.type === "hello") {
-          const hello: Hello = { plan: text(payload.plan, 200), session: text(payload.session, 200) || randomUUID(), host: text(payload.host, 200), wg: text(payload.wg, 50) };
-          // A reconnect replaces the socket of the same session, including on another hub.
-          // A socket that sends hello for a different session releases its previous session.
-          const joined = await this.shared.edit(ref, (room) => {
-            if (!room.sockets.has(socket.id)) return null;
-            if (session !== hello.session) release(room, at);
-            const old = room.coordinators.get(hello.session);
-            room.coordinators.set(hello.session, {
-              socket: socket.id, hello, state: old?.state ?? null,
-              since: old && (old.socket || (old.reconnectUntil ?? 0) > Date.parse(at)) ? old.since : at, lastSeen: at,
-            });
-            return { room, replaced: old?.socket };
-          });
-          if (!joined) return;
-          const replay = session !== null;
-          session = hello.session;
-          const { room, replaced } = joined;
-          const events: LinkEvent[] = [];
-          if (replaced && replaced !== socket.id) events.push({ kind: "replaced", socket: replaced });
-          events.push(this.queueEvent(room, [socket.id], undefined, replay), this.announce(room));
-          return this.send(events);
-        }
-        if (!KNOWN.has(message.type)) {
-          // A newer wg can send a type that this server does not know yet, also as its first message: ignore it,
-          // and keep the connection.
-          console.log(`link: ignored a message of unknown type ${logField(text(message.type, 100))} from ${logField(session ?? "(no hello yet)")}`);
-          return;
-        }
-        if (!session) return fail("send hello first");
-        const sessionId = session;
-        if (!this.shared.renew) await this.shared.edit(ref, (room) => {
-          const current = room.coordinators.get(sessionId);
+    const receive: Connection["receive"] = async (raw) => {
+      let message: unknown;
+      try { message = JSON.parse(raw); } catch { return fail("message is not JSON"); }
+      if (!isObject(message) || message.v !== LINK_VERSION || typeof message.type !== "string") return fail(`not a wg-link/${LINK_VERSION} message`);
+      const payload = isObject(message.payload) ? message.payload : {};
+      const at = this.now().toISOString();
+      if (message.type === "wrote") {
+        if (session && !this.shared.renew) await this.shared.edit(ref, (room) => {
+          const current = room.coordinators.get(session!);
           if (current?.socket === socket.id) current.lastSeen = at;
         });
-        // A replaced socket can still have room updates in flight before the transport closes it.
-        const type = message.type as keyof FromCoordinator;
-        if (type === "state") {
-          const lines = Array.isArray(payload.lines) ? payload.lines.filter(isObject).slice(0, 200).map((l) => ({ level: text(l.level, 20), text: text(l.text, 2000) })) : [];
-          const room = await this.shared.edit(ref, (room) => {
-            const current = room.coordinators.get(sessionId);
-            if (current?.socket === socket.id) {
-              current.state = { mode: payload.mode === "waiting" ? "waiting" : "working", head: text(payload.head, 500), lines };
-            }
-            return room;
+        const issues = (Array.isArray(payload.issues) ? payload.issues : []).filter((i): i is string => typeof i === "string").slice(0, 500).map((i) => i.slice(0, 50));
+        const changed = this.envelope(ref, "changed", { by: "coordinator", what: "issue", issues });
+        // Clear each cache before its pages reload the graph. The coordinator needs no queued copy.
+        return this.send([{ kind: "wrote", ref }, {
+          kind: "pages", message: changed, overview: false,
+          viewer: this.envelope(ref, "changed", { ...changed.payload, issues: [] }),
+        }]);
+      }
+      if (message.type === "agents") {
+        const rows: AgentRow[] = (Array.isArray(payload.agents) ? payload.agents.filter(isObject) : []).slice(0, AGENTS_MAX).map((a) => ({
+          id: text(a.id, 200), role: a.role === "coordinator" ? "coordinator" as const : "worker" as const, key: text(a.key, 200) || null,
+          issue: text(a.issue, 50) || null, agent: text(a.agent, 50), state: text(a.state, 50), title: text(a.title, 200),
+          said: text(a.said, SAID_MAX), at: text(a.at, 50) || null,
+        })).filter((a) => a.id);
+        const agents = { at, agents: rows };
+        const room = await this.shared.edit(ref, (room) => { room.agents = agents; return room; });
+        return this.send([this.pages(room, "agents", agents, true)]);
+      }
+      if (message.type === "hello") {
+        const hello: Hello = { plan: text(payload.plan, 200), session: text(payload.session, 200) || randomUUID(), host: text(payload.host, 200), wg: text(payload.wg, 50) };
+        // A reconnect replaces the socket of the same session, including on another hub.
+        // A socket that sends hello for a different session releases its previous session.
+        const joined = await this.shared.edit(ref, (room) => {
+          if (!room.sockets.has(socket.id)) return null;
+          if (session !== hello.session) release(room, at);
+          const old = room.coordinators.get(hello.session);
+          room.coordinators.set(hello.session, {
+            socket: socket.id, hello, state: old?.state ?? null,
+            since: old && (old.socket || (old.reconnectUntil ?? 0) > Date.parse(at)) ? old.since : at, lastSeen: at,
           });
-          await this.send([this.announce(room)]);
-        } else if (type === "ack") {
-          const ids = Array.isArray(payload.ids) ? payload.ids.filter((id): id is string => typeof id === "string") : [];
-          const room = await this.shared.ack(ref, ids);
-          await this.send([this.announce(room)]);
-        } else if (type === "asks") {
-          const asks = (Array.isArray(payload.asks) ? payload.asks.filter(isObject) : []).slice(0, ASKS_MAX).map((a) => ({
-            id: text(a.id, 200), key: text(a.key, 200) || null, issue: text(a.issue, 50) || null, from: text(a.from, 200), body: text(a.body), at: text(a.at, 50),
-            ...(a.kind === "escalation" ? { kind: "escalation" as const } : {}),
-          })).filter((a) => a.id);
-          const room = await this.shared.setAsks(ref, asks);
-          await this.send([this.pages(room, "asks", { asks: room.asks }, true)]);
-        } else if (type === "progress") {
-          const progress = (Array.isArray(payload.nodes) ? payload.nodes.filter(isObject) : []).slice(0, 500).map((n) => ({
-            key: text(n.key, 200), issue: text(n.issue, 50) || null, job: text(n.job, 50) || null, state: text(n.state, 50) || null,
-            ci: text(n.ci, 200) || null, evidence: text(n.evidence, 500) || null, at: text(n.at, 50) || null,
-          })).filter((n) => n.key);
-          const room = await this.shared.edit(ref, (room) => { room.progress = progress; return room; });
-          await this.send([this.pages(room, "progress", { nodes: room.progress })]);
+          return { room, replaced: old?.socket };
+        });
+        if (!joined) return;
+        const replay = session !== null;
+        session = hello.session;
+        const { room, replaced } = joined;
+        const events: LinkEvent[] = [];
+        if (replaced && replaced !== socket.id) events.push({ kind: "replaced", socket: replaced });
+        events.push(this.queueEvent(room, [socket.id], undefined, replay), this.announce(room));
+        return this.send(events);
+      }
+      if (!KNOWN.has(message.type)) {
+        // A newer wg can send a type that this server does not know yet, also as its first message: ignore it,
+        // and keep the connection.
+        console.log(`link: ignored a message of unknown type ${logField(text(message.type, 100))} from ${logField(session ?? "(no hello yet)")}`);
+        return;
+      }
+      if (!session) return fail("send hello first");
+      const sessionId = session;
+      if (!this.shared.renew) await this.shared.edit(ref, (room) => {
+        const current = room.coordinators.get(sessionId);
+        if (current?.socket === socket.id) current.lastSeen = at;
+      });
+      // A replaced socket can still have room updates in flight before the transport closes it.
+      const type = message.type as keyof FromCoordinator;
+      if (type === "state") {
+        const lines = Array.isArray(payload.lines) ? payload.lines.filter(isObject).slice(0, 200).map((l) => ({ level: text(l.level, 20), text: text(l.text, 2000) })) : [];
+        const room = await this.shared.edit(ref, (room) => {
+          const current = room.coordinators.get(sessionId);
+          if (current?.socket === socket.id) {
+            current.state = { mode: payload.mode === "waiting" ? "waiting" : "working", head: text(payload.head, 500), lines };
+          }
+          return room;
+        });
+        await this.send([this.announce(room)]);
+      } else if (type === "ack") {
+        const ids = Array.isArray(payload.ids) ? payload.ids.filter((id): id is string => typeof id === "string") : [];
+        const room = await this.shared.ack(ref, ids);
+        await this.send([this.announce(room)]);
+      } else if (type === "asks") {
+        const asks = (Array.isArray(payload.asks) ? payload.asks.filter(isObject) : []).slice(0, ASKS_MAX).map((a) => ({
+          id: text(a.id, 200), key: text(a.key, 200) || null, issue: text(a.issue, 50) || null, from: text(a.from, 200), body: text(a.body), at: text(a.at, 50),
+          ...(a.kind === "escalation" ? { kind: "escalation" as const } : {}),
+        })).filter((a) => a.id);
+        const room = await this.shared.setAsks(ref, asks);
+        await this.send([this.pages(room, "asks", { asks: room.asks }, true)]);
+      } else if (type === "progress") {
+        const progress = (Array.isArray(payload.nodes) ? payload.nodes.filter(isObject) : []).slice(0, 500).map((n) => ({
+          key: text(n.key, 200), issue: text(n.issue, 50) || null, job: text(n.job, 50) || null, state: text(n.state, 50) || null,
+          ci: text(n.ci, 200) || null, evidence: text(n.evidence, 500) || null, at: text(n.at, 50) || null,
+        })).filter((n) => n.key);
+        const room = await this.shared.edit(ref, (room) => { room.progress = progress; return room; });
+        await this.send([this.pages(room, "progress", { nodes: room.progress })]);
+      }
+    };
+    let transportClosed = false;
+    return {
+      pong: connection.pong,
+      closed: () => { transportClosed = true; return connection.closed(); },
+      receive: async (raw) => {
+        if (transportClosed) return;
+        try {
+          await receive(raw);
+        } finally {
+          this.recycleIfDue(socket);
         }
       },
     };

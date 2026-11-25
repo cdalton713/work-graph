@@ -8,7 +8,7 @@ import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
 import type { Rules } from "./access.ts";
 import { createApp } from "./app.ts";
-import { stopOnSignals } from "./link.ts";
+import { linkSettings, stopOnSignals } from "./link.ts";
 import { serve as serveTailnet } from "./tailnet.ts";
 import { readConfig } from "./workspaces.ts";
 
@@ -31,8 +31,7 @@ const config = readConfig(values.team);
 const app = createApp(rules, {
   team: config.workspaces[0].team, dist, human: config.human, workspaces: config.workspaces, auth: config.auth,
   linkToken: process.env.WG_LINK_TOKEN,
-  linkMaxAgeMs: Number(process.env.WG_LINK_MAX_AGE ?? 0) * 1000,
-  linkPongMs: process.env.WG_LINK_PONG_MS ? Number(process.env.WG_LINK_PONG_MS) : undefined,
+  ...linkSettings(process.env),
   redisUrl: process.env.WG_REDIS_URL,
   redisPrefix: process.env.WG_REDIS_PREFIX || undefined,
 });

@@ -206,12 +206,15 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
   underscores in the environment variable. The workspace uses only its own token, even when its
   address equals the top-level `page_url`. When you set `WG_UI_URL`, `wg` sends the selected token
   to the override address.
-- `WG_LINK_MAX_AGE` (optional): maximum link socket age in seconds. The server closes each socket slightly
-  earlier with code 4001 so clients can reconnect. The host's socket limit must be longer than this setting.
-  Leave it unset or set it to 0 to keep sockets open without an age limit. With a limit set, the page and
-  `wg wake` keep a disconnected coordinator present for up to 15 seconds while it reconnects.
+- `WG_LINK_MAX_AGE` (optional): maximum link socket age in seconds, measured from the socket join.
+  Use 60 to 2147483 seconds. The server closes each socket slightly earlier with code 4001 so clients
+  can reconnect. Set the host's limit at least 20 seconds above this setting to allow time for the join.
+  Leave the setting blank or set it to 0 to turn off the age limit. With a limit set, the page and the
+  presence API show a coordinator as connected for up to 15 seconds after any close, including a
+  deliberate exit. Autostart uses the queued work count and the Orca agent list to decide when to start.
 - `WG_LINK_PONG_MS` (optional): time in milliseconds to wait for a pong before ending a socket.
-  The default is 45000. Set it to 0 to turn off the deadline if the host drops pong frames.
+  Use 25000 to 300000 milliseconds. A blank value uses the default of 45000.
+  Set it to 0 to turn off the deadline if the host drops pong frames.
   Set a socket age limit when you turn off the pong deadline. These settings have had no live test on Vercel.
 - `WG_STATE_DIR` (optional): a directory where the link keeps the queue of each project and the open worker
   questions over a restart. Without it, a restart loses them: a reply or a command that a coordinator did not get

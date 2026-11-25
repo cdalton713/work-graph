@@ -2,11 +2,27 @@ import { describe, expect, it } from "vitest";
 import contract from "../../skills/work-graph/contract.json";
 import { ANSWERED_LABEL, AUTONOMY_DEFAULT, AUTONOMY_GROUP, AUTONOMY_LEVELS, autonomyOf, PAUSED_LABEL, pausedOf } from "./autonomy";
 import { REVIEW_DEFAULT, REVIEW_GROUP, REVIEW_LEVELS, REVIEW_PREFIX, reviewOf } from "./review";
-import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, RECYCLE_CODE, RESTART_CODE, agentState, agentsShown, liveJob, presenceText, canCommandCoordinator, pageLinkPath, reconnectImmediately } from "./link";
+import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, RECYCLE_CODE, RESTART_CODE, agentState, agentsShown, liveJob, presenceText, canCommandCoordinator, pageLinkPath, plannedReconnect, plannedRetryAfterFailure, reconnectImmediately } from "./link";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
+it("keeps short retries during the planned reconnect window", () => {
+  expect(plannedRetryAfterFailure(0, 15_000, 1000)).toBe(1000);
+  expect(plannedRetryAfterFailure(1000, 15_000, 2000)).toBe(2000);
+  expect(plannedRetryAfterFailure(13_000, 15_000, 8000)).toBe(2000);
+  expect(plannedRetryAfterFailure(15_000, 15_000, 5000)).toBeNull();
+});
 it("keeps the page connected across planned reconnects", () => {
   expect([4001, 1012, 1000, 1006].map(reconnectImmediately)).toEqual([true, true, false, false]);
+});
+
+it("backs off after two quick planned closes and resets after a long connection", () => {
+  let quickCloses = 0;
+  const delays = [1, 1, 1, 1, 1, 1, 1, 10_000, 1].map((lifetime) => {
+    const retry = plannedReconnect(lifetime, quickCloses);
+    quickCloses = retry.quickCloses;
+    return retry.delay;
+  });
+  expect(delays).toEqual([0, 1000, 2000, 4000, 8000, 16000, 30000, 0, 0]);
 });
 const coordinator = (over: Partial<CoordinatorPresence>): CoordinatorPresence => ({
   session: "s", host: "mac", plan: "/plans/a", connected: true, mode: "waiting", head: "phase 1", since: "2026-11-20T11:00:00Z", lastSeen: "2026-11-20T11:54:00Z", paused: false, ...over,

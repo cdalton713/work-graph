@@ -38,3 +38,17 @@ jobs:
           python-version: "3.12"
       - run: python3 -m unittest test_wg
         working-directory: skills/work-graph/scripts
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t wg-image-check .
+      - name: Check runtime files
+        run: |
+          docker run --rm wg-image-check sh -ec '
+            test ! -e vercel.json
+            test ! -e api
+            test ! -e server/testing
+            test -z "$(find server src -name "*.test.*" -print)"
+          '

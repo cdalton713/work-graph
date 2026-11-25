@@ -4,7 +4,8 @@ WORKDIR /ui
 RUN corepack enable && corepack prepare pnpm@12.11.2 --activate
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
-COPY index.html tsconfig.json vite.config.ts ./
+COPY index.html tsconfig.json vite.config.ts vercel.json ./
+COPY api ./api
 COPY public ./public
 COPY src ./src
 COPY skills/work-graph/contract.json ./skills/work-graph/contract.json

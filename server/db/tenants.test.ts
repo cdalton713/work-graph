@@ -57,6 +57,30 @@ databaseSuites((open) => {
     directory.close();
   });
 
+  test.each(["credential", "refresh_token"])("keeps healthy workspaces when one connection has a damaged %s", async (field) => {
+    const directory = dbTenants(sql, crypto);
+    const tenant = await directory.accounts.createAccount(user, "Ada", connection);
+    const bad = await directory.accounts.addConnection(tenant, {
+      ...connection, workspaceId: "second", linearOrgId: "other",
+      credential: { kind: "oauth", key: "second-access", refreshToken: "second-refresh", expiresAt: new Date("2030-01-01") },
+    });
+    const { token } = await directory.accounts.createToken(tenant, "coordinator");
+    await sql.query(`UPDATE linear_connections SET ${field} = $1 WHERE id = $2`, ["damaged-value", bad]);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const account = await directory.byId(tenant);
+      expect(account?.workspaces).toMatchObject([{ id: "first", key: "only-first" }]);
+      const session = { id: tenant, email: user.email, expiresAt: Date.now() + 60_000 };
+      expect(await directory.fromSession(session)).toEqual({ tenant: account, role: "owner" });
+      expect(await directory.fromToken(`Bearer ${token}`)).toEqual(account);
+      await expect(directory.accounts.readCredential(tenant, bad)).rejects.toThrow(/^Cannot decrypt database credential$/);
+      expect(log.mock.calls).toEqual([[`Cannot decrypt database credential for connection ${bad}`]]);
+    } finally {
+      log.mockRestore();
+      directory.close();
+    }
+  });
+
   test("clears a cached tenant immediately on change and expires it after ten seconds", async () => {
     const directory = dbTenants(sql, crypto);
     const id = await directory.accounts.createAccount(user, "Ada", connection);

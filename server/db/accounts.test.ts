@@ -82,6 +82,61 @@ databaseSuites((open) => {
     expect(await store.listTokens(other)).toEqual([]);
   });
 
+  test("accepts uppercase UUIDs across account, connection, and token operations", async () => {
+    const tenant = await store.createAccount(user, "Ada", connection);
+    const upper = tenant.toUpperCase();
+    const [first] = (await store.readTenant(upper))!.connections;
+    const credential = { kind: "oauth", key: apiKey, refreshToken, expiresAt: new Date("2030-01-01") } as const;
+    const second = await store.addConnection(upper, {
+      ...connection, workspaceId: "second", linearOrgId: "other", credential,
+    });
+    const third = await store.addConnection(upper, { ...connection, workspaceId: "third", linearOrgId: "third" });
+    expect(await store.readCredential(upper, second.toUpperCase())).toEqual(credential);
+    await store.replaceCredential(upper, first.id.toUpperCase(), credential);
+    expect(await store.readCredential(tenant, first.id)).toEqual(credential);
+    await store.updateConnectionSettings(upper, second.toUpperCase(), {
+      name: "Next", team: "NEW", teamLabels: true, position: 0,
+    });
+    expect((await store.readTenant(upper))?.connections.map(({ id }) => id)).toEqual([second, first.id, third]);
+    await store.setNeedsKey(upper, first.id.toUpperCase());
+    await store.removeConnection(upper, third.toUpperCase());
+    expect(await store.resolveTenant(upper)).toMatchObject({
+      id: tenant, workspaces: [{ id: "second", key: apiKey, name: "Next", team: "NEW", teamLabels: true }],
+    });
+    expect((await store.resolveTenant(upper))?.workspaces).toHaveLength(1);
+    const { id, token } = await store.createToken(upper, "coordinator");
+    expect(await store.useToken(token)).toBe(tenant);
+    expect(await store.listTokens(upper)).toMatchObject([{ id, revokedAt: null }]);
+    await store.revokeToken(upper, id.toUpperCase());
+    expect(await store.useToken(token)).toBeNull();
+    await store.deleteAccount(upper);
+    expect(await store.readTenant(upper)).toBeNull();
+    expect(changed.mock.calls.every(([id]) => id === tenant)).toBe(true);
+  });
+
+  test("rejects malformed UUIDs at the store boundary", async () => {
+    const tenant = await store.createAccount(user, "Ada", connection);
+    const invalid = tenant.replaceAll("-", "");
+    const settings = { name: "First", team: "WG", teamLabels: false };
+    for (const run of [
+      () => store.readTenant(invalid),
+      () => store.readCredential(invalid, tenant),
+      () => store.readCredential(tenant, invalid),
+      () => store.resolveTenant(invalid),
+      () => store.addConnection(invalid, connection),
+      () => store.replaceCredential(tenant, invalid, connection.credential),
+      () => store.updateConnectionSettings(tenant, invalid, settings),
+      () => store.removeConnection(tenant, invalid),
+      () => store.setNeedsKey(tenant, invalid),
+      () => store.createToken(invalid, "coordinator"),
+      () => store.listTokens(invalid),
+      () => store.revokeToken(tenant, invalid),
+      () => store.deleteAccount(invalid),
+    ]) {
+      await expect(run()).rejects.toThrow(/^Invalid database UUID$/);
+    }
+  });
+
   test("stores only the hash and throttles last-used writes", async () => {
     const tenant = await store.createAccount(user, "Ada", connection);
     const { id, token } = await store.createToken(tenant, "coordinator");

@@ -325,6 +325,8 @@ export class LinkHub {
     }
   }
 
+  get hasSockets(): boolean { return this.sockets.size > 0; }
+
   /** An unavailable link must reconnect to receive the messages it missed. */
   restartSockets() {
     for (const socket of this.sockets.values()) {

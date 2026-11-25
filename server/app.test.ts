@@ -137,8 +137,11 @@ describe("api", () => {
       expect((await page.request("/", { headers: local })).status).toBe(200);
       const status = await page.request("/api/status", { headers: local });
       expect(await status.json()).toMatchObject({ linkStore: "redis", redisReady: false });
+      const started = Date.now();
       const response = await page.request("/api/link?role=coordinator&project=p1", { headers: local });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(2900);
       expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("1");
       expect(await response.text()).not.toContain("private-password");
       expect(JSON.stringify([log.mock.calls, warn.mock.calls, error.mock.calls])).not.toContain("private-password");
     } finally {
@@ -1632,6 +1635,63 @@ describe("sign-in of the viewer", () => {
     }
   });
 
+  it.skipIf(!localRedis).each(["startup", "reconnect after a pause"])("waits for Redis during %s", async (phase) => {
+    const redis = await startLocalRedis();
+    if (phase === "startup") await redis.stop();
+    const page = createApp(rules, { team: "WG", dist, watchMs: 0, redisUrl: redis.url });
+    const now = performance.now.bind(performance);
+    const clock = vi.spyOn(performance, "now");
+    const status = async () => (await page.request("/api/status", { headers: local })).json();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      if (phase !== "startup") {
+        await vi.waitFor(async () => expect(await status()).toMatchObject({ redisReady: true }));
+        clock.mockImplementation(() => now() + 5000);
+        await redis.stop();
+        await vi.waitFor(async () => expect(await status()).toMatchObject({ redisReady: false }));
+      }
+      const response = page.request("/api/link?role=page", { headers: { ...local, origin: "http://127.0.0.1:4747" } });
+      await redis.start();
+      // A plain HTTP request reaches the upgrade handler and falls through to 404.
+      expect((await response).status).toBe(404);
+      expect(warn).not.toHaveBeenCalledWith("Redis link lost");
+      expect(log).not.toHaveBeenCalledWith("Redis link back");
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+      clock.mockRestore();
+      page.link.stop();
+      await redis.close();
+    }
+  });
+
+  it.skipIf(!localRedis)("keeps a link socket open when a fresh ping passes after a pause", async () => {
+    const redis = await startLocalRedis();
+    const admin = connectRedis(redis.url, undefined, undefined, true);
+    const page = createApp(rules, { team: "WG", dist, watchMs: 0, redisUrl: redis.url });
+    const close = vi.fn();
+    const now = performance.now.bind(performance);
+    const clock = vi.spyOn(performance, "now");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await page.link.hub.joinPage({ close, send: () => {} }, null);
+      await admin.run((client) => client.client("PAUSE", 2200, "ALL"));
+      const response = page.request("/api/link?role=page", { headers: { ...local, origin: "http://127.0.0.1:4747" } });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      clock.mockImplementation(() => now() + 5000);
+      expect((await response).status).toBe(404);
+      expect(close).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalledWith("Redis link lost");
+    } finally {
+      warn.mockRestore();
+      clock.mockRestore();
+      page.link.stop();
+      admin.close();
+      await redis.close();
+    }
+  });
+
   it.skipIf(!localRedis)("keeps signed-in reads and logout available during Redis loss", async () => {
     const redis = await startLocalRedis();
     const options = { team: "WG", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth,
@@ -1644,18 +1704,20 @@ describe("sign-in of the viewer", () => {
     try {
       await vi.waitFor(async () => expect(await (await status(second)).json()).toMatchObject({ redisReady: true }));
       const closed = vi.fn();
-      await second.link.hub.joinPage({ session: "ended", send: () => {}, close: closed }, null);
+      const connection = await second.link.hub.joinPage({ session: "ended", send: () => {}, close: closed }, null);
       expect((await first.request("/auth/logout", { headers: ended })).status).toBe(302);
       await vi.waitFor(() => expect(closed).toHaveBeenCalledWith(1008, "session ended"));
+      await connection.closed();
       await redis.stop();
       expect((await status(second)).status).toBe(200);
       expect(await (await second.request("/api/config", { headers: live })).json()).toMatchObject({ user: "ada@example.com" });
       expect((await status(second, ended)).status).toBe(401);
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
-        for (let i = 0; i < 2; i++) expect((await second.request("/api/link?role=page", {
+        const request = () => second.request("/api/link?role=page", {
           headers: { ...live, origin: "https://view.example.com" },
-        })).status).toBe(503);
+        });
+        for (const response of await Promise.all([request(), request()])) expect(response.status).toBe(503);
         expect(warn).not.toHaveBeenCalled();
       } finally { warn.mockRestore(); }
       expect((await second.request("/api/projects/p1/commands", {
@@ -1671,7 +1733,7 @@ describe("sign-in of the viewer", () => {
     } finally {
       first.link.stop(); second.link.stop(); await redis.close();
     }
-  });
+  }, 20_000);
 
   it("queues a repeated browser request once using the ID of the action", async () => {
     const page = createApp(rules, { team: "WG", dist, watchMs: 0 });

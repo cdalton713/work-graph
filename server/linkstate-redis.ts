@@ -194,7 +194,7 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
     return new Set(indices.map((index) => sockets[index - 1].socket));
   };
   const sessionExpiry = async (id: string) => {
-    const expiry = await redis.run((client) => client.get(prefix + "ended:" + id), false);
+    const expiry = await redis.readSession((client) => client.get(prefix + "ended:" + id));
     return expiry === null ? null : Number(expiry);
   };
   const pageCutoff = async () => {

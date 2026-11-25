@@ -181,8 +181,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (ready) {
       for (const cache of caches.values()) cache.clear();
       void flushLogouts();
-    } else hub.restartSockets();
-  }, readOnly) : null;
+    } else if (hub.hasSockets) hub.restartSockets();
+  }, readOnly, undefined, () => hub.hasSockets) : null;
   const redisState = redis ? redisLinkState(redis, redisPrefix, undefined, linkMaxAgeMs ? RECONNECT_GRACE_MS : 0) : null;
   if (redis && stateDir) console.log("Redis link store ignores WG_STATE_DIR");
   const store = redis || linkState ? null : linkStore(stateDir, dist, workspaces, (linkTimers ?? realLinkTimers).after);
@@ -234,24 +234,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (clock() >= session.expiresAt || (ended.get(session.id) ?? 0) > clock()) return false;
     if (!redis || !allowOffline) return !await lookupSession(session);
     const unavailable = Symbol();
-    const started = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<typeof unavailable>((resolve) => { timer = setTimeout(() => resolve(unavailable), 500); });
-    const check = async () => {
-      try { return await lookupSession(session); }
-      catch (error) {
-        if (error instanceof RedisCommandFailed) return unavailable;
-        if (!(error instanceof RedisUnavailable)) throw error;
-        // Reconnect can run as soon as a paused instance resumes. Give it the rest of the read budget.
-        await redis.waitForCommands(500 - (Date.now() - started));
-        return lookupSession(session).catch((error) => {
-          if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) return unavailable;
-          throw error;
-        });
-      }
-    };
     try {
-      const result = await Promise.race([check(), deadline]);
+      const result = await Promise.race([linkRead<boolean | typeof unavailable>(() => lookupSession(session), unavailable), deadline]);
       return result === unavailable ? (ended.get(session.id) ?? 0) <= clock() : !result;
     } finally {
       if (timer) clearTimeout(timer);
@@ -392,8 +378,6 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const signed = auth ? await sessionOf(c, auth, clock) : null;
     const session = signed && await sessionActive(signed, read) ? signed : null;
     if (redis && !read && !readOnly) {
-      await redis.initialized;
-      if (!redis.ready) throw new RedisUnavailable();
       await redis.checkWrites();
       await flushLogouts();
     }
@@ -418,7 +402,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
   // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
   api.get("/status", async (c) => {
-    const rooms = (readOnly && redis) || (!readOnly && c.var.viewer) ? [] : await linkRead(() => hub.counts(), []);
+    const rooms = (redis && (readOnly || !redis.ready)) || (!readOnly && c.var.viewer)
+      ? [] : await linkRead(() => hub.counts(), []);
     return c.json<ServerStatus & Pick<SiteConfig, "readOnly" | "link">>({
       version, contract, uptime: Math.floor((clock() - started) / 1000),
       readOnly: c.var.viewer, link: readOnly ? null : "/api/link",
@@ -707,12 +692,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (role === "coordinator" && linkCredential !== null && !hasLinkToken(c.req.header("authorization"))) {
       return c.json({ error: "coordinator token required" }, 401);
     }
-    const restarting = () => {
-      if (redis && !hub.closing) throw new RedisUnavailable();
-      return c.json({ error: "the server restarts" }, 503);
-    };
-    if (redis) await redis.initialized;
-    if (!linkAvailable()) return restarting();
+    const restarting = () => c.json({ error: "the server restarts" }, 503);
+    if (hub.closing) return restarting();
     if (redis) { await redis.checkWrites(); await flushLogouts(); }
     const session = auth && role === "page" ? await sessionOf(c, auth, clock) : null;
     if (auth && role === "page" && (!session || !await sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
@@ -723,7 +704,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (!wanted && role === "coordinator") return c.json({ error: "a coordinator names its project" }, 400);
     const id = wanted ? viewer ? await sharedProject(wanted, workspace) : (await resolve(workspace, wanted))?.id : null;
     if (wanted && !id) return c.json({ error: `no project "${wanted}" in ${workspace}` }, 404);
-    if (!linkAvailable()) return restarting();
+    if (redis) await redis.waitReady();
+    if (hub.closing) return restarting();
     c.set("linkRef" as never, (id ? { workspace, id } : null) as never);
     c.set("linkViewer" as never, viewer as never);
     c.set("linkSession" as never, session as never);
@@ -821,6 +803,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const status = ((error instanceof RedisUnavailable || error instanceof RedisCommandFailed) ? 503 : error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;
     // An API request writes its one log line in the request log above. Another route writes the error here.
     if (status === 500 && !c.req.path.startsWith("/api/")) console.error(error);
+    if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) c.header("Retry-After", "1");
     return c.json({ error: error.message }, status);
   });
   // Linear edits that did not come through this page: for each project with a connected coordinator,

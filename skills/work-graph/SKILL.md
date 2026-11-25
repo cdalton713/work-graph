@@ -45,9 +45,9 @@ Each is a project label: `wg autonomy <plan-dir> [<level>]` or `wg review-effort
 
 An initiative is a project label that groups related efforts. Set `effort.initiative` in step 1; `wg load --apply` creates and sets the label. Details: graph.md "Initiatives".
 
-## Autostart
+## Autostart and status check
 
-`wg autostart <plan-dir> --install` makes an Orca automation that starts a fresh coordinator when the effort has work and none runs. The human installs it; that run uses the current levels. Details: setup.md "Autostart".
+`wg autostart <plan-dir> --install` starts a coordinator, at the current levels, when work waits and none runs (setup.md "Autostart"). `wg health <plan-dir> --install` adds a read-only status check ([references/health.md](references/health.md)). The human installs both.
 
 ## Steps
 

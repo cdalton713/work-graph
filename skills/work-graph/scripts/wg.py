@@ -31,6 +31,7 @@ that Python, and without it `wg next` polls Linear.
   wg tick      [--root <dir>]... [--channel none|notify] [--install | --uninstall]
   wg wake      <dir>
   wg autostart <dir> [--install | --uninstall]
+  wg health    <dir> [--install | --uninstall | --due | --report <file>]
   wg doctor    [<dir>]
   wg config
   wg contract  [--write]
@@ -82,7 +83,8 @@ DEFAULT_WORKSPACE = {"id": "default", "name": "Linear", "team": None, "teams": N
 DEFAULT_CONFIG = {"human": "Human", "page_url": None, "github_user": None, "tick_roots": ["~/Projects"],
                   "tick_label": "dev.work-graph.tick", "test_runner": None, "branch_prefix": "wg/",
                   "release_branch": "release", "rules": "~/.config/work-graph/rules.md",
-                  "notify": [], "agent_merge": [], "workspaces": [DEFAULT_WORKSPACE]}
+                  "notify": [], "agent_merge": [], "health_interval": 6, "health_agent": "codex",
+                  "workspaces": [DEFAULT_WORKSPACE]}
 
 
 def read_config(path=CONFIG_PATH):
@@ -103,6 +105,11 @@ def read_config(path=CONFIG_PATH):
     if not isinstance(merge, list) or not all(isinstance(m, str) and re.fullmatch(r"[\w.-]+(/[\w.-]+)?", m)
                                                for m in merge):
         raise SystemExit(f"{path}: agent_merge must be a list of GitHub owners or owner/repo names")
+    interval = config["health_interval"]
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not 1 <= interval <= 168:
+        raise SystemExit(f"{path}: health_interval must be a number of hours from 1 to 168")
+    if not isinstance(config["health_agent"], str) or not re.fullmatch(r"[a-z0-9-]+", config["health_agent"]):
+        raise SystemExit(f"{path}: health_agent must be an Orca agent id, such as codex or claude")
     if problem := notify_problem(config["notify"]):
         raise SystemExit(f"{path}: notify: {problem}")
     return config | {"workspaces": workspaces}
@@ -4063,7 +4070,7 @@ DO_COMMANDS = {
     "load": "load {dir} --apply",  # coordinator.md "Loop": the dry run `wg load <plan-dir>` comes first
 }
 # The `note` lines that the terminal prints in full. It counts the other notes in one line.
-NOTES_SHOWN = ("autonomy", "triage", "page", "review", "doctor")
+NOTES_SHOWN = ("autonomy", "triage", "page", "review", "doctor", "health")
 
 
 def line_verb(text):
@@ -4163,6 +4170,8 @@ EXPLAIN = {
     "reviewer": "wait: a reviewer job runs",
     "coordinator": "wait: an ops node that you run",
     "human": "wait: the human must act",
+    "health": "the last status check found faults (note health)",
+    "health-check": "the checks of the status check agent (wg health)",
 }
 EXPLAIN_MAX_LINES = 60
 
@@ -4226,7 +4235,7 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                 # Before next_lines: a new review effort applies to the lines of this same wg next.
                 reviews = review_effort_lines(plan_dir, plan)
                 head, lines = next_lines(plan_dir, plan, tolerant=wait)
-                lines = paused_lines(plan_dir, plan, extra + lines) + page_contract_note(plan_dir)
+                lines = paused_lines(plan_dir, plan, extra + lines) + page_contract_note(plan_dir) + health_lines(plan_dir)
                 if head != COMPLETE:
                     lines = autonomy_lines(plan_dir, plan) + reviews + lines
                 done = not wait or head == COMPLETE or any(level == "do" for level, _ in lines)
@@ -4373,6 +4382,20 @@ def autostart_prompt(plan_dir):
             "\"Autostart\" says.")
 
 
+def automation_precheck(*args):
+    """The precheck command of an Orca automation: `wg <args>` with this shell's PATH (git, gh) and the Orca CLI,
+    because Orca runs it without the login shell. A stable uv (a shim or a package-manager link), not a versioned
+    path that the next uv upgrade removes."""
+    home = Path.home()
+    uv = next((str(c) for c in (home / ".proto/shims/uv", home / ".local/bin/uv", home / ".cargo/bin/uv",
+                                Path("/opt/homebrew/bin/uv"), Path("/usr/local/bin/uv")) if c.is_file()), None) or shutil.which("uv")
+    script = str(Path(__file__).resolve())
+    path = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep) if d and "/.cache/uv/" not in d)
+    env = f"env PATH={shlex.quote(path)} ORCA_CLI_COMMAND={shlex.quote(orca_cli())} "
+    return env + (f"{shlex.quote(uv)} run --quiet --script {shlex.quote(script)}" if uv
+                  else f"python3 -I {shlex.quote(script)}") + "".join(f" {shlex.quote(a)}" for a in args)
+
+
 def autostart_command(plan_dir, plan, install, uninstall):
     """`wg autostart <plan-dir> [--install | --uninstall]`: an Orca automation that runs `wg wake` every 5 minutes
     and starts a coordinator agent in this worktree when it says start. Without a flag, print its state."""
@@ -4408,16 +4431,7 @@ def autostart_command(plan_dir, plan, install, uninstall):
         shown = orca("automations", "show", current).get("automation") or {}
         print(f"autostart {'on' if shown.get('enabled', True) else 'disabled'}: automation {current}, every 5 minutes")
         return 0
-    # A stable uv (a shim or a package-manager link), not a versioned path that the next uv upgrade removes.
-    home = Path.home()
-    uv = next((str(c) for c in (home / ".proto/shims/uv", home / ".local/bin/uv", home / ".cargo/bin/uv",
-                                Path("/opt/homebrew/bin/uv"), Path("/usr/local/bin/uv")) if c.is_file()), None) or shutil.which("uv")
-    script = str(Path(__file__).resolve())
-    # Orca runs the precheck without the login shell: give it this shell's PATH (git, gh) and the Orca CLI.
-    path = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep) if d and "/.cache/uv/" not in d)
-    env = f"env PATH={shlex.quote(path)} ORCA_CLI_COMMAND={shlex.quote(orca_cli())} "
-    precheck = env + (f"{shlex.quote(uv)} run --quiet --script {shlex.quote(script)}" if uv
-                      else f"python3 -I {shlex.quote(script)}") + f" wake {shlex.quote(here)}"
+    precheck = automation_precheck("wake", here)
     if current:
         # Install again: refresh the precheck and the prompt, and turn the automation on.
         orca("automations", "edit", current, "--precheck", precheck, "--prompt", autostart_prompt(here), "--enabled")
@@ -4435,6 +4449,372 @@ def autostart_command(plan_dir, plan, install, uninstall):
         die("orca automations create returned no id")
     save(automation)
     print(f"autostart on: automation {automation}, every 5 minutes, agent {agent}")
+    return 0
+
+
+# ---------------------------------------------------------------- status check (wg health)
+
+# An Orca automation runs `wg health --due` each hour. When it says start, a fresh agent (config `health_agent`)
+# checks the effort, read only, and gives its findings to `wg health --report`. The code, not the agent, sets the
+# health value from the findings (references/health.md).
+HEALTH_SCHEDULE = "0 * * * *"
+HEALTH_FORMS = ({"FREQ": "HOURLY", "BYMINUTE": "0"}, {"FREQ": "HOURLY"})  # the rrule forms of HEALTH_SCHEDULE
+HEALTH_FORCE = 24 * 3600  # seconds: with no change, a check still runs this long after the last one
+HEALTH_STALE_HUMAN = 24  # hours in `Needs <human>` that make a `stale-human` finding
+HEALTH_STALE_REVIEW = 48  # hours in `In Review` or `Ready to Merge` with no activity that make a `stale-review` finding
+HEALTH_IDLE = 3 * 24 * 3600  # seconds with no journal entry while work is open: an `idle` finding
+HEALTH_LEVELS = ("onTrack", "atRisk", "offTrack")  # Linear's project update health, from good to bad
+HEALTH_LABEL = "health"  # the issue label of each fault issue
+HEALTH_MARK = "wg-health-fault:"  # the line of a fault issue's description that names its fault id
+# The finding kinds that the agent reports, with the health value of each (None: an issue, no value).
+HEALTH_KINDS = {"status": "offTrack", "connection": "offTrack", "stale-human": "atRisk", "stale-review": "atRisk",
+                "comment": "atRisk", "plan-drift": "atRisk", "relation": "atRisk", "worker": "atRisk",
+                "other": "atRisk", "doctor-gap": None}
+HEALTH_STALE_HOURS = {"stale-human": HEALTH_STALE_HUMAN, "stale-review": HEALTH_STALE_REVIEW}
+# Run row fields of @effort that a check, the page contract cache, a notice, or a level read change: an entry
+# with only these fields is not a change of the effort.
+HEALTH_QUIET = re.compile(r"(health\w*|page_contract\w*|notified_\d+|notify_failed_\d+|paused_seen|autonomy_seen)")
+
+
+def health_rank(value):
+    return HEALTH_LEVELS.index(value) if value in HEALTH_LEVELS else 0
+
+
+def health_last(effort):
+    """The time of the last check or of the last start of a check (a check that gave no report), or None."""
+    times = []
+    for field in ("health_at", "health_started"):
+        with contextlib.suppress(KeyError, TypeError, ValueError, AttributeError):
+            times.append(parse_utc(effort[field]).timestamp())
+    return max(times) if times else None
+
+
+def health_worktree_path(plan_dir, plan):
+    return run_rows(load_keymap(plan_dir))["effort"].get("health_worktree")
+
+
+def journal_changed(plan_dir, since):
+    """Is there a journal entry after `since` (epoch seconds) that is a change of the effort?"""
+    for entry in journal_entries(plan_dir):
+        if parse_utc(entry["time"]).timestamp() <= since:
+            continue
+        if entry.get("key") == "@effort" and all(HEALTH_QUIET.fullmatch(f) for f in entry.get("changes") or {}):
+            continue
+        return True
+    return False
+
+
+def linear_changed(project_id, since):
+    """Did an issue of the project change after `since`, other than a fault issue of the status check?"""
+    at = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    found = gql("""query($p:ID!,$t:DateTimeOrDuration!){ issues(first:50, filter:{project:{id:{eq:$p}}, updatedAt:{gt:$t}}){
+                   nodes{ id labels(first:20){nodes{name}} } } }""", {"p": project_id, "t": at})["issues"]["nodes"]
+    return any(HEALTH_LABEL not in {label["name"] for label in issue["labels"]["nodes"]} for issue in found)
+
+
+def health_due(plan_dir, plan, now=None):
+    """Should the status check start an agent now? Returns (start, reason). On start, it records the start time,
+    so a check that gives no report waits one interval before the next start."""
+    now = now or time.time()
+    km = load_keymap(plan_dir)
+    project_id = (km.get("project") or {}).get("id")
+    if not project_id or not km.get("nodes"):
+        return False, "the plan is not loaded"
+    effort = run_rows(km)["effort"]
+    if worktree := effort.get("health_worktree"):
+        try:
+            alive = live_agents()
+        except (ReadError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as e:
+            return False, f"Orca cannot be read ({one_line(e, 120)})"
+        if any(a["path"] == str(Path(worktree).resolve()) for a in alive):
+            return False, "a status check agent runs"
+    last = health_last(effort)
+    interval = CONFIG["health_interval"] * 3600
+    if last is not None and now - last < interval:
+        return False, f"the last check was {duration_text(now - last)} ago (interval {duration_text(interval)})"
+    if effort_paused(plan_dir, plan):
+        return False, "the effort is paused"
+    statuses = snapshot(plan_dir, plan, km)[3]
+    ships = [n["key"] for n in plan["nodes"] if n["kind"] == "ship-point"]
+    if ships and all(statuses.get(k) in {"Done", "Canceled"} for k in ships):
+        return False, "the effort is complete"
+    if last is None:
+        reason = "no check yet"
+    elif not effort.get("health_at") or (effort.get("health_started") or "") > effort["health_at"]:
+        reason = "the last start gave no report"
+    elif now - last >= HEALTH_FORCE:
+        reason = f"no check for {duration_text(now - last)}"
+    elif journal_changed(plan_dir, last) or linear_changed(project_id, last):
+        reason = "the effort changed since the last check"
+    else:
+        return False, "no change since the last check"
+    with plan_lock(plan_dir):
+        km = load_keymap(plan_dir)
+        run_rows(km)["effort"]["health_started"] = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        save_keymap(plan_dir, km)
+    return True, reason
+
+
+def health_finding_problem(i, f):
+    """What is wrong with finding i of a report, or None."""
+    if not isinstance(f, dict):
+        return f"finding {i}: not an object"
+    if f.get("kind") not in HEALTH_KINDS:
+        return f"finding {i}: kind must be one of {', '.join(HEALTH_KINDS)}"
+    if not isinstance(f.get("subject"), str) or not re.fullmatch(r"[A-Za-z0-9_.@-]{1,60}", f["subject"]):
+        return f"finding {i}: subject must be 1-60 characters of A-Z, a-z, 0-9, _ . @ -"
+    if not isinstance(f.get("text"), str) or not f["text"].strip() or len(f["text"]) > 2000:
+        return f"finding {i}: text must be 1-2000 characters"
+    if "fix" in f and not isinstance(f["fix"], str):
+        return f"finding {i}: fix must be text"
+    if f["kind"] in HEALTH_STALE_HOURS and (isinstance(f.get("hours"), bool) or not isinstance(f.get("hours"), (int, float))):
+        return f"finding {i}: a {f['kind']} finding needs hours, a number"
+    return None
+
+
+def health_findings(report, doctor, entries, now, complete=False):
+    """The faults of one check: the agent's findings that pass the rules, each FAIL line of `wg doctor`, and an
+    `idle` fault. Returns (faults, notes): each fault is {id, kind, subject, text, fix, level}; the notes are the
+    doctor warnings and the findings that the rules drop."""
+    faults, notes = {}, []
+    for f in report["findings"]:
+        kind = f["kind"]
+        if kind in HEALTH_STALE_HOURS and f["hours"] < HEALTH_STALE_HOURS[kind]:
+            notes.append(f"dropped {kind} {f['subject']}: {f['hours']:g} hours is less than {HEALTH_STALE_HOURS[kind]}")
+            continue
+        fault = {"kind": kind, "subject": f["subject"], "text": " ".join(f["text"].split()),
+                 "fix": " ".join((f.get("fix") or "").split()), "level": HEALTH_KINDS[kind]}
+        faults.setdefault(f"{kind}:{f['subject']}", fault)
+    for level, text in doctor:
+        if level == "warn":
+            notes.append(f"doctor warn: {text}")
+        elif level == "FAIL":
+            subject = re.sub(r"[^A-Za-z0-9_.@-]+", "-", text.split(":", 1)[0]).strip("-")[:60] or "doctor"
+            faults.setdefault(f"doctor:{subject}", {"kind": "doctor", "subject": subject, "text": text,
+                                                     "fix": "wg doctor prints the fix", "level": "offTrack"})
+    times = [parse_utc(e["time"]).timestamp() for e in entries
+             if not (e.get("key") == "@effort" and all(HEALTH_QUIET.fullmatch(c) for c in e.get("changes") or {}))]
+    if not complete and times and now - max(times) > HEALTH_IDLE:
+        faults["idle:@effort"] = {"kind": "idle", "subject": "@effort", "level": "atRisk", "fix": "",
+                                  "text": f"no journal entry for {duration_text(now - max(times))} while work is open"}
+    for fault_id, fault in faults.items():
+        fault["id"] = fault_id
+    return faults, notes
+
+
+def health_value(faults):
+    return max((f["level"] for f in faults.values() if f["level"]), key=health_rank, default="onTrack")
+
+
+def health_body(value, faults, notes, issues, at):
+    lines = [f"**work-graph status check: {value}**", ""]
+    counted = [f for f in faults.values() if f["level"]]
+    if counted:
+        for f in sorted(counted, key=lambda f: (-health_rank(f["level"]), f["id"])):
+            issue = f" ({issues[f['id']]})" if f["id"] in issues else ""
+            lines.append(f"- {f['level']} {f['id']}{issue}: {f['text']}" + (f" Fix: {f['fix']}" if f["fix"] else ""))
+    else:
+        lines.append("No faults.")
+    if gaps := [f for f in faults.values() if not f["level"]]:
+        lines += ["", "Checks to add to wg doctor:"]
+        lines += [f"- {f['subject']}" + (f" ({issues[f['id']]})" if f["id"] in issues else "") + f": {f['text']}"
+                  for f in gaps]
+    if notes:
+        lines += ["", "Notes:"] + [f"- {n}" for n in notes]
+    lines += ["", f"Checked at {at} by wg health. The status check changes nothing in the effort."]
+    return "\n".join(lines)
+
+
+def health_open_issue(team_id, fault_id):
+    found = gql("""query($t:ID!,$m:String!){ issues(first:5, filter:{team:{id:{eq:$t}}, labels:{name:{eq:"health"}},
+                   state:{type:{nin:["completed","canceled"]}}, description:{contains:$m}}){ nodes{ id identifier } } }""",
+                {"t": team_id, "m": f"{HEALTH_MARK} {fault_id}"})["issues"]["nodes"]
+    return found[0] if found else None
+
+
+def health_file(plan, project_id, faults, previous):
+    """One Triage issue for each new fault: a comment on its open issue, else a new issue. A fault that the last
+    check also had gets nothing. Returns {fault id: identifier}."""
+    new = [f for fid, f in sorted(faults.items()) if fid not in previous]
+    if not new:
+        return {}
+    team_id, states, labels = team_info(plan_team(plan))
+    label = labels.get(HEALTH_LABEL) or gql(
+        """mutation($i:IssueLabelCreateInput!){ issueLabelCreate(input:$i){ issueLabel{id} } }""",
+        {"i": {"name": HEALTH_LABEL, "teamId": team_id}})["issueLabelCreate"]["issueLabel"]["id"]
+    state = states.get("Triage") or states.get("Backlog")
+    filed = {}
+    for f in new:
+        body = f"{f['text']}" + (f"\n\nFix: {f['fix']}" if f["fix"] else "")
+        if found := health_open_issue(team_id, f["id"]):
+            gql("""mutation($i:CommentCreateInput!){ commentCreate(input:$i){ success } }""",
+                {"i": {"issueId": found["id"], "body": f"The status check found this fault again.\n\n{body}"}})
+            filed[f["id"]] = found["identifier"]
+            continue
+        title = (f"health: add a wg doctor check: {f['subject']}" if f["kind"] == "doctor-gap"
+                 else f"health: {f['kind']} {f['subject']}: {f['text']}")
+        inp = {"teamId": team_id, "title": title[:120], "labelIds": [label],
+               "description": f"{body}\n\nThe work-graph status check of {plan['effort']['name']} found this fault.\n\n"
+                              f"{HEALTH_MARK} {f['id']}"}
+        if state:
+            inp["stateId"] = state
+        if f["kind"] != "doctor-gap":  # a check to add to wg is not work of the effort
+            inp["projectId"] = project_id
+        issue = gql("""mutation($i:IssueCreateInput!){ issueCreate(input:$i){ issue{id identifier} } }""",
+                    {"i": inp})["issueCreate"]["issue"]
+        filed[f["id"]] = issue["identifier"]
+    return filed
+
+
+def health_notice(plan, title, body):
+    """Send one notice through each `notify` channel. Failures give one `warn notify:` line; it never raises."""
+    deadline, errors = time.monotonic() + NOTIFY_DEADLINE, []
+    for channel in CONFIG.get("notify") or []:
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ReadError("no time left")
+            NOTIFY_SENDERS[channel["type"]](channel, title, body, page_link(plan), remaining)
+        except ReadError as e:
+            errors.append(f"{channel['type']}: {one_line(e, 200)}")
+    if errors:
+        print(f"warn notify: {'; '.join(errors)}", file=sys.stderr, flush=True)
+
+
+def health_report(plan_dir, plan, path, now=None):
+    """`wg health <dir> --report <file>`: publish one check. Exit 0: published; 2: the file is not a report."""
+    try:
+        report = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as e:
+        die(f"{path}: {e}")
+    if not isinstance(report, dict) or not isinstance(report.get("findings"), list):
+        die(f"{path}: a report is a JSON object with a list `findings`")
+    for i, f in enumerate(report["findings"]):
+        if problem := health_finding_problem(i, f):
+            die(f"{path}: {problem}")
+    if not isinstance(report.get("summary", ""), str):
+        die(f"{path}: summary must be text")
+    now = now or time.time()
+    km = load_keymap(plan_dir)
+    project_id = (km.get("project") or {}).get("id") or die("keymap.json has no project; run wg load --apply")
+    statuses = snapshot(plan_dir, plan, km)[3]
+    ships = [n["key"] for n in plan["nodes"] if n["kind"] == "ship-point"]
+    complete = bool(ships) and all(statuses.get(k) in {"Done", "Canceled"} for k in ships)
+    doctor = list(doctor_lines(plan_dir))
+    faults, notes = health_findings(report, doctor, journal_entries(plan_dir), now, complete)
+    value = health_value(faults)
+    effort = run_rows(km)["effort"]
+    previous = {i for i in (effort.get("health_faults") or "").split(",") if i}
+    issues = health_file(plan, project_id, faults, previous)
+    at = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    body = health_body(value, faults, notes, issues, at)
+    if summary := " ".join(report.get("summary", "").split()):
+        body = body.replace("\n\n", f"\n\n{summary}\n\n", 1)
+    update = gql("""mutation($i:ProjectUpdateCreateInput!){ projectUpdateCreate(input:$i){ projectUpdate{ id url } } }""",
+                 {"i": {"projectId": project_id, "body": body, "health": value}})["projectUpdateCreate"]["projectUpdate"]
+    before = effort.get("health")
+    with plan_lock(plan_dir):
+        km = load_keymap(plan_dir)
+        row = run_rows(km)["effort"]
+        row.update(health=value, health_at=at, health_update=update.get("url") or update["id"])
+        notify_set(row, "health_faults", set(faults))
+        row.pop("health_started", None)
+        save_keymap(plan_dir, km)
+    if health_rank(value) > health_rank(before) and not effort_paused(plan_dir, plan):
+        counted = [f for f in faults.values() if f["level"]]
+        health_notice(plan, f"work-graph: {plan['effort']['name']} is {value}",
+                      "\n".join(f"{f['level']} {f['id']}: {f['text'][:200]}" for f in counted[:10])
+                      + f"\n{update.get('url') or ''}".rstrip())
+    print(f"health {value}: {sum(1 for f in faults.values() if f['level'])} fault(s), {len(issues)} issue(s) filed or "
+          f"commented; {update.get('url') or update['id']}")
+    return 0
+
+
+def health_lines(plan_dir):
+    """The `note health` line of `wg next` when the last check was atRisk or offTrack."""
+    effort = run_rows(load_keymap(plan_dir))["effort"]
+    value = effort.get("health")
+    if health_rank(value) == 0:
+        return []
+    count = len([i for i in (effort.get("health_faults") or "").split(",") if i])
+    return [("note", f"health @effort -: {value} at {effort.get('health_at', '?')}, {count} fault(s); "
+                     f"{effort.get('health_update', 'no update')}")]
+
+
+def health_prompt(plan_dir, worktree):
+    return (f"You are the work-graph status check of the effort in {plan_dir}. `wg health` started you. You are read "
+            f"only: edit no file in {plan_dir} or in a repository, move no issue, add no comment or label, send no "
+            "message to an agent, and run only the wg commands that references/health.md names, each with "
+            "WG_LINK=off. Load the work-graph skill and read references/health.md (`wg explain health-check` prints "
+            f"it). Do its checks. Write the findings as JSON to a new file in {worktree}/.wg-health/, run "
+            f"`wg health {plan_dir} --report <file>` once, print its last line, and end.")
+
+
+def health_command(plan_dir, plan, install=False, uninstall=False, due=False, report=None):
+    """`wg health <dir> [--install | --uninstall | --due | --report <file>]`. With no flag: print the state."""
+    here = str(Path(plan_dir).resolve())
+    if due:
+        start, reason = health_due(plan_dir, plan)
+        print(f"{'start' if start else 'skip'}: {reason}")
+        return 0 if start else 1
+    if report:
+        return health_report(plan_dir, plan, report)
+    effort = run_rows(load_keymap(plan_dir))["effort"]
+    current = effort.get("health_automation")
+
+    def save(**fields):
+        with plan_lock(plan_dir):
+            km = load_keymap(plan_dir)
+            row = run_rows(km)["effort"]
+            for field, value in fields.items():
+                if value:
+                    row[field] = value
+                else:
+                    row.pop(field, None)
+            save_keymap(plan_dir, km)
+
+    if uninstall:
+        if current:
+            orca_result("automations", "remove", current)
+        save(health_automation=None)
+        tail = f"; the worktree {effort['health_worktree']} stays (orca worktree rm to remove it)" if effort.get("health_worktree") else ""
+        print("health off" + tail)
+        return 0
+    if not install:
+        last = f"last check {effort['health']} at {effort.get('health_at')}" if effort.get("health") else "no check yet"
+        if not current:
+            print(f"health off; {last}")
+            return 0
+        shown = orca_result("automations", "show", current).get("automation") or {}
+        print(f"health {'on' if shown.get('enabled', True) else 'disabled'}: automation {current}, each hour, "
+              f"interval {CONFIG['health_interval']:g} hours; {last}")
+        return 0
+    slug = plan["effort"].get("slug") or die("effort.slug is missing in plan.json")
+    trees = orca_worktrees()
+    core = find_tree(trees, path=here) or die(f"{here} is not an Orca worktree")
+    branch = f"{BRANCH_PREFIX}{slug}-health"
+    tree = find_tree({i: t for i, t in trees.items() if tree_repo(t) == tree_repo(core)}, branch=branch)
+    if not tree:
+        tree = created_tree("--name", f"{slug}-health", "--branch", branch, "--parent-worktree", f"id:{core['id']}",
+                            "--base-branch", checked_out(here) or "HEAD", "--setup", "skip")
+    worktree = str(Path(tree["path"]).resolve())
+    agents = {a["id"] for a in orca_result("agent", "installed")["agents"]}
+    agent = CONFIG["health_agent"]
+    if agent not in agents:
+        die(f"config health_agent {agent!r} is not an installed Orca agent ({', '.join(sorted(agents)) or 'none'})")
+    precheck, prompt = automation_precheck("health", here, "--due"), health_prompt(here, worktree)
+    if current:
+        orca_result("automations", "edit", current, "--precheck", precheck, "--prompt", prompt, "--enabled")
+        save(health_worktree=worktree)
+        print(f"health on: automation {current}, each hour (updated), worktree {worktree}")
+        return 0
+    created = orca_result("automations", "create", "--name", f"wg health: {plan['effort']['name']}",
+                          "--trigger", HEALTH_SCHEDULE, "--prompt", prompt, "--provider", agent,
+                          "--workspace", f"id:{tree['id']}", "--precheck", precheck, "--precheck-timeout", "120",
+                          "--fresh-session")
+    automation = (created.get("automation") or created).get("id") or die("orca automations create returned no id")
+    save(health_automation=automation, health_worktree=worktree)
+    print(f"health on: automation {automation}, each hour, agent {agent}, worktree {worktree}")
     return 0
 
 
@@ -5206,20 +5586,24 @@ def doctor_watch():
     return "ok", f"agents: {WATCH_LABEL} loaded"
 
 
-def wake_trigger(automation):
-    """True when the Orca automation runs each 5 minutes (WAKE_SCHEDULE), False when it runs at other times, None
-    when its trigger is not readable. Orca keeps the trigger as `rrule`; a `trigger` field is the cron text."""
-    if (cron := automation.get("trigger")) is not None:
-        return cron == WAKE_SCHEDULE
+def wake_trigger(automation, cron=WAKE_SCHEDULE, forms=None):
+    """True when the Orca automation runs at the times of `cron` (default: each 5 minutes, WAKE_SCHEDULE), False
+    when it runs at other times, None when its trigger is not readable. Orca keeps the trigger as `rrule`; a
+    `trigger` field is the cron text. `forms` are the rrule parts that are the same times as `cron`."""
+    if (text := automation.get("trigger")) is not None:
+        return text == cron
     rrule = automation.get("rrule")
     if not isinstance(rrule, str) or "FREQ=" not in rrule:
         return None
     parts = dict(part.split("=", 1) for part in rrule.upper().split(";") if "=" in part)
     if parts.get("BYSECOND") == "0":
         del parts["BYSECOND"]
-    every5 = {"FREQ": "MINUTELY", "INTERVAL": "5"}
-    hourly = {"FREQ": "HOURLY", "BYMINUTE": ",".join(str(m) for m in range(0, 60, 5))}
-    return parts in (every5, hourly)
+    if parts.get("INTERVAL") == "1":
+        del parts["INTERVAL"]
+    if forms is None:
+        forms = ({"FREQ": "MINUTELY", "INTERVAL": "5"},
+                 {"FREQ": "HOURLY", "BYMINUTE": ",".join(str(m) for m in range(0, 60, 5))})
+    return parts in forms
 
 
 def doctor_autostart(plans):
@@ -5247,6 +5631,37 @@ def doctor_autostart(plans):
             else:
                 lines.append(("ok", f"{name} on, each 5 minutes"))
         return lines or [("ok", "autostart: off for each loaded effort")]
+    return check
+
+
+def doctor_health(plans):
+    """Each effort with the status check on has its Orca automation, the automation is on and runs each hour, and
+    its worktree exists."""
+    def check():
+        lines = []
+        for path in plans:
+            effort = run_rows(load_keymap(path))["effort"]
+            automation = effort.get("health_automation")
+            if not automation:
+                continue
+            name = f"health {path}: automation {automation}"
+            fix = f"wg health {shlex.quote(str(path))} --install"
+            result = command(orca_cli(), "automations", "show", automation, "--json")
+            if result.returncode:
+                lines.append(("FAIL", f"{name}: {flat_line(command_error(result))}; {fix}"))
+                continue
+            shown = json.loads(result.stdout)["result"].get("automation") or {}
+            if (worktree := effort.get("health_worktree")) and not Path(worktree).exists():
+                lines.append(("FAIL", f"{name}: its worktree {worktree} does not exist; {fix}"))
+            elif not shown.get("enabled", True):
+                lines.append(("warn", f"{name} disabled"))
+            elif (hourly := wake_trigger(shown, HEALTH_SCHEDULE, HEALTH_FORMS)) is None:
+                lines.append(("warn", f"{name} on, but its trigger is not readable"))
+            elif not hourly:
+                lines.append(("FAIL", f"{name} does not run each hour ({shown.get('rrule') or shown.get('trigger')}); {fix}"))
+            else:
+                lines.append(("ok", f"{name} on, each hour; last check {effort.get('health') or 'none'}"))
+        return lines or [("ok", "health: off for each loaded effort")]
     return check
 
 
@@ -5316,28 +5731,22 @@ def doctor_link(plan_dir, plan):
     return check
 
 
-def doctor(plan_dir=None):
-    """`wg doctor [<dir>]`: one ok, warn, or FAIL line for each check of this machine and, with a plan
-    directory, of that effort. It changes nothing. Exit 1 on a FAIL."""
+def doctor_lines(plan_dir=None):
+    """Each (level, text) line of `wg doctor [<dir>]`, as each check ends: the checks of this machine and, with a
+    plan directory, of that effort. It changes nothing."""
     plans = set(tick_plans())
     checks = [("python", doctor_python), ("websockets", doctor_websockets), ("checkout", doctor_checkout)]
     checks += [(f"key {w}", doctor_key(w)) for w in WORKSPACES]
     checks += [(name, doctor_tool(name, args)) for name, args in TOOL_CHECKS.items()]
     checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", doctor_page), ("tick", doctor_tick),
                ("agents", doctor_watch)]
-    failed = False
     if plan_dir:
         plans.add(Path(plan_dir).resolve())
-    checks.append(("autostart", doctor_autostart(sorted(plans))))
-
-    def show(lines):
-        nonlocal failed
-        for level, text in lines:
-            print(f"{level} {text}", flush=True)
-            failed |= level == "FAIL"
-
+    checks += [("autostart", doctor_autostart(sorted(plans))), ("health", doctor_health(sorted(plans)))]
     for name, step in checks:
-        show(doctor_run(name, step))
+        yield from doctor_run(name, step)
+    if not plan_dir:
+        return
     loaded = {}
 
     def plan_check():
@@ -5347,17 +5756,25 @@ def doctor(plan_dir=None):
         loaded["plan"] = plan
         return ("FAIL", "plan: " + "; ".join(errors)) if errors else ("ok", "plan: wg check is clean")
 
-    if plan_dir:
-        show(doctor_run("plan", plan_check))
+    yield from doctor_run("plan", plan_check)
     if plan := loaded.get("plan"):
         statuses = {}
         token = LINEAR_WORKSPACE.set(plan_workspace(plan))
         try:
             for name, step in (("keymap", doctor_keymap(plan_dir, statuses)),
                                ("worktrees", doctor_worktrees(plan_dir, statuses)), ("link", doctor_link(plan_dir, plan))):
-                show(doctor_run(name, step))
+                yield from doctor_run(name, step)
         finally:
             LINEAR_WORKSPACE.reset(token)
+
+
+def doctor(plan_dir=None):
+    """`wg doctor [<dir>]`: one ok, warn, or FAIL line for each check of this machine and, with a plan
+    directory, of that effort. It changes nothing. Exit 1 on a FAIL."""
+    failed = False
+    for level, text in doctor_lines(plan_dir):
+        print(f"{level} {text}", flush=True)
+        failed |= level == "FAIL"
     return int(failed)
 
 
@@ -6732,6 +7149,12 @@ def cli_parser():
         n.add_argument("--no-publish", action="store_true", help="do not copy the result to Linear for the page")
         n.add_argument("--all", action="store_true", help="print each wait and note line in full")
     add(sub, "wake")
+    h = add(sub, "health")
+    h_mode = h.add_mutually_exclusive_group()
+    h_mode.add_argument("--install", action="store_true")
+    h_mode.add_argument("--uninstall", action="store_true")
+    h_mode.add_argument("--due", action="store_true", help="the precheck of the automation: exit 0 starts a check")
+    h_mode.add_argument("--report", metavar="FILE", help="publish the findings of a check")
     auto = add(sub, "autostart")
     auto_mode = auto.add_mutually_exclusive_group()
     auto_mode.add_argument("--install", action="store_true")
@@ -6849,6 +7272,8 @@ def run_command(ns, d, plan, given):
         return wake_command(d, plan)
     if ns.cmd == "autostart":
         return autostart_command(d, plan, ns.install, ns.uninstall)
+    if ns.cmd == "health":
+        return health_command(d, plan, ns.install, ns.uninstall, ns.due, ns.report)
     if ns.cmd == "approve":
         return approve(d, plan, ns.keys, ns.quote)
     if ns.cmd == "dispatch":

@@ -4966,6 +4966,240 @@ class ReviewEffortTests(DirTests):
                           "review_levels": ["thorough", "standard", "light"], "review_default": "thorough"})
 
 
+def utc_text(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class HealthTests(DirTests):
+    """`wg health`: the precheck, the rules of the health value, the report, and the `note health` line."""
+
+    def setUp(self):
+        super().setUp()
+        self.p["effort"]["slug"] = "example"
+        self.write_plan()
+        self.keymap()
+        self.statuses = {"a": "In Progress", "mp": "Todo", "sp": "Todo"}
+        self.agents, self.paused, self.linear_change = [], False, False
+        for name, value in [("live_agents", lambda: self.agents), ("effort_paused", lambda d, plan: self.paused),
+                            ("snapshot", lambda d, plan, km=None: (km, {}, {}, self.statuses, {}, {})),
+                            ("linear_changed", lambda project, since: self.linear_change)]:
+            patcher = patch.object(wg, name, side_effect=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.now = time.time() + 60  # after each journal entry of setUp
+
+    def set_effort(self, **fields):
+        km = wg.load_keymap(self.d)
+        row = wg.run_rows(km)["effort"]
+        row.update(fields)
+        for field in [f for f, value in fields.items() if value is None]:
+            del row[field]
+        wg.save_keymap(self.d, km)
+
+    def due(self, now=None):
+        return wg.health_due(self.d, self.p, now=now or self.now)
+
+    def test_the_first_check_starts_and_records_its_start(self):
+        self.assertEqual(self.due(), (True, "no check yet"))
+        self.assertEqual(wg.run_rows(wg.load_keymap(self.d))["effort"]["health_started"], utc_text(self.now))
+        # A check that gave no report: the next start waits one interval.
+        self.assertEqual(self.due(self.now + 3600)[0], False)
+        self.assertEqual(self.due(self.now + 6 * 3600 + 1), (True, "the last start gave no report"))
+
+    def test_a_check_waits_for_the_interval_a_pause_the_end_and_a_change(self):
+        self.set_effort(health_at=utc_text(self.now), health="onTrack")
+        start, reason = self.due(self.now + 3600)
+        self.assertFalse(start)
+        self.assertIn("interval 6h", reason)
+        later = self.now + 7 * 3600
+        self.assertEqual(self.due(later), (False, "no change since the last check"))
+        self.paused = True
+        self.assertEqual(self.due(later), (False, "the effort is paused"))
+        self.paused = False
+        self.statuses["sp"] = "Done"
+        self.assertEqual(self.due(later), (False, "the effort is complete"))
+        self.statuses["sp"] = "Todo"
+        self.linear_change = True
+        self.assertEqual(self.due(later), (True, "the effort changed since the last check"))
+
+    def test_a_journal_change_counts_and_the_quiet_fields_do_not(self):
+        self.set_effort(health_at=utc_text(self.now), health="onTrack")
+        later = self.now + 7 * 3600
+        with (self.d / wg.JOURNAL).open("a") as f:
+            f.write(json.dumps({"time": utc_text(self.now + 10), "command": "next", "key": "@effort", "kind": "run",
+                                "changes": {"page_contract_at": [None, "x"], "notified_0": [None, "y"]}}) + "\n")
+        self.assertEqual(self.due(later), (False, "no change since the last check"))
+        self.set_effort(health_started=None)
+        with (self.d / wg.JOURNAL).open("a") as f:
+            f.write(json.dumps({"time": utc_text(self.now + 20), "command": "move", "key": "a", "kind": "run",
+                                "changes": {"state": ["running", None]}}) + "\n")
+        self.assertEqual(self.due(later), (True, "the effort changed since the last check"))
+
+    def test_with_no_change_a_check_still_runs_each_day(self):
+        self.set_effort(health_at=utc_text(self.now), health="onTrack")
+        start, reason = self.due(self.now + 25 * 3600)
+        self.assertTrue(start)
+        self.assertTrue(reason.startswith("no check for "), reason)
+
+    def test_a_running_check_agent_or_no_plan_starts_nothing(self):
+        worktree = self.d / "example-health"
+        worktree.mkdir()
+        self.set_effort(health_worktree=str(worktree))
+        self.agents = [{"path": str(worktree.resolve()), "state": "working"}]
+        self.assertEqual(self.due(), (False, "a status check agent runs"))
+        wg.save_keymap(self.d, {"nodes": {}})
+        self.assertEqual(self.due(), (False, "the plan is not loaded"))
+
+    def report(self, *findings):
+        return {"summary": "", "findings": list(findings)}
+
+    def test_the_rules_set_the_health_value(self):
+        status = {"kind": "status", "subject": "a", "text": "PR #4 merged,\n the issue is In Review."}
+        stale = {"kind": "stale-human", "subject": "mp", "text": "no answer", "hours": 30}
+        early = {"kind": "stale-review", "subject": "a", "text": "no review", "hours": 5}
+        gap = {"kind": "doctor-gap", "subject": "merged-pr", "text": "a script can compare the PR state"}
+        now = self.now
+        faults, notes = wg.health_findings(self.report(stale, early, gap), [("warn", "tick: not installed")], [], now)
+        self.assertEqual(wg.health_value(faults), "atRisk")
+        self.assertEqual(sorted(faults), ["doctor-gap:merged-pr", "stale-human:mp"])
+        self.assertIn("dropped stale-review a: 5 hours is less than 48", notes)
+        self.assertIn("doctor warn: tick: not installed", notes)
+        faults, _ = wg.health_findings(self.report(status), [("FAIL", "keymap a CD-1: agent:codex with no live job")], [], now)
+        self.assertEqual(wg.health_value(faults), "offTrack")
+        self.assertEqual(faults["status:a"]["text"], "PR #4 merged, the issue is In Review.")
+        self.assertIn("doctor:keymap-a-CD-1", faults)
+        faults, _ = wg.health_findings(self.report(gap), [("ok", "python: 3.12")], [], now)
+        self.assertEqual(wg.health_value(faults), "onTrack")
+        old = [{"time": utc_text(now - 4 * 24 * 3600), "key": "a", "changes": {"state": ["a", "b"]}},
+               {"time": utc_text(now - 3600), "key": "@effort", "changes": {"health_at": ["a", "b"]}}]
+        faults, _ = wg.health_findings(self.report(), [], old, now)
+        self.assertEqual(list(faults), ["idle:@effort"])
+        self.assertEqual(wg.health_findings(self.report(), [], old, now, complete=True)[0], {})
+
+    def test_a_report_that_breaks_a_rule_is_refused(self):
+        for finding, message in (({"kind": "bad", "subject": "a", "text": "x"}, "kind must be one of"),
+                                 ({"kind": "status", "subject": "a b", "text": "x"}, "subject must be"),
+                                 ({"kind": "status", "subject": "a", "text": " "}, "text must be"),
+                                 ({"kind": "stale-human", "subject": "a", "text": "x"}, "needs hours")):
+            with self.subTest(message=message):
+                self.assertIn(message, wg.health_finding_problem(0, finding))
+        path = self.d / "bad.json"
+        path.write_text(json.dumps({"findings": {}}))
+        _, err = self.call(wg.health_report, self.d, self.p, str(path), code=2)
+        self.assertIn("a list `findings`", err)
+
+    def fake_linear(self, open_issue=None):
+        calls = []
+
+        def gql(query, variables=None):
+            calls.append((query, variables))
+            if "issueLabelCreate" in query:
+                return {"issueLabelCreate": {"issueLabel": {"id": "lab-health"}}}
+            if "issues(first:5" in query:
+                return {"issues": {"nodes": [open_issue] if open_issue else []}}
+            if "issueCreate" in query:
+                return {"issueCreate": {"issue": {"id": "new", "identifier": f"CD-{90 + len(calls)}"}}}
+            if "commentCreate" in query:
+                return {"commentCreate": {"success": True}}
+            if "projectUpdateCreate" in query:
+                return {"projectUpdateCreate": {"projectUpdate": {"id": "u1", "url": "https://linear.app/u1"}}}
+            raise AssertionError(query)
+        return calls, gql
+
+    def run_report(self, report, doctor=(), open_issue=None):
+        path = self.d / "report.json"
+        path.write_text(json.dumps(report))
+        calls, gql = self.fake_linear(open_issue)
+        sent = []
+        with patch.object(wg, "gql", side_effect=gql), patch.object(wg, "doctor_lines", return_value=list(doctor)), \
+                patch.object(wg, "team_info", return_value=("team", {"Triage": "s-triage"}, {})), \
+                patch.object(wg, "health_notice", side_effect=lambda plan, title, body: sent.append(title)):
+            out, _ = self.call(wg.health_report, self.d, self.p, str(path))
+        return calls, sent, out
+
+    def test_the_report_files_new_faults_posts_the_update_and_sends_a_notice_when_worse(self):
+        status = {"kind": "status", "subject": "a", "text": "PR #4 merged, the issue is In Review.", "fix": "wg move"}
+        calls, sent, out = self.run_report(self.report(status))
+        self.assertIn("health offTrack: 1 fault(s), 1 issue(s)", out)
+        created = [v["i"] for q, v in calls if "issueCreate" in q]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["stateId"], "s-triage")
+        self.assertEqual(created[0]["projectId"], "project")
+        self.assertIn("wg-health-fault: status:a", created[0]["description"])
+        update = next(v["i"] for q, v in calls if "projectUpdateCreate" in q)
+        self.assertEqual((update["health"], update["projectId"]), ("offTrack", "project"))
+        self.assertIn("offTrack status:a (CD-", update["body"])
+        self.assertEqual(sent, ["work-graph: Example is offTrack"])
+        effort = wg.run_rows(wg.load_keymap(self.d))["effort"]
+        self.assertEqual((effort["health"], effort["health_faults"], effort["health_update"]),
+                         ("offTrack", "status:a", "https://linear.app/u1"))
+        # The same fault again: no new issue, no comment, and no notice (the value is not worse).
+        calls, sent, _ = self.run_report(self.report(status))
+        self.assertFalse([q for q, _ in calls if "issueCreate" in q or "commentCreate" in q])
+        self.assertEqual(sent, [])
+        # It goes away, then comes back while its issue is open: a comment on that issue.
+        self.run_report(self.report())
+        self.assertEqual(wg.run_rows(wg.load_keymap(self.d))["effort"]["health"], "onTrack")
+        calls, sent, _ = self.run_report(self.report(status), open_issue={"id": "i7", "identifier": "CD-7"})
+        self.assertFalse([q for q, _ in calls if "issueCreate" in q])
+        self.assertEqual([v["i"]["issueId"] for q, v in calls if "commentCreate" in q], ["i7"])
+        self.assertEqual(sent, ["work-graph: Example is offTrack"])
+
+    def test_a_doctor_gap_issue_is_not_in_the_project(self):
+        gap = {"kind": "doctor-gap", "subject": "merged-pr", "text": "compare the PR state in wg doctor"}
+        calls, sent, out = self.run_report(self.report(gap))
+        created = next(v["i"] for q, v in calls if "issueCreate" in q)
+        self.assertNotIn("projectId", created)
+        self.assertTrue(created["title"].startswith("health: add a wg doctor check: merged-pr"))
+        self.assertIn("health onTrack", out)
+        self.assertEqual(sent, [])
+
+    def test_next_notes_a_check_that_found_faults(self):
+        self.assertEqual(wg.health_lines(self.d), [])
+        self.set_effort(health="atRisk", health_at="2026-11-24T10:00:00Z", health_faults="a:b,c:d",
+                        health_update="https://linear.app/u1")
+        self.assertEqual(wg.health_lines(self.d),
+                         [("note", "health @effort -: atRisk at 2026-11-24T10:00:00Z, 2 fault(s); https://linear.app/u1")])
+        self.set_effort(health="onTrack")
+        self.assertEqual(wg.health_lines(self.d), [])
+
+    def test_doctor_checks_the_hourly_automation(self):
+        self.assertEqual(wg.doctor_health([self.d])(), [("ok", "health: off for each loaded effort")])
+        self.set_effort(health_automation="h1")
+
+        def shown(**automation):
+            return done_proc(json.dumps({"result": {"automation": {"id": "h1", **automation}}}))
+        for automation, level in (({"rrule": "FREQ=HOURLY;BYMINUTE=0"}, "ok"), ({"trigger": "0 * * * *"}, "ok"),
+                                  ({"rrule": "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0;BYSECOND=0"}, "ok"),
+                                  ({"trigger": "*/5 * * * *"}, "FAIL"), ({"enabled": False}, "warn"), ({}, "warn")):
+            with self.subTest(automation=automation), patch.object(wg, "command", return_value=shown(**automation)):
+                self.assertEqual(wg.doctor_health([self.d])()[0][0], level)
+        self.set_effort(health_worktree=str(self.d / "gone"))
+        with patch.object(wg, "command", return_value=shown(trigger="0 * * * *")):
+            level, text = wg.doctor_health([self.d])()[0]
+        self.assertEqual(level, "FAIL")
+        self.assertIn("does not exist", text)
+
+    def test_the_prompt_is_read_only_and_names_the_report(self):
+        prompt = wg.health_prompt("/plans/x-core", "/plans/x-health")
+        for text in ("read only", "WG_LINK=off", "`wg explain health-check`", "wg health /plans/x-core --report",
+                     "/plans/x-health/.wg-health/"):
+            self.assertIn(text, prompt)
+        self.assertIn("health-check", wg.EXPLAIN)
+
+    def test_the_config_checks_the_health_fields(self):
+        for fields, message in (({"health_interval": 0}, "health_interval"), ({"health_interval": True}, "health_interval"),
+                                ({"health_agent": "Bad Agent"}, "health_agent")):
+            path = self.d / "config.json"
+            path.write_text(json.dumps(fields))
+            with self.subTest(fields=fields), self.assertRaises(SystemExit) as raised:
+                wg.read_config(path)
+            self.assertIn(message, str(raised.exception))
+        path.write_text(json.dumps({}))
+        config = wg.read_config(path)
+        self.assertEqual((config["health_interval"], config["health_agent"]), (6, "codex"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

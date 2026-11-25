@@ -28,7 +28,7 @@ wg doctor                                                                    # o
 `wg doctor` checks this machine and changes nothing: the Python version, the `websockets` package, that `wg` on
 PATH and each skill link point at one checkout and that checkout is not behind its `origin/main`, each workspace
 key (present, mode 600, accepted by Linear) with the request budget that is left, `gh auth`, `st`, the Orca CLI,
-the page server (`/healthz`, and the contract of `/api/config`), and the `tick` and `autostart` schedules.
+the page server (`/healthz`, and the contract of `/api/config`), and the `tick`, `autostart`, and `health` schedules.
 `wg doctor <plan-dir>` also checks that effort: `wg check`, `keymap.json` against Linear (an issue that is gone, a
 claim label with no live job, a job start that is stuck for more than 30 minutes, a status that the run row
 contradicts), each worktree path of the run rows, and the link (connect, `hello`, close). It exits 1 on a `FAIL`.
@@ -49,6 +49,8 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
   "github_user": "ada",
   "tick_label": "dev.work-graph.tick",
   "tick_roots": ["~/Projects"],
+  "health_interval": 6,
+  "health_agent": "codex",
   "notify": [
     {"type": "webhook", "url_env": "WG_NOTIFY_URL", "url_file": "~/.config/work-graph/notify-url"},
     {"type": "command", "argv": ["/usr/local/bin/my-notifier", "--title", "work-graph"]}
@@ -78,6 +80,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | `agent_merge` | The GitHub owners (`ada`) or repositories (`ada/tool`) where agents may merge. At autonomy level `full` there, `wg next` prints `do merge` in place of `ask-merge`: the merge is the coordinator's step, not the human's move. Default: none. |
 | `tick_label`, `tick_roots` | The launchd label of `wg tick --install`, and the folders where `wg tick` looks for `*-core/plan.json`. |
 | `notify` | The channels that tell `human` that a move is theirs (see "Notices" below). Default: none. |
+| `health_interval`, `health_agent` | The status check (`wg health`, `skills/work-graph/references/health.md`): the hours from one check to the next (1 to 168, default 6), and the Orca agent that does the check (default `codex`). |
 | `test_runner` | The default test command of `wg evidence`. A node runs the moon test tasks that its diff affects; `@full-<phase>` runs `suite`. `commit_marker` is a regular expression for the line where the runner prints the commit it tests; without it, the exit code is the proof. `lint` is the lint command of the worker spec's push checks, as a list of arguments; each `{lower}` is the node's diff base. Without it, the spec has no lint step. A plan's `effort.lint` replaces it, and a plan with `effort.test` does not use it (`skills/work-graph/references/graph.md`). |
 | `workspaces` | The Linear workspaces. The first is the default. `team` is the default team of a plan; `teams` limits a workspace to those teams; `team_labels: false` makes project labels workspace labels (Linear's team project labels need the Business plan). |
 

@@ -214,6 +214,17 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
   memory only. If the server cannot write the file, it logs the error and exits with code 1 at a stop, and after
   the restart a coordinator can get a message again that it acknowledged.
 
+- `WG_REDIS_URL` (optional): the secret URL of the Redis server (`redis://` or `rediss://`).
+  Set the same URL on each instance when more than one instance serves the full page.
+  Redis keeps the link state and queue for all instances. When you set the URL, the server ignores
+  `WG_STATE_DIR`. Use a Redis server with persistence if the queue must survive a Redis restart.
+  If Redis goes down, the link closes its sockets and refuses new sockets until Redis is back.
+  The server tries again automatically, and the coordinator polls Linear while the link is down.
+  The page and reads that do not need a sign-in stay available. A signed-in request needs Redis
+  to check if the session ended.
+  Check `linkStore` and `redisReady` in `/api/status`.
+- `WG_REDIS_PREFIX` (optional): use a different prefix for each deployment that shares a Redis server.
+  The default is `wg:link:`. Use the same prefix on all instances of a deployment.
 - `WG_VERSION` (optional): the commit of the build. The `Dockerfile` takes it as a build argument
   (`--build-arg WG_VERSION=<commit>`). Without it, the server gives `dev`.
 

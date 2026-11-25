@@ -1,8 +1,8 @@
 import type { Envelope, ProjectRef } from "../src/lib/link.ts";
 
 export type LinkEvent =
-  | { kind: "pages"; message: Envelope; overview: boolean; viewer?: Envelope }
-  | { kind: "sockets"; sockets: string[]; messages: Envelope[] }
+  | { kind: "pages"; message: Envelope; overview: boolean; viewer?: Envelope; sequence?: number }
+  | { kind: "sockets"; sockets: string[]; messages: Envelope[]; sequence?: number; queue?: boolean }
   | { kind: "replaced"; socket: string }
   | { kind: "wrote"; ref: ProjectRef }
   | { kind: "ended"; session: string };

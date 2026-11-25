@@ -15,6 +15,7 @@ export interface Coordinator {
 
 export interface LinkRoom {
   ref: ProjectRef;
+  sequence?: number;
   queue: Envelope[];
   asks: Ask[];
   coordinators: Map<string, Coordinator>;
@@ -32,17 +33,18 @@ export interface LinkRoomState {
    * An edit does not schedule a save of the queue or asks. Use the methods below to change those fields.
    */
   edit<T>(ref: ProjectRef, change: (room: LinkRoom) => T): Promise<T>;
-  append(ref: ProjectRef, message: Envelope): Promise<LinkRoom>;
+  append(ref: ProjectRef, message: Envelope, answeredAsk?: string): Promise<LinkRoom>;
   ack(ref: ProjectRef, ids: string[]): Promise<LinkRoom>;
   setAsks(ref: ProjectRef, asks: Ask[]): Promise<LinkRoom>;
   removeAsk(ref: ProjectRef, id: string): Promise<LinkRoom | null>;
-  prune(cutoff: number): Promise<void>;
+  prune(cutoff: number): Promise<void | LinkRoom[]>;
   endSession(id: string, expiresAt: number, now: number): Promise<void>;
   sessionEnded(id: string, now: number): Promise<boolean>;
   flush(): Promise<boolean>;
+  refresh?(ref: ProjectRef, socket: string, at: string): Promise<boolean>;
 }
 
-const emptyRoom = (ref: ProjectRef): LinkRoom => ({
+export const emptyRoom = (ref: ProjectRef): LinkRoom => ({
   ref, queue: [], asks: [], coordinators: new Map(), sockets: new Map(), progress: [], agents: null,
 });
 
@@ -70,9 +72,10 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
       write(structuredClone(draft));
       return result;
     },
-    async append(ref, message) {
+    async append(ref, message, answeredAsk) {
       const room = roomOf(ref) ?? emptyRoom(structuredClone(ref));
       room.queue.push(structuredClone(message));
+      if (answeredAsk !== undefined) room.asks = room.asks.filter((ask) => ask.id !== answeredAsk);
       if (room.queue.length > QUEUE_MAX) {
         const firstChanged = room.queue.findIndex((item) => item.type === "changed");
         room.queue.splice(firstChanged < 0 ? 0 : firstChanged, 1);
@@ -108,11 +111,7 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
     },
     async prune(cutoff) {
       for (const [key, room] of rooms) {
-        for (const [session, coordinator] of room.coordinators) {
-          if (!coordinator.socket && Date.parse(coordinator.lastSeen) < cutoff) room.coordinators.delete(session);
-        }
-        if (room.agents && Date.parse(room.agents.at) < cutoff) room.agents = null;
-        if (!room.sockets.size && !room.coordinators.size && !room.queue.length && !room.asks.length && !room.agents) rooms.delete(key);
+        if (!pruneRoom(room, cutoff)) rooms.delete(key);
       }
     },
     async endSession(id, expiresAt, now) {
@@ -126,4 +125,12 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
       return store?.flush() ?? true;
     },
   };
+}
+
+export function pruneRoom(room: LinkRoom, cutoff: number): boolean {
+  for (const [session, coordinator] of room.coordinators) {
+    if (!coordinator.socket && Date.parse(coordinator.lastSeen) < cutoff) room.coordinators.delete(session);
+  }
+  if (room.agents && Date.parse(room.agents.at) < cutoff) room.agents = null;
+  return !!(room.sockets.size || room.coordinators.size || room.queue.length || room.asks.length || room.agents);
 }

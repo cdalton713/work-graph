@@ -88,6 +88,38 @@ describe("project links", () => {
 });
 
 describe("api", () => {
+  it("reports the memory link store with no Redis configuration", async () => {
+    const page = createApp(rules, { team: "WG", dist, watchMs: 0 });
+    try {
+      const response = await page.request("/api/status", { headers: local });
+      expect(await response.json()).toMatchObject({ linkStore: "memory", redisReady: null });
+    } finally {
+      page.link.stop();
+    }
+  });
+
+  it("keeps reads available when Redis cannot connect and keeps its URL private", async () => {
+    const redisUrl = "rediss://:private-password@127.0.0.1:1";
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const page = createApp(rules, { team: "WG", dist, watchMs: 0, redisUrl, stateDir: "/unused" });
+    try {
+      expect((await page.request("/", { headers: local })).status).toBe(200);
+      const status = await page.request("/api/status", { headers: local });
+      expect(await status.json()).toMatchObject({ linkStore: "redis", redisReady: false });
+      const response = await page.request("/api/link?role=coordinator&project=p1", { headers: local });
+      expect(response.status).toBe(503);
+      expect(await response.text()).not.toContain("private-password");
+      expect(JSON.stringify([log.mock.calls, warn.mock.calls, error.mock.calls])).not.toContain("private-password");
+    } finally {
+      page.link.stop();
+      log.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
   it("refuses a caller that is not this page", async () => {
     const response = await app().request("/api/projects", { headers: { host: "evil.example" } });
     expect(response.status).toBe(403);
@@ -1509,6 +1541,44 @@ describe("sign-in of the viewer", () => {
       socket?.terminate();
       http.close();
       await Promise.all([a.link.shutdown(), b.link.shutdown()]);
+    }
+  });
+
+  it.each(["missed logout", "failed admission"])("closes a page socket after %s", async (failure) => {
+    const state = memoryLinkState();
+    let checks = 0, ended = false;
+    const page = createApp(hostedRoles, {
+      team: "WG", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth, linkToken: rolesToken, watchMs: 0,
+      linkState: {
+        ...state,
+        async sessionEnded() {
+          checks++;
+          if (checks > 1 && failure === "failed admission") throw new Error("session state unavailable");
+          return ended;
+        },
+      },
+    });
+    const http = serve({ fetch: page.fetch, port: 0, hostname: "127.0.0.1" });
+    page.injectWebSocket(http as never);
+    if (!http.listening) await new Promise<void>((resolve) => http.once("listening", resolve));
+    const ws = new WebSocket(`ws://127.0.0.1:${(http.address() as AddressInfo).port}/api/link?role=page`, {
+      headers: { ...await rolesHeaders("ada@example.com"), origin: "https://view.example.com" },
+    });
+    const failed = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const closed = new Promise<number>((resolve) => ws.once("close", resolve));
+      await new Promise<void>((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
+      await vi.waitFor(() => expect(checks).toBeGreaterThanOrEqual(2));
+      if (failure === "missed logout") {
+        ended = true;
+        await page.link.hub.beat();
+      }
+      expect(await closed).toBe(failure === "missed logout" ? 1008 : 1011);
+    } finally {
+      ws.terminate();
+      page.link.stop();
+      http.close();
+      failed.mockRestore();
     }
   });
 

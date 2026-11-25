@@ -19,7 +19,9 @@ import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
 import { LinearError, addComment, linearBudget, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
-import { type Connection, LinkHub, QUEUE_MAX, realTimers as realLinkTimers, type Timers } from "./link.ts";
+import { type Connection, LinkHub, QUEUE_MAX, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
+import type { LinkBus } from "./linkbus.ts";
+import type { LinkRoomState } from "./linkstate.ts";
 import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
 import { configureSite, site } from "../src/lib/site.ts";
@@ -69,6 +71,8 @@ export interface AppOptions {
   now?: () => number;
   /** The timers of the link heartbeat (tests). */
   linkTimers?: Timers;
+  linkState?: LinkRoomState;
+  linkBus?: LinkBus;
   /**
    * The directory where the link keeps its queue and the open asks over a restart. Default: `WG_STATE_DIR`.
    * None: the link keeps them in memory only.
@@ -131,7 +135,7 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
 export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, human, stateDir = process.env.WG_STATE_DIR || undefined,
-  version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linkToken, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
+  version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linkToken, linkState, linkBus, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   if (linkToken && [...linkToken].length < 32) {
     throw new Error("WG_LINK_TOKEN must have at least 32 characters");
   }
@@ -149,12 +153,6 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (readOnly || (email && !auth?.owners?.includes(email))) return "viewer";
     return "owner";
   };
-  const revoked = new Map<string, number>();
-  const sessionActive = (session: Session) => clock() < session.expiresAt && !revoked.has(session.id);
-  const signOut = (session: Session) => {
-    for (const [id, expiresAt] of revoked) if (expiresAt <= clock()) revoked.delete(id);
-    revoked.set(session.id, session.expiresAt);
-  };
   // The overview and the graph rules on the server use the same names as the page.
   configureSite({ human, defaultWorkspace: workspaces[0].id });
   const clock = now ?? Date.now;
@@ -162,9 +160,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const contract = contractHash(contractFile);
   const app = new Hono();
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
+  const caches = new Map(workspaces.map((w) => [w.id, createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now })]));
   // `wrote` from wg: forget the cached graph of that project, so the pages that load again see the change.
-  const store = linkStore(stateDir, dist, workspaces, (linkTimers ?? realLinkTimers).after);
-  const hub = new LinkHub(now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers, store);
+  const store = linkState ? null : linkStore(stateDir, dist, workspaces, (linkTimers ?? realLinkTimers).after);
+  const hub = new LinkHub(now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers, store, linkState, linkBus);
+  const sessionActive = async (session: Session) => clock() < session.expiresAt && !await hub.sessionEnded(session.id, clock());
+  const signOut = (session: Session) => hub.endSession(session.id, session.expiresAt, clock());
   hub.start();
   app.use(async (c, next) => {
     await next();
@@ -186,7 +187,6 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
   app.get("/healthz", (c) => c.json({ ok: true }));
 
-  const caches = new Map(workspaces.map((w) => [w.id, createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now })]));
   const graphs = () => caches.get(linearWorkspace.getStore()!.id)!;
   /**
    * The graph as this page may show it. The full page shows each issue of another project that has a blocks
@@ -249,8 +249,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       ? { identifier: issue.identifier, status: statusName(issue.state, issue.labels), key: parseCard(issue.card?.body)?.key ?? null }
       : { identifier: issueId, status: null, key: null };
   };
-  const pageChanged = (ref: ProjectRef | null, what: Changed["what"], issues: string[]) => {
-    if (ref) hub.publish(ref, "changed", { by: "page", what, issues });
+  const pageChanged = async (ref: ProjectRef | null, what: Changed["what"], issues: string[]) => {
+    if (ref) await hub.publish(ref, "changed", { by: "page", what, issues });
   };
   /** The count of lists started and the order of the latest list used for shared access. */
   const lists = { started: 0, stored: 0 };
@@ -263,7 +263,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const host = refusal("GET", header, rules);
     if (host) return c.json({ error: host }, 403);
     const signed = auth ? await sessionOf(c, auth, clock) : null;
-    const session = signed && sessionActive(signed) ? signed : null;
+    const session = signed && await sessionActive(signed) ? signed : null;
     const role = roleOf(session?.email);
     const viewer = readOnly || role === "viewer";
     const method = c.req.method;
@@ -284,7 +284,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await next();
   });
   // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
-  api.get("/status", (c) => c.json<ServerStatus>({
+  api.get("/status", async (c) => c.json<ServerStatus>({
     version, contract, uptime: Math.floor((clock() - started) / 1000),
     workspaces: workspaces.map(({ id, name }) => {
       const budget = linearBudget(id);
@@ -293,7 +293,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         complexityReset: budget?.complexityReset ?? null, at: budget?.at ?? null };
     }),
     cache: !readOnly && c.var.viewer ? 0 : [...caches.values()].reduce((sum, cache) => sum + cache.size(), 0),
-    rooms: !readOnly && c.var.viewer ? [] : hub.counts(),
+    rooms: !readOnly && c.var.viewer ? [] : await hub.counts(),
   }));
   api.use(bodyLimit({ maxSize: 2_000_000, onError: (c) => c.json({ error: "request body too large" }, 413) }));
   const projectList = async (viewer = false): Promise<ProjectList> => {
@@ -419,8 +419,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       names.at = 0;
       wrote(null, ref.id);
     }
-    hub.publish(ref, "command", { name, key: typeof key === "string" ? key : null, issue: identifier });
-    return c.json({ ok: true, queued: hub.presence(ref).queued });
+    await hub.publish(ref, "command", { name, key: typeof key === "string" ? key : null, issue: identifier });
+    return c.json({ ok: true, queued: (await hub.presence(ref)).queued });
   });
   // The link state of a project, for `wg wake` on the human's machine: is a coordinator connected, and do messages
   // wait that only a coordinator can act on. A GET, so the host check above is the only gate; it changes nothing.
@@ -428,9 +428,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const ref = { workspace: linearWorkspace.getStore()!.id, id: c.req.param("id") };
     if (!readOnly && c.var.viewer) {
       await sharedProject(ref.id, ref.workspace);
-      return c.json({ ...hub.viewerPresence(ref), waiting: 0 });
+      return c.json({ ...await hub.viewerPresence(ref), waiting: 0 });
     }
-    return c.json({ ...hub.presence(ref), waiting: hub.waiting(ref) });
+    return c.json({ ...await hub.presence(ref), waiting: await hub.waiting(ref) });
   });
   // The autonomy level of the effort (work-graph SKILL.md "Autonomy level"). The project label is the record;
   // the command wakes the coordinator, whose `wg next` reads the label and prints `do autonomy`.
@@ -442,8 +442,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await setAutonomy(ref.id, level, workspace.team, workspace.teamLabels);
     names.at = 0;
     wrote(null, ref.id);
-    hub.publish(ref, "command", { name: "autonomy", key: null, issue: null, level });
-    return c.json({ ok: true, level, queued: hub.presence(ref).queued });
+    await hub.publish(ref, "command", { name: "autonomy", key: null, issue: null, level });
+    return c.json({ ok: true, level, queued: (await hub.presence(ref)).queued });
   });
   // The review effort of the effort (work-graph review-and-merge.md "Review effort"). The project label is the
   // record; the command `next` wakes the coordinator, whose `wg next` reads the label and prints `do review`.
@@ -455,8 +455,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await setReviewEffort(ref.id, level, workspace.team, workspace.teamLabels);
     names.at = 0;
     wrote(null, ref.id);
-    hub.publish(ref, "command", { name: "next", key: null, issue: null });
-    return c.json({ ok: true, level, queued: hub.presence(ref).queued });
+    await hub.publish(ref, "command", { name: "next", key: null, issue: null });
+    return c.json({ ok: true, level, queued: (await hub.presence(ref)).queued });
   });
   // Share a project with the read-only viewer, or stop that. The project label `shared` is the record: the viewer
   // reads it from Linear. No coordinator acts on it.
@@ -478,7 +478,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const { body } = await json(c.req.json<{ body?: unknown }>());
     if (typeof body !== "string" || !body.trim()) throw new LinearError("reply body is empty", 400);
     const ref = { workspace: linearWorkspace.getStore()!.id, id: c.req.param("id") };
-    const ask = hub.ask(ref, c.req.param("ask"));
+    const ask = await hub.ask(ref, c.req.param("ask"));
     if (!ask) throw new LinearError("no open question with this id: it was answered, or the coordinator has not reported it", 404);
     // Which issues are in the project decides whether the reply is saved in Linear: a stale graph is not enough.
     // A failed refresh stops the route here, and the question stays open.
@@ -489,8 +489,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       await addComment(issue.id, `**Reply to a worker question** (from the page)\n\n${quote}\n\n${body.trim()}`, linearWorkspace.getStore()!.team, written.hear);
       wrote(null, written.id);
     }
-    hub.publish(ref, "reply", { ask: ask.id, issue: ask.issue, key: ask.key, body: body.trim() });
-    hub.answered(ref, ask.id);
+    await hub.publish(ref, "reply", { ask: ask.id, issue: ask.issue, key: ask.key, body: body.trim() });
+    await hub.answered(ref, ask.id);
     return c.json({ ok: true, recorded: !!issue });
   });
   api.patch("/issues/:id", async (c) => {
@@ -499,7 +499,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const written = projectOfWrite();
     const issue = wrote(await updateIssue(c.req.param("id"), patch, linearWorkspace.getStore()!.team, written.hear), written.id);
     const what: Changed["what"] = patch.stateId ? "status" : patch.labelIds ? "label" : "issue";
-    pageChanged(ref, what, [issue.identifier]);
+    await pageChanged(ref, what, [issue.identifier]);
     return c.json(issue);
   });
   api.get("/issues/:id/comments", async (c) => {
@@ -514,7 +514,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const info = ref ? await issueInfo(ref, c.req.param("id")) : null;
     const written = projectOfWrite();
     const comment = wrote(await addComment(c.req.param("id"), body, linearWorkspace.getStore()!.team, written.hear), written.id);
-    pageChanged(ref, "comment", [info?.identifier ?? c.req.param("id")]);
+    await pageChanged(ref, "comment", [info?.identifier ?? c.req.param("id")]);
     // A comment in the page on an issue that waits on the human is their answer: the label `answered` marks it
     // in Linear (wg next finds it there after a restart), and the message wakes the coordinator at once.
     // The comment is saved before the label: when the label fails, the answer is still 200. A retry from
@@ -529,7 +529,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         console.warn(`wg ui: comment saved, but the answered label failed: ${(error as Error).message}`);
       }
       wrote(null, written.id);
-      hub.publish(ref, "answer", { issue: info.identifier, key: info.key, body: comment.body });
+      await hub.publish(ref, "answer", { issue: info.identifier, key: info.key, body: comment.body });
       return c.json({ ...comment, answered });
     }
     return c.json(comment);
@@ -560,7 +560,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       return c.json({ error: "coordinator token required" }, 401);
     }
     const session = auth && role === "page" ? await sessionOf(c, auth, clock) : null;
-    if (auth && role === "page" && (!session || !sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    if (auth && role === "page" && (!session || !await sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     const viewer = role === "page" && roleOf(session?.email) === "viewer";
     // The server stops: it takes no new link socket (also below, for an upgrade that waited for the project).
     const restarting = () => c.json({ error: "the server restarts" }, 503);
@@ -582,30 +582,42 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const viewer = c.get("linkViewer" as never) as boolean;
     const session = c.get("linkSession" as never) as Session | null;
     let connection: Connection | null = null;
+    let pending: Promise<void> = Promise.resolve();
+    const afterOpen = (action: () => Promise<void> | undefined) => {
+      pending = pending.then(action).catch(reportLinkError);
+    };
     return {
       onOpen: (_event, ws) => {
         // The raw socket of `ws` has the ping frames of the heartbeat, which WSContext does not have.
         const raw = ws.raw as import("ws").WebSocket;
-        const canSend = () => {
-          if (!session || (sessionActive(session) && roleOf(session.email) === (viewer ? "viewer" : "owner"))) return true;
-          ws.close(1008, "session ended");
-          return false;
+        const admitted = session && sessionActive(session);
+        const protectedSend = (send: () => void) => {
+          if (!session || !admitted) return send();
+          void admitted.then((active) => {
+            if (active && clock() < session.expiresAt && roleOf(session.email) === (viewer ? "viewer" : "owner")) send();
+            else ws.close(1008, "session ended");
+          }).catch(reportLinkError);
         };
         const peer = {
-          send: (text: string) => { if (canSend()) ws.send(text); },
+          session: session?.id,
+          send: (text: string) => protectedSend(() => ws.send(text)),
           close: (code?: number, reason?: string) => ws.close(code, reason),
-          ping: () => { if (canSend()) raw.ping(); },
+          ping: () => protectedSend(() => raw.ping()),
           terminate: () => raw.terminate(),
         };
-        if (role === "coordinator") connection = hub.joinCoordinator(peer, ref!);
-        else if (viewer) connection = hub.joinViewer(peer, ref, (project) =>
+        const joined = role === "coordinator" ? hub.joinCoordinator(peer, ref!)
+          : viewer ? hub.joinViewer(peer, ref, (project) =>
           Date.now() - sharedNames.at <= 60_000 && !!sharedNames.list?.projects.some(
-            (p) => p.workspace === project.workspace && p.id === project.id));
-        else connection = hub.joinPage(peer, ref);
+            (p) => p.workspace === project.workspace && p.id === project.id))
+          : hub.joinPage(peer, ref);
+        pending = joined.then((opened) => { connection = opened; }).catch((error) => {
+          reportLinkError(error);
+          ws.close(1011, "link unavailable");
+        });
         raw.on("pong", () => connection?.pong());
       },
-      onMessage: (event) => connection?.receive(typeof event.data === "string" ? event.data : String(event.data)),
-      onClose: () => connection?.closed(),
+      onMessage: (event) => afterOpen(() => connection?.receive(typeof event.data === "string" ? event.data : String(event.data))),
+      onClose: () => afterOpen(() => connection?.closed()),
     };
   }));
   app.route("/api", api);
@@ -650,14 +662,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const cardHash = (body: string | undefined) => (body === undefined ? "" : createHash("sha1").update(body).digest("hex"));
   const fingerprint = (data: GraphData) => new Map(data.issues.map((i) => [i.id, `${i.updatedAt}|${i.state.id}|${cardHash(i.card?.body)}`]));
   const check = async () => {
-    const active = hub.active();
+    const active = await hub.active({ forCheck: true });
     for (const key of [...seen.keys()]) if (!active.some((r) => projectKey(r) === key)) seen.delete(key);
     await checkAll(active);
     for (const ref of active) {
       const workspace = workspaces.find((w) => w.id === ref.workspace);
       if (!workspace) continue;
       // The coordinator can go away while the check of all projects waits for Linear: then no load for it.
-      if (!hub.active().some((r) => projectKey(r) === projectKey(ref))) {
+      if (!(await hub.active({ forCheck: true })).some((r) => projectKey(r) === projectKey(ref))) {
         seen.delete(projectKey(ref));
         continue;
       }
@@ -667,7 +679,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         seen.set(projectKey(ref), now);
         if (!before) continue;
         const changed = data.issues.filter((i) => before.get(i.id) !== now.get(i.id)).map((i) => i.identifier);
-        if (changed.length) hub.publish(ref, "changed", { by: "linear", what: "issue", issues: changed });
+        if (changed.length) await hub.publish(ref, "changed", { by: "linear", what: "issue", issues: changed });
       } catch (error) {
         console.error(`link: Linear check of ${projectKey(ref)} failed: ${(error as Error).message}`);
       }
@@ -677,7 +689,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const timer = watchMs > 0 ? setInterval(() => {
     if (checking) return;
     checking = true;
-    void check().finally(() => { checking = false; });
+    void check().catch(reportLinkError).finally(() => { checking = false; });
   }, watchMs) : null;
   timer?.unref();
 

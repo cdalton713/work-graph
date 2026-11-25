@@ -99,7 +99,7 @@ export function accountOf(idToken: unknown, auth: Auth, now: () => number): { em
  * The routes `/login`, `/callback`, and `/logout` (under `/auth`). `origin` is the HTTPS origin of the page:
  * Google sends the browser back to `<origin>/auth/callback`, which the OAuth client must name as a redirect URI.
  */
-export function authRoutes(auth: Auth, origin: () => string, now: () => number, onLogout: (session: Session) => void): Hono {
+export function authRoutes(auth: Auth, origin: () => string, now: () => number, onLogout: (session: Session) => void | Promise<void>): Hono {
   const routes = new Hono();
   const redirectUri = () => `${origin()}/auth/callback`;
   routes.get("/login", async (c) => {
@@ -139,7 +139,7 @@ export function authRoutes(auth: Auth, origin: () => string, now: () => number, 
   });
   routes.get("/logout", async (c) => {
     const session = await sessionOf(c, auth, now);
-    if (session) onLogout(session);
+    if (session) await onLogout(session);
     deleteCookie(c, SESSION_COOKIE, { path: "/", secure: true, prefix: "host" });
     return c.redirect(`${origin()}/`, 302);
   });

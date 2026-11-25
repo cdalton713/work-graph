@@ -14,6 +14,8 @@ import type { Rules } from "./access.ts";
 import { SLOW_MS, contractHash, createApp } from "./app.ts";
 import { setTransport } from "./linear.ts";
 import { DEAD_MS, PING_MS, RESTART_CODE, stopOnSignals, type Timers } from "./link.ts";
+import { memoryLinkBus } from "./linkbus.ts";
+import { memoryLinkState } from "./linkstate.ts";
 
 const rules: Rules = { port: 4747, tailnet: null };
 const local = { host: "127.0.0.1:4747" };
@@ -299,8 +301,8 @@ describe("api", () => {
     expect(await response.json()).toEqual({ id: "c1", body: "yes", createdAt: "today", parentId: null, author: "human", answered });
     expect(mutations).toEqual(["commentCreate", "issueUpdate"]); // one comment; the label mutation is not sent again
     const sent: string[] = [];
-    const connection = a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
-    connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
+    const connection = await a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
+    await connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
     expect(sent.map((t) => JSON.parse(t))).toContainEqual(expect.objectContaining({ type: "answer", payload: { issue: `${team}-1`, key: null, body: "yes" } }));
   });
   it.each([["data: null", { data: null }], ["no data", {}]])("answers 502 when Linear gives %s for the new comment", async (_name, answer) => {
@@ -536,8 +538,8 @@ describe("review effort", () => {
     expect(calls.filter((c) => c.query.includes("projectRemoveLabel")).map((c) => c.variables)).toEqual([{ id: "p1", l: "old-light" }]);
     expect(calls.find((c) => c.query.includes("projectAddLabel"))?.variables).toEqual({ id: "p1", l: "new-review:standard" });
     const sent: string[] = [];
-    const connection = a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
-    connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
+    const connection = await a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
+    await connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
     expect(JSON.parse(sent[0])).toMatchObject({ type: "command", payload: { name: "next", key: null, issue: null } });
   });
   it("refuses a level that is not a review effort", async () => {
@@ -587,8 +589,8 @@ describe("autonomy", () => {
     expect(calls.find((c) => c.query.includes("projectAddLabel"))?.variables).toEqual({ id: "p1", l: "new-full" });
     // A coordinator that connects now gets the command from the queue.
     const sent: string[] = [];
-    const connection = a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
-    connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
+    const connection = await a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
+    await connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
     expect(JSON.parse(sent[0])).toMatchObject({ type: "command", payload: { name: "autonomy", key: null, issue: null, level: "full" } });
   });
   it("makes the group when it is missing, and changes nothing for the level the project has", async () => {
@@ -703,8 +705,8 @@ describe("graph cache of the server", () => {
     await graph(server, "p1");
     await graph(server, "p2");
     const sent: string[] = [];
-    const wg = server.link.hub.joinCoordinator({ send: (text) => sent.push(text), close: () => {} }, { workspace: "work", id: "p2" });
-    wg.receive(JSON.stringify({ v: 1, type: "wrote", id: "w", project: { workspace: "work", id: "p2" }, at: "", payload: { issues: [`${TEAM}-1`] } }));
+    const wg = await server.link.hub.joinCoordinator({ send: (text) => sent.push(text), close: () => {} }, { workspace: "work", id: "p2" });
+    await wg.receive(JSON.stringify({ v: 1, type: "wrote", id: "w", project: { workspace: "work", id: "p2" }, at: "", payload: { issues: [`${TEAM}-1`] } }));
     await graph(server, "p1");
     await graph(server, "p2");
     expect(asked.loads).toEqual(["p1", "p2", "p2"]);
@@ -714,16 +716,16 @@ describe("graph cache of the server", () => {
     const server = cached();
     await graph(server, "p1"); // this graph has no issues yet
     state.issues.p1 = [rawIssue("i2", `${TEAM}-2`, "p1")];
-    const coordinator = server.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, { workspace: "work", id: "p1" });
-    coordinator.receive(JSON.stringify({ v: 1, type: "hello", id: "h", project: { workspace: "work", id: "p1" }, at: "", payload: { plan: "p1", session: "p1", host: "test", wg: "1" } }));
-    coordinator.receive(JSON.stringify({ v: 1, type: "asks", id: "x", project: {}, at: "", payload: { asks: [{ id: "msg_q", key: "a", issue: `${TEAM}-2`, from: "w", body: "Which API?", at: "t" }] } }));
-    expect(server.link.hub.ask({ workspace: "work", id: "p1" }, "msg_q")).not.toBeNull();
+    const coordinator = await server.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, { workspace: "work", id: "p1" });
+    await coordinator.receive(JSON.stringify({ v: 1, type: "hello", id: "h", project: { workspace: "work", id: "p1" }, at: "", payload: { plan: "p1", session: "p1", host: "test", wg: "1" } }));
+    await coordinator.receive(JSON.stringify({ v: 1, type: "asks", id: "x", project: {}, at: "", payload: { asks: [{ id: "msg_q", key: "a", issue: `${TEAM}-2`, from: "w", body: "Which API?", at: "t" }] } }));
+    expect(await server.link.hub.ask({ workspace: "work", id: "p1" }, "msg_q")).not.toBeNull();
     state.down = true;
     clock.at += 60_000;
     expect((await graph(server, "p1")).status).toBe(200); // the page still gets the stale graph
     const reply = await server.request("/api/projects/p1/asks/msg_q/reply", { method: "POST", headers: write, body: JSON.stringify({ body: "Use v2." }) });
     expect(reply.status).toBe(502);
-    expect(server.link.hub.ask({ workspace: "work", id: "p1" }, "msg_q")).not.toBeNull(); // the question stays open
+    expect(await server.link.hub.ask({ workspace: "work", id: "p1" }, "msg_q")).not.toBeNull(); // the question stays open
     const dispatch = await server.request("/api/projects/p1/commands", { method: "POST", headers: write, body: JSON.stringify({ name: "dispatch", key: "a", issue: `${TEAM}-2` }) });
     expect(dispatch.status).toBe(502);
     expect(asked.comments).toEqual([]);
@@ -769,10 +771,9 @@ describe("graph cache of the server", () => {
     expect(asked.loads.sort()).toEqual(["p1", "p2", "p2"]);
     // The link check of the projects with a coordinator: one request too.
     for (const id of ["p1", "p2"]) {
-      server.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, { workspace: "work", id })
-        .receive(JSON.stringify({ v: 1, type: "hello", id: "h", project: { workspace: "work", id }, at: "", payload: { plan: id, session: id, host: "test", wg: "1" } }));
+      await (await server.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, { workspace: "work", id })).receive(JSON.stringify({ v: 1, type: "hello", id: "h", project: { workspace: "work", id }, at: "", payload: { plan: id, session: id, host: "test", wg: "1" } }));
     }
-    expect(server.link.hub.active()).toHaveLength(2);
+    expect(await server.link.hub.active()).toHaveLength(2);
     clock.at += 60_000;
     state.changed = [];
     await server.link.check();
@@ -958,11 +959,11 @@ describe("server status", () => {
     }));
     const server = createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], watchMs: 0, now: () => clock.at, version: "v1" });
     expect((await server.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
-    const coordinator = server.link.hub.joinCoordinator(sink(), { workspace: "work", id: "p1" });
-    coordinator.receive(msg("hello", { plan: "/plans/a", session: "s1", host: "mac", wg: "1" }));
-    coordinator.receive(msg("asks", { asks: [{ id: "q1", issue: "CD-1", from: "w", body: "Secret question body", at: "" }] }));
-    server.link.hub.joinPage(sink(), { workspace: "work", id: "p1" });
-    server.link.hub.publish({ workspace: "work", id: "p1" }, "reply", { ask: "q1", issue: "CD-1", key: "a", body: "Secret reply body" });
+    const coordinator = await server.link.hub.joinCoordinator(sink(), { workspace: "work", id: "p1" });
+    await coordinator.receive(msg("hello", { plan: "/plans/a", session: "s1", host: "mac", wg: "1" }));
+    await coordinator.receive(msg("asks", { asks: [{ id: "q1", issue: "CD-1", from: "w", body: "Secret question body", at: "" }] }));
+    await server.link.hub.joinPage(sink(), { workspace: "work", id: "p1" });
+    await server.link.hub.publish({ workspace: "work", id: "p1" }, "reply", { ask: "q1", issue: "CD-1", key: "a", body: "Secret reply body" });
     clock.at += 61_000;
     const response = await server.request("/api/status", { headers: local });
     expect(response.status).toBe(200);
@@ -1482,6 +1483,35 @@ describe("sign-in of the viewer", () => {
     expect(() => createApp(hosted, { ...options, linkToken: "", auth: { ...auth, owners: ["ada@example.com"] } })).toThrow("WG_LINK_TOKEN");
   });
 
+  it("ends a session on another app before logout redirects", async () => {
+    const options = {
+      team: "WG", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth, linkToken: rolesToken,
+      watchMs: 0, linkState: memoryLinkState(), linkBus: memoryLinkBus(),
+    };
+    const a = createApp(hostedRoles, options);
+    const b = createApp(hostedRoles, options);
+    const http = serve({ fetch: b.fetch, port: 0, hostname: "127.0.0.1" });
+    b.injectWebSocket(http as never);
+    const headers = { ...await rolesHeaders("ada@example.com"), origin: "https://view.example.com" };
+    let socket: WebSocket | undefined;
+    try {
+      if (!http.listening) await new Promise<void>((ok) => http.once("listening", ok));
+      const address = http.address() as AddressInfo;
+      socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/link?role=page`, { headers });
+      const ws = socket;
+      const closed = new Promise<number>((ok) => ws.once("close", ok));
+      await new Promise((ok, fail) => { ws.once("open", ok); ws.once("error", fail); });
+      expect((await b.request("/api/status", { headers })).status).toBe(200);
+      expect((await a.request("/auth/logout", { headers })).status).toBe(302);
+      expect((await b.request("/api/status", { headers })).status).toBe(401);
+      expect(await closed).toBe(1008);
+    } finally {
+      socket?.terminate();
+      http.close();
+      await Promise.all([a.link.shutdown(), b.link.shutdown()]);
+    }
+  });
+
   it.each(["expiry", "logout"])("filters real viewer sockets and closes owner sockets on %s", async (endSession) => {
     let shared = true;
     let now = Date.now();
@@ -1502,13 +1532,13 @@ describe("sign-in of the viewer", () => {
     const sockets: WebSocket[] = [];
     const peer = { send: () => {}, close: () => {} };
     const ref = { workspace: "work", id: "p1" };
-    const coordinator = page.link.hub.joinCoordinator(peer, ref);
+    const coordinator = await page.link.hub.joinCoordinator(peer, ref);
     const send = (type: string, payload: unknown) => coordinator.receive(JSON.stringify({ v: 1, type, payload }));
-    send("hello", { session: "private-session", host: "private-host", plan: "private-path" });
-    page.link.hub.joinCoordinator({ ...peer }, ref).receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "other-session" } }));
-    send("asks", { asks: [{ id: "q", body: "private question" }] });
-    send("agents", { agents: [{ id: "a", said: "private reply" }] });
-    send("progress", { nodes: [{ key: "a", evidence: "private evidence" }] });
+    await send("hello", { session: "private-session", host: "private-host", plan: "private-path" });
+    await (await page.link.hub.joinCoordinator({ ...peer }, ref)).receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "other-session" } }));
+    await send("asks", { asks: [{ id: "q", body: "private question" }] });
+    await send("agents", { agents: [{ id: "a", said: "private reply" }] });
+    await send("progress", { nodes: [{ key: "a", evidence: "private evidence" }] });
     try {
       if (!http.listening) await new Promise<void>((resolve) => http.once("listening", resolve));
       const connect = async (headers: typeof owner, project = "") => {
@@ -1535,8 +1565,8 @@ describe("sign-in of the viewer", () => {
 
       const calls = list.mock.calls.length;
       now += 6_000;
-      page.link.hub.publish({ ...ref, id: "p2" }, "changed", { by: "page", what: "issue", issues: ["WG-2"] });
-      send("wrote", { issues: ["WG-1"] });
+      await page.link.hub.publish({ ...ref, id: "p2" }, "changed", { by: "page", what: "issue", issues: ["WG-2"] });
+      await send("wrote", { issues: ["WG-1"] });
       await vi.waitFor(() => expect(overview.messages.map((m) => m.type)).toEqual(["presence", "changed"]));
       expect(view.messages.map((m) => m.type)).toEqual(["presence", "changed"]);
       expect(view.messages[1]).toMatchObject({ project: { id: "p1" }, payload: { issues: [] } });
@@ -1544,7 +1574,7 @@ describe("sign-in of the viewer", () => {
       expect(list).toHaveBeenCalledTimes(calls);
 
       now += 60_000;
-      send("wrote", { issues: ["WG-1"] });
+      await send("wrote", { issues: ["WG-1"] });
       await vi.waitFor(() => expect(own.messages.filter((m) => m.type === "changed")).toHaveLength(2));
       expect(view.messages).toHaveLength(2);
       expect(overview.messages).toHaveLength(2);
@@ -1553,14 +1583,14 @@ describe("sign-in of the viewer", () => {
       await page.request("/api/projects", { headers: viewer });
       shared = false;
       await page.request("/api/projects", { headers: viewer });
-      send("wrote", { issues: ["WG-1"] });
+      await send("wrote", { issues: ["WG-1"] });
       await vi.waitFor(() => expect(own.messages.filter((m) => m.type === "changed")).toHaveLength(3));
       expect(view.messages).toHaveLength(2);
       expect(overview.messages).toHaveLength(2);
 
       if (endSession === "logout") await page.request("/auth/logout", { headers: owner });
       else now += 600_000;
-      send("wrote", { issues: ["WG-1"] });
+      await send("wrote", { issues: ["WG-1"] });
       await expect(own.closed).resolves.toBe(1008);
       expect(own.messages.filter((m) => m.type === "changed")).toHaveLength(3);
     } finally {

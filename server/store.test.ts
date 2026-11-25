@@ -29,32 +29,32 @@ const hello = (session: string) => msg("hello", { plan: "/plans/a", session, hos
 const ask = { id: "ask-1", key: "a", issue: "CD-1", from: "worker", body: "Which base?", at: "2026-11-20T00:00:00Z" };
 
 describe("fileStore", () => {
-  it("restarts a hub over the same directory with the queued reply and command, and the asks", () => {
+  it("restarts a hub over the same directory with the queued reply and command, and the asks", async () => {
     const dir = tempDir(), timer = fakeAfter(), logs: string[] = [];
     const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: (l) => logs.push(l) });
     const first = new LinkHub(undefined, undefined, undefined, store());
-    const coordinator = peer(), c = first.joinCoordinator(coordinator, A);
-    c.receive(hello("s1"));
-    c.receive(msg("asks", { asks: [ask] }));
-    const reply = first.publish(A, "reply", { ask: "ask-0", issue: "CD-1", key: "a", body: "main" });
-    const command = first.publish(A, "command", { name: "dispatch", key: "b", issue: "CD-2" });
-    const done = first.publish(A, "command", { name: "next", key: null, issue: null });
+    const coordinator = peer(), c = await first.joinCoordinator(coordinator, A);
+    await c.receive(hello("s1"));
+    await c.receive(msg("asks", { asks: [ask] }));
+    const reply = await first.publish(A, "reply", { ask: "ask-0", issue: "CD-1", key: "a", body: "main" });
+    const command = await first.publish(A, "command", { name: "dispatch", key: "b", issue: "CD-2" });
+    const done = await first.publish(A, "command", { name: "next", key: null, issue: null });
     // One write for all the changes, at most SAVE_MS after the first.
     expect(timer.waiting()).toEqual([SAVE_MS]);
     timer.run();
-    c.receive(msg("ack", { ids: [done.id] })); // written at once
+    await c.receive(msg("ack", { ids: [done.id] })); // written at once
     expect(timer.waiting()).toEqual([]);
     expect(statSync(join(dir, STATE_FILE)).mode & 0o777).toBe(0o600);
 
     const second = new LinkHub(undefined, undefined, undefined, store());
-    const again = peer(), c2 = second.joinCoordinator(again, A);
-    c2.receive(hello("s2"));
+    const again = peer(), c2 = await second.joinCoordinator(again, A);
+    await c2.receive(hello("s2"));
     expect(again.sent.map((m) => m.id)).toEqual([reply.id, command.id]); // not the acknowledged one
     expect(again.of("reply")[0].payload).toEqual({ ask: "ask-0", issue: "CD-1", key: "a", body: "main" });
-    expect(second.presence(A).queued).toBe(2);
-    expect(second.ask(A, "ask-1")).toEqual(ask);
+    expect((await second.presence(A)).queued).toBe(2);
+    expect(await second.ask(A, "ask-1")).toEqual(ask);
     const page = peer();
-    second.joinPage(page, A);
+    await second.joinPage(page, A);
     expect(page.of("asks")[0].payload).toEqual({ asks: [ask] });
     expect(logs).toEqual(["link state: no " + join(dir, STATE_FILE) + "; the link starts empty"]);
   });
@@ -63,29 +63,29 @@ describe("fileStore", () => {
     const dir = tempDir(), timer = fakeAfter();
     const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: () => {} });
     const hub = new LinkHub(undefined, undefined, undefined, store());
-    const sent = hub.publish(A, "answer", { issue: "CD-1", key: "a", body: "yes" });
+    const sent = await hub.publish(A, "answer", { issue: "CD-1", key: "a", body: "yes" });
     timer.run();
-    const c = hub.joinCoordinator(peer(), A);
-    c.receive(hello("s1"));
-    c.receive(msg("ack", { ids: [sent.id] }));
+    const c = await hub.joinCoordinator(peer(), A);
+    await c.receive(hello("s1"));
+    await c.receive(msg("ack", { ids: [sent.id] }));
     await hub.shutdown(); // before the debounce timer runs
-    const again = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
-    c2.receive(hello("s2"));
+    const again = peer(), c2 = await new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
+    await c2.receive(hello("s2"));
     expect(again.sent).toEqual([]);
   });
 
-  it("writes an acknowledgment at once, so a hub that starts before the debounce timer does not send the message again", () => {
+  it("writes an acknowledgment at once, so a hub that starts before the debounce timer does not send the message again", async () => {
     const dir = tempDir(), timer = fakeAfter();
     const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: () => {} });
     const hub = new LinkHub(undefined, undefined, undefined, store());
-    const sent = hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
+    const sent = await hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
     timer.run();
-    const c = hub.joinCoordinator(peer(), A);
-    c.receive(hello("s1"));
-    c.receive(msg("ack", { ids: [sent.id] }));
+    const c = await hub.joinCoordinator(peer(), A);
+    await c.receive(hello("s1"));
+    await c.receive(msg("ack", { ids: [sent.id] }));
     // No timer runs and no shutdown: the process stops here.
-    const again = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
-    c2.receive(hello("s2"));
+    const again = peer(), c2 = await new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
+    await c2.receive(hello("s2"));
     expect(again.sent).toEqual([]);
   });
 
@@ -93,26 +93,26 @@ describe("fileStore", () => {
     const dir = tempDir(), timer = fakeAfter();
     const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: () => {} });
     const hub = new LinkHub(undefined, undefined, undefined, store());
-    const sent = hub.publish(A, "reply", { ask: "ask-1", issue: "CD-1", key: "a", body: "main" });
+    const sent = await hub.publish(A, "reply", { ask: "ask-1", issue: "CD-1", key: "a", body: "main" });
     timer.run();
-    const c = hub.joinCoordinator(peer(), A);
-    c.receive(hello("s1"));
+    const c = await hub.joinCoordinator(peer(), A);
+    await c.receive(hello("s1"));
     const stopped = hub.shutdown();
-    c.receive(msg("ack", { ids: [sent.id] }));
-    hub.publish(A, "command", { name: "next", key: null, issue: null }); // an HTTP request while the sockets close
-    c.closed();
+    await c.receive(msg("ack", { ids: [sent.id] }));
+    await hub.publish(A, "command", { name: "next", key: null, issue: null }); // an HTTP request while the sockets close
+    await c.closed();
     await stopped;
-    const again = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
-    c2.receive(hello("s2"));
+    const again = peer(), c2 = await new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
+    await c2.receive(hello("s2"));
     expect(again.sent.map((m) => m.type)).toEqual(["command"]);
   });
 
-  it("keeps a change after a failed write, and writes it at the next try", () => {
+  it("keeps a change after a failed write, and writes it at the next try", async () => {
     const parent = tempDir(), dir = join(parent, "state"), timer = fakeAfter(), logs: string[] = [];
     writeFileSync(dir, "a file where the directory must be");
     const store = fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: (l) => logs.push(l) });
     const hub = new LinkHub(undefined, undefined, undefined, store);
-    const sent = hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
+    const sent = await hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
     timer.run();
     expect(logs.filter((l) => l.includes("cannot write"))).toHaveLength(1);
     expect(timer.waiting()).toEqual([SAVE_MS]); // the next try
@@ -123,7 +123,7 @@ describe("fileStore", () => {
     expect(timer.waiting()).toEqual([]);
   });
 
-  it("removes an answered ask from the file, and keeps at most 100 asks of a room", () => {
+  it("removes an answered ask from the file, and keeps at most 100 asks of a room", async () => {
     const dir = tempDir(), timer = fakeAfter();
     const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: () => {} });
     const asks = Array.from({ length: 150 }, (_, i) => ({ ...ask, id: `ask-${i}` }));
@@ -134,28 +134,28 @@ describe("fileStore", () => {
     expect(saved.rooms[0].asks.map((a: { id: string }) => a.id)).toEqual(asks.slice(0, 100).map((a) => a.id));
 
     const hub = new LinkHub(undefined, undefined, undefined, store());
-    expect(hub.ask(A, "ask-0")).toEqual(asks[0]);
-    hub.answered(A, "ask-0");
+    expect(await hub.ask(A, "ask-0")).toEqual(asks[0]);
+    await hub.answered(A, "ask-0");
     timer.run();
     const after = new LinkHub(undefined, undefined, undefined, store());
-    expect(after.ask(A, "ask-0")).toBeNull();
-    expect(after.ask(A, "ask-1")).toEqual(asks[1]);
+    expect(await after.ask(A, "ask-0")).toBeNull();
+    expect(await after.ask(A, "ask-1")).toEqual(asks[1]);
   });
 
-  it("writes at an acknowledgment of a message that a full queue dropped, so a restart does not send it again", () => {
+  it("writes at an acknowledgment of a message that a full queue dropped, so a restart does not send it again", async () => {
     const dir = tempDir(), timer = fakeAfter();
     const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: () => {} });
     const hub = new LinkHub(undefined, undefined, undefined, store());
-    const oldest = hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
+    const oldest = await hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
     timer.run(); // the file holds the oldest message
-    for (let i = 0; i < QUEUE_MAX; i++) hub.publish(A, "command", { name: "next", key: null, issue: null });
-    expect(hub.presence(A).queued).toBe(QUEUE_MAX); // the queue dropped the oldest; the write waits
-    const c = hub.joinCoordinator(peer(), A);
-    c.receive(hello("s1"));
-    c.receive(msg("ack", { ids: [oldest.id] }));
+    for (let i = 0; i < QUEUE_MAX; i++) await hub.publish(A, "command", { name: "next", key: null, issue: null });
+    expect((await hub.presence(A)).queued).toBe(QUEUE_MAX); // the queue dropped the oldest; the write waits
+    const c = await hub.joinCoordinator(peer(), A);
+    await c.receive(hello("s1"));
+    await c.receive(msg("ack", { ids: [oldest.id] }));
     // No timer runs: the process stops here.
-    const again = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
-    c2.receive(hello("s2"));
+    const again = peer(), c2 = await new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
+    await c2.receive(hello("s2"));
     expect(again.sent).toHaveLength(QUEUE_MAX);
     expect(again.sent.map((m) => m.id)).not.toContain(oldest.id);
   });
@@ -165,37 +165,37 @@ describe("fileStore", () => {
     const dir = tempDir(), timer = fakeAfter(), logs: string[] = [];
     const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: (l) => logs.push(l) });
     const hub = new LinkHub(undefined, undefined, undefined, store());
-    const sent = hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
+    const sent = await hub.publish(A, "command", { name: "dispatch", key: "a", issue: "CD-1" });
     timer.run();
-    const c = hub.joinCoordinator(peer(), A);
-    c.receive(hello("s1"));
+    const c = await hub.joinCoordinator(peer(), A);
+    await c.receive(hello("s1"));
     chmodSync(dir, 0o500); // the temporary file cannot be made
     try {
-      c.receive(msg("ack", { ids: [sent.id] }));
+      await c.receive(msg("ack", { ids: [sent.id] }));
       expect(logs.filter((l) => l.includes("cannot write"))).toHaveLength(1);
-      c.closed();
+      await c.closed();
       expect(await hub.shutdown()).toBe(false);
       // A restart now sends the acknowledged message again: the stop knows it.
-      const lost = peer(), c2 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(lost, A);
-      c2.receive(hello("s2"));
+      const lost = peer(), c2 = await new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(lost, A);
+      await c2.receive(hello("s2"));
       expect(lost.sent.map((m) => m.id)).toEqual([sent.id]);
     } finally {
       chmodSync(dir, 0o700);
     }
 
     const second = new LinkHub(undefined, undefined, undefined, store());
-    const d = second.joinCoordinator(peer(), A);
-    d.receive(hello("s3"));
+    const d = await second.joinCoordinator(peer(), A);
+    await d.receive(hello("s3"));
     chmodSync(dir, 0o500);
     try {
-      d.receive(msg("ack", { ids: [sent.id] })); // fails
+      await d.receive(msg("ack", { ids: [sent.id] })); // fails
     } finally {
       chmodSync(dir, 0o700);
     }
-    d.closed();
+    await d.closed();
     expect(await second.shutdown()).toBe(true); // the try at the stop succeeds
-    const again = peer(), c3 = new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
-    c3.receive(hello("s4"));
+    const again = peer(), c3 = await new LinkHub(undefined, undefined, undefined, store()).joinCoordinator(again, A);
+    await c3.receive(hello("s4"));
     expect(again.sent).toEqual([]);
   });
 
@@ -225,12 +225,12 @@ describe("fileStore", () => {
     expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([`${STATE_FILE}.${process.pid}.tmp`]);
   });
 
-  it("starts empty with one log line when the file is unreadable or of another version", () => {
+  it("starts empty with one log line when the file is unreadable or of another version", async () => {
     for (const text of ["not json", JSON.stringify({ version: STATE_VERSION + 1, rooms: [{ ref: A, queue: [], asks: [ask] }] })]) {
       const dir = tempDir(), logs: string[] = [];
       writeFileSync(join(dir, STATE_FILE), text);
       const hub = new LinkHub(undefined, undefined, undefined, fileStore(dir, { queueMax: QUEUE_MAX, after: fakeAfter().after, log: (l) => logs.push(l) }));
-      expect(hub.state()).toEqual({ rooms: [] });
+      expect(await hub.state()).toEqual({ rooms: [] });
       expect(logs).toHaveLength(1);
       expect(logs[0]).toMatch(/cannot use .*; the link starts empty$/);
     }
@@ -259,15 +259,15 @@ describe("fileStore", () => {
     expect(rooms[0].queue.map((m) => m.id)).toEqual(["good"]);
   });
 
-  it("starts empty with one log line when the file cannot be read", () => {
+  it("starts empty with one log line when the file cannot be read", async () => {
     const dir = tempDir(), logs: string[] = [];
     mkdirSync(join(dir, STATE_FILE)); // a read gives EISDIR
     const hub = new LinkHub(undefined, undefined, undefined, fileStore(dir, { queueMax: QUEUE_MAX, after: fakeAfter().after, log: (l) => logs.push(l) }));
-    expect(hub.state()).toEqual({ rooms: [] });
+    expect(await hub.state()).toEqual({ rooms: [] });
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatch(/^link state: cannot read .*EISDIR.*; the link starts empty$/);
     const page = peer();
-    hub.joinPage(page, A); // the hub works
+    await hub.joinPage(page, A); // the hub works
     expect(page.of("asks")[0].payload).toEqual({ asks: [] });
   });
 
@@ -276,7 +276,7 @@ describe("fileStore", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: `${dist}/`, watchMs: 0, stateDir });
-      app.link.hub.publish(A, "reply", { ask: "a", issue: null, key: null, body: "secret" });
+      await app.link.hub.publish(A, "reply", { ask: "a", issue: null, key: null, body: "secret" });
       expect(await app.link.shutdown()).toBe(true);
       expect(existsSync(stateDir)).toBe(false);
       const lines = log.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("link state:"));
@@ -289,7 +289,7 @@ describe("fileStore", () => {
     }
   });
 
-  it("loads only the rooms of the configured workspaces, so the overview gets no ask of a removed workspace", () => {
+  it("loads only the rooms of the configured workspaces, so the overview gets no ask of a removed workspace", async () => {
     const dir = tempDir();
     const gone = { workspace: "gone", id: "p9" };
     writeFileSync(join(dir, STATE_FILE), JSON.stringify({
@@ -303,9 +303,9 @@ describe("fileStore", () => {
         workspaces: [{ id: "work", name: "Work", team: "T", key: "", teamLabels: true }],
       });
       const overview = peer();
-      app.link.hub.joinPage(overview, null);
+      await app.link.hub.joinPage(overview, null);
       expect(overview.of("asks").map((m) => m.project)).toEqual([A]);
-      expect(app.link.hub.ask(gone, "ask-gone")).toBeNull();
+      expect(await app.link.hub.ask(gone, "ask-gone")).toBeNull();
       expect(log.mock.calls.map((c) => String(c[0]))).toContain("link state: ignored 1 rooms of workspaces that the config does not name");
       app.link.stop();
     } finally {
@@ -313,11 +313,11 @@ describe("fileStore", () => {
     }
   });
 
-  it("writes nothing without a state directory", () => {
+  it("writes nothing without a state directory", async () => {
     const dir = tempDir();
     delete process.env.WG_STATE_DIR;
     const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: dir, watchMs: 0 });
-    app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
+    await app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
     app.link.stop();
     expect(() => readFileSync(join(dir, STATE_FILE))).toThrow();
   });
@@ -327,7 +327,7 @@ describe("fileStore", () => {
     process.env.WG_STATE_DIR = dir;
     try {
       const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: `${tempDir()}/`, watchMs: 0 });
-      const sent = app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
+      const sent = await app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
       await app.link.shutdown();
       const saved = JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8"));
       expect(saved.rooms[0].queue.map((m: Envelope) => m.id)).toEqual([sent.id]);
@@ -339,7 +339,7 @@ describe("fileStore", () => {
   it("builds the store from the state directory of the app", async () => {
     const dir = tempDir();
     const app = createApp({ port: 4747, tailnet: null, hosted: null }, { team: "T", dist: `${tempDir()}/`, watchMs: 0, stateDir: dir });
-    const sent = app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
+    const sent = await app.link.hub.publish(A, "command", { name: "next", key: null, issue: null });
     await app.link.shutdown();
     const saved = JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8"));
     expect(saved.rooms[0].queue.map((m: Envelope) => m.id)).toEqual([sent.id]);

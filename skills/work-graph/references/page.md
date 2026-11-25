@@ -42,10 +42,12 @@ The `work-graph status` document gives the status, wave, and result lines. Its `
 
 Set `WG_LINK_TOKEN` on the hosted server to require a bearer token on coordinator sockets. Use a secret
 with at least 32 characters. Set the same value in the coordinator's environment or put it in
-`~/.config/work-graph/link-token` with mode 600. The environment takes precedence.
+`~/.config/work-graph/link-token` with mode 600. The environment takes precedence. Set the variable to an empty value to use no token.
 For a workspace with its own `page_url`, set `WG_<ID>_LINK_TOKEN` or use
 `~/.config/work-graph/<id>-link-token` with mode 600. In the environment variable, use uppercase
-and replace hyphens with underscores. An override to a different page carries no token.
+and replace hyphens with underscores. A workspace with its own page uses only its own token.
+When you set `WG_UI_URL`, `wg` uses the token selected for the plan workspace.
+`wg` sends tokens only over HTTPS or to a loopback address.
 `wg` sends the token on the link, on the short connections for writes and agent state, and on HTTP requests
 to the page. On a page with sign-in, the token permits API reads. The viewer's write limit still applies.
 `wg doctor <plan-dir>` checks the plan's page and reports if it accepts the token.

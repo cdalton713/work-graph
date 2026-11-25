@@ -106,6 +106,12 @@ def read_config(path=CONFIG_PATH):
     ids = [w["id"] for w in workspaces]
     if len(set(ids)) != len(ids) or not all(isinstance(i, str) and re.fullmatch(r"[a-z0-9-]+", i) for i in ids):
         raise SystemExit(f"{path}: each workspace needs a unique id of a-z, 0-9 and -")
+    pages = [("page_url", data)] + [(f"workspaces[{i}].page_url", w) for i, w in enumerate(workspaces)]
+    for field, source in pages:
+        if "page_url" in source:
+            url = source["page_url"]
+            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+                raise SystemExit(f"{path}: {field} must start with http:// or https://")
     if not isinstance(config["human"], str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9 ]*", config["human"]):
         raise SystemExit(f"{path}: human must be a name of letters, digits and spaces")
     merge = config["agent_merge"]
@@ -4157,12 +4163,8 @@ def workspace_page(workspace=None):
     return WORKSPACES.get(workspace, {}).get("page_url")
 
 
-def configured_page_base(workspace=None):
-    return (workspace_page(workspace) or PAGE_URL).rstrip("/")
-
-
 def page_base(workspace=None):
-    return (os.environ.get("WG_UI_URL") or configured_page_base(workspace)).rstrip("/")
+    return (os.environ.get("WG_UI_URL") or workspace_page(workspace) or PAGE_URL).rstrip("/")
 
 
 def page_link(plan, identifier=None):
@@ -6468,9 +6470,9 @@ def doctor_link(plan_dir, plan):
 
 
 def doctor_lines(plan_dir=None, fix=False):
-    """Each (level, text) line of `wg doctor [<dir>]`, as each check ends: the checks of this machine and, with a
-    plan directory, of that effort. It changes nothing; with fix, it writes the coordinator settings of each loaded
-    effort."""
+    """Yield the machine and effort check results for `wg doctor [<dir>]`.
+    Load the plan first to select the page, then report machine checks before plan checks.
+    With fix, write the coordinator settings of each loaded effort."""
     loaded = {}
 
     def plan_check():
@@ -6495,7 +6497,11 @@ def doctor_lines(plan_dir=None, fix=False):
     checks += [("autostart", doctor_autostart(sorted(plans))), ("health", doctor_health(sorted(plans)))]
     checks.append(("settings", doctor_context(sorted(plans), fix)))
     for name, step in checks:
-        yield from doctor_run(name, step)
+        for level, message in doctor_run(name, step):
+            if name == "page" and plan_dir and workspace is None:
+                destination = "the WG_UI_URL override" if os.environ.get("WG_UI_URL") else "the top-level page"
+                message = f"{message} (plan unavailable, checking {destination})"
+            yield level, message
     if not plan_dir:
         return
     yield from plan_result

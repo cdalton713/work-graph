@@ -4348,6 +4348,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["workspaces"][0]["key_env"], ["LINEAR_API_KEY"])
         self.assertIsNone(config["test_runner"])
 
+    def test_config_reads_workspace_page_url(self):
+        page = "https://workspace.example.com"
+        config = self.config({"workspaces": [{"id": "home", "page_url": page}]})
+        self.assertEqual(config["workspaces"][0]["page_url"], page)
+
+    def test_config_rejects_invalid_page_urls(self):
+        for value in ("example.com", "ftp://example.com", 7, None):
+            for config, field in (({"page_url": value}, "page_url"),
+                                  ({"workspaces": [{"id": "home", "page_url": value}]},
+                                   r"workspaces\[0\]\.page_url")):
+                with self.subTest(config=config), self.assertRaisesRegex(SystemExit, field):
+                    self.config(config)
+
     def test_bad_config_stops_with_its_path(self):
         for data in ({"workspaces": [{"id": "A"}]}, {"workspaces": [{"id": "a"}, {"id": "a"}]}, {"human": "x!"}, []):
             with self.assertRaises(SystemExit):
@@ -5591,6 +5604,7 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(err.count("warn link:"), 1)
         self.assertIn("HTTP 401", err)
         self.assertIn("Polling Linear instead", err)
+        self.assertIn("Check WG_LINK_TOKEN", err)
         self.assertNotIn(token, out + err)
 
     def test_next_still_polls_with_an_unreadable_token_configuration(self):
@@ -7834,9 +7848,17 @@ class DoctorTests(DirTests):
                 self.assertTrue(all(call.args[0].full_url.startswith("https://home.example.com/")
                                     for call in open_url.call_args_list))
                 self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer workspace-token")
+            with patch.dict(os.environ, {"WG_HOME_LINK_TOKEN": ""}):
+                self.assertEqual(wg.page_waiting(home, "p1"), 2)
+                self.assertIsNone(open_url.call_args.args[0].get_header("Authorization"))
             path.chmod(0o640)
-            self.assertEqual(wg.page_waiting(home, "p1"), 2)
+            err = io.StringIO()
+            with patch.object(wg, "_LINK_AUTH_WARNED", set()), contextlib.redirect_stderr(err):
+                for _ in range(2):
+                    self.assertEqual(wg.page_waiting(home, "p1"), 2)
             self.assertIsNone(open_url.call_args.args[0].get_header("Authorization"))
+            self.assertEqual(err.getvalue().count("warn link:"), 1)
+            self.assertIn("home-link-token must have mode 600", err.getvalue())
             self.assertEqual(wg.page_waiting(work, "p1"), 2)
             self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer shared-token")
             path.chmod(0o600)
@@ -7845,6 +7867,21 @@ class DoctorTests(DirTests):
                 req = open_url.call_args.args[0]
                 self.assertTrue(req.full_url.startswith("https://override.example.com/"))
                 self.assertEqual(req.get_header("Authorization"), "Bearer private-file-token")
+
+    def test_workspace_token_validation_applies_to_an_override(self):
+        home = {"effort": {"workspace": "home"}}
+        with patch.dict(wg.WORKSPACES["home"], {"page_url": "https://home.example.com"}), \
+                patch.dict(os.environ, {"WG_UI_URL": "http://override.example.com",
+                                        "WG_HOME_LINK_TOKEN": "test-token"}, clear=True), \
+                patch.object(wg.urllib.request, "urlopen", side_effect=lambda *a, **kw: io.StringIO("{}")) as open_url:
+            self.assertEqual(wg.page_waiting(home, "p1"), 0)
+            self.assertIsNone(open_url.call_args.args[0].get_header("Authorization"))
+            with patch.dict(os.environ, {"WG_HOME_LINK_TOKEN": "invalid\nsecret"}):
+                err = io.StringIO()
+                with patch.object(wg, "_LINK_AUTH_WARNED", set()), contextlib.redirect_stderr(err):
+                    self.assertEqual(wg.page_waiting(home, "p1"), 0)
+                self.assertIn("WG_HOME_LINK_TOKEN must contain one line", err.getvalue())
+                self.assertNotIn("secret", err.getvalue())
 
     def test_doctor_reports_whether_the_page_accepted_the_token(self):
         token = "test-token-with-at-least-32-characters"
@@ -7989,6 +8026,7 @@ class DoctorTests(DirTests):
             self.assertIn("warn tick", out)
             self.assertEqual(out.splitlines()[-4:], ["ok plan: wg check is clean", "FAIL keymap x", "ok worktrees", "ok link"])
             out, _ = self.call(wg.doctor, str(self.d / "nothing"), code=1)
+            self.assertIn("checking the top-level page", out)
             self.assertIn("FAIL plan: no plan.json", out)
             # A plan that is not an object, or a phase with no key: one FAIL line, not a traceback.
             for bad in ([], {**self.p, "phases": [{"name": "no key", "target": "main"}]}):
@@ -8019,6 +8057,21 @@ class DoctorTests(DirTests):
             self.assertEqual(PAGE_CONTRACT_NOTE(self.d, self.p), [])  # a page that is down is cached too: no second GET
         self.assertEqual(get.call_count, 1)
         self.assertEqual(get.call_args.kwargs["timeout"], wg.PAGE_CONTRACT_WAIT)
+
+    def test_contract_note_reads_the_new_page_when_the_address_changes(self):
+        self.keymap()
+
+        def response(request, timeout):
+            contract = wg.contract_hash() if request.full_url.startswith("https://new.example.com/") else "old"
+            return io.StringIO(json.dumps({"contract": contract}))
+
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(wg.urllib.request, "urlopen", side_effect=response) as open_url:
+            self.assertTrue(PAGE_CONTRACT_NOTE(self.d, self.p))
+            with patch.dict(os.environ, {"WG_UI_URL": "https://new.example.com"}):
+                self.assertEqual(PAGE_CONTRACT_NOTE(self.d, self.p), [])
+                self.assertEqual(PAGE_CONTRACT_NOTE(self.d, self.p), [])
+            self.assertEqual(open_url.call_count, 2)
 
     def test_wg_next_prints_the_doctor_note(self):
         lines = wg.terminal_lines(self.d, [("note", "doctor @effort -: page contract differs; run wg doctor")])

@@ -203,7 +203,9 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
   a loopback address (`127.0.0.1`, `localhost`, or `::1`).
   For a workspace with its own `page_url`, set the client token in `WG_<ID>_LINK_TOKEN` or in
   `~/.config/work-graph/<id>-link-token` with mode 600. Use uppercase and replace hyphens with
-  underscores in the environment variable. `wg` sends the token only to its configured page.
+  underscores in the environment variable. The workspace uses only its own token, even when its
+  address equals the top-level `page_url`. When you set `WG_UI_URL`, `wg` sends the selected token
+  to the override address.
 - `WG_STATE_DIR` (optional): a directory where the link keeps the queue of each project and the open worker
   questions over a restart. Without it, a restart loses them: a reply or a command that a coordinator did not get
   yet does not arrive. The server writes one file, `link-state.json` (mode 600), at most 1 s after a change, and

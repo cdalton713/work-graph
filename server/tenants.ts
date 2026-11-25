@@ -21,6 +21,15 @@ export interface Tenants {
 export const CONFIG_TENANT_ID = "config";
 export const TENANT_IDLE_MS = 30 * 60_000;
 
+export async function openDatabaseTenants(
+  env: NodeJS.ProcessEnv = process.env,
+  options?: import("./db/tenants.ts").DatabaseTenantOptions,
+) {
+  if (!env.DATABASE_URL) return null;
+  const { openTenants } = await import("./db/tenants.ts");
+  return openTenants(env.DATABASE_URL, env, options);
+}
+
 export function configTenants({ human, workspaces, auth, linkToken, readOnly }: {
   human: string; workspaces: Workspace[]; auth: Auth | null; linkToken?: string; readOnly: boolean;
 }) {

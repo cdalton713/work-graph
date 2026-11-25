@@ -38,14 +38,18 @@ The `work-graph status` document gives the status, wave, and result lines. Its `
 
 ## Link
 
-`wg next` connects to the page server over a WebSocket (`/api/link`, protocol `wg-link/1`, `contract.json` `link`). The server is `WG_UI_URL`, or the hosted page.
+`wg next` connects to the page server over a WebSocket (`/api/link`, protocol `wg-link/1`, `contract.json` `link`). The server is `WG_UI_URL`, the plan workspace's `page_url`, or the top-level `page_url`, in that order.
 
 Set `WG_LINK_TOKEN` on the hosted server to require a bearer token on coordinator sockets. Use a secret
 with at least 32 characters. Set the same value in the coordinator's environment or put it in
 `~/.config/work-graph/link-token` with mode 600. The environment takes precedence.
+For a workspace with its own `page_url`, set `WG_<ID>_LINK_TOKEN` or use
+`~/.config/work-graph/<id>-link-token` with mode 600. In the environment variable, use uppercase
+and replace hyphens with underscores. An override to a different page carries no token.
 `wg` sends the token on the link, on the short connections for writes and agent state, and on HTTP requests
 to the page. On a page with sign-in, the token permits API reads. The viewer's write limit still applies.
-`wg doctor` reports if the token is set and if the page accepts it. A 401 on the link gives one
+`wg doctor <plan-dir>` checks the plan's page and reports if it accepts the token.
+`wg doctor` checks the top-level page. A 401 on the link gives one
 `warn link:` line, and `wg next` polls Linear.
 
 - `wg next` sends its status and lines, the open Orca questions of the effort's workers, and the job and test evidence of each node. The page shows the coordinator as `coordinator listening`, `coordinator working · <age>`, or `coordinator not listening · <age>`.

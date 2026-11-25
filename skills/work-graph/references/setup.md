@@ -49,6 +49,10 @@ When moving an existing setup, copy all of them, check that `wg status <new-dir>
 
 The config lists the Linear workspaces. Set `effort.workspace` to the id of the workspace that owns the work; a plan without it uses the first one. `effort.team` defaults to the workspace's `team`. A workspace with `teams` accepts only those teams, and a team that another workspace names stops `wg`. Choose from the work's owner, not the current shell key. Do not copy issues from one workspace into another.
 
+Set `page_url` on a workspace to use a separate page for its plans. Other workspaces use the
+top-level `page_url`. Set `WG_UI_URL` to override either setting for a command. See "Link" in
+[page.md](page.md) for token setup.
+
 `wg` selects the key for every command from the plan: `LINEAR_<ID>_API_KEY`, then the workspace's `key_env` names, then the private file `~/.config/work-graph/<id>-linear-api-key` (mode 600). A missing key stops the command; it never uses the key of another workspace. Keep keys out of plans, comments, and command arguments.
 
 `wg` tries a Linear request again when it failed for a short time, at most 4 tries. The base delay is 1 s and doubles for each new try; a random factor from 0.5 to 1.5 changes each delay, so one delay can be shorter than the one before. It tries a query again after a network error, a timeout, HTTP 429, HTTP 5xx, or a `RATELIMITED` error. It tries a mutation again only when Linear refused it before it ran (HTTP 429, or a `RATELIMITED` error code below HTTP 500 with no data and no error path), because after a timeout, a 5xx, or a partial execution Linear can have applied it. A document that `wg` cannot prove to be a query counts as a mutation. At a rate limit, `wg` uses the times of that refusal (`Retry-After`, and the reset time of each used-up limit, also the limit of one endpoint; a complexity limit with fewer points than the request costs is used up). When that time is at most 60 s away, `wg` waits for it in place of the base delay; when it is farther, `wg` stops at once. Each new try prints one `warn linear:` line to stderr. After a failed mutation, read the issue before you run the command again.

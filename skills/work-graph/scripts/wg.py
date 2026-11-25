@@ -4153,14 +4153,27 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
 PAGE_URL = CONFIG["page_url"] or "http://127.0.0.1:4747"  # the hosted page (config `page_url`), else `wg ui`
 
 
+def workspace_page(workspace=None):
+    return WORKSPACES.get(workspace, {}).get("page_url")
+
+
+def configured_page_base(workspace=None):
+    return (workspace_page(workspace) or PAGE_URL).rstrip("/")
+
+
+def page_base(workspace=None):
+    return (os.environ.get("WG_UI_URL") or configured_page_base(workspace)).rstrip("/")
+
+
 def page_link(plan, identifier=None):
     """The link of the effort in the page, or of one of its issues. `WG_UI_URL` names another page."""
     query = {"project": plan["effort"]["name"]}
-    if plan_workspace(plan) != DEFAULT_WORKSPACE_ID:
-        query["workspace"] = plan_workspace(plan)
+    workspace = plan_workspace(plan)
+    if workspace != DEFAULT_WORKSPACE_ID:
+        query["workspace"] = workspace
     if identifier:
         query["issue"] = identifier
-    base = (os.environ.get("WG_UI_URL") or PAGE_URL).rstrip("/")
+    base = page_base(workspace)
     return f"{base}/?{urllib.parse.urlencode(query, quote_via=urllib.parse.quote)}"
 
 
@@ -4289,12 +4302,19 @@ class LinkTokenError(ReadError):
     pass
 
 
-def link_token():
+def link_token_env(workspace):
+    if workspace_page(workspace):
+        suffix = workspace.upper().replace("-", "_")
+        return f"WG_{suffix}_LINK_TOKEN"
+    return "WG_LINK_TOKEN"
+
+
+def link_token(workspace=None):
     """Read the environment or a private file. Never include the value in an error."""
-    source = "WG_LINK_TOKEN"
-    token = os.environ.get(source, "")
-    if not token:
-        source = LINK_TOKEN_FILE
+    source = link_token_env(workspace)
+    token = os.environ.get(source)
+    if token is None:
+        source = LINK_TOKEN_FILE.with_name(f"{workspace}-link-token") if workspace_page(workspace) else LINK_TOKEN_FILE
         try:
             with source.open(encoding="utf-8") as file:
                 if stat.S_IMODE(os.fstat(file.fileno()).st_mode) != 0o600:
@@ -4311,8 +4331,8 @@ def link_token():
     return token.strip()
 
 
-def link_token_for(url):
-    token = link_token()
+def link_token_for(url, workspace=None):
+    token = link_token(workspace)
     if token:
         target = urllib.parse.urlsplit(url)
         if target.scheme not in ("https", "wss") and target.hostname not in ("127.0.0.1", "localhost", "::1"):
@@ -4331,21 +4351,22 @@ class LinkUnauthorized(LinkResponseError):
 _LINK_AUTH_WARNED = set()
 
 
-def warn_link_token(problem, *, polling=False):
-    base = page_base()
+def warn_link_token(problem, workspace=None, *, polling=False):
+    base = (page_base(workspace), link_token_env(workspace))
     if base not in _LINK_AUTH_WARNED:
         _LINK_AUTH_WARNED.add(base)
         fallback = " Polling Linear instead." if polling else ""
         print(f"warn link: {problem}.{fallback}", file=sys.stderr, flush=True)
 
 
-LINK_UNAUTHORIZED = "HTTP 401. Check WG_LINK_TOKEN"
+def link_unauthorized_message(workspace):
+    return f"HTTP 401. Check {link_token_env(workspace)}"
 
 
 @contextlib.contextmanager
-def link_socket(url, **options):
+def link_socket(url, *, workspace, **options):
     from websockets.sync.client import connect
-    token = link_token_for(url)
+    token = link_token_for(url, workspace)
     if token:
         options["additional_headers"] = {"Authorization": f"Bearer {token}"}
     try:
@@ -4368,8 +4389,9 @@ class Link:
     about a change on the page or in Linear, and keeps the messages for it while it is busy. Linear stays the
     truth: without a link (`WG_LINK=off`, no `websockets` package, no server), `wg next` polls as before."""
 
-    def __init__(self, url, project, session, hello):
+    def __init__(self, url, project, session, hello, workspace):
         self.url, self.project, self.session, self.hello = url, project, session, hello
+        self.workspace = workspace
         self.inbox, self.ws, self.reader = [], None, None
         self.cond = __import__("threading").Condition()
         self.retry_at = 0.0
@@ -4386,7 +4408,7 @@ class Link:
         except ImportError:
             return None
         url, project, session, hello = link_target(plan_dir, plan)
-        link = cls(url, project, session, hello)
+        link = cls(url, project, session, hello, plan_workspace(plan))
         link.connect()
         return link
 
@@ -4398,7 +4420,7 @@ class Link:
             return self.ws is not None
         stack = contextlib.ExitStack()
         try:
-            self.ws = stack.enter_context(link_socket(self.url, max_size=2**22))
+            self.ws = stack.enter_context(link_socket(self.url, workspace=self.workspace, max_size=2**22))
             self.ws.stack = stack
             self.ws.send(self.envelope("hello", self.hello))
             for kind, payload in self.last.items():
@@ -4409,7 +4431,8 @@ class Link:
             self.ws = None
             self.retry_at = time.monotonic() + 30
             if isinstance(e, (LinkUnauthorized, LinkTokenError)):
-                warn_link_token(LINK_UNAUTHORIZED if isinstance(e, LinkUnauthorized) else e, polling=True)
+                problem = link_unauthorized_message(self.workspace) if isinstance(e, LinkUnauthorized) else e
+                warn_link_token(problem, self.workspace, polling=True)
                 self.warned = True
             elif not self.warned:
                 print(f"warn link: {self.url.split('?')[0]}: {e}. Polling Linear instead.", file=sys.stderr, flush=True)
@@ -4492,9 +4515,10 @@ def link_target(plan_dir, plan):
     """The link URL of the plan's project, the project, this coordinator's session, and its `hello`."""
     km = load_keymap(plan_dir)
     project = (km.get("project") or {}).get("id") or plan["effort"]["name"]
-    base = page_base()
+    workspace = plan_workspace(plan)
+    base = page_base(workspace)
     scheme, rest = base.split("://", 1)
-    query = urllib.parse.urlencode({"role": "coordinator", "workspace": plan_workspace(plan), "project": project})
+    query = urllib.parse.urlencode({"role": "coordinator", "workspace": workspace, "project": project})
     url = f"{'wss' if scheme == 'https' else 'ws'}://{rest}/api/link?{query}"
     host = os.uname().nodename
     here = str(Path(plan_dir).resolve())
@@ -4525,14 +4549,15 @@ def flush_writes(plan_dir, plan, link=None):
         return False
     try:
         url, project, session, _ = link_target(plan_dir, plan)
-        with link_socket(url) as ws:
+        with link_socket(url, workspace=plan_workspace(plan)) as ws:
             ws.send(link_envelope(session, project, "wrote", payload))
         return True
     except LinkUnauthorized:
-        warn_link_token(LINK_UNAUTHORIZED)
+        workspace = plan_workspace(plan)
+        warn_link_token(link_unauthorized_message(workspace), workspace)
         return False
     except LinkTokenError as error:
-        warn_link_token(error)
+        warn_link_token(error, plan_workspace(plan))
         return False
     except Exception:  # no package, no server, or an old server: the server's check sees the change later
         return False
@@ -4857,7 +4882,7 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                 # Before next_lines: a new review effort applies to the lines of this same wg next.
                 reviews = review_effort_lines(plan_dir, plan)
                 head, lines = next_lines(plan_dir, plan, tolerant=wait)
-                lines = paused_lines(plan_dir, plan, extra + lines) + page_contract_note(plan_dir) + health_lines(plan_dir)
+                lines = paused_lines(plan_dir, plan, extra + lines) + page_contract_note(plan_dir, plan) + health_lines(plan_dir)
                 if head != COMPLETE:
                     lines = autonomy_lines(plan_dir, plan) + reviews + lines
                 done = not wait or head == COMPLETE or any(level == "do" for level, _ in lines)
@@ -4928,9 +4953,10 @@ def live_agents():
 
 def page_waiting(plan, project_id):
     """How many page messages wait for a coordinator (answer, reply, command). 0 when the server cannot be read."""
+    workspace = plan_workspace(plan)
     try:
         presence = page_get(f"/api/projects/{urllib.parse.quote(project_id)}/presence",
-                            headers={"x-workspace": plan_workspace(plan)})
+                            headers={"x-workspace": workspace}, workspace=workspace)
         return int(presence.get("waiting") or 0)
     except (ReadError, OSError, ValueError, TypeError, http.client.HTTPException):
         return 0
@@ -5883,7 +5909,7 @@ def agent_rows(plan_dir, km, agents, now=None):
 def send_agents(plan_dir, plan, rows):
     """Send the rows to the page server on a short connection with no `hello`, as `wrote` goes."""
     url, project, session, _ = link_target(plan_dir, plan)
-    with link_socket(url) as ws:
+    with link_socket(url, workspace=plan_workspace(plan)) as ws:
         ws.send(link_envelope(session, project, "agents", {"agents": rows}))
 
 
@@ -5963,9 +5989,10 @@ def watch_poll(memory, state, roots=None, clock=time.monotonic):
                 send_agents(path, plan, rows)
                 mine.update(digest=digest, at=clock())
             except LinkUnauthorized:
-                warn_link_token(LINK_UNAUTHORIZED)
+                workspace = plan_workspace(plan)
+                warn_link_token(link_unauthorized_message(workspace), workspace)
             except LinkTokenError as error:
-                warn_link_token(error)
+                warn_link_token(error, plan_workspace(plan))
             except LinkResponseError as error:
                 print(f"warn link: {plan['effort']['name']}: {error}", file=sys.stderr, flush=True)
             except Exception as e:  # no server, an old server, or a project that the server does not list: try again
@@ -6163,16 +6190,12 @@ def doctor_tool(name, args):
     return check
 
 
-def page_base():
-    return (os.environ.get("WG_UI_URL") or PAGE_URL).rstrip("/")
-
-
-def page_get(path, timeout=10, headers=None, *, use_token=True):
-    request = urllib.request.Request(f"{page_base()}{path}", headers=headers or {})
+def page_get(path, timeout=10, headers=None, *, use_token=True, workspace=None):
+    request = urllib.request.Request(f"{page_base(workspace)}{path}", headers=headers or {})
     try:
-        token = link_token_for(request.full_url) if use_token else ""
+        token = link_token_for(request.full_url, workspace) if use_token else ""
     except LinkTokenError as error:
-        warn_link_token(error)
+        warn_link_token(error, workspace)
         token = ""
     if token:
         # Do not forward the credential on a redirect.
@@ -6181,27 +6204,27 @@ def page_get(path, timeout=10, headers=None, *, use_token=True):
         response = urllib.request.urlopen(request, timeout=timeout)
     except urllib.error.HTTPError as error:
         if token and error.code == 401:
-            warn_link_token(LINK_UNAUTHORIZED)
+            warn_link_token(link_unauthorized_message(workspace), workspace)
         raise
     except ValueError:
         if token:
-            warn_link_token("the token could not be sent in the page request")
+            warn_link_token("the token could not be sent in the page request", workspace)
             raise ValueError("could not send page request") from None
         raise
     with response:
         return json.load(response)
 
 
-def doctor_link_token():
-    if not link_token():
+def doctor_link_token(workspace=None):
+    if not link_token_for(page_base(workspace), workspace):
         return "ok", "link token: not set"
-    config = page_get("/api/config")
+    config = page_get("/api/config", workspace=workspace)
     if config.get("readOnly") and not config.get("auth"):
         return "warn", "link token: set, this page has no sign-in or coordinator link"
     # With no project, the link request reaches the project check without an upgrade or a Linear lookup.
     path = "/api/status" if config.get("auth") else "/api/link?role=coordinator"
     try:
-        page_get(path)
+        page_get(path, workspace=workspace)
     except urllib.error.HTTPError as error:
         with error:
             if error.code == 401:
@@ -6211,7 +6234,7 @@ def doctor_link_token():
     if path != "/api/status":
         # A server with no token configured also lets the request reach the project check.
         try:
-            page_get(path, use_token=False)
+            page_get(path, use_token=False, workspace=workspace)
         except urllib.error.HTTPError as error:
             with error:
                 if error.code == 401:
@@ -6220,15 +6243,15 @@ def doctor_link_token():
     return "ok", "link token: set, accepted by the page"
 
 
-def doctor_page():
+def doctor_page(workspace=None):
     """The page server answers `/healthz`, and `/api/config` names the contract of this wg."""
-    health = page_get("/healthz")
+    health = page_get("/healthz", workspace=workspace)
     if not isinstance(health, dict) or health.get("ok") is not True:
-        return "FAIL", f"page: {page_base()}/healthz did not answer ok"
-    theirs, ours = page_get("/api/config").get("contract"), contract_hash()
+        return "FAIL", f"page: {page_base(workspace)}/healthz did not answer ok"
+    theirs, ours = page_get("/api/config", workspace=workspace).get("contract"), contract_hash()
     if theirs != ours:
         return "FAIL", f"page contract: deploy the page (the server has {theirs}, wg has {ours})"
-    return "ok", f"page: {page_base()}, contract {ours}"
+    return "ok", f"page: {page_base(workspace)}, contract {ours}"
 
 
 def doctor_tick():
@@ -6438,7 +6461,7 @@ def doctor_link(plan_dir, plan):
         except ImportError:
             return "warn", "link: no websockets in this Python; run wg through uv"
         url = link_target(plan_dir, plan)[0]
-        with link_socket(url):
+        with link_socket(url, workspace=plan_workspace(plan)):
             pass  # the WebSocket handshake passed
         return "ok", f"link: {url.split('?')[0]} accepts a connection (the connection only; no hello sent)"
     return check
@@ -6448,21 +6471,6 @@ def doctor_lines(plan_dir=None, fix=False):
     """Each (level, text) line of `wg doctor [<dir>]`, as each check ends: the checks of this machine and, with a
     plan directory, of that effort. It changes nothing; with fix, it writes the coordinator settings of each loaded
     effort."""
-    plans = set(tick_plans())
-    checks = [("python", doctor_python), ("websockets", doctor_websockets), ("checkout", doctor_checkout)]
-    checks += [(f"key {w}", doctor_key(w)) for w in WORKSPACES]
-    checks += [(name, doctor_tool(name, args)) for name, args in TOOL_CHECKS.items()]
-    checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", doctor_page),
-               ("link token", doctor_link_token), ("tick", doctor_tick),
-               ("agents", doctor_watch)]
-    if plan_dir:
-        plans.add(Path(plan_dir).resolve())
-    checks += [("autostart", doctor_autostart(sorted(plans))), ("health", doctor_health(sorted(plans)))]
-    checks.append(("settings", doctor_context(sorted(plans), fix)))
-    for name, step in checks:
-        yield from doctor_run(name, step)
-    if not plan_dir:
-        return
     loaded = {}
 
     def plan_check():
@@ -6472,7 +6480,25 @@ def doctor_lines(plan_dir=None, fix=False):
         loaded["plan"] = plan
         return ("FAIL", "plan: " + "; ".join(errors)) if errors else ("ok", "plan: wg check is clean")
 
-    yield from doctor_run("plan", plan_check)
+    plan_result = list(doctor_run("plan", plan_check)) if plan_dir else []
+    workspace = plan_workspace(loaded["plan"]) if "plan" in loaded else None
+
+    plans = set(tick_plans())
+    checks = [("python", doctor_python), ("websockets", doctor_websockets), ("checkout", doctor_checkout)]
+    checks += [(f"key {w}", doctor_key(w)) for w in WORKSPACES]
+    checks += [(name, doctor_tool(name, args)) for name, args in TOOL_CHECKS.items()]
+    checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", lambda: doctor_page(workspace)),
+               ("link token", lambda: doctor_link_token(workspace)), ("tick", doctor_tick),
+               ("agents", doctor_watch)]
+    if plan_dir:
+        plans.add(Path(plan_dir).resolve())
+    checks += [("autostart", doctor_autostart(sorted(plans))), ("health", doctor_health(sorted(plans)))]
+    checks.append(("settings", doctor_context(sorted(plans), fix)))
+    for name, step in checks:
+        yield from doctor_run(name, step)
+    if not plan_dir:
+        return
+    yield from plan_result
     if plan := loaded.get("plan"):
         statuses = {}
         token = LINEAR_WORKSPACE.set(plan_workspace(plan))
@@ -6495,25 +6521,29 @@ def doctor(plan_dir=None, fix=False):
     return int(failed)
 
 
-def page_contract_note(plan_dir):
+def page_contract_note(plan_dir, plan):
     """The `note doctor` line of `wg next` when the page server runs another contract than this wg. One GET of
     `/api/config` at most each PAGE_CONTRACT_TTL: the run row of @effort keeps the answer and its time. No
     answer gives no line: the link and `wg doctor` report a server that is down."""
     effort = run_rows(load_keymap(plan_dir))["effort"]
+    workspace = plan_workspace(plan)
+    base = page_base(workspace)
     theirs, at = effort.get("page_contract"), effort.get("page_contract_at")
     try:
-        fresh = bool(at) and time.time() - parse_utc(at).timestamp() < PAGE_CONTRACT_TTL
+        fresh = (effort.get("page_contract_url") == base and bool(at)
+                 and time.time() - parse_utc(at).timestamp() < PAGE_CONTRACT_TTL)
     except (TypeError, ValueError):
         fresh = False
     if not fresh:
         try:
-            theirs = str(page_get("/api/config", timeout=PAGE_CONTRACT_WAIT).get("contract") or "none")
-        except (OSError, ValueError, AttributeError, http.client.HTTPException):
+            theirs = str(page_get("/api/config", timeout=PAGE_CONTRACT_WAIT, workspace=workspace).get("contract") or "none")
+        except (ReadError, OSError, ValueError, AttributeError, http.client.HTTPException):
             theirs = ""  # no answer: cached too, so a page that is down costs one GET each PAGE_CONTRACT_TTL
         with contextlib.suppress(TimeoutError, OSError, ValueError):
             with plan_lock(plan_dir, wait=PAGE_CONTRACT_WAIT):
                 km = load_keymap(plan_dir)
-                run_rows(km)["effort"].update(page_contract=theirs, page_contract_at=f"{utc_now():%Y-%m-%dT%H:%M:%SZ}")
+                run_rows(km)["effort"].update(page_contract=theirs, page_contract_url=base,
+                                              page_contract_at=f"{utc_now():%Y-%m-%dT%H:%M:%SZ}")
                 save_keymap(plan_dir, km)
     if theirs and theirs != contract_hash():
         return [("note", "doctor @effort -: page contract differs; run wg doctor")]

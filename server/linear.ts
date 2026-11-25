@@ -1,6 +1,6 @@
 // Linear GraphQL access for the work-graph UI. The API key stays in this process.
 import type { Comment, GraphData, Issue, IssuePatch, IssueRef, Label, Milestone, Person, Project, PullRequest, State, Team } from "../src/lib/types.ts";
-import { site } from "../src/lib/site.ts";
+import { currentSite } from "../src/lib/site.ts";
 import { ANSWERED_LABEL, AUTONOMY_GROUP, type AutonomyLevel, autonomyOf, PAUSED_LABEL, pausedOf, SHARED_LABEL, sharedOf } from "../src/lib/autonomy.ts";
 import { REVIEW_GROUP, type ReviewEffort, reviewLabel, reviewOf } from "../src/lib/review.ts";
 import { linearWorkspace } from "./workspaces.ts";
@@ -442,7 +442,7 @@ async function setGroupLabel(projectId: string, teamKey: string, teamScoped: boo
  * so a pause survives a restart of this server; `wg next` reads it. Same scope rule as the autonomy label.
  */
 export const setPaused = (projectId: string, paused: boolean, teamKey: string, teamScoped: boolean): Promise<void> =>
-  setPlainLabel(projectId, PAUSED_LABEL, paused, teamKey, teamScoped, `work-graph: the coordinator holds each action until ${site.human} resumes the effort.`);
+  setPlainLabel(projectId, PAUSED_LABEL, paused, teamKey, teamScoped, `work-graph: the coordinator holds each action until ${currentSite().human} resumes the effort.`);
 
 /** Shares a project with the read-only viewer, or stops that: the plain project label `shared` is the record. */
 export const setShared = (projectId: string, shared: boolean, teamKey: string, teamScoped: boolean): Promise<void> =>
@@ -659,7 +659,7 @@ export async function loadGraph(projectId: string): Promise<GraphData> {
   await addReviewUrls(issues);
   let teams: Record<string, Team> = {};
   let labels: Label[] = [];
-  const metaKey = `${linearWorkspace.getStore()?.id ?? site.defaultWorkspace}:${[...teamIds].sort().join(",")}`;
+  const metaKey = `${linearWorkspace.getStore()?.id ?? currentSite().defaultWorkspace}:${[...teamIds].sort().join(",")}`;
   const meta = metaCache.get(metaKey);
   if (meta && Date.now() - meta.at < META_MS) ({ teams, labels } = meta);
   else if (teamIds.length) {

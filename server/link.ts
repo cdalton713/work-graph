@@ -6,10 +6,12 @@ import {
   type AgentRow, type CoordinatorPresence, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
   type Presence, type ProjectRef, type ToCoordinator, type ToPage, projectKey, RECYCLE_CODE, RECONNECT_GRACE_MS, RESTART_CODE,
 } from "../src/lib/link.ts";
+import type { Site } from "../src/lib/site.ts";
 import type { RoomCounts } from "../src/lib/types.ts";
 import { memoryLinkBus, type LinkBus, type LinkEvent } from "./linkbus.ts";
 import { expireReconnectGrace, memoryLinkState, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
 import { RedisCommandFailed, RedisUnavailable } from "./redis.ts";
+import { requestSite } from "./site.ts";
 import { ASKS_MAX, type LinkState as SavedState, type Store } from "./store.ts";
 
 export { QUEUE_MAX } from "./linkstate.ts";
@@ -126,6 +128,7 @@ export class LinkHub {
   private readonly onEnded: (id: string, expiresAt: number) => void;
   private readonly maxAgeMs: number;
   private readonly pongMs: number;
+  private readonly site: Site | undefined;
 
   constructor(
     now: () => Date = () => new Date(),
@@ -135,7 +138,7 @@ export class LinkHub {
     store: Store | null = null,
     shared: LinkRoomState = memoryLinkState(store),
     bus: LinkBus = memoryLinkBus(),
-    { maxAgeMs = 0, pongMs = DEAD_MS }: { maxAgeMs?: number; pongMs?: number } = {},
+    { maxAgeMs = 0, pongMs = DEAD_MS, site }: { maxAgeMs?: number; pongMs?: number; site?: Site } = {},
     onEnded: (id: string, expiresAt: number) => void = () => {},
   ) {
     this.now = now;
@@ -146,7 +149,12 @@ export class LinkHub {
     this.onEnded = onEnded;
     this.maxAgeMs = Number.isFinite(maxAgeMs) && maxAgeMs > 0 ? maxAgeMs : 0;
     this.pongMs = Number.isFinite(pongMs) && pongMs >= 0 ? pongMs : DEAD_MS;
-    this.unsubscribe = bus.subscribe((event) => this.deliver(event));
+    this.site = site;
+    this.unsubscribe = bus.subscribe((event) => this.inSite(() => this.deliver(event)));
+  }
+
+  private inSite<T>(handle: () => T): T {
+    return this.site ? requestSite.run(this.site, handle) : handle();
   }
 
   /** The queue and asks that the file store keeps. */
@@ -729,14 +737,14 @@ export class LinkHub {
     return {
       pong: connection.pong,
       closed: () => { transportClosed = true; return connection.closed(); },
-      receive: async (raw) => {
+      receive: (raw) => this.inSite(async () => {
         if (transportClosed) return;
         try {
           await receive(raw);
         } finally {
           this.recycleIfDue(socket);
         }
-      },
+      }),
     };
   }
 }

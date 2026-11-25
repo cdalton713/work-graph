@@ -27,7 +27,8 @@ import { connectRedis, RedisCommandFailed, RedisUnavailable } from "./redis.ts";
 import type { LinkRoomState } from "./linkstate.ts";
 import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
-import { configureSite, site } from "../src/lib/site.ts";
+import { createSite, currentSite, DEFAULT_HUMAN } from "../src/lib/site.ts";
+import { requestSite } from "./site.ts";
 
 /** How many project graphs the overview loads at the same time. */
 const OVERVIEW_LOADS = 4;
@@ -161,11 +162,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     return "owner";
   };
   // The overview and the graph rules on the server use the same names as the page.
-  configureSite({ human, defaultWorkspace: workspaces[0].id });
+  const installationSite = createSite(human ?? DEFAULT_HUMAN, workspaces[0].id);
   const clock = now ?? Date.now;
   const started = clock();
   const contract = contractHash(contractFile);
   const app = new Hono();
+  app.use((_c, next) => requestSite.run(installationSite, next));
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   const caches = new Map(workspaces.map((w) => [w.id, createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now })]));
   // `wrote` from wg: forget the cached graph of that project, so the pages that load again see the change.
@@ -187,7 +189,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const hub = new LinkHub(
     now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers,
     store, redisState ?? linkState, redis && !readOnly ? redisLinkBus(redis, redisPrefix) : linkBus,
-    { maxAgeMs: linkMaxAgeMs, pongMs: linkPongMs }, rememberEnded,
+    { maxAgeMs: linkMaxAgeMs, pongMs: linkPongMs, site: installationSite }, rememberEnded,
   );
   let logoutTimer: ReturnType<typeof setInterval> | undefined;
   let flushing: Promise<void> | undefined;
@@ -402,7 +404,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (reason) return c.json({ error: reason }, 403);
     if (c.req.path === "/api/config" && (method === "GET" || method === "HEAD")) {
       return c.json<SiteConfig & { linkStore?: ServerStatus["linkStore"] }>({
-        human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version,
+        human: currentSite().human, defaultWorkspace: currentSite().defaultWorkspace, contract, version,
         readOnly: viewer, auth: !!auth, user: session?.email ?? null, role,
         linkStore: readOnly ? undefined : redis ? "redis" : "memory",
         link: !readOnly && role ? "/api/link" : null,
@@ -486,7 +488,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     return c.json<OverviewData>({ ...list, summaries });
   });
   api.use(async (c, next) => {
-    const id = c.req.header("x-workspace") || site.defaultWorkspace;
+    const id = c.req.header("x-workspace") || currentSite().defaultWorkspace;
     const workspace = workspaces.find((w) => w.id === id);
     if (!workspace) return c.json({ error: `workspace ${id} is not configured` }, 400);
     return linearWorkspace.run(workspace, next);
@@ -665,7 +667,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // The comment is saved before the label: when the label fails, the answer is still 200. A retry from
     // the page would write a second comment, so the coordinator gets the message, and `answered: false`
     // tells the page that the label is missing.
-    if (ref && info?.status === site.waitStatus) {
+    if (ref && info?.status === currentSite().waitStatus) {
       let answered = true;
       try {
         await markAnswered(c.req.param("id"));
@@ -715,7 +717,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const session = auth && role === "page" ? await sessionOf(c, auth, clock) : null;
     if (auth && role === "page" && (!session || !await sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     const viewer = role === "page" && roleOf(session?.email) === "viewer";
-    const workspace = c.req.query("workspace") || site.defaultWorkspace;
+    const workspace = c.req.query("workspace") || currentSite().defaultWorkspace;
     if (!workspaces.some((w) => w.id === workspace)) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
     const wanted = c.req.query("project");
     if (!wanted && role === "coordinator") return c.json({ error: "a coordinator names its project" }, 400);
@@ -827,7 +829,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // A hash of the node card: two card texts of the same length are still a change.
   const cardHash = (body: string | undefined) => (body === undefined ? "" : createHash("sha1").update(body).digest("hex"));
   const fingerprint = (data: GraphData) => new Map(data.issues.map((i) => [i.id, `${i.updatedAt}|${i.state.id}|${cardHash(i.card?.body)}`]));
-  const check = async () => {
+  const check = () => requestSite.run(installationSite, async () => {
     if (readOnly || !linkAvailable()) return;
     const active = await hub.active({ forCheck: true });
     const present = new Set((linkMaxAgeMs ? await hub.active({ forCheck: true, includeGrace: true }) : active).map(projectKey));
@@ -851,7 +853,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         console.error(`link: Linear check of ${projectKey(ref)} failed: ${(error as Error).message}`);
       }
     }
-  };
+  });
   let checking = false;
   const timer = !readOnly && watchMs > 0 ? setInterval(() => {
     if (checking) return;

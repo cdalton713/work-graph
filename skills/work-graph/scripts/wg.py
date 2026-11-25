@@ -187,9 +187,19 @@ ROLES = {"hotfix", "sync", "integration"}
 OPS_BY = {"human", human_slug(HUMAN), "coordinator"}
 REVIEWING = {"In Review", "Ready to Merge"}
 WAIT_STATUS = f"Needs {HUMAN}"  # the status of an issue that waits on the human
-CD_WRITES = {"Todo", "Ready", "In Progress", WAIT_STATUS, "In Review",
-             "Ready to Merge", "Merged", "Verifying", "Done", "Canceled"}
-CD_STATUSES = CD_WRITES | {"Triage", "Backlog"}
+
+
+def setup_status_types():
+    return {
+        "Triage": "triage", "Backlog": "backlog", "Todo": "unstarted", "Ready": "unstarted",
+        "In Progress": "started", WAIT_STATUS: "started", "In Review": "started",
+        "Ready to Merge": "started", "Merged": "started", "Verifying": "started",
+        "Done": "completed", "Canceled": "canceled", "Duplicate": "duplicate",
+    }
+
+
+CD_STATUSES = setup_status_types().keys() - {"Duplicate"}
+AGENT_LABELS = ("agent:codex", "agent:claude", "agent:coordinator")
 WAIT_LABEL = f"needs-{human_slug(HUMAN)}"
 MERGE_LABEL = "ready-to-merge"
 # An ENG workflow has no twin for these statuses. A workspace label marks them on an ENG ticket.
@@ -1562,6 +1572,235 @@ def team_info(team_key):
         if not info["hasNextPage"]:
             return team["id"], {state["name"]: state["id"] for state in team["states"]["nodes"]}, labels
         after = info["endCursor"]
+
+
+def setup_team(key):
+    teams = gql("""query($k:String!){ teams(filter:{key:{eq:$k}}){
+                   nodes{id visibility triageEnabled} } }""", {"k": key})["teams"]["nodes"]
+    return teams[0] if teams else None
+
+
+def setup_pages(read):
+    after = None
+    while True:
+        page = read(after)
+        yield from page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            return
+        after = page["pageInfo"]["endCursor"]
+
+
+def setup_states(team_id):
+    return {state["name"]: state for state in setup_pages(lambda after: gql(
+        """query($id:String!,$after:String){ team(id:$id){ states(first:100,after:$after){
+           nodes{id name type} pageInfo{hasNextPage endCursor} } } }""",
+        {"id": team_id, "after": after})["team"]["states"])}
+
+
+def setup_labels(kind, team_id):
+    field = f"{kind}s"
+    scope = {"id": {"eq": team_id}} if team_id else {"null": True}
+    query = f"""query($f:{kind[0].upper() + kind[1:]}Filter!,$after:String){{
+        {field}(first:100,after:$after,filter:$f){{
+            nodes{{id name isGroup groupType parent{{id}} retiredAt}} pageInfo{{hasNextPage endCursor}} }} }}"""
+    return list(setup_pages(lambda after: gql(query, {"f": {"team": scope}, "after": after})[field]))
+
+
+def setup_mutation(name, query, variables):
+    result = gql(query, variables).get(name)
+    if not result or not result.get("success"):
+        raise ReadError(f"Linear did not confirm {name}")
+    return result
+
+
+def setup_create(kind, item, reread):
+    mutation = kind + "Create"
+    input_type = kind[0].upper() + kind[1:] + "CreateInput"
+    try:
+        return setup_mutation(mutation, f"""mutation($i:{input_type}!){{ {mutation}(input:$i){{
+                              success {kind}{{id}} }} }}""", {"i": item})[kind]
+    except ReadError as e:
+        if not re.search(r"duplicate|already exists|already (?:been )?taken", str(e), re.I):
+            raise
+        for attempt in range(10):
+            if attempt:
+                time.sleep(1)
+            if found := reread():
+                return found
+        raise
+
+
+def setup_update_team(team_id, item):
+    setup_mutation("teamUpdate", """mutation($id:String!,$i:TeamUpdateInput!){
+                   teamUpdate(id:$id,input:$i){success} }""", {"id": team_id, "i": item})
+
+
+def setup_private_team(key, team, new_team):
+    team_id = team["id"]
+    if not new_team:
+        content = gql("""query($id:String!){ team(id:$id){
+                         issues(first:1,includeArchived:true){nodes{id}}
+                         projects(first:1,includeArchived:true){nodes{id}} } }""", {"id": team_id})["team"]
+        for field, reason in (("issues", "an issue"), ("projects", "a project")):
+            if content[field]["nodes"]:
+                raise ReadError(f"team {key} has {reason}. Make it private in Linear or rerun with --no-private.")
+    hint = "Make it private in Linear and run again, or run again with --no-private."
+    try:
+        setup_update_team(team_id, {"private": True})
+    except ReadError as e:
+        try:
+            current = setup_team(key)
+        except ReadError:
+            current = None
+        if current and current["id"] == team_id and current["visibility"] != "private":
+            raise ReadError(f"{e}\nThe team {key} exists and is not private. {hint}") from e
+        if current and current["id"] == team_id and current["visibility"] == "private":
+            raise ReadError(f"{e}\nThe team {key} is now private. Run setup again to continue.") from e
+        raise ReadError(f"{e}\nThe team {key} exists. Its privacy could not be verified. {hint}") from e
+    try:
+        verified = setup_team(key)
+    except ReadError as e:
+        raise ReadError(f"{e}\nThe team {key} exists. Its privacy could not be verified. {hint}") from e
+    if not verified or verified["id"] != team_id:
+        raise ReadError(f"Linear did not return the team {key} after the update. {hint}")
+    if verified["visibility"] != "private":
+        raise ReadError(f"Linear did not confirm private visibility. The team {key} exists and is not private. {hint}")
+    return verified
+
+
+def setup_workflow(team, apply, report):
+    team_id = team["id"] if team else None
+    states = setup_states(team_id) if team else {}
+    for name, expected in setup_status_types().items():
+        state = states.get(name)
+        if state:
+            actual = state["type"]
+            report(f"status {name}", "exists" if actual == expected else "warn",
+                   f" ({actual})" if actual == expected else f" ({actual}, expected {expected})")
+            continue
+        report(f"status {name}", "missing", f" ({expected})")
+        if not apply:
+            continue
+        # Linear owns the reserved statuses. Enabling triage adds its state.
+        if expected == "triage" and not team["triageEnabled"] and not any(
+                state["type"] == "triage" for state in states.values()):
+            setup_update_team(team_id, {"triageEnabled": True})
+            states = setup_states(team_id)
+            if states.get(name, {}).get("type") == expected:
+                print(f"created status {name}")
+                continue
+        if expected in {"triage", "duplicate"}:
+            print(f"warn status {name}: Linear manages this status. Check the team's workflow in Linear.")
+            continue
+        state = setup_create("workflowState", {"name": name, "type": expected, "teamId": team_id,
+                                              "color": "#5E6AD2"}, lambda: setup_states(team_id).get(name))
+        if state.get("type", expected) != expected:
+            report(f"status {name}", "warn", f" ({state['type']}, expected {expected})")
+
+
+def setup_label_scope(kind, team_id, groups, plain, apply, report, *, missing_team=False):
+    labels = [] if missing_team else setup_labels(kind, team_id)
+    owner = {"teamId": team_id} if team_id else {}
+    label_kind = "issue label" if kind == "issueLabel" else "project label"
+
+    def ensure(name, parent=None, group=False):
+        def match(rows):
+            return next((row for row in rows if row["name"].casefold() == name.casefold()
+                         and (row.get("parent") or {}).get("id") == parent), None)
+
+        description = f"{label_kind}{' group' if group else ''} {name}"
+        if found := match(labels):
+            if (bool(found.get("isGroup")) != group or found.get("retiredAt") or (not group and found["name"] != name)
+                    or (group and found.get("groupType") != "singleSelect")):
+                report(description, "warn", " (check its type and availability in Linear)")
+                return None
+            report(description, "exists")
+            return found["id"]
+        report(description, "missing")
+        if apply:
+            item = {"name": name, **owner}
+            if group:
+                item.update(isGroup=True, groupType="singleSelect")
+            if parent:
+                item["parentId"] = parent
+            return setup_create(kind, item, lambda: match(setup_labels(kind, team_id)))["id"]
+        return None
+
+    for name in plain:
+        ensure(name)
+    for group, children in groups:
+        group_id = ensure(group, group=True)
+        for child in children:
+            if group_id:
+                ensure(child, parent=group_id)
+            elif not apply:
+                report(f"{label_kind} {child} in {group}", "missing")
+
+
+def setup_config_hint(workspace, team_key, scoped):
+    try:
+        raw = json.loads(CONFIG_PATH.read_text())
+    except FileNotFoundError:
+        raw = {}
+    entry = {"id": workspace, "team": team_key, "team_labels": scoped}
+    if not any(entry.items() <= row.items() for row in raw.get("workspaces", [])):
+        print(f"Set this entry in workspaces in {CONFIG_PATH}:")
+        print(json.dumps(entry, indent=2))
+    print("Next commands\n  wg preflight <plan-dir>\n  wg doctor")
+
+
+def setup_command(ns):
+    workspace = ns.workspace
+    if workspace not in WORKSPACES:
+        raise ReadError(f"unknown workspace {workspace}: choose one of {', '.join(WORKSPACES)}")
+    config = WORKSPACES[workspace]
+    team_key = (ns.team or config["team"] or "").upper()
+    if not team_key:
+        raise ReadError(f"workspace {workspace} has no default team. Supply --team <KEY>.")
+    token = LINEAR_WORKSPACE.set(workspace)
+    try:
+        missing = False
+
+        def report(item, status, detail=""):
+            nonlocal missing
+            missing |= status == "missing"
+            print(f"{status} {item}{detail}")
+
+        team = setup_team(team_key)
+        new_team = team is None
+        report(f"team {team_key}", "missing" if new_team else "exists")
+        if new_team and ns.apply:
+            if not ns.name:
+                raise ReadError(f"team {team_key} needs a name. Supply --name <team name>.")
+            team = setup_mutation("teamCreate", """mutation($i:TeamCreateInput!){
+                teamCreate(input:$i){success team{id visibility triageEnabled}} }""",
+                {"i": {"key": team_key, "name": ns.name}})["team"]
+        if ns.private and (not team or team["visibility"] != "private"):
+            report(f"private visibility for team {team_key}", "missing")
+            if ns.apply:
+                team = setup_private_team(team_key, team, new_team)
+        visibility = team["visibility"] if team else "public"
+        if not ns.private or visibility == "private":
+            print(f"Team {team_key} visibility: {visibility}.")
+
+        setup_workflow(team, ns.apply, report)
+        team_id = team["id"] if team else None
+        scoped = bool(config["team_labels"])
+        setup_label_scope("issueLabel", team_id, (), (*KIND_LABEL.values(), REVIEWED_LABEL, ANSWERED_LABEL),
+                          ns.apply, report, missing_team=team is None)
+        setup_label_scope("issueLabel", None, (("agent", AGENT_LABELS),), (), ns.apply, report)
+        groups = ((INITIATIVE_GROUP, ()), (AUTONOMY_GROUP, AUTONOMY_LEVELS),
+                  (REVIEW_GROUP, tuple(review_label(level) for level in REVIEW_LEVELS)))
+        setup_label_scope("projectLabel", team_id if scoped else None, groups, (PAUSED_LABEL, "shared"),
+                          ns.apply, report, missing_team=scoped and team is None)
+        if not missing:
+            print("nothing is missing")
+        elif not ns.apply:
+            print("Run again with --apply to make missing items.")
+        setup_config_hint(workspace, team_key, scoped)
+        return 0
+    finally:
+        LINEAR_WORKSPACE.reset(token)
 
 
 def fetch_nodes(km):
@@ -3107,6 +3346,28 @@ def tool_problem(args, cwd=None):
     return f"{args[0]}: {command_error(result)}" if result.returncode else None
 
 
+def linear_workflow_check(team):
+    try:
+        team_id, _, labels = team_info(team)
+    except ReadError as e:
+        if str(e) == f"team {team} not found":
+            return "FAIL", f"{e}. Run wg setup."
+        raise
+    states = setup_states(team_id)
+    agents = set(AGENT_LABELS) - labels.keys()
+    if agents:
+        agents -= workspace_labels(agents).keys()
+    expected_types = setup_status_types()
+    missing = sorted((expected_types.keys() - states.keys()) | agents)
+    wrong = [f"{name} has type {states[name]['type']}, expected {expected}"
+             for name, expected in expected_types.items() if name in states and states[name]["type"] != expected]
+    if missing:
+        wrong.insert(0, "missing " + ", ".join(missing))
+    if wrong:
+        return "FAIL", f"{team} " + ". ".join(wrong) + ". Run wg setup to check the workflow."
+    return "ok", f"{team} workflow and agent labels"
+
+
 def preflight(plan_dir, plan, phase):
     phases = phase_list(plan, phase)
     failed = False
@@ -3124,14 +3385,8 @@ def preflight(plan_dir, plan, phase):
     team = plan_team(plan)
     try:
         gql("{ viewer { id } }")
-        _, states, labels = team_info(team)
-        agents = {"agent:codex", "agent:claude", "agent:coordinator"}
-        found = set(labels)
-        if agents - found:
-            found.update(workspace_labels(agents - found))
-        missing = sorted((CD_WRITES - states.keys()) | (agents - found))
-        line("FAIL" if missing else "ok", "linear",
-             f"{team} missing " + ", ".join(missing) if missing else f"{team} workflow and agent labels")
+        level, message = linear_workflow_check(team)
+        line(level, "linear", message)
     except ReadError as e:
         line("FAIL", "linear", str(e).replace("\n", " "))
     stax_phases = [p for p in phases if p.get("target") != RELEASE_BRANCH]
@@ -6223,7 +6478,7 @@ def rate_budget():
     return ", ".join(parts) + " left" if parts else "no budget headers"
 
 
-def doctor_key(workspace):
+def doctor_key(workspace, *, team=None):
     def check():
         key, source = key_source(workspace)
         if not key:
@@ -6235,9 +6490,14 @@ def doctor_key(workspace):
         token = LINEAR_WORKSPACE.set(workspace)
         try:
             gql("{ viewer { id } }")
+            accepted = ("ok", f"key {workspace}: accepted ({source}); {rate_budget()}")
+            if team:
+                workflow = doctor_run(f"Linear workflow {workspace}",
+                                      lambda: linear_workflow_check(team))
+                return [accepted, *workflow]
+            return accepted
         finally:
             LINEAR_WORKSPACE.reset(token)
-        return "ok", f"key {workspace}: accepted ({source}); {rate_budget()}"
     return check
 
 
@@ -6543,7 +6803,9 @@ def doctor_lines(plan_dir=None, fix=False):
 
     plans = set(tick_plans())
     checks = [("python", doctor_python), ("websockets", doctor_websockets), ("checkout", doctor_checkout)]
-    checks += [(f"key {w}", doctor_key(w)) for w in WORKSPACES]
+    effort_team = loaded.get("plan", {}).get("effort", {}).get("team")
+    checks += [(f"key {w}", doctor_key(w, team=(effort_team if w == workspace else None) or config["team"]))
+               for w, config in WORKSPACES.items()]
     checks += [(name, doctor_tool(name, args)) for name, args in TOOL_CHECKS.items()]
     checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", lambda: doctor_page(workspace)),
                ("link token", lambda: doctor_link_token(workspace)), ("tick", doctor_tick),
@@ -8234,6 +8496,12 @@ def cli_parser():
     d = sub.add_parser("doctor", help="check this machine and, with a plan directory, that effort; changes nothing")
     d.add_argument("dir", nargs="?")
     d.add_argument("--fix", action="store_true", help="also write the coordinator settings and context limit of each loaded effort")
+    setup = sub.add_parser("setup", help="check a Linear team and create missing workflow items with --apply")
+    setup.add_argument("--workspace", default=DEFAULT_WORKSPACE_ID)
+    setup.add_argument("--team")
+    setup.add_argument("--name")
+    setup.add_argument("--private", action=argparse.BooleanOptionalAction, default=False)
+    setup.add_argument("--apply", action="store_true")
     sub.add_parser("config", help="print the config of this machine (no keys) and the local rules file")
     c = sub.add_parser("contract", help="print what the page must agree with; --write updates contract.json")
     c.add_argument("--write", action="store_true")
@@ -8359,6 +8627,8 @@ def main(argv):
             return explain_command(ns.verb)
         if ns.cmd == "doctor":
             return doctor(ns.dir, ns.fix)
+        if ns.cmd == "setup":
+            return setup_command(ns)
         if ns.cmd == "contract":
             if ns.write:
                 (Path(__file__).resolve().parent.parent / "contract.json").write_text(contract_text())

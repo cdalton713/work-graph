@@ -23,12 +23,18 @@ When moving an existing setup, copy all of them, check that `wg status <new-dir>
 
 ## Linear
 
-1. Configure the plan's Linear workspace and key as "Linear workspace" below says. `wg preflight <plan-dir> [--phase P]` checks the tools (`git`, `gh auth`, `st`), the selected key, the statuses and claim labels below, and the target of each phase ("Stax trunk and targets").
-2. The plan's team needs these statuses. For a team that owns its statuses (`inheritWorkflowStatuses: false`), configure them on the team: Triage, Backlog, Todo, Ready, In Progress, Needs <human>, In Review, Ready to Merge, Merged, Verifying, Done, Canceled, Duplicate. `Needs <human>` is `Needs` and the config's `human` (for example `Needs Ada`). `wg` uses these names; do not rename them. The meanings are in the table below.
-3. Kind labels for the plan's team: `merge-point`, `ship-point`, `ops`, `decision`. `wg load` creates `spike` on first use, and the `reviewed` label (review-and-merge.md "Mark a PR reviewed").
-4. Claim labels: the workspace label group `agent` (single-select) with `agent:codex`, `agent:claude`, and `agent:coordinator`. Single-select means an issue holds at most one claim. The claim comment names the Orca dispatch.
-5. Initiatives: the project label group `initiative` (single-select): a team group where the workspace has `team_labels: true`, else a workspace group. `wg load --apply` creates it and its labels on first use. If Linear says that a label it just created is a duplicate, `wg` reads the labels again and uses that label.
-6. Agents use the human's API key, so Linear shows them as the author of each agent comment and status change. A comment is no proof of who wrote it. Their words about a node can be recorded with `wg approve --quote`; their `ops` evidence and their answers go in `wg move --note`.
+1. Set up the workspace and key as described in [Linear workspace](#linear-workspace). Set `team_labels: false` for workspace project labels if your plan does not support team project labels.
+2. Run `wg setup --team WG --name "Work Graph"` to see the existing and missing items. Use `--apply` to create missing items or configure them by hand as described below. The first configured workspace and its team key are the defaults. Use `--workspace <id>` to select a different configured workspace. Give `--name` if the team does not exist.
+3. Add the workspace entry that `wg setup` prints to the config if necessary. Run `wg doctor` and `wg preflight <plan-dir>`.
+
+Setup creates a public team by default. Use `--private` for a private team on a paid Linear plan. Setup first creates an empty team, then sets and checks its privacy before it adds workflow items. If Linear refuses the privacy change, make the team private in Linear and run setup again, or run again with `--no-private`. For a team with issues or projects, change its privacy in Linear.
+
+- **Statuses** use the names in the table below. `Needs <human>` uses the configured `human`, for example `Needs Ada`. Linear supplies Duplicate and adds Triage when triage is enabled.
+- **Team issue labels** are `merge-point`, `ship-point`, `ops`, `decision`, `spike`, `reviewed`, and `answered`.
+- **Claim labels** belong to the workspace group `agent`. The single-select group holds `agent:codex`, `agent:claude`, and `agent:coordinator`. An issue holds at most one claim. The claim comment names the Orca dispatch.
+- **Project labels** include single-select groups `initiative`, `autonomy`, and `review`, and plain labels `paused` and `shared`. Setup creates the fixed choices for autonomy and review. `wg load --apply` creates initiative choices when an effort first uses them. Set `team_labels: true` for team project labels or `false` for workspace project labels.
+
+Agents use the human's API key, so Linear shows them as the author of each agent comment and status change. Record an agent's words about a node with `wg approve --quote`. Record ops evidence and answers with `wg move --note`.
 
 | Status | Meaning |
 |---|---|

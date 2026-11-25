@@ -53,9 +53,9 @@ An initiative is a project label that groups related efforts. Set `effort.initia
 
 ### 0. Set up
 
-Follow [references/setup.md](references/setup.md).
+Follow [worktree and Linear setup](references/setup.md). The human runs `wg setup --apply` when needed.
 
-Done when: the `<slug>-core` coordinator worktree exists, `wg` runs with the selected workspace's key, and its team has the kind labels and the `agent:*` claim labels.
+Done when: `<slug>-core` exists, `wg` uses the selected workspace's key, and the required labels exist.
 
 ### 1. Draw the graph
 

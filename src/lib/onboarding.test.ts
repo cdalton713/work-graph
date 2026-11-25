@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { configBlock, doneSteps, firstStep, setupCommands, validateNewTeam } from "./onboarding";
+import { describe, expect, it, vi } from "vitest";
+import { configBlock, pollWhileVisible, workspaceKeyLocation, doneSteps, firstStep, setupCommands, validateNewTeam } from "./onboarding";
 import type { OnboardingState, AccountConnection } from "./types";
 
 const complete: OnboardingState = {
@@ -30,15 +30,53 @@ describe("onboarding", () => {
 
   it("writes the page URL for each workspace and uses a new team's key", () => {
     expect(JSON.parse(configBlock(account, {}))).toEqual({
-      human: "Ada", page_url: "https://example.com", workspaces: [{ id: "example", team: "WG", page_url: "https://example.com", team_labels: false }],
+      human: "Ada", page_url: "https://example.com", workspaces: [{ id: "example", team: "WG", page_url: "https://example.com", team_labels: false, key_env: [] }],
     });
     const config = JSON.parse(configBlock(
       { ...account, connections: [home, second] }, { second: { key: "NEW", name: "New team" } },
     ));
     expect(config.workspaces).toEqual([
-      { id: "example", team: "WG", page_url: "https://example.com", team_labels: false },
-      { id: "extra", team: "NEW", page_url: "https://example.com", team_labels: false },
+      { id: "example", team: "WG", page_url: "https://example.com", team_labels: false, key_env: [] },
+      { id: "extra", team: "NEW", page_url: "https://example.com", team_labels: false, key_env: [] },
     ]);
+  });
+
+  it("names the workspace-specific environment variable and key file", () => {
+    expect(workspaceKeyLocation("extra-team")).toEqual({
+      env: "LINEAR_EXTRA_TEAM_API_KEY",
+      file: "~/.config/work-graph/extra-team-linear-api-key",
+    });
+  });
+
+  it("polls on entry and after returning to the page, with no polls while hidden or after cleanup", () => {
+    vi.useFakeTimers();
+    const page = Object.assign(new EventTarget(), { visibilityState: "hidden" });
+    const poll = vi.fn();
+    const stop = pollWhileVisible(page as Pick<Document, "visibilityState" | "addEventListener" | "removeEventListener">, poll);
+    const show = (state: string) => {
+      page.visibilityState = state;
+      page.dispatchEvent(new Event("visibilitychange"));
+    };
+    try {
+      vi.advanceTimersByTime(10_000);
+      expect(poll).not.toHaveBeenCalled();
+      show("visible");
+      expect(poll).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(5000);
+      expect(poll).toHaveBeenCalledTimes(2);
+      show("hidden");
+      vi.advanceTimersByTime(10_000);
+      expect(poll).toHaveBeenCalledTimes(2);
+      show("visible");
+      expect(poll).toHaveBeenCalledTimes(3);
+    } finally {
+      stop();
+      show("hidden");
+      show("visible");
+      vi.advanceTimersByTime(10_000);
+      vi.useRealTimers();
+    }
+    expect(poll).toHaveBeenCalledTimes(3);
   });
 
   it("orders the commands after the token and quotes the new team name for the shell", () => {

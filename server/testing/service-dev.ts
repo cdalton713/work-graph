@@ -11,6 +11,14 @@ import { dbTenants } from "../db/tenants.ts";
 import { stopOnSignals } from "../link.ts";
 import { pgliteSql } from "./pglite.ts";
 
+const productionSetting = ["DATABASE_URL", "WG_HOSTED", "WG_DATA_KEY", "WG_SESSION_SECRET"]
+  .find((name) => process.env[name] !== undefined) ??
+  (process.env.NODE_ENV === "production" ? "NODE_ENV" : undefined);
+if (productionSetting) {
+  console.error(`Service preview cannot start with ${productionSetting} set for production. Use a local development environment.`);
+  process.exit(1);
+}
+
 const { values } = parseArgs({ options: { port: { type: "string", default: "4748" } } });
 const port = Number(values.port);
 const host = "example.com";

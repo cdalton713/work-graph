@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { accountApi } from "../api";
-import { configBlock, doneSteps, firstStep, setupCommands, steps, type NewTeam, type NewTeams, type Step } from "../lib/onboarding";
+import { configBlock, doneSteps, firstStep, pollWhileVisible, setupCommands, steps, workspaceKeyLocation, type NewTeam, type NewTeams, type Step } from "../lib/onboarding";
 import type { Account } from "../lib/types";
 import { AccountError, NameForm, TeamForm, TokenForm, useAccountAction, WorkspaceKeyForm, WorkspaceStatus, type RefreshAccount } from "./Settings";
 import { CopyButton } from "./ui";
@@ -27,6 +27,7 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
   useEffect(() => {
     if (step !== "connect") return;
     const controller = new AbortController();
+    const inactive = () => controller.signal.aborted || document.visibilityState === "hidden";
     let pending = false;
     async function poll() {
       if (pending) return;
@@ -35,11 +36,11 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
         const current = await refresh();
         for (const workspace of current.connections) {
           const draft = drafts[workspace.id];
-          if (controller.signal.aborted || !draft || workspace.team === draft.key || workspace.status !== "ok") continue;
+          if (inactive() || !draft || workspace.team === draft.key || workspace.status !== "ok") continue;
           const teams = await accountApi.teams(workspace.id, controller.signal);
-          if (controller.signal.aborted || !teams.some(({ key }) => key === draft.key)) continue;
+          if (inactive() || !teams.some(({ key }) => key === draft.key)) continue;
           await accountApi.updateWorkspace(workspace.id, { team: draft.key });
-          if (!controller.signal.aborted) await refresh();
+          if (!inactive()) await refresh();
         }
         if (!controller.signal.aborted) setConnectError("");
       } catch (error) {
@@ -48,9 +49,8 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
         pending = false;
       }
     }
-    void poll();
-    const timer = setInterval(() => void poll(), 5000);
-    return () => { controller.abort(); clearInterval(timer); };
+    const stop = pollWhileVisible(document, () => void poll());
+    return () => { controller.abort(); stop(); };
   }, [step, refresh, drafts]);
 
   const saveDraft = (id: string, team?: NewTeam) => setDrafts((current) => {
@@ -96,7 +96,13 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
               <section>
                 <h3>Install the skill and local tools</h3>
                 <p><a href={readme + "#install-the-skill"} target="_blank" rel="noreferrer">Read the installation instructions</a>.</p>
-                <p><a href={readme + "#config"} target="_blank" rel="noreferrer">Set up a local Linear key</a> for each workspace so <code>wg</code> can work with its team.</p>
+                <p><a href={readme + "#config"} target="_blank" rel="noreferrer">Set up a local Linear key</a> for each workspace so <code>wg</code> can work with its team. Set the environment variable or save the key in the file with permissions 600.</p>
+                <ul className="account-key-locations">
+                  {account.connections.map(({ id, name, workspace_id }) => {
+                    const { env, file } = workspaceKeyLocation(workspace_id);
+                    return <li key={id}>{name} <code>{env}</code> or <code>{file}</code></li>;
+                  })}
+                </ul>
               </section>
               <section>
                 <h3>Set up the config</h3>

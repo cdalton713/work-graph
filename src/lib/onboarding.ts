@@ -32,6 +32,7 @@ export function configBlock({ human, connections, pageUrl }: SetupAccount, draft
       team: drafts[workspace.id]?.key ?? workspace.team,
       page_url: pageUrl,
       team_labels: workspace.team_labels,
+      key_env: [],
     })),
   }, null, 2);
 }
@@ -56,4 +57,34 @@ export function validateNewTeam(key: string, name: string): NewTeam | null {
   key = key.trim().toUpperCase();
   name = name.trim();
   return /^[A-Z][A-Z0-9]{0,6}$/.test(key) && name && [...name].length <= 80 ? { key, name } : null;
+}
+
+export function workspaceKeyLocation(id: string) {
+  return {
+    env: `LINEAR_${id.toUpperCase().replaceAll("-", "_")}_API_KEY`,
+    file: `~/.config/work-graph/${id}-linear-api-key`,
+  };
+}
+
+export function pollWhileVisible(
+  page: Pick<Document, "visibilityState" | "addEventListener" | "removeEventListener">,
+  poll: () => void,
+): () => void {
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const tick = () => {
+    if (page.visibilityState === "visible") poll();
+  };
+  const sync = () => {
+    clearInterval(timer);
+    if (page.visibilityState === "visible") {
+      tick();
+      timer = setInterval(tick, 5000);
+    }
+  };
+  page.addEventListener("visibilitychange", sync);
+  sync();
+  return () => {
+    page.removeEventListener("visibilitychange", sync);
+    clearInterval(timer);
+  };
 }

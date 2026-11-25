@@ -1,9 +1,24 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { test, expect } from "vitest";
 
+const productionSettings = ["DATABASE_URL", "WG_HOSTED", "WG_DATA_KEY", "WG_SESSION_SECRET", "NODE_ENV"];
+const previewEnv = { ...process.env };
+for (const name of productionSettings) delete previewEnv[name];
+
+test.each(productionSettings)("the service preview refuses %s before it starts", (name) => {
+  const result = spawnSync(process.execPath, ["server/testing/service-dev.ts", "--port", "0"], {
+    encoding: "utf8", timeout: 5000,
+    env: { ...previewEnv, [name]: name === "NODE_ENV" ? "production" : "example" },
+  });
+  expect(result.stderr).toContain(`Service preview cannot start with ${name} set for production.`);
+  expect(result.status).toBe(1);
+  expect(result.stdout).toBe("");
+});
+
 test("the local service starts on loopback, serves service config, and stops", async () => {
   const child = spawn(process.execPath, ["server/testing/service-dev.ts", "--port", "0"], {
+    env: previewEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const exited = once(child, "exit");

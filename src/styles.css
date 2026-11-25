@@ -613,6 +613,8 @@ button.copy.is-copied { color: var(--lamp-done); }
 .account-guide ol { display: grid; gap: 4px; padding: 0; margin: 0; list-style: none; }
 .account-guide li button { width: 100%; display: flex; align-items: center; gap: 8px; text-align: left; padding: 8px 12px; border-color: transparent; }
 .account-guide li button[aria-current="step"] { background: var(--cab-3); border-color: var(--rail-2); color: var(--ink-1); }
+#setup-step-heading:focus { outline: none; }
+.account-key-locations { margin: 0; padding-inline-start: 20px; }
 .account-done { color: var(--lamp-done); }
 .account-pending, .account-muted { color: var(--ink-3); }
 .account-card, .account-item, .account-step, .account-step section, .account-form, .account-dialog[open] { display: grid; min-width: 0; gap: 12px; overflow-wrap: anywhere; }

@@ -30,7 +30,7 @@ it.skipIf(!localRedis)("reconnects when a subscriber stops replying without clos
   const redis = connectRedis(`redis://127.0.0.1:${(proxy.address() as AddressInfo).port}`, undefined,
     (ready) => transitions.push(ready), false, 25);
   try {
-    await redis.initialized;
+    await redis.waitReady();
     expect(redis.ready).toBe(true);
     block = true;
     await vi.waitFor(() => expect(transitions).toContain(false), { timeout: 3500 });

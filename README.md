@@ -326,6 +326,10 @@ app, set `WG_LINK_PONG_MS=0`. The function has no stop hook. If the host ends th
 planned close, clients reconnect and Redis keeps the link state. `wg next --wait` also polls Linear, so a
 missed timer check can delay an update.
 
+The live check used a bearer token with the Python link client. A socket stayed open for 30 seconds.
+The server waits up to three seconds for Redis to connect before returning 503 with `Retry-After: 1`.
+After a pause, it checks a timed-out connection with a fresh ping before it reconnects.
+
 `GET /healthz` checks that the configured server runs. Use the coordinator token on `GET /api/status`
 to check the mode (`readOnly` and `link`) and Redis (`linkStore` and `redisReady`). Redis can be
 unavailable while `/healthz` returns 200.

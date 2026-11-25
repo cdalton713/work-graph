@@ -41,6 +41,8 @@ export interface LinkRoomState {
   endSession(id: string, expiresAt: number, now: number): Promise<void>;
   sessionEnded(id: string, now: number): Promise<boolean>;
   flush(): Promise<boolean>;
+  renew?(sockets: { ref: ProjectRef; socket: string }[], at: string): Promise<Set<string>>;
+  sessionExpiry?(id: string): Promise<number | null>;
   refresh?(ref: ProjectRef, socket: string, at: string): Promise<boolean>;
 }
 
@@ -74,6 +76,7 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
     },
     async append(ref, message, answeredAsk) {
       const room = roomOf(ref) ?? emptyRoom(structuredClone(ref));
+      if (room.queue.some(({ id }) => id === message.id)) return structuredClone(room);
       room.queue.push(structuredClone(message));
       if (answeredAsk !== undefined) room.asks = room.asks.filter((ask) => ask.id !== answeredAsk);
       if (room.queue.length > QUEUE_MAX) {

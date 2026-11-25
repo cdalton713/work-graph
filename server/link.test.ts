@@ -715,6 +715,88 @@ describe("/api/link over a real socket", () => {
     await sharedLink({ redisUrl: redis.url, redisPrefix: `test:${randomUUID()}:` });
   });
 
+  it.skipIf(!localRedis)("renews 100 sockets in one room without rewriting it", async () => {
+    const server = await startLocalRedis();
+    closers.push(server.close);
+    const redis = connectRedis(server.url);
+    closers.push(redis.close);
+    const state = redisLinkState(redis);
+    const hub = new LinkHub(undefined, undefined, undefined, null, state, redisLinkBus(redis));
+    const page = peer();
+    for (let i = 0; i < 100; i++) await hub.joinPage(page, A);
+    const before = (await state.read(A))?.sequence;
+    const commandCounts = async () => {
+      const info = await redis.run((client) => client.info("commandstats"));
+      return Object.fromEntries([...info.matchAll(/^cmdstat_(\w+):calls=(\d+)/gm)].map(([, name, count]) => [name, Number(count)]));
+    };
+    const first = await commandCounts();
+    await hub.beat();
+    const after = await commandCounts();
+    expect(after.eval - first.eval).toBeLessThanOrEqual(1);
+    expect(after.get - first.get).toBeLessThan(5);
+    expect((await state.read(A))?.sequence).toBe(before);
+    expect((await state.read(A))?.sockets.size).toBe(100);
+  });
+
+  it.skipIf(!testRedis)("replays the queue on a second hello on the same socket", async () => {
+    const server = await startTestRedis();
+    closers.push(server.close);
+    const prefix = `test:${randomUUID()}:`;
+    const redis = connectRedis(server.url, prefix);
+    closers.push(redis.close);
+    const hub = new LinkHub(undefined, undefined, undefined, null, redisLinkState(redis, prefix), redisLinkBus(redis, prefix));
+    const queued = await hub.publish(A, "command", { name: "next", key: null, issue: null });
+    const target = peer();
+    const pair = await hub.joinCoordinator(target, A);
+    await pair.receive(hello("one"));
+    await vi.waitFor(() => expect(target.of("command")).toEqual([queued]));
+    await pair.receive(hello("one"));
+    await vi.waitFor(() => expect(target.of("command")).toEqual([queued, queued]));
+  });
+
+  it("limits peer activity to one lease renewal per heartbeat interval", async () => {
+    const time = fakeTime();
+    const renew = vi.fn(async (sockets: { socket: string }[]) => new Set(sockets.map(({ socket }) => socket)));
+    const hub = new LinkHub(time.now, undefined, time.timers, null, { ...memoryLinkState(), renew });
+    const page = await hub.joinPage(peer(), A);
+    for (let i = 0; i < 100; i++) page.pong();
+    await hub.beat();
+    expect(renew.mock.calls.filter(([sockets]) => sockets.length)).toHaveLength(1);
+    time.advance(PING_MS);
+    page.pong();
+    expect(renew.mock.calls.filter(([sockets]) => sockets.length)).toHaveLength(2);
+  });
+
+  it("returns the saved Linear result when a follow-up notice fails", async () => {
+    const linear = fakeLinear();
+    const state = memoryLinkState();
+    const { app, port } = await start(undefined, undefined, {
+      linkState: { ...state, async append() { throw new Error("queue unavailable"); } },
+    });
+    const host = `127.0.0.1:${port}`;
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const response = await app.request("/api/projects/p1/commands", {
+        method: "POST", body: JSON.stringify({ name: "pause" }),
+        headers: { host, origin: `http://${host}`, "x-workspace": "work", "content-type": "application/json" },
+      });
+      expect(linear.marks.paused).toBe(true);
+      expect(response.status).toBe(200);
+      expect(log.mock.calls).toEqual([["Linear write saved, but the link notice was lost"]]);
+    } finally { log.mockRestore(); }
+  });
+
+  it("prunes even when socket renewal fails", async () => {
+    const memory = memoryLinkState();
+    const prune = vi.fn(memory.prune);
+    const hub = new LinkHub(undefined, undefined, undefined, null, {
+      ...memory, prune, async renew() { throw new Error("renewal failed"); },
+    });
+    await hub.joinPage(peer(), A);
+    await expect(hub.beat()).rejects.toThrow("renewal failed");
+    expect(prune).toHaveBeenCalledOnce();
+  });
+
   it.skipIf(!testRedis)("passes the Linear check to a live socket after the first hub misses shutdown", async () => {
     const server = await startTestRedis();
     closers.push(server.close);

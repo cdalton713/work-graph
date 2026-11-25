@@ -1,3 +1,5 @@
+import { connectRedis } from "./redis.ts";
+import { localRedis, startLocalRedis } from "./testing/redis.ts";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
@@ -1107,8 +1109,8 @@ const hostedRoles: Rules = { port: 4747, tailnet: null, hosted: { host: "view.ex
 const rolesAuth = { domains: ["example.com"], owners: ["ada@example.com"], clientId: "client", clientSecret: "secret", secret: "a-session-secret-of-32-characters" };
 const rolesToken = "a-test-token-with-32-characters-or-more";
 const rolesHost = { host: "view.example.com" };
-const rolesHeaders = async (email: string) => {
-  const value = Buffer.from(JSON.stringify({ email, hd: "example.com", exp: Math.floor(Date.now() / 1000) + 600 })).toString("base64url");
+const rolesHeaders = async (email: string, id?: string) => {
+  const value = Buffer.from(JSON.stringify({ email, id, hd: "example.com", exp: Math.floor(Date.now() / 1000) + 600 })).toString("base64url");
   return { ...rolesHost, cookie: (await serializeSigned("__Host-wg_session", value, rolesAuth.secret, { secure: true, path: "/" })).split(";")[0] };
 };
 const rolesPage = (now?: () => number) => createApp(hostedRoles, {
@@ -1542,6 +1544,82 @@ describe("sign-in of the viewer", () => {
       http.close();
       await Promise.all([a.link.shutdown(), b.link.shutdown()]);
     }
+  });
+
+  it.skipIf(!localRedis)("keeps signed-in reads and logout available during Redis loss", async () => {
+    const redis = await startLocalRedis();
+    const options = { team: "WG", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth,
+      linkToken: rolesToken, watchMs: 0, redisUrl: redis.url };
+    const first = createApp(hostedRoles, options), second = createApp(hostedRoles, options);
+    const live = await rolesHeaders("ada@example.com", "live");
+    const ended = await rolesHeaders("ada@example.com", "ended");
+    const pending = await rolesHeaders("ada@example.com", "pending");
+    const status = (page: typeof first, headers = live) => page.request("/api/status", { headers });
+    try {
+      await vi.waitFor(async () => expect(await (await status(second)).json()).toMatchObject({ redisReady: true }));
+      const closed = vi.fn();
+      await second.link.hub.joinPage({ session: "ended", send: () => {}, close: closed }, null);
+      expect((await first.request("/auth/logout", { headers: ended })).status).toBe(302);
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledWith(1008, "session ended"));
+      await redis.stop();
+      expect((await status(second)).status).toBe(200);
+      expect(await (await second.request("/api/config", { headers: live })).json()).toMatchObject({ user: "ada@example.com" });
+      expect((await status(second, ended)).status).toBe(401);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        for (let i = 0; i < 2; i++) expect((await second.request("/api/link?role=page", {
+          headers: { ...live, origin: "https://view.example.com" },
+        })).status).toBe(503);
+        expect(warn).not.toHaveBeenCalled();
+      } finally { warn.mockRestore(); }
+      expect((await second.request("/api/projects/p1/commands", {
+        method: "POST", headers: { ...live, origin: "https://view.example.com", "content-type": "application/json" },
+        body: JSON.stringify({ name: "next" }),
+      })).status).toBe(503);
+      const logout = await second.request("/auth/logout", { headers: pending });
+      expect(logout.status).toBe(302);
+      expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+      expect((await status(second, pending)).status).toBe(401);
+      await redis.start();
+      await vi.waitFor(async () => expect((await status(first, pending)).status).toBe(401), { timeout: 4000 });
+    } finally {
+      first.link.stop(); second.link.stop(); await redis.close();
+    }
+  });
+
+  it.skipIf(!localRedis)("opens only one lazy Redis connection for a read-only viewer", async () => {
+    const server = await startLocalRedis();
+    const inspector = connectRedis(server.url, undefined, undefined, true);
+    const count = async () => String(await inspector.run((client) => client.client("LIST"))).trim().split("\n").length;
+    const before = await count();
+    const page = createApp(hostedRoles, {
+      team: "WG", dist, workspaces: [workWorkspace()], readOnly: true, auth: rolesAuth, redisUrl: server.url,
+    });
+    try {
+      expect((await page.request("/api/status", { headers: rolesHost })).status).toBe(401);
+      expect(await count()).toBe(before);
+      const headers = await rolesHeaders("ada@example.com", "viewer");
+      expect((await page.request("/api/status", { headers })).status).toBe(200);
+      expect(await count()).toBe(before + 1);
+      const info = await inspector.run((client) => client.info("commandstats"));
+      expect(info).not.toMatch(/cmdstat_(scan|subscribe):/);
+    } finally { page.link.stop(); inspector.close(); await server.close(); }
+  });
+
+  it("redirects and deletes the cookie when the logout event cannot publish", async () => {
+    const headers = await rolesHeaders("ada@example.com", "logout");
+    const bus = memoryLinkBus();
+    const page = createApp(hostedRoles, {
+      team: "WG", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth, linkToken: rolesToken, watchMs: 0,
+      linkBus: { ...bus, async publish() { throw new Error("event dropped"); } },
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await page.request("/auth/logout", { headers });
+      expect(result.status).toBe(302);
+      expect(result.headers.get("set-cookie")).toContain("Max-Age=0");
+      expect((await page.request("/api/status", { headers })).status).toBe(401);
+    } finally { page.link.stop(); log.mockRestore(); }
   });
 
   it.each(["missed logout", "failed admission"])("closes a page socket after %s", async (failure) => {

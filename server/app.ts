@@ -23,7 +23,7 @@ import { type Connection, LinkHub, QUEUE_MAX, RESTART_CODE, realTimers as realLi
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
 import { redisLinkState } from "./linkstate-redis.ts";
-import { connectRedis, RedisUnavailable } from "./redis.ts";
+import { connectRedis, RedisCommandFailed, RedisUnavailable } from "./redis.ts";
 import type { LinkRoomState } from "./linkstate.ts";
 import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
@@ -167,16 +167,40 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   const caches = new Map(workspaces.map((w) => [w.id, createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now })]));
   // `wrote` from wg: forget the cached graph of that project, so the pages that load again see the change.
+  const ended = new Map<string, number>();
+  const pendingLogout = new Map<string, number>();
+  const rememberEnded = (id: string, expiresAt: number) => {
+    for (const [session, expiry] of ended) if (expiry <= clock()) ended.delete(session);
+    if (expiresAt > clock()) ended.set(id, Math.max(expiresAt, ended.get(id) ?? 0));
+  };
   const redis = redisUrl ? connectRedis(redisUrl, redisPrefix, (ready) => {
-    if (ready) for (const cache of caches.values()) cache.clear();
-    else hub.restartSockets();
-  }) : null;
+    if (ready) {
+      for (const cache of caches.values()) cache.clear();
+      void flushLogouts();
+    } else hub.restartSockets();
+  }, readOnly) : null;
+  const redisState = redis ? redisLinkState(redis, redisPrefix) : null;
   if (redis && stateDir) console.log("Redis link store ignores WG_STATE_DIR");
   const store = redis || linkState ? null : linkStore(stateDir, dist, workspaces, (linkTimers ?? realLinkTimers).after);
   const hub = new LinkHub(
     now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers,
-    store, redis ? redisLinkState(redis, redisPrefix) : linkState, redis ? redisLinkBus(redis, redisPrefix) : linkBus,
+    store, redisState ?? linkState, redis && !readOnly ? redisLinkBus(redis, redisPrefix) : linkBus, rememberEnded,
   );
+  let flushing = false;
+  async function flushLogouts() {
+    if (flushing || !redis?.ready || !pendingLogout.size) return;
+    flushing = true;
+    try {
+      for (const [id, expiry] of pendingLogout) {
+        if (expiry > clock()) await hub.endSession(id, expiry, clock());
+        if (pendingLogout.get(id) === expiry) pendingLogout.delete(id);
+      }
+    } catch (error) {
+      reportLinkError(error);
+    } finally {
+      flushing = false;
+    }
+  }
   const linkAvailable = () => !hub.closing && (redis?.ready ?? true);
   const linkRead = async <T>(read: () => Promise<T>, fallback: T): Promise<T> => {
     try { return await read(); }
@@ -185,9 +209,52 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       throw error;
     }
   };
-  const sessionActive = async (session: Session) => clock() < session.expiresAt && !await hub.sessionEnded(session.id, clock());
-  const signOut = (session: Session) => hub.endSession(session.id, session.expiresAt, clock());
-  hub.start();
+  const lookupSession = async (session: Session) => {
+    if (!redisState) return hub.sessionEnded(session.id, clock());
+    const expiry = await redisState.sessionExpiry!(session.id);
+    if (expiry !== null) rememberEnded(session.id, expiry);
+    void flushLogouts();
+    return (expiry ?? 0) > clock() || (pendingLogout.get(session.id) ?? 0) > clock();
+  };
+  const sessionActive = async (session: Session, allowOffline = false) => {
+    if (clock() >= session.expiresAt) return false;
+    if (!redis || !allowOffline) return !await lookupSession(session);
+    const unavailable = Symbol();
+    const started = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<typeof unavailable>((resolve) => { timer = setTimeout(() => resolve(unavailable), 500); });
+    const check = async () => {
+      try { return await lookupSession(session); }
+      catch (error) {
+        if (!(error instanceof RedisUnavailable)) throw error;
+        // Reconnect can run as soon as a paused instance resumes. Give it the rest of the read budget.
+        await redis.waitForCommands(500 - (Date.now() - started));
+        return lookupSession(session).catch((error) => {
+          if (error instanceof RedisUnavailable) return unavailable;
+          throw error;
+        });
+      }
+    };
+    try {
+      const result = await Promise.race([check(), deadline]);
+      return result === unavailable ? (ended.get(session.id) ?? 0) <= clock() : !result;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  const signOut = async (session: Session) => {
+    rememberEnded(session.id, session.expiresAt);
+    try {
+      await hub.endSession(session.id, session.expiresAt, clock());
+    } catch (error) {
+      if (redis) {
+        pendingLogout.set(session.id, session.expiresAt);
+        void flushLogouts();
+      }
+      reportLinkError(error);
+    }
+  };
+  if (!readOnly) hub.start();
   app.use(async (c, next) => {
     await next();
     // Vite puts a hash of the content in each name under assets/, so such a file never changes.
@@ -204,7 +271,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const start = clock();
     await next();
     const ms = clock() - start;
-    if (ms > SLOW_MS || c.res.status >= 500) console.warn(`wg api: ${c.req.method} ${new URL(c.req.url).pathname} ${c.res.status} ${Math.round(ms)}ms`);
+    if (!(c.error instanceof RedisUnavailable || c.error instanceof RedisCommandFailed)
+        && (ms > SLOW_MS || c.res.status >= 500)) console.warn(`wg api: ${c.req.method} ${new URL(c.req.url).pathname} ${c.res.status} ${Math.round(ms)}ms`);
   });
   app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -271,8 +339,17 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       ? { identifier: issue.identifier, status: statusName(issue.state, issue.labels), key: parseCard(issue.card?.body)?.key ?? null }
       : { identifier: issueId, status: null, key: null };
   };
-  const pageChanged = async (ref: ProjectRef | null, what: Changed["what"], issues: string[]) => {
-    if (ref) await linkRead(() => hub.publish(ref, "changed", { by: "page", what, issues }), undefined);
+  const notify = async <T, F>(send: () => Promise<T>, fallback: F): Promise<T | F> => {
+    try { return await send(); }
+    catch {
+      console.warn("Linear write saved, but the link notice was lost");
+      return fallback;
+    }
+  };
+  const noticeId = (key: string | undefined, route: string) =>
+    key && key.length <= 256 ? digest(JSON.stringify([route, key])).toString("hex") : undefined;
+  const pageChanged = async (ref: ProjectRef | null, what: Changed["what"], issues: string[], id?: string) => {
+    if (ref) await notify(() => hub.enqueue(ref, "changed", { by: "page", what, issues }, undefined, id), undefined);
   };
   /** The count of lists started and the order of the latest list used for shared access. */
   const lists = { started: 0, stored: 0 };
@@ -284,11 +361,16 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const header = (name: string) => c.req.header(name);
     const host = refusal("GET", header, rules);
     if (host) return c.json({ error: host }, 403);
+    const method = c.req.method;
+    const read = method === "GET" || method === "HEAD";
     const signed = auth ? await sessionOf(c, auth, clock) : null;
-    const session = signed && await sessionActive(signed) ? signed : null;
+    const session = signed && await sessionActive(signed, read) ? signed : null;
+    if (redis && !read && !readOnly) {
+      await redis.initialized;
+      if (!redis.ready) throw new RedisUnavailable();
+    }
     const role = roleOf(session?.email);
     const viewer = readOnly || role === "viewer";
-    const method = c.req.method;
     if (viewer && method !== "GET" && method !== "HEAD") return c.json({ error: "this page is read-only" }, 405);
     const reason = refusal(method, header, rules);
     if (reason) return c.json({ error: reason }, 403);
@@ -307,7 +389,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
   // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
   api.get("/status", async (c) => {
-    const rooms = !readOnly && c.var.viewer ? [] : await linkRead(() => hub.counts(), []);
+    const rooms = (readOnly && redis) || (!readOnly && c.var.viewer) ? [] : await linkRead(() => hub.counts(), []);
     return c.json<ServerStatus>({
       version, contract, uptime: Math.floor((clock() - started) / 1000),
       workspaces: workspaces.map(({ id, name }) => {
@@ -444,7 +526,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       names.at = 0;
       await wrote(null, ref.id);
     }
-    const { queued } = await hub.enqueue(ref, "command", { name, key: typeof key === "string" ? key : null, issue: identifier });
+    const enqueue = () => hub.enqueue(ref, "command", { name, key: typeof key === "string" ? key : null, issue: identifier },
+      undefined, noticeId(c.req.header("Idempotency-Key"), name));
+    const { queued } = name === "next" ? await enqueue() : await notify(enqueue, { queued: 0 });
     return c.json({ ok: true, queued });
   });
   // The link state of a project, for `wg wake` on the human's machine: is a coordinator connected, and do messages
@@ -470,7 +554,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await setAutonomy(ref.id, level, workspace.team, workspace.teamLabels);
     names.at = 0;
     await wrote(null, ref.id);
-    const { queued } = await hub.enqueue(ref, "command", { name: "autonomy", key: null, issue: null, level });
+    const { queued } = await notify(() => hub.enqueue(ref, "command", { name: "autonomy", key: null, issue: null, level },
+      undefined, noticeId(c.req.header("Idempotency-Key"), "autonomy")), { queued: 0 });
     return c.json({ ok: true, level, queued });
   });
   // The review effort of the effort (work-graph review-and-merge.md "Review effort"). The project label is the
@@ -483,7 +568,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await setReviewEffort(ref.id, level, workspace.team, workspace.teamLabels);
     names.at = 0;
     await wrote(null, ref.id);
-    const { queued } = await hub.enqueue(ref, "command", { name: "next", key: null, issue: null });
+    const { queued } = await notify(() => hub.enqueue(ref, "command", { name: "next", key: null, issue: null },
+      undefined, noticeId(c.req.header("Idempotency-Key"), "review-effort")), { queued: 0 });
     return c.json({ ok: true, level, queued });
   });
   // Share a project with the read-only viewer, or stop that. The project label `shared` is the record: the viewer
@@ -518,7 +604,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       await addComment(issue.id, `**Reply to a worker question** (from the page)\n\n${quote}\n\n${body.trim()}`, linearWorkspace.getStore()!.team, written.hear);
       await wrote(null, written.id);
     }
-    await hub.enqueue(ref, "reply", { ask: ask.id, issue: ask.issue, key: ask.key, body: body.trim() }, ask.id);
+    const enqueue = () => hub.enqueue(ref, "reply", { ask: ask.id, issue: ask.issue, key: ask.key, body: body.trim() }, ask.id,
+      noticeId(c.req.header("Idempotency-Key"), "ask:" + ask.id));
+    if (issue) await notify(enqueue, undefined);
+    else await enqueue();
     return c.json({ ok: true, recorded: !!issue });
   });
   api.patch("/issues/:id", async (c) => {
@@ -527,7 +616,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const written = projectOfWrite();
     const issue = await wrote(await updateIssue(c.req.param("id"), patch, linearWorkspace.getStore()!.team, written.hear), written.id);
     const what: Changed["what"] = patch.stateId ? "status" : patch.labelIds ? "label" : "issue";
-    await pageChanged(ref, what, [issue.identifier]);
+    await pageChanged(ref, what, [issue.identifier], noticeId(c.req.header("Idempotency-Key"), "issue:" + c.req.param("id")));
     return c.json(issue);
   });
   api.get("/issues/:id/comments", async (c) => {
@@ -542,7 +631,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const info = ref ? await issueInfo(ref, c.req.param("id")) : null;
     const written = projectOfWrite();
     const comment = await wrote(await addComment(c.req.param("id"), body, linearWorkspace.getStore()!.team, written.hear), written.id);
-    await pageChanged(ref, "comment", [info?.identifier ?? c.req.param("id")]);
+    await pageChanged(ref, "comment", [info?.identifier ?? c.req.param("id")], noticeId(c.req.header("Idempotency-Key"), "comment:" + c.req.param("id")));
     // A comment in the page on an issue that waits on the human is their answer: the label `answered` marks it
     // in Linear (wg next finds it there after a restart), and the message wakes the coordinator at once.
     // The comment is saved before the label: when the label fails, the answer is still 200. A retry from
@@ -557,7 +646,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         console.warn(`wg ui: comment saved, but the answered label failed: ${(error as Error).message}`);
       }
       await wrote(null, written.id);
-      await hub.publish(ref, "answer", { issue: info.identifier, key: info.key, body: comment.body });
+      await notify(() => hub.enqueue(ref, "answer", { issue: info.identifier, key: info.key, body: comment.body },
+        undefined, noticeId(c.req.header("Idempotency-Key"), "answer:" + c.req.param("id"))), undefined);
       return c.json({ ...comment, answered });
     }
     return c.json(comment);
@@ -587,7 +677,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (role === "coordinator" && linkCredential !== null && !hasLinkToken(c.req.header("authorization"))) {
       return c.json({ error: "coordinator token required" }, 401);
     }
-    const restarting = () => c.json({ error: hub.closing ? "the server restarts" : "the link is unavailable" }, 503);
+    const restarting = () => {
+      if (redis && !hub.closing) throw new RedisUnavailable();
+      return c.json({ error: "the server restarts" }, 503);
+    };
     if (redis) await redis.initialized;
     if (!linkAvailable()) return restarting();
     const session = auth && role === "page" ? await sessionOf(c, auth, clock) : null;
@@ -656,11 +749,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
             : await hub.joinPage(peer, ref);
         })().catch(unavailable);
         raw.on("pong", () => connection?.pong());
-        // Client pings also renew presence when the host pauses the server heartbeat.
-        if (redis) raw.on("ping", () => {
-          if (session) void verify().then((active) => { if (active) connection?.pong(); }).catch(unavailable);
-          else connection?.pong();
-        });
+        if (redis) raw.on("ping", () => connection?.pong());
+
       },
       onMessage: (event) => afterOpen(() => connection?.receive(typeof event.data === "string" ? event.data : String(event.data))),
       onClose: () => afterOpen(() => connection?.closed()),
@@ -696,7 +786,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
 
   app.onError((error, c) => {
-    const status = (error instanceof RedisUnavailable ? 503 : error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;
+    const status = ((error instanceof RedisUnavailable || error instanceof RedisCommandFailed) ? 503 : error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;
     // An API request writes its one log line in the request log above. Another route writes the error here.
     if (status === 500 && !c.req.path.startsWith("/api/")) console.error(error);
     return c.json({ error: error.message }, status);
@@ -708,7 +798,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const cardHash = (body: string | undefined) => (body === undefined ? "" : createHash("sha1").update(body).digest("hex"));
   const fingerprint = (data: GraphData) => new Map(data.issues.map((i) => [i.id, `${i.updatedAt}|${i.state.id}|${cardHash(i.card?.body)}`]));
   const check = async () => {
-    if (!linkAvailable()) return;
+    if (readOnly || !linkAvailable()) return;
     const active = await hub.active({ forCheck: true });
     for (const key of [...seen.keys()]) if (!active.some((r) => projectKey(r) === key)) seen.delete(key);
     await checkAll(active);
@@ -733,7 +823,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }
   };
   let checking = false;
-  const timer = watchMs > 0 ? setInterval(() => {
+  const timer = !readOnly && watchMs > 0 ? setInterval(() => {
     if (checking) return;
     checking = true;
     void check().catch(reportLinkError).finally(() => { checking = false; });

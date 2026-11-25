@@ -9,7 +9,7 @@ COPY public ./public
 COPY src ./src
 COPY skills/work-graph/contract.json ./skills/work-graph/contract.json
 COPY server ./server
-RUN pnpm build && pnpm prune --prod && rm server/*.test.ts src/lib/*.test.ts
+RUN pnpm build && pnpm prune --prod && rm -r server/testing server/*.test.ts src/lib/*.test.ts
 
 FROM node:24.22.1-alpine
 WORKDIR /ui

@@ -31,6 +31,8 @@ const config = readConfig(values.team);
 const app = createApp(rules, {
   team: config.workspaces[0].team, dist, human: config.human, workspaces: config.workspaces, auth: config.auth,
   linkToken: process.env.WG_LINK_TOKEN,
+  redisUrl: process.env.WG_REDIS_URL,
+  redisPrefix: process.env.WG_REDIS_PREFIX || undefined,
 });
 
 // A signal must end the process through `exit`, so that Tailscale Serve stops with it. Before that, the link

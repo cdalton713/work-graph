@@ -9,6 +9,7 @@ import {
 import type { RoomCounts } from "../src/lib/types.ts";
 import { memoryLinkBus, type LinkBus, type LinkEvent } from "./linkbus.ts";
 import { memoryLinkState, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
+import { RedisCommandFailed, RedisUnavailable } from "./redis.ts";
 import { ASKS_MAX, type LinkState as SavedState, type Store } from "./store.ts";
 
 export { QUEUE_MAX } from "./linkstate.ts";
@@ -45,6 +46,11 @@ interface Socket {
   id: string;
   peer: Peer;
   room: string | null;
+  ref: ProjectRef | null;
+  lastSent: Map<string, number>;
+  queuedMessages: Map<string, Envelope>;
+  renewedAt: number;
+  leaseReady: boolean;
   audience: "coordinator" | "page" | "viewer" | null;
   allows?: (project: ProjectRef) => boolean;
   deadline: (() => void) | null;
@@ -80,7 +86,9 @@ export function stopOnSignals(shutdown: () => Promise<boolean | void>, on: (sign
   }
 }
 
-export const reportLinkError = (error: unknown) => console.error("link:", error);
+export const reportLinkError = (error: unknown) => {
+  if (!(error instanceof RedisUnavailable || error instanceof RedisCommandFailed)) console.error("link:", error);
+};
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const text = (v: unknown, max = 20_000) => (typeof v === "string" ? v.slice(0, max) : "");
@@ -88,6 +96,7 @@ const text = (v: unknown, max = 20_000) => (typeof v === "string" ? v.slice(0, m
 export class LinkHub {
   /** Each open page or coordinator socket, with its pong deadline. */
   private sockets = new Map<string, Socket>();
+  private releases = 0;
   private stopBeat: (() => void) | null = null;
   /** Set at shutdown. The hub takes no new socket and drains when its last socket closes. */
   private stopping: { drained: () => void; done: Promise<boolean> } | null = null;
@@ -98,6 +107,7 @@ export class LinkHub {
   private readonly timers: Timers;
   private readonly shared: LinkRoomState;
   private readonly bus: LinkBus;
+  private readonly onEnded: (id: string, expiresAt: number) => void;
 
   constructor(
     now: () => Date = () => new Date(),
@@ -107,12 +117,14 @@ export class LinkHub {
     store: Store | null = null,
     shared: LinkRoomState = memoryLinkState(store),
     bus: LinkBus = memoryLinkBus(),
+    onEnded: (id: string, expiresAt: number) => void = () => {},
   ) {
     this.now = now;
     this.onWrote = onWrote;
     this.timers = timers;
     this.shared = shared;
     this.bus = bus;
+    this.onEnded = onEnded;
     this.unsubscribe = bus.subscribe((event) => this.deliver(event));
   }
 
@@ -126,8 +138,17 @@ export class LinkHub {
   }
 
   async endSession(id: string, expiresAt: number, now: number): Promise<void> {
-    await this.shared.endSession(id, expiresAt, now);
-    await this.send([{ kind: "ended", session: id }]);
+    const event = { kind: "ended", session: id, expiresAt } as const;
+    try {
+      await this.shared.endSession(id, expiresAt, now);
+    } catch (error) {
+      this.deliver(event);
+      throw error;
+    }
+    await this.send([event]).catch((error) => {
+      this.deliver(event);
+      reportLinkError(error);
+    });
   }
 
   private async send(events: LinkEvent[]): Promise<void> {
@@ -141,6 +162,7 @@ export class LinkHub {
         this.onWrote(event.ref);
         break;
       case "ended":
+        if (event.expiresAt !== undefined) this.onEnded(event.session, event.expiresAt);
         for (const { peer } of this.sockets.values()) {
           if (peer.session === event.session) peer.close(1008, "session ended");
         }
@@ -152,8 +174,12 @@ export class LinkHub {
         for (const id of event.sockets) {
           const socket = this.sockets.get(id);
           if (!socket || (socket.audience === "viewer" && this.closing)) continue;
+          if (event.queue && event.sequence !== undefined) {
+            this.sendQueue(socket, event.messages, event.sequence, event.replay);
+            continue;
+          }
           for (const message of event.messages) {
-            if (socket.audience !== "viewer" || socket.allows?.(message.project)) socket.peer.send(JSON.stringify(message));
+            if (socket.audience !== "viewer" || socket.allows?.(message.project)) this.sendTo(socket, message, event.sequence);
           }
         }
         break;
@@ -161,15 +187,77 @@ export class LinkHub {
         const key = projectKey(event.message.project);
         for (const socket of this.sockets.values()) {
           if (socket.audience === "page" && (socket.room === key || (!socket.room && event.overview))) {
-            socket.peer.send(JSON.stringify(event.message));
+            this.sendTo(socket, event.message, event.sequence);
           } else if (socket.audience === "viewer" && event.viewer && (!socket.room || socket.room === key)
             && !this.closing && socket.allows?.(event.message.project)) {
-            socket.peer.send(JSON.stringify(event.viewer));
+            this.sendTo(socket, event.viewer, event.sequence);
           }
         }
         break;
       }
     }
+  }
+
+  private sendTo(socket: Socket, message: Envelope, sequence?: number) {
+    if (sequence !== undefined) {
+      const key = JSON.stringify([projectKey(message.project), message.type]);
+      if (sequence <= (socket.lastSent.get(key) ?? -1)) return;
+      socket.lastSent.set(key, sequence);
+    }
+    socket.peer.send(JSON.stringify(message));
+  }
+
+  private sendQueue(socket: Socket, messages: Envelope[], sequence: number, replay = false) {
+    const last = socket.lastSent.get("queue") ?? -1;
+    const previous = socket.queuedMessages;
+    if (sequence <= last) {
+      if (replay) for (const item of previous.values()) socket.peer.send(JSON.stringify(item));
+      return;
+    }
+    socket.lastSent.set("queue", sequence);
+    socket.queuedMessages = new Map(messages.map((item) => [item.id, item]));
+    for (const item of messages) if (replay || !previous.has(item.id)) socket.peer.send(JSON.stringify(item));
+  }
+
+  private queueEvent(room: LinkRoom, sockets: string[], message?: Envelope, replay = false): LinkEvent {
+    return {
+      kind: "sockets", sockets, messages: room.sequence !== undefined || !message ? room.queue : [message],
+      sequence: room.sequence, queue: room.sequence !== undefined, replay,
+    };
+  }
+
+  private async renewDue(sockets: Socket[], heartbeat = false) {
+    const at = this.now();
+    const due = heartbeat ? sockets : sockets.filter((socket) => at.getTime() - socket.renewedAt >= PING_MS);
+    for (const socket of due) socket.renewedAt = at.getTime();
+    if (!due.length) return new Set<string>();
+    const renewed = await this.shared.renew!(due.map((socket) => ({ ref: socket.ref!, socket: socket.id, page: socket.audience !== "coordinator" && !!this.shared.openPage })), at.toISOString());
+    for (const socket of due) {
+      if (!renewed.has(socket.id) && this.sockets.has(socket.id)) socket.peer.close(RESTART_CODE, "server restart");
+    }
+    return new Set(due.filter((socket) => !renewed.has(socket.id)).map((socket) => socket.id));
+  }
+
+  private async renewSockets() {
+    const sockets = [...this.sockets.values()].filter((socket) => socket.ref !== null && socket.leaseReady);
+    const expired = await this.renewDue(sockets, true);
+    const coordinators = new Map<string, Socket[]>();
+    for (const socket of sockets) {
+      if (!this.sockets.has(socket.id)) continue;
+      if (!expired.has(socket.id) && socket.audience === "coordinator" && socket.room) {
+        const peers = coordinators.get(socket.room) ?? [];
+        peers.push(socket);
+        coordinators.set(socket.room, peers);
+      }
+    }
+    await Promise.all([...coordinators.values()].map(async (peers) => {
+      const room = await this.shared.read(peers[0].ref!);
+      if (room?.sequence === undefined) return;
+      const active = new Set([...room.coordinators.values()].map(({ socket }) => socket));
+      for (const socket of peers) {
+        if (this.sockets.has(socket.id) && active.has(socket.id)) this.sendQueue(socket, room.queue, room.sequence);
+      }
+    }));
   }
 
   /** Start the heartbeat: each `PING_MS`, `beat`. Each open socket gets a new pong deadline of `DEAD_MS`. */
@@ -194,7 +282,21 @@ export class LinkHub {
   /** Ping local sockets and prune expired shared state. */
   async beat() {
     for (const socket of this.sockets.values()) socket.peer.ping?.();
-    await this.shared.prune(this.now().getTime() - GONE_MS);
+    try {
+      if (this.shared.recoverWrites) await this.shared.recoverWrites();
+      if (this.shared.renew) await this.renewSockets();
+    } finally {
+      const changed = await this.shared.prune(this.now().getTime() - GONE_MS);
+      if (changed?.length) await this.send(changed.map((room) => this.announce(room)));
+    }
+  }
+
+  /** An unavailable link must reconnect to receive the messages it missed. */
+  restartSockets() {
+    for (const socket of this.sockets.values()) {
+      socket.peer.close(RESTART_CODE, "server restart");
+      void socket.closed(true).catch(reportLinkError);
+    }
   }
 
   /**
@@ -217,7 +319,7 @@ export class LinkHub {
     });
     const cancel = this.timers.after(() => finish(), SHUTDOWN_MS);
     this.stopping = { drained: () => { cancel(); finish(); }, done };
-    if (!this.sockets.size) this.stopping.drained();
+    if (!this.sockets.size && !this.releases) this.stopping.drained();
     for (const socket of [...this.sockets.values()]) socket.peer.close(RESTART_CODE, "server restart");
     return done;
   }
@@ -248,19 +350,24 @@ export class LinkHub {
       socket.deadline?.();
       socket.deadline = null;
       this.sockets.delete(socket.id);
+      this.releases++;
       try {
         await closed(lost);
       } finally {
-        if (this.stopping && !this.sockets.size) this.stopping.drained();
+        this.releases--;
+        if (this.stopping && !this.sockets.size && !this.releases) this.stopping.drained();
       }
     };
     this.sockets.set(socket.id, socket);
     socket.arm();
-    return { receive: async () => {}, closed: () => socket.closed(), pong: () => socket.arm() };
+    return { receive: async () => {}, closed: () => socket.closed(), pong: () => {
+      socket.arm();
+      if (this.shared.renew && socket.ref && socket.leaseReady && this.sockets.has(socket.id)) void this.renewDue([socket]).catch(reportLinkError);
+    } };
   }
 
   private socket(peer: Peer, ref: ProjectRef | null, audience: Socket["audience"], allows?: Socket["allows"]): Socket {
-    return { id: randomUUID(), peer, room: ref && projectKey(ref), audience, allows, deadline: null, arm: () => {}, closed: async () => {} };
+    return { id: randomUUID(), peer, ref, lastSent: new Map(), queuedMessages: new Map(), renewedAt: -Infinity, leaseReady: false, room: ref && projectKey(ref), audience, allows, deadline: null, arm: () => {}, closed: async () => {} };
   }
 
   /** An upgrade that the transport admitted while the hub stops also gets a restart close. */
@@ -279,7 +386,7 @@ export class LinkHub {
     const reduced = type === "presence" ? this.redactPresence(payload as Presence)
       : type === "changed" ? { ...(payload as ToPage["changed"]), issues: [] } : null;
     return {
-      kind: "pages", message, overview,
+      kind: "pages", message, overview, sequence: room.sequence,
       ...(reduced && { viewer: this.envelope(room.ref, type, reduced) }),
     };
   }
@@ -365,14 +472,25 @@ export class LinkHub {
    * so a busy coordinator can pick it up at its next wg next. Send changed notices to project pages too.
    */
   async publish<T extends keyof ToCoordinator>(ref: ProjectRef, type: T, payload: ToCoordinator[T]): Promise<Envelope<T, ToCoordinator[T]>> {
+    return (await this.enqueue(ref, type, payload)).message;
+  }
+
+  async enqueue<T extends keyof ToCoordinator>(ref: ProjectRef, type: T, payload: ToCoordinator[T], answeredAsk?: string, id?: string) {
     const message = this.envelope(ref, type, payload);
-    const room = await this.shared.append(ref, message);
+    if (id !== undefined) message.id = id;
+    const room = await this.shared.append(ref, message, answeredAsk);
     const sockets = [...room.coordinators.values()].flatMap(({ socket }) => socket ? [socket] : []);
-    const events: LinkEvent[] = [{ kind: "sockets", sockets, messages: [message] }];
+    const events: LinkEvent[] = [this.queueEvent(room, sockets, message)];
+    if (answeredAsk !== undefined) events.push(this.pages(room, "asks", { asks: room.asks }, true));
     if (type === "changed") events.push(this.pages(room, "changed", payload as ToPage["changed"]));
     events.push(this.announce(room));
-    await this.send(events);
-    return message;
+    // The queue is committed. A delivery failure cannot turn the request into a retry.
+    await this.send(events).catch(reportLinkError);
+    return { message, queued: room.queue.length };
+  }
+
+  async invalidate(ref: ProjectRef) {
+    await this.send([{ kind: "wrote", ref }]).catch(reportLinkError);
   }
 
   /** A page of one project, or the overview (no project). It gets the current state at once. */
@@ -385,26 +503,32 @@ export class LinkHub {
     if (this.closing) return this.refuse(peer);
     const socket = this.socket(peer, ref, allows ? "viewer" : "page", allows);
     const connection = this.track(socket, async () => {
-      if (ref) await this.shared.edit(ref, (room) => { room.sockets.delete(socket.id); });
+      if (ref && this.shared.closePage) await this.shared.closePage(ref, socket.id);
+      else if (ref) await this.shared.edit(ref, (room) => { room.sockets.delete(socket.id); });
     });
-    const rooms = ref ? await this.shared.edit(ref, (room) => {
-      room.sockets.set(socket.id, "page");
-      return [room];
-    }) : await this.shared.rooms();
-    const messages: Envelope[] = [];
-    for (const room of rooms) {
-      const presence = this.roomPresence(room);
-      if (allows) {
-        messages.push(this.envelope(room.ref, "presence", this.redactPresence(presence)));
-        continue;
+    try {
+      const rooms = !ref ? await this.shared.rooms() : this.shared.openPage ? [await this.shared.openPage(ref, socket.id)] : await this.shared.edit(ref, (room) => {
+        room.sockets.set(socket.id, "page");
+        return [room];
+      });
+      socket.leaseReady = true;
+      const events: LinkEvent[] = [];
+      for (const room of rooms) {
+        const presence = this.roomPresence(room);
+        const messages: Envelope[] = [this.envelope(room.ref, "presence", allows ? this.redactPresence(presence) : presence)];
+        if (!allows) {
+          // The overview counts worker questions as moves for the human.
+          if (ref || room.asks.length) messages.push(this.envelope(room.ref, "asks", { asks: room.asks }));
+          if (ref) messages.push(this.envelope(room.ref, "progress", { nodes: room.progress }));
+          if (room.agents) messages.push(this.envelope(room.ref, "agents", room.agents));
+        }
+        events.push({ kind: "sockets", sockets: [socket.id], messages, sequence: room.sequence });
       }
-      messages.push(this.envelope(room.ref, "presence", presence));
-      // The overview counts worker questions as moves for the human, so it gets asks from every project.
-      if (ref || room.asks.length) messages.push(this.envelope(room.ref, "asks", { asks: room.asks }));
-      if (ref) messages.push(this.envelope(room.ref, "progress", { nodes: room.progress }));
-      if (room.agents) messages.push(this.envelope(room.ref, "agents", room.agents));
+      if (events.length) await this.send(events);
+    } catch (error) {
+      await connection.closed().catch(reportLinkError);
+      throw error;
     }
-    if (messages.length) await this.send([{ kind: "sockets", sockets: [socket.id], messages }]);
     return connection;
   }
 
@@ -432,7 +556,13 @@ export class LinkHub {
       });
       if (room) await this.send([this.announce(room)]);
     });
-    await this.shared.edit(ref, (room) => { room.sockets.set(socket.id, "coordinator"); });
+    try {
+      await this.shared.edit(ref, (room) => { room.sockets.set(socket.id, "coordinator"); });
+      socket.leaseReady = true;
+    } catch (error) {
+      await connection.closed().catch(reportLinkError);
+      throw error;
+    }
     return {
       pong: connection.pong,
       closed: connection.closed,
@@ -443,7 +573,7 @@ export class LinkHub {
         const payload = isObject(message.payload) ? message.payload : {};
         const at = this.now().toISOString();
         if (message.type === "wrote") {
-          if (session) await this.shared.edit(ref, (room) => {
+          if (session && !this.shared.renew) await this.shared.edit(ref, (room) => {
             const current = room.coordinators.get(session!);
             if (current?.socket === socket.id) current.lastSeen = at;
           });
@@ -479,11 +609,12 @@ export class LinkHub {
             return { room, replaced: old?.socket };
           });
           if (!joined) return;
+          const replay = session !== null;
           session = hello.session;
           const { room, replaced } = joined;
           const events: LinkEvent[] = [];
           if (replaced && replaced !== socket.id) events.push({ kind: "replaced", socket: replaced });
-          events.push({ kind: "sockets", sockets: [socket.id], messages: room.queue }, this.announce(room));
+          events.push(this.queueEvent(room, [socket.id], undefined, replay), this.announce(room));
           return this.send(events);
         }
         if (!KNOWN.has(message.type)) {
@@ -494,7 +625,7 @@ export class LinkHub {
         }
         if (!session) return fail("send hello first");
         const sessionId = session;
-        await this.shared.edit(ref, (room) => {
+        if (!this.shared.renew) await this.shared.edit(ref, (room) => {
           const current = room.coordinators.get(sessionId);
           if (current?.socket === socket.id) current.lastSeen = at;
         });

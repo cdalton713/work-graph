@@ -119,4 +119,6 @@ export interface ServerStatus {
   /** How many project graphs the caches hold. */
   cache: number;
   rooms: RoomCounts[];
+  linkStore?: "memory" | "redis";
+  redisReady?: boolean | null;
 }

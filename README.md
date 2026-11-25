@@ -214,6 +214,25 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
   memory only. If the server cannot write the file, it logs the error and exits with code 1 at a stop, and after
   the restart a coordinator can get a message again that it acknowledged.
 
+- `WG_REDIS_URL` (optional): the secret URL of the Redis server (`redis://` or `rediss://`).
+  Set the same URL on each instance when more than one instance serves the full page.
+  Redis keeps the link state and queue for all instances. When you set the URL, the server ignores
+  `WG_STATE_DIR`. Use a standalone Redis server with persistence if the queue must survive a Redis restart.
+  The client uses scripts with more than one key. Redis Cluster is unsupported.
+  If Redis goes down, the link closes its sockets and refuses new sockets until Redis is back.
+  The server tries again automatically, and the coordinator polls Linear while the link is down.
+  The page and read API stay available. During an outage, a signed-in cookie can still read
+  unless this instance already knows the session ended. A logged-out cookie can therefore read
+  until Redis is back, and cannot write. Writes and link connections return HTTP 503.
+  A signed-in read can wait up to 500 ms when Redis does not answer. A new instance knows only
+  the ended sessions that Redis gives it.
+  A dead coordinator's lease expires within 60 seconds of its last heartbeat. An open page
+  can show it as connected for up to about 80 seconds, until a live instance's next heartbeat.
+  If the dead coordinator held the Linear check, no instance runs that check for its project
+  until the lease expires.
+  Check `linkStore` and `redisReady` in `/api/status`.
+- `WG_REDIS_PREFIX` (optional): use a different prefix for each deployment that shares a Redis server.
+  The default is `wg:link:`. Use the same prefix on all instances of a deployment.
 - `WG_VERSION` (optional): the commit of the build. The `Dockerfile` takes it as a build argument
   (`--build-arg WG_VERSION=<commit>`). Without it, the server gives `dev`.
 

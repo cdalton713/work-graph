@@ -13,6 +13,12 @@ let reloading = false;
 async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "x-workspace": workspace };
   if (openProject) headers["x-project"] = openProject;
+  const method = init?.method?.toUpperCase() ?? "GET";
+  if (method !== "GET" && method !== "HEAD") {
+    // Keep the same headers if this request is retried.
+    headers["Idempotency-Key"] = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+      (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
   const response = await fetch(`/api/${path}`, { ...init, headers });
   if (response.status === 204) return null as T; // the graph did not change
   const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));

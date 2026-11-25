@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,7 +7,11 @@ import type { Envelope } from "../src/lib/link.ts";
 import { linkRefusal, type Rules } from "./access.ts";
 import { createApp, type AppOptions } from "./app.ts";
 import { memoryLinkState } from "./linkstate.ts";
-import { memoryLinkBus } from "./linkbus.ts";
+import { memoryLinkBus, type LinkBus } from "./linkbus.ts";
+import { redisLinkBus } from "./linkbus-redis.ts";
+import { redisLinkState } from "./linkstate-redis.ts";
+import { connectRedis } from "./redis.ts";
+import { startLocalRedis, startTestRedis, localRedis, testRedis } from "./testing/redis.ts";
 import { AGENTS_MAX, DEAD_MS, GONE_MS, LinkHub, PING_MS, QUEUE_MAX, RESTART_CODE, SHUTDOWN_MS, type Peer, stopOnSignals, type Timers } from "./link.ts";
 
 const A = { workspace: "work", id: "p1" }, B = { workspace: "work", id: "p2" };
@@ -452,6 +457,45 @@ describe("LinkHub heartbeat, prune, and shutdown", () => {
     expect(time.running()).toBe(0); // no heartbeat, no deadline, no wait timer
   });
 
+  it("waits for all in-flight release writes before flushing at shutdown", async () => {
+    const memory = memoryLinkState();
+    const gates: (() => void)[] = [];
+    let closing = false;
+    const hub = new LinkHub(undefined, undefined, fakeTime().timers, null, {
+      ...memory,
+      async edit(ref, change) {
+        if (closing) await new Promise<void>((resolve) => gates.push(resolve));
+        return memory.edit(ref, change);
+      },
+    });
+    const first = await hub.joinPage(peer(), A);
+    const second = await hub.joinPage(peer(), A);
+    closing = true;
+    let stopped = false;
+    const shutdown = hub.shutdown().then(() => { stopped = true; });
+    const a = first.closed();
+    const b = second.closed();
+    gates[0]();
+    await a;
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    gates[1]();
+    await Promise.all([b, shutdown]);
+    expect(stopped).toBe(true);
+  });
+
+  it("removes a socket when its initial snapshot cannot be delivered", async () => {
+    const memory = memoryLinkState();
+    const bus = memoryLinkBus();
+    const hub = new LinkHub(undefined, undefined, fakeTime().timers, null, memory, {
+      ...bus,
+      async publish() { throw new Error("bus unavailable"); },
+    });
+    await expect(hub.joinPage(peer(), A)).rejects.toThrow("bus unavailable");
+    expect((await memory.read(A))?.sockets.size).toBe(0);
+    expect(await hub.shutdown()).toBe(true);
+  });
+
   it("at shutdown resolves after SHUTDOWN_MS when a socket does not close", async () => {
     const time = fakeTime();
     const hub = new LinkHub(time.now, undefined, time.timers);
@@ -498,8 +542,12 @@ describe("linkRefusal", () => {
 });
 
 describe("/api/link over a real socket", () => {
-  const closers: (() => void)[] = [];
-  afterEach(() => { closers.splice(0).forEach((close) => close()); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+  const closers: (() => void | Promise<void>)[] = [];
+  afterEach(async () => {
+    for (const close of closers.splice(0).reverse()) await close();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
 
   /** Linear with two projects; issue i1 (CD-1) is in p1. Each comment create is recorded. */
   /** `team`: the team key of the issue of p1 in its graph. */
@@ -549,7 +597,7 @@ describe("/api/link over a real socket", () => {
     return { comments, marks, touch: (at: string) => { updatedAt = at; }, writeCard: (body: string) => { card = body; } };
   }
 
-  async function start(clock = { at: Date.now() }, linkTimers?: Timers, shared?: Pick<AppOptions, "linkState" | "linkBus">) {
+  async function start(clock = { at: Date.now() }, linkTimers?: Timers, shared?: Pick<AppOptions, "linkState" | "linkBus" | "redisUrl" | "redisPrefix">) {
     const rules: Rules = { port: 0, tailnet: null };
     const app = createApp(rules, { team: "CD", dist: "/nonexistent/", workspaces: [{ id: "work", name: "Work", team: "CD", key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }], watchMs: 0, now: () => clock.at, linkTimers, ...shared });
     const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
@@ -583,14 +631,19 @@ describe("/api/link over a real socket", () => {
     };
   }
 
-  it("shares commands, presence, acknowledgments and graph changes between two apps", async () => {
+  async function sharedLink(shared: Pick<AppOptions, "linkState" | "linkBus" | "redisUrl" | "redisPrefix">) {
     const linear = fakeLinear("WG");
-    const shared = { linkState: memoryLinkState(), linkBus: memoryLinkBus() };
     const clock = { at: Date.now() };
     const a = await start(clock, undefined, shared);
     const b = await start(clock, undefined, shared);
     const origin = `http://127.0.0.1:${b.port}`;
     const headers = { host: `127.0.0.1:${b.port}`, "x-workspace": "work", origin };
+    if (shared.redisUrl) await vi.waitFor(async () => {
+      for (const { app, port } of [a, b]) {
+        const response = await app.request("/api/status", { headers: { host: `127.0.0.1:${port}` } });
+        expect((await response.json()).redisReady).toBe(true);
+      }
+    });
     const page = new WebSocket(`ws://127.0.0.1:${b.port}/api/link?role=page&workspace=work&project=p1`, { headers: { origin } });
     const notices: Envelope[] = [];
     page.on("message", (data) => notices.push(JSON.parse(String(data))));
@@ -632,6 +685,275 @@ describe("/api/link over a real socket", () => {
     await Promise.all([a.app.link.check(), b.app.link.check()]);
     const presence = await b.app.request("/api/projects/p1/presence", { headers });
     expect(await presence.json()).toMatchObject({ queued: 1, waiting: 0 });
+
+    linear.touch("2026-11-20T04:00:00Z");
+    const ownerOrigin = `http://127.0.0.1:${a.port}`;
+    const result = await a.app.request("/api/issues/i1/comments", {
+      method: "POST", body: JSON.stringify({ body: "Page write" }),
+      headers: { host: `127.0.0.1:${a.port}`, origin: ownerOrigin, "content-type": "application/json", "x-workspace": "work", "x-project": "p1" },
+    });
+    expect(result.status).toBe(200);
+    await vi.waitFor(() => expect(notices).toContainEqual(expect.objectContaining({
+      type: "changed", payload: expect.objectContaining({ by: "page" }),
+    })));
+    expect(await graph()).toBe("2026-11-20T04:00:00Z");
+
+    const signed = peer();
+    signed.session = "signed-session";
+    await b.app.link.hub.joinPage(signed, A);
+    await a.app.link.hub.endSession(signed.session, clock.at + 10_000, clock.at);
+    await vi.waitFor(() => expect(signed.closed).toEqual([{ code: 1008, reason: "session ended" }]));
+    expect(await b.app.link.hub.sessionEnded(signed.session, clock.at)).toBe(true);
+  }
+
+  it("shares commands, presence, acknowledgments and graph changes through memory", () =>
+    sharedLink({ linkState: memoryLinkState(), linkBus: memoryLinkBus() }));
+
+  it.skipIf(!testRedis)("shares commands, presence, acknowledgments and graph changes through Redis", async () => {
+    const redis = await startTestRedis();
+    closers.push(redis.close);
+    await sharedLink({ redisUrl: redis.url, redisPrefix: `test:${randomUUID()}:` });
+  });
+
+  it.skipIf(!localRedis)("renews 100 sockets in one room without rewriting it", async () => {
+    const server = await startLocalRedis();
+    closers.push(server.close);
+    const redis = connectRedis(server.url);
+    closers.push(redis.close);
+    const state = redisLinkState(redis);
+    const hub = new LinkHub(undefined, undefined, undefined, null, state, redisLinkBus(redis));
+    const page = peer();
+    await Promise.all(Array.from({ length: 100 }, () => hub.joinPage(page, A)));
+    const before = (await state.read(A))?.sequence;
+    const commandCounts = async () => {
+      const info = await redis.run((client) => client.info("commandstats"));
+      return Object.fromEntries([...info.matchAll(/^cmdstat_(\w+):calls=(\d+)/gm)].map(([, name, count]) => [name, Number(count)]));
+    };
+    const first = await commandCounts();
+    await hub.beat();
+    const after = await commandCounts();
+    expect(after.eval - first.eval).toBeLessThanOrEqual(1);
+    expect(after.get - first.get).toBeLessThan(5);
+    expect((await state.read(A))?.sequence).toBe(before);
+    expect((await state.read(A))?.sockets.size).toBe(100);
+    expect(await redis.run((client) => client.keys("wg:link:*:seen"))).toEqual([]);
+  });
+
+  it.skipIf(!testRedis)("replays the queue on a second hello on the same socket", async () => {
+    const server = await startTestRedis();
+    closers.push(server.close);
+    const prefix = `test:${randomUUID()}:`;
+    const redis = connectRedis(server.url, prefix);
+    closers.push(redis.close);
+    const hub = new LinkHub(undefined, undefined, undefined, null, redisLinkState(redis, prefix), redisLinkBus(redis, prefix));
+    const queued = await hub.publish(A, "command", { name: "next", key: null, issue: null });
+    const target = peer();
+    const pair = await hub.joinCoordinator(target, A);
+    await pair.receive(hello("one"));
+    await vi.waitFor(() => expect(target.of("command")).toEqual([queued]));
+    await pair.receive(hello("one"));
+    await vi.waitFor(() => expect(target.of("command")).toEqual([queued, queued]));
+  });
+
+  it("limits peer activity to one lease renewal per heartbeat interval", async () => {
+    const time = fakeTime();
+    const renew = vi.fn(async (sockets: { socket: string }[]) => new Set(sockets.map(({ socket }) => socket)));
+    const hub = new LinkHub(time.now, undefined, time.timers, null, { ...memoryLinkState(), renew });
+    const page = await hub.joinPage(peer(), A);
+    for (let i = 0; i < 100; i++) page.pong();
+    expect(renew.mock.calls).toHaveLength(1);
+    time.advance(PING_MS - 4);
+    await hub.beat();
+    expect(renew.mock.calls).toHaveLength(2);
+    page.pong();
+    expect(renew.mock.calls).toHaveLength(2);
+    time.advance(PING_MS);
+    page.pong();
+    expect(renew.mock.calls).toHaveLength(3);
+  });
+
+  it("returns the saved Linear result when a follow-up notice fails", async () => {
+    const linear = fakeLinear();
+    const state = memoryLinkState();
+    const { app, port } = await start(undefined, undefined, {
+      linkState: { ...state, async append() { throw new Error("queue unavailable"); } },
+    });
+    const host = `127.0.0.1:${port}`;
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const response = await app.request("/api/projects/p1/commands", {
+        method: "POST", body: JSON.stringify({ name: "pause" }),
+        headers: { host, origin: `http://${host}`, "x-workspace": "work", "content-type": "application/json" },
+      });
+      expect(linear.marks.paused).toBe(true);
+      expect(response.status).toBe(200);
+      expect(log.mock.calls).toEqual([["Linear write saved, but the link notice was lost"]]);
+    } finally { log.mockRestore(); }
+  });
+
+  it("prunes even when socket renewal fails", async () => {
+    const memory = memoryLinkState();
+    const prune = vi.fn(memory.prune);
+    const hub = new LinkHub(undefined, undefined, undefined, null, {
+      ...memory, prune, async renew() { throw new Error("renewal failed"); },
+    });
+    await hub.joinPage(peer(), A);
+    await expect(hub.beat()).rejects.toThrow("renewal failed");
+    expect(prune).toHaveBeenCalledOnce();
+  });
+
+  it.skipIf(!testRedis)("passes the Linear check to a live socket after the first hub misses shutdown", async () => {
+    const server = await startTestRedis();
+    closers.push(server.close);
+    const prefix = `test:${randomUUID()}:`;
+    const redis = connectRedis(server.url, prefix);
+    closers.push(redis.close);
+    const bus = redisLinkBus(redis, prefix);
+    const firstTime = fakeTime();
+    const first = new LinkHub(firstTime.now, undefined, firstTime.timers, null, redisLinkState(redis, prefix, 400), bus);
+    const second = new LinkHub(firstTime.now, undefined, undefined, null, redisLinkState(redis, prefix), bus);
+    const dead = peer();
+    await (await first.joinCoordinator(dead, A)).receive(hello("first"));
+    await (await second.joinCoordinator(peer(), A)).receive(hello("second"));
+    expect(await first.active({ forCheck: true })).toEqual([A]);
+    expect(await second.active({ forCheck: true })).toEqual([]);
+    const shutdown = first.shutdown();
+    firstTime.advance(SHUTDOWN_MS);
+    expect(await shutdown).toBe(true);
+    expect(dead.closed).toEqual([{ code: RESTART_CODE, reason: "server restart" }]);
+    await vi.waitFor(async () => {
+      expect(await second.active({ forCheck: true })).toEqual([A]);
+      expect((await second.presence(A)).coordinators).toMatchObject([
+        { session: "second", connected: true }, { session: "first", connected: false, lost: true },
+      ]);
+    });
+  });
+
+  it.skipIf(!testRedis)("delivers Redis commands in queue order and suppresses older room snapshots", async () => {
+    const server = await startTestRedis();
+    closers.push(server.close);
+    const prefix = `test:${randomUUID()}:`;
+    const redis = connectRedis(server.url, prefix);
+    closers.push(redis.close);
+    const bus = redisLinkBus(redis, prefix);
+    const state = redisLinkState(redis, prefix);
+    let release = () => {};
+    let delayed = false;
+    const delay: LinkBus = {
+      ...bus,
+      async publish(events) {
+        if (!delayed) {
+          delayed = true;
+          await new Promise<void>((resolve) => { release = resolve; });
+        }
+        await bus.publish(events);
+      },
+    };
+    const receiver = new LinkHub(undefined, undefined, undefined, null, state, bus);
+    const first = new LinkHub(undefined, undefined, undefined, null, state, delay);
+    const second = new LinkHub(undefined, undefined, undefined, null, state, bus);
+    const wg = peer(), page = peer();
+    await (await receiver.joinCoordinator(wg, A)).receive(hello("coordinator"));
+    await receiver.joinPage(page, A);
+    await vi.waitFor(() => expect(page.of("asks")).toHaveLength(1));
+    page.sent.length = 0;
+
+    const a = first.publish(A, "command", { name: "next", key: "first", issue: null });
+    await vi.waitFor(() => expect(delayed).toBe(true));
+    await second.publish(A, "command", { name: "next", key: "second", issue: null });
+    await vi.waitFor(() => expect(page.of("presence").map(({ payload }) => payload)).toMatchObject([{ queued: 2 }]));
+    release();
+    await a;
+    // Wait for an event after both publications, so late delivery cannot hide a failure.
+    await second.publish(A, "command", { name: "next", key: "third", issue: null });
+    await vi.waitFor(() => expect(wg.of("command")).toHaveLength(3));
+    expect(wg.of("command").map((message) => message.payload)).toMatchObject([
+      { key: "first" }, { key: "second" }, { key: "third" },
+    ]);
+    expect(page.of("presence").map((message) => message.payload)).toMatchObject([
+      { queued: 2 }, { queued: 3 },
+    ]);
+
+    delayed = false;
+    const late = peer();
+    const joined = first.joinPage(late, A);
+    await vi.waitFor(() => expect(delayed).toBe(true));
+    await second.publish(A, "command", { name: "next", key: "fourth", issue: null });
+    await vi.waitFor(() => expect(late.of("presence").map(({ payload }) => payload)).toMatchObject([{ queued: 4 }]));
+    release();
+    await joined;
+    await vi.waitFor(() => expect(late.of("asks")).toHaveLength(1));
+    expect(late.of("presence")).toHaveLength(1);
+
+    const offline = new LinkHub(undefined, undefined, undefined, null, state, {
+      ...bus, async publish() { throw new Error("dropped event"); },
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await offline.publish(A, "command", { name: "next", key: "fifth", issue: null });
+      expect(wg.of("command")).toHaveLength(4);
+      await receiver.beat();
+      expect(wg.of("command").at(-1)?.payload).toMatchObject({ key: "fifth" });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("accepts a queued command when its delivery fails and the coordinator reads the queue again", async () => {
+    const state = memoryLinkState();
+    const bus = memoryLinkBus();
+    let failure = false;
+    const shared = {
+      linkState: { ...state, async read(ref: typeof A) {
+        if (failure) throw new Error("room read unavailable");
+        return state.read(ref);
+      } }, linkBus: {
+        ...bus, async publish(events: Parameters<LinkBus["publish"]>[0]) {
+          if (failure) throw new Error("bus unavailable");
+          await bus.publish(events);
+        },
+      },
+    };
+    fakeLinear("WG");
+    const { app, port } = await start(undefined, undefined, shared);
+    const host = `127.0.0.1:${port}`;
+    const headers = { host, origin: `http://${host}`, "x-workspace": "work", "content-type": "application/json" };
+    failure = true;
+    const response = await app.request("/api/projects/p1/commands", {
+      method: "POST", headers, body: JSON.stringify({ name: "next" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, queued: 1 });
+    failure = false;
+    const wg = await coordinator(port, "p1");
+    expect((await wg.next("command")).payload).toMatchObject({ name: "next" });
+  });
+
+  it.skipIf(!localRedis)("closes sockets after Redis stops and delivers the queued command after recovery", async () => {
+    fakeLinear("WG");
+    const redis = await startLocalRedis();
+    closers.push(redis.close);
+    const { app, port } = await start(undefined, undefined, { redisUrl: redis.url });
+    const host = `127.0.0.1:${port}`;
+    const headers = { host, origin: `http://${host}`, "x-workspace": "work" };
+    const status = async () => (await app.request("/api/status", { headers })).json();
+    await vi.waitFor(async () => expect(await status()).toMatchObject({ linkStore: "redis", redisReady: true }));
+    const wg = await coordinator(port, "p1");
+    const request = await app.request("/api/projects/p1/commands", {
+      method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ name: "next" }),
+    });
+    expect(request.status).toBe(200);
+    const command = await wg.next("command");
+    const closed = new Promise<number>((resolve) => wg.ws.once("close", resolve));
+    await redis.stop();
+    expect(await closed).toBe(RESTART_CODE);
+    expect(await status()).toMatchObject({ linkStore: "redis", redisReady: false });
+    expect((await app.request("/api/projects/p1/graph", { headers })).status).toBe(200);
+    expect((await app.request("/api/link?role=coordinator&workspace=work&project=p1", { headers: { host } })).status).toBe(503);
+    await redis.start();
+    await vi.waitFor(async () => expect(await status()).toMatchObject({ redisReady: true }), { timeout: 4_000 });
+    const reconnected = await coordinator(port, "p1");
+    expect(await reconnected.next("command")).toEqual(command);
   });
 
   it("tells only the coordinator of the project about a comment written in the page", async () => {

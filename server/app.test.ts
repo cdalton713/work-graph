@@ -1459,9 +1459,43 @@ describe("sign-in of the viewer", () => {
     now += 1000;
     expect((await page.request("/api/projects", { headers: { ...host, cookie } })).status).toBe(401);
   });
-  it("starts only as a hosted read-only page", () => {
-    expect(() => createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true, auth })).toThrow("the sign-in needs a hosted page");
-    expect(() => createApp(hosted, { team: "CD", dist, workspaces: [workWorkspace()], auth })).toThrow("the sign-in needs the read-only mode");
+  it("starts a signed-in full page only with owners and a link token", () => {
+    const options = { team: "CD", dist, workspaces: [workWorkspace()] };
+    expect(() => createApp(rules, { ...options, readOnly: true, auth })).toThrow("the sign-in needs a hosted page");
+    expect(() => createApp(hosted, { ...options, auth })).toThrow("auth.owners");
+    expect(() => createApp(hosted, { ...options, linkToken: "", auth: { ...auth, owners: ["ada@example.com"] } })).toThrow("WG_LINK_TOKEN");
+  });
+
+  it("gives owners and viewers different access on the same page", async () => {
+    const page = createApp(hosted, { linkToken: "a-test-token-with-32-characters-or-more", team: "CD", dist, workspaces: [workWorkspace()], auth: { ...auth, owners: ["ada@example.com"] } });
+    const session = async (email: string) => {
+      google({ id_token: idToken({ email, hd: "example.com" }) });
+      const { callback } = await signIn(page);
+      return { ...host, cookie: `__Host-wg_session=${cookies(callback)["__Host-wg_session"]}` };
+    };
+    const owner = await session("Ada@Example.com");
+    const viewer = await session("viewer@example.com");
+    linear({ teams: { nodes: [{ projects: { nodes: [
+      { id: "p1", name: "Shared", url: "u", status: null, labels: { nodes: [{ name: "shared", parent: null }] } },
+      { id: "p2", name: "Private", url: "u", status: null },
+    ], pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+    for (const [headers, role, ids] of [[owner, "owner", ["p1", "p2"]], [viewer, "viewer", ["p1"]]] as const) {
+      expect(await (await page.request("/api/config", { headers })).json()).toMatchObject({ role, link: "/api/link", readOnly: role === "viewer" });
+      const list = await (await page.request("/api/projects", { headers })).json();
+      expect(list.projects.map((project: { id: string }) => project.id).sort()).toEqual(ids);
+    }
+    const headers = { ...viewer, origin: "https://view.example.com" };
+    expect((await page.request("/api/projects/p2/graph", { headers })).status).toBe(404);
+    expect((await page.request("/api/link?role=page&workspace=work&project=p2", { headers })).status).toBe(404);
+    expect((await page.request("/api/link?role=page", { headers: { ...host, origin: headers.origin } })).status).toBe(401);
+    expect((await page.request("/api/projects/p1/commands", { method: "POST", headers })).status).toBe(405);
+    const command = await page.request("/api/projects/p1/commands", { method: "POST", headers: { ...owner, origin: headers.origin, "content-type": "application/json" }, body: JSON.stringify({ name: "next" }) });
+    expect(command.status).toBe(200);
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ errors: [{ message: "unavailable" }] }) })));
+    await page.request("/api/projects", { headers });
+    expect((await page.request("/api/projects/p1/graph", { headers })).status).toBe(503);
+    expect((await page.request("/api/issues/i1/comments", { headers: { ...headers, "x-project": "p1" } })).status).toBe(503);
+    expect((await page.request("/api/link?role=page&workspace=work&project=p1", { headers })).status).toBe(503);
   });
 });
 

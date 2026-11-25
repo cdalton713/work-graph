@@ -142,7 +142,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // A sign-in gives each account of the domain the same rights, so it is only for a page that changes nothing.
   // Google sends the browser back to the HTTPS name of the page, which only a hosted page has.
   if (auth && !rules.hosted) throw new Error("the sign-in needs a hosted page (WG_HOSTED)");
-  if (auth && !readOnly) throw new Error("the sign-in needs the read-only mode (WG_READ_ONLY): a signed-in account would get each write of the page");
+  if (auth && !readOnly && !auth.owners?.length) throw new Error("the sign-in needs auth.owners on a full page");
+  if (auth && !readOnly && !linkCredential) throw new Error("the sign-in needs WG_LINK_TOKEN on a full page");
+  const roleOf = (email: string | undefined): SiteConfig["role"] => {
+    if (auth && !email) return null;
+    if (readOnly || (email && !auth?.owners?.includes(email))) return "viewer";
+    return "owner";
+  };
   // The overview and the graph rules on the server use the same names as the page.
   configureSite({ human, defaultWorkspace: workspaces[0].id });
   const clock = now ?? Date.now;
@@ -181,7 +187,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
    * relation with an issue of the project. The viewer shows the project only: such an issue can be in a project
    * that its owner did not share, and its title, text, and node card are in the graph.
    */
-  const shown = (data: GraphData): GraphData => (readOnly ? {
+  const shown = (data: GraphData, viewer: boolean): GraphData => (viewer ? {
     ...data,
     issues: data.issues.filter((i) => !i.external)
       .map((i) => ({ ...i, blocks: i.blocks.filter((r) => r.inProject), blockedBy: i.blockedBy.filter((r) => r.inProject) })),
@@ -242,31 +248,29 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   };
   /** The count of the project lists that started, and the number of the list that `names` holds. */
   const lists = { started: 0, stored: 0 };
-  const api = new Hono();
+  const api = new Hono<{ Variables: { viewer: boolean } }>();
   // The API can change Linear with the user's key. Accept only this page as the caller.
   api.use(async (c, next) => {
     const header = (name: string) => c.req.header(name);
     const host = refusal("GET", header, rules);
     if (host) return c.json({ error: host }, 403);
-    // The viewer changes nothing: not Linear, and not a coordinator. The method decides this before the headers
-    // of a write and before the session, so each write gets the same answer.
-    if (readOnly && c.req.method !== "GET" && c.req.method !== "HEAD") return c.json({ error: "this page is read-only" }, 405);
-    const reason = refusal(c.req.method, header, rules);
+    const session = auth ? await sessionOf(c, auth, clock) : null;
+    const role = roleOf(session?.email);
+    const viewer = readOnly || role === "viewer";
+    const method = c.req.method;
+    if (viewer && method !== "GET" && method !== "HEAD") return c.json({ error: "this page is read-only" }, 405);
+    const reason = refusal(method, header, rules);
     if (reason) return c.json({ error: reason }, 403);
-    await next();
-  });
-  // The human's name and the default workspace, for the page before its first render (src/main.tsx).
-  // `contract` and `version` let a deploy check see which commit and which page contract run.
-  api.get("/config", async (c) => c.json<SiteConfig>({
-    human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version, readOnly,
-    auth: !!auth, user: auth ? (await sessionOf(c, auth, clock))?.email ?? null : null,
-  }));
-  // Each route from here needs a session, on a page with a sign-in. The config above is open: the page needs it to
-  // show the sign-in screen.
-  api.use(async (c, next) => {
-    // The token passes the session check for GET only. The read-only rule above refuses writes today.
-    const tokenRead = c.req.method === "GET" && hasLinkToken(c.req.header("authorization"));
-    if (auth && !tokenRead && !(await sessionOf(c, auth, clock))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    if (c.req.path === "/api/config" && (method === "GET" || method === "HEAD")) {
+      return c.json<SiteConfig>({
+        human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version,
+        readOnly: viewer, auth: !!auth, user: session?.email ?? null, role,
+        link: !readOnly && role ? "/api/link" : null,
+      });
+    }
+    const tokenRead = method === "GET" && hasLinkToken(header("authorization"));
+    if (auth && !session && !tokenRead) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    c.set("viewer", viewer);
     await next();
   });
   // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
@@ -278,40 +282,42 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         requestsReset: budget?.requestsReset ?? null, complexityRemaining: budget?.complexityRemaining ?? null,
         complexityReset: budget?.complexityReset ?? null, at: budget?.at ?? null };
     }),
-    cache: [...caches.values()].reduce((sum, cache) => sum + cache.size(), 0),
-    rooms: hub.counts(),
+    cache: !readOnly && c.var.viewer ? 0 : [...caches.values()].reduce((sum, cache) => sum + cache.size(), 0),
+    rooms: !readOnly && c.var.viewer ? [] : hub.counts(),
   }));
   api.use(bodyLimit({ maxSize: 2_000_000, onError: (c) => c.json({ error: "request body too large" }, 413) }));
-  const projectList = async (): Promise<ProjectList> => {
+  const projectList = async (viewer = false): Promise<ProjectList> => {
     const order = ++lists.started;
     const results = await Promise.allSettled(workspaces.map((workspace) =>
       linearWorkspace.run(workspace, () => listProjects(workspace.team)),
     ));
     const list: ProjectList = {
-      workspaces: workspaces.map(({ id, name, shareUrl }, at) => ({
-        id, name, ...(shareUrl ? { shareUrl } : {}),
-        ...(results[at].status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
-      })),
+      workspaces: workspaces.map(({ id, name, shareUrl }, at) => {
+        const address = shareUrl ?? (auth && !readOnly ? `https://${rules.hosted!.host}` : undefined);
+        return {
+          id, name, ...(address ? { shareUrl: address } : {}),
+          ...(results[at].status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
+        };
+      }),
       // The viewer has only the projects that their owner shared (the project label `shared`).
       projects: results.flatMap((result, at) => result.status === "fulfilled"
-        ? result.value.filter((p) => !readOnly || p.shared).map((p) => ({ ...p, workspace: workspaces[at].id, workspaceName: workspaces[at].name }))
+        ? result.value.map((p) => ({ ...p, workspace: workspaces[at].id, workspaceName: workspaces[at].name }))
         : []),
     };
-    // On the viewer, the list that started last decides which projects are shared: a share that ended in it ends
-    // for each later request at once. A list that started before it and ends after it changes nothing. The full
-    // page keeps the list of its link (`resolve`), which a list with a failed workspace must not replace.
-    if (readOnly && order > lists.stored) {
+    const shared = { ...list, projects: list.projects.filter((p) => p.shared) };
+    if ((auth || readOnly) && order > lists.stored) {
       lists.stored = order;
-      names.list = list;
-      names.at = Date.now();
+      sharedNames.list = shared;
+      sharedNames.at = Date.now();
     }
-    return list;
+    return viewer ? shared : list;
   };
-  api.get("/projects", async (c) => c.json<ProjectList>(await projectList()));
+  api.get("/projects", async (c) => c.json<ProjectList>(await projectList(c.var.viewer)));
   // The projects with a summary of each open one. The graphs come from the same cache as the graph
   // route, a few at a time, so a poll of the overview costs about one cheap check for each project.
   api.get("/overview", async (c) => {
-    const list = await projectList();
+    const viewer = c.var.viewer;
+    const list = await projectList(viewer);
     const open = list.projects.filter((p) => p.statusType !== "completed" && p.statusType !== "canceled");
     await checkAll(open);
     const summaries: ProjectSummary[] = [];
@@ -322,8 +328,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const workspace = workspaces.find((w) => w.id === p.workspace)!;
         try {
           // The viewer takes no older graph when Linear fails (see the graph route).
-          const { data } = await linearWorkspace.run(workspace, () => caches.get(workspace.id)!.get(p.id, { fresh: readOnly }));
-          summaries.push(summarize(shown(data), p.workspace));
+          const { data } = await linearWorkspace.run(workspace, () => caches.get(workspace.id)!.get(p.id, { fresh: viewer }));
+          summaries.push(summarize(shown(data, viewer), p.workspace));
         } catch (error) {
           summaries.push({ workspace: p.workspace, id: p.id, planned: 0, done: 0, counts: [], you: [], running: 0, review: 0, ready: 0,
             effort: null, freshness: null, updatedAt: null, error: (error as Error).message });
@@ -346,24 +352,28 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
    * When Linear does not give the list, the answer is 503 and no older list counts: the server gives a project only
    * while it knows that the project is shared. Each server process has its own list.
    */
-  const sharedProject = async (id: string | undefined): Promise<string> => {
-    const workspace = linearWorkspace.getStore()!.id;
-    const find = () => names.list?.projects.find((p) => p.workspace === workspace && p.id === id);
-    if (id && Date.now() - names.at > (find() ? 60_000 : 5_000)) await projectList();
-    if (names.list?.workspaces.find((w) => w.id === workspace)?.error) throw new LinearError("Linear did not confirm that this project is shared. Try again.", 503);
+  let sharedRefresh: Promise<ProjectList> | undefined;
+  const sharedProject = async (id: string | undefined, workspace = linearWorkspace.getStore()!.id): Promise<string> => {
+    const find = () => sharedNames.list?.projects.find((p) => p.workspace === workspace && p.id === id);
+    if (id && Date.now() - sharedNames.at > (find() ? 60_000 : 5_000)) {
+      sharedRefresh ??= projectList().finally(() => { sharedRefresh = undefined; });
+      await sharedRefresh;
+    }
+    if (sharedNames.list?.workspaces.find((w) => w.id === workspace)?.error) throw new LinearError("Linear did not confirm that this project is shared. Try again.", 503);
     if (!id || !find()) throw new LinearError("no shared project with this id", 404);
     return id;
   };
   // `?have=<version>`: the page has this version already. Then the answer has no body, except while the graph is stale.
   api.get("/projects/:id/graph", async (c) => {
-    if (readOnly) await sharedProject(c.req.param("id"));
+    const viewer = c.var.viewer;
+    if (viewer) await sharedProject(c.req.param("id"));
     // A stale graph (the refresh failed) also carries `stale`, the error, and its load time, so the page can show them.
     // The viewer gets the error of the refresh in its place: an issue of the older graph can be in another project
     // now. A graph in memory can still have an issue that left the project, until its full reload (`FULL_MS`):
     // the check for changes does not see an issue that is in the project no more.
-    const { data, version, stale, error, loadedAt } = await graphs().get(c.req.param("id"), { fresh: readOnly });
+    const { data, version, stale, error, loadedAt } = await graphs().get(c.req.param("id"), { fresh: viewer });
     if (!stale && c.req.query("have") === version) return c.body(null, 204);
-    return c.json({ ...shown(data), version, workspace: linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
+    return c.json({ ...shown(data, viewer), version, workspace: linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
   });
   api.post("/projects/:id/close", async (c) => {
     const { confirm } = await json(c.req.json<{ confirm?: unknown }>());
@@ -403,8 +413,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
   // The link state of a project, for `wg wake` on the human's machine: is a coordinator connected, and do messages
   // wait that only a coordinator can act on. A GET, so the host check above is the only gate; it changes nothing.
-  api.get("/projects/:id/presence", (c) => {
+  api.get("/projects/:id/presence", async (c) => {
     const ref = { workspace: linearWorkspace.getStore()!.id, id: c.req.param("id") };
+    if (!readOnly && c.var.viewer) {
+      await sharedProject(ref.id, ref.workspace);
+      return c.json({ ...hub.viewerPresence(ref), waiting: 0 });
+    }
     return c.json({ ...hub.presence(ref), waiting: hub.waiting(ref) });
   });
   // The autonomy level of the effort (work-graph SKILL.md "Autonomy level"). The project label is the record;
@@ -441,6 +455,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const workspace = linearWorkspace.getStore()!;
     await setShared(c.req.param("id"), shared, workspace.team, workspace.teamLabels);
     names.at = 0;
+    sharedNames.at = 0;
+    sharedNames.list = null;
+    lists.stored = lists.started;
     return c.json({ ok: true, shared });
   });
   // The human's reply to a worker's question (an Orca ask that the coordinator reported). The reply is a
@@ -476,7 +493,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   api.get("/issues/:id/comments", async (c) => {
     // The viewer reads the comments of an issue only through its shared project (`x-project`). Linear says in the
     // same answer which project the issue is in now: an issue that moved to another project gives 404.
-    if (readOnly) return c.json(await listComments(c.req.param("id"), await sharedProject(c.req.header("x-project"))));
+    if (c.var.viewer) return c.json(await listComments(c.req.param("id"), await sharedProject(c.req.header("x-project"))));
     return c.json(await listComments(c.req.param("id")));
   });
   api.post("/issues/:id/comments", async (c) => {
@@ -509,6 +526,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // The link (src/lib/link.ts): `?role=page|coordinator&workspace=<id>&project=<id or name>`. A page
   // with no project is the overview. Each coordinator of each project has its own connection.
   const names = { at: 0, list: null as ProjectList | null };
+  const sharedNames = { at: 0, list: null as ProjectList | null };
   const resolve = async (workspace: string, wanted: string): Promise<Project | null> => {
     const find = (list: ProjectList | null) => list?.projects.find((p) => p.workspace === workspace
       && (p.id === wanted || p.name.toLowerCase() === wanted.toLowerCase())) ?? null;
@@ -529,6 +547,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (role === "coordinator" && linkCredential !== null && !hasLinkToken(c.req.header("authorization"))) {
       return c.json({ error: "coordinator token required" }, 401);
     }
+    const session = auth && role === "page" ? await sessionOf(c, auth, clock) : null;
+    if (auth && role === "page" && !session) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    const viewer = role === "page" && roleOf(session?.email) === "viewer";
     // The server stops: it takes no new link socket (also below, for an upgrade that waited for the project).
     const restarting = () => c.json({ error: "the server restarts" }, 503);
     if (hub.closing) return restarting();
@@ -536,14 +557,16 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (!workspaces.some((w) => w.id === workspace)) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
     const wanted = c.req.query("project");
     if (!wanted && role === "coordinator") return c.json({ error: "a coordinator names its project" }, 400);
-    const project = wanted ? await resolve(workspace, wanted) : null;
-    if (wanted && !project) return c.json({ error: `no project "${wanted}" in ${workspace}` }, 404);
+    const id = wanted ? viewer ? await sharedProject(wanted, workspace) : (await resolve(workspace, wanted))?.id : null;
+    if (wanted && !id) return c.json({ error: `no project "${wanted}" in ${workspace}` }, 404);
     if (hub.closing) return restarting();
-    c.set("linkRef" as never, (project ? { workspace, id: project.id } : null) as never);
+    c.set("linkRef" as never, (id ? { workspace, id } : null) as never);
+    c.set("linkViewer" as never, viewer as never);
     return next();
   }, upgradeWebSocket((c) => {
     const ref = c.get("linkRef" as never) as ProjectRef | null;
     const role = c.req.query("role");
+    const viewer = c.get("linkViewer" as never) as boolean;
     let connection: Connection | null = null;
     return {
       onOpen: (_event, ws) => {
@@ -553,7 +576,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           send: (text: string) => ws.send(text), close: (code?: number, reason?: string) => ws.close(code, reason),
           ping: () => raw.ping(), terminate: () => raw.terminate(),
         };
-        connection = role === "coordinator" ? hub.joinCoordinator(peer, ref!) : hub.joinPage(peer, ref);
+        if (role === "coordinator") connection = hub.joinCoordinator(peer, ref!);
+        else if (viewer) connection = hub.joinViewer(peer, ref, async (project) =>
+          !!(await sessionOf(c, auth!, clock)) && await sharedProject(project.id, project.workspace).then(() => true, () => false));
+        else connection = hub.joinPage(peer, ref);
         raw.on("pong", () => connection?.pong());
       },
       onMessage: (event) => connection?.receive(typeof event.data === "string" ? event.data : String(event.data)),

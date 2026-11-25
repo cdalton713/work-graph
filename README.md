@@ -96,7 +96,8 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | `test_runner` | The default test command of `wg evidence`. A node runs the moon test tasks that its diff affects; `@full-<phase>` runs `suite`. `commit_marker` is a regular expression for the line where the runner prints the commit it tests; without it, the exit code is the proof. `lint` is the lint command of the worker spec's push checks, as a list of arguments; each `{lower}` is the node's diff base. Without it, the spec has no lint step. A plan's `effort.lint` replaces it, and a plan with `effort.test` does not use it (`skills/work-graph/references/graph.md`). |
 | `worker_settings` | The session settings of a worker, per agent. Before a worker starts in a worktree, `wg dispatch` and `wg claim` merge `claude` into the worktree's `.claude/settings.local.json` and `codex` into its `.codex/config.toml` (as TOML). The merge keeps the other keys of a file that exists. A value of the config replaces a value of a different type in the file (a `false` replaces a table), and a list gets the config's items that it does not have yet, each one time. `wg` adds the file to the repository's `.git/info/exclude`, so the tree stays clean. It does not change a file that git tracks, a symlink, or a file that a `.gitignore` rule keeps in `git status`; it prints one line and the dispatch continues. Codex reads `.codex/config.toml` only in a project that it trusts. Use it to turn off what a worker does not need (plugins, MCP servers, tools, skills), so that each worker starts with less context. Default: none, and `wg` writes no file (`skills/work-graph/references/setup.md` "Worker sessions"). |
 | `workspaces` | The Linear workspaces. The first is the default. `team` is the default team of a plan; `teams` limits a workspace to those teams; `team_labels: false` makes project labels workspace labels (Linear's team project labels need the Business plan). `share_url` is the address of the read-only viewer of the workspace: with it, the page has a **Share** button on each project ("Host a read-only viewer"). |
-| `auth` | Only in the config of a read-only viewer: `{"domains": ["example.com"]}` names the Google Workspace domains whose accounts may sign in ("Host a read-only viewer"). `wg` does not read it. |
+| `auth` | Only in the config of a read-only viewer or a full page with owners: `{"domains": ["example.com"]}` names the Google Workspace domains whose accounts may sign in ("Host a read-only viewer"). `wg` does not read it. |
+| `auth.owners` | The emails of owners on a hosted page with sign-in. See "Give owners and viewers access on one hosted page". |
 
 A workspace's key comes from `LINEAR_<ID>_API_KEY`, then the `key_env` names, then the private file
 `~/.config/work-graph/<id>-linear-api-key` (mode 600). Keys never go in the config.
@@ -231,15 +232,30 @@ Each API request that takes more than 5 s or ends with status 500 or more writes
 path, the status, and the duration. The server compresses static files and JSON answers of any size with gzip when
 the client accepts it. `index.html` has a weak `ETag` and `Vary: Accept-Encoding`, also on a 304.
 
-The server listens on `127.0.0.1:4747`. It does not check who the user is: keep it on a private network, such as a
+The server listens on `127.0.0.1:4747`. Without sign-in, it does not check who the user is: keep it on a private network, such as a
 tailnet, or put an authenticating proxy in front of it. To let other people read a project, use a viewer
-("Host a read-only viewer"), not this page. Then set `page_url` in the config of each machine that
+("Host a read-only viewer"), not this page without sign-in. Then set `page_url` in the config of each machine that
 runs `wg`.
 
 The server pings each link socket every 20 s. It closes a socket that sent no pong for 45 s (messages do not count), so the
 page shows a coordinator whose machine sleeps as not connected. On `SIGTERM` or `SIGINT`, the server closes each
 link socket with code 1012 (restart), and stops after the sockets close or after 3 s. A proxy in front of the server
 must keep a WebSocket open for longer than 20 s with no data.
+
+### Give owners and viewers access on one hosted page
+
+Set `auth.domains` to the Google Workspace domains that may sign in. Add the owner emails in
+`auth.owners`, for example `["ada@example.com"]`. Set the sign-in environment values from the
+next section and set `WG_LINK_TOKEN`. Leave `WG_READ_ONLY` unset. The server needs at least one
+owner and a link token to start with sign-in on a full page.
+
+An owner can read and edit all projects of the page. Other accounts can read only the projects
+with the `shared` label. They get the same graph and comment limits as the read-only viewer below.
+They get change notices and limited coordinator presence for those projects. The Share button
+uses this page as the viewer address when the workspace has no `share_url`.
+
+`GET /api/config` gives the signed-in `role` and the `link` path that the page opens.
+Set `WG_READ_ONLY` to give each account viewer access and turn off the link.
 
 ## Host a read-only viewer
 

@@ -57,6 +57,11 @@ describe("the work-graph config", () => {
     expect(() => read({ ...secrets, WG_AUTH_CLIENT_SECRET: "" })).toThrow("the sign-in needs WG_AUTH_CLIENT_SECRET");
     expect(() => read({ ...secrets, WG_SESSION_SECRET: "short" })).toThrow("WG_SESSION_SECRET must have 32 characters or more");
     const none = (auth: unknown) => () => readConfig("CD", { WG_CONFIG_JSON: JSON.stringify({ workspaces: [{ id: "x", team: "X" }], auth }), LINEAR_X_API_KEY: "k", ...secrets }, home());
+    expect(none({ domains: ["example.com"], owners: ["ada@other.example"] })).toThrow("auth.owners");
+    const owners = readConfig("WG", { ...secrets, WG_CONFIG_JSON: JSON.stringify({
+      auth: { domains: ["example.com"], owners: [" Ada@Example.com "] },
+    }) }, home());
+    expect(owners.auth?.owners).toEqual(["ada@example.com"]);
     expect(none({ domains: [] })).toThrow("auth.domains must name one domain or more");
     expect(none({ domains: ["a@example.com"] })).toThrow("auth.domains must name one domain or more");
     expect(none({})).toThrow("auth.domains must name one domain or more");

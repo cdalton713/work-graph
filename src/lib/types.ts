@@ -96,9 +96,12 @@ export interface SiteConfig {
   contract: string | null;
   /** The commit of the build (`WG_VERSION`), or `dev`. */
   version: string;
-  /** The viewer: the page shows no edit control and no command, and opens no link. */
+  /** The page hides edit controls for viewers. */
   readOnly: boolean;
-  /** The page has a sign-in. Then `user` is the email of the session, or null: the page shows the sign-in screen. */
+  role: "owner" | "viewer" | null;
+  /** The same-origin WebSocket path, when this page can open the link. */
+  link: string | null;
+  /** The page has a sign-in. Then `user` is the email of the session, or null. */
   auth: boolean;
   user: string | null;
 }

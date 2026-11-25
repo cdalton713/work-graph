@@ -9,6 +9,8 @@ import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
 export interface Auth {
   /** The Google Workspace domains whose accounts may sign in (config `auth.domains`), in lowercase. */
   domains: string[];
+  /** The signed-in accounts that can edit a full page, in lowercase. */
+  owners?: string[];
   /** The OAuth client of the page (`WG_AUTH_CLIENT_ID`, `WG_AUTH_CLIENT_SECRET`). */
   clientId: string;
   clientSecret: string;

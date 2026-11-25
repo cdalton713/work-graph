@@ -28,7 +28,10 @@ const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 // `tailnet` is set while Tailscale Serve sends requests to this server (see below).
 const rules: Rules = { port, tailnet: null, hosted };
 const config = readConfig(values.team);
-const app = createApp(rules, { team: config.workspaces[0].team, dist, human: config.human, workspaces: config.workspaces, auth: config.auth });
+const app = createApp(rules, {
+  team: config.workspaces[0].team, dist, human: config.human, workspaces: config.workspaces, auth: config.auth,
+  linkToken: process.env.WG_LINK_TOKEN,
+});
 
 // A signal must end the process through `exit`, so that Tailscale Serve stops with it. Before that, the link
 // closes each socket with a close frame of code 1012 (server restart). Each client decides when it connects again.

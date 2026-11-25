@@ -15,6 +15,7 @@ const config = readConfig(undefined);
 const root = process.cwd();
 const app = createApp({ port: 443, tailnet: null, hosted: { host: hostedName.toLowerCase() } }, {
   team: config.workspaces[0].team, dist: join(root, "dist") + sep, human: config.human, workspaces: config.workspaces, auth: config.auth,
+  linkToken: process.env.WG_LINK_TOKEN,
   readOnly: true, watchMs: 0,
   contractFile: join(root, "skills/work-graph/contract.json"),
   version: process.env.WG_VERSION || process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "dev",

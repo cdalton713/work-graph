@@ -21,6 +21,7 @@ sys.dont_write_bytecode = True
 # No test may reach the page server; LinkTests turn the link on against a local server.
 import os  # noqa: E402
 os.environ["WG_LINK"] = "off"
+os.environ.pop("WG_LINK_TOKEN", None)
 # The tests use their own config, never the config of this machine: two workspaces, the default human, a page,
 # and a test runner that prints the commit it tests.
 TEST_CONFIG = Path(tempfile.mkdtemp()) / "config.json"
@@ -38,6 +39,7 @@ os.environ["WG_CONFIG"] = str(TEST_CONFIG)
 spec = importlib.util.spec_from_file_location("wg", Path(__file__).with_name("wg.py"))
 wg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wg)
+wg.LINK_TOKEN_FILE = TEST_CONFIG.parent / "absent-link-token"
 # The other tests mock Linear call by call; AutonomyTests use the real autonomy_lines.
 AUTONOMY_LINES = wg.autonomy_lines
 wg.autonomy_lines = lambda plan_dir, plan: []
@@ -5552,7 +5554,36 @@ class LinkTests(unittest.TestCase):
         self.assertIn("do dispatch a CD-1", out)
         self.assertEqual(err.count("warn link:"), 1)
         self.assertIn("HTTP 401", err)
+        self.assertIn("Polling Linear instead", err)
         self.assertNotIn(token, out + err)
+
+    def test_next_still_polls_with_an_unreadable_token_configuration(self):
+        path = Path(self.d) / "link-token"
+        path.write_text("test-token-with-at-least-32-characters\n")
+        for wait in (False, True):
+            wg.save_keymap(self.d, {"project": {"id": "proj"}})
+            path.chmod(0o644)
+            with self.subTest(wait=wait), patch.object(wg, "LINK_TOKEN_FILE", path), \
+                    patch.object(wg, "_LINK_AUTH_WARNED", set()):
+                results = [("phase 1", [("do", "dispatch a CD-1")])]
+                if wait:
+                    results.insert(0, ("phase 1", [("wait", "worker a")]))
+                out, err, _ = self.run_next(results, wait=wait, interval=0.01)
+            self.assertIn("do dispatch a CD-1", out)
+            self.assertEqual(err.count("warn link:"), 1)
+            self.assertIn(f"{path} must have mode 600", err)
+            self.assertNotIn(path.read_text().strip(), out + err)
+
+    def test_next_does_not_send_the_token_to_a_remote_plaintext_socket(self):
+        with patch.dict(os.environ, {"WG_UI_URL": "http://example.com", "WG_LINK_TOKEN": "test-token"}), \
+                patch("websockets.sync.client.connect") as connect, \
+                patch.object(wg.urllib.request, "urlopen", return_value=io.StringIO("{}")), \
+                patch.object(wg, "_LINK_AUTH_WARNED", set()):
+            out, err, _ = self.run_next([("phase 1", [("do", "dispatch a CD-1")])])
+        connect.assert_not_called()
+        self.assertIn("do dispatch a CD-1", out)
+        self.assertEqual(err.count("warn link:"), 1)
+        self.assertIn("requires HTTPS", err)
 
     def test_a_change_wakes_a_waiting_next_at_once_and_is_acknowledged(self):
         self.to_send.append({"v": 1, "type": "changed", "id": "m1", "project": {"workspace": "work", "id": "proj"},
@@ -7678,7 +7709,7 @@ class DoctorTests(DirTests):
         path = directory / "link-token"
         path.write_text(token + "\n")
         response = io.StringIO("{\"waiting\": 2}")
-        with patch.object(Path, "home", return_value=self.d), patch.dict(os.environ, {"WG_LINK_TOKEN": ""}), \
+        with patch.object(wg, "LINK_TOKEN_FILE", path), patch.dict(os.environ, {"WG_LINK_TOKEN": ""}), \
                 patch.object(wg.urllib.request, "urlopen", return_value=response) as open_url:
             path.chmod(0o600)
             plan = {"effort": {"workspace": "work"}}
@@ -7687,12 +7718,58 @@ class DoctorTests(DirTests):
             self.assertEqual(req.get_header("Authorization"), f"Bearer {token}")
             self.assertEqual(req.get_header("X-workspace"), "work")
             path.chmod(0o640)
-            with self.assertRaisesRegex(wg.ReadError, "mode 600"):
-                wg.page_get("/healthz")
+            for contents, mode, cause in (
+                (token, 0o640, "must have mode 600"),
+                (token + "\nsecond line", 0o600, "must contain one line"),
+                (token + "☃", 0o600, "cannot be sent in an Authorization header"),
+            ):
+                path.write_text(contents)
+                path.chmod(mode)
+                open_url.return_value = io.StringIO('{"waiting": 2}')
+                err = io.StringIO()
+                with patch.object(wg, "_LINK_AUTH_WARNED", set()), contextlib.redirect_stderr(err):
+                    self.assertEqual(wg.page_waiting(plan, "p1"), 2)
+                self.assertIsNone(open_url.call_args.args[0].get_header("Authorization"))
+                self.assertEqual(err.getvalue().count("warn link:"), 1)
+                self.assertIn(f"{path} {cause}", err.getvalue())
+                self.assertNotIn(token, err.getvalue())
             open_url.return_value = io.StringIO("{}")
             with patch.dict(os.environ, {"WG_LINK_TOKEN": "environment-token"}):
-                wg.page_get("/healthz")
+                with patch.dict(os.environ, {"WG_UI_URL": "https://example.com"}):
+                    wg.page_get("/healthz")
                 self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer environment-token")
+
+    def test_page_waiting_warns_only_if_a_sent_token_gets_401(self):
+        def unauthorized(*args, **kwargs):
+            raise wg.urllib.error.HTTPError("", 401, "", {}, None)
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), patch.object(wg, "_LINK_AUTH_WARNED", set()), \
+                patch.object(wg.urllib.request, "urlopen", side_effect=unauthorized):
+            self.assertEqual(wg.page_waiting({}, "p1"), 0)
+            self.assertEqual(err.getvalue(), "")
+            with patch.dict(os.environ, {"WG_LINK_TOKEN": "test-token"}):
+                self.assertEqual(wg.page_waiting({}, "p1"), 0)
+                self.assertEqual(wg.page_waiting({}, "p1"), 0)
+        self.assertEqual(err.getvalue().count("warn link:"), 1)
+        self.assertIn("HTTP 401", err.getvalue())
+        self.assertNotIn("Polling", err.getvalue())
+
+    def test_page_requests_send_the_token_only_over_https_or_to_loopback(self):
+        with patch.dict(os.environ, {"WG_LINK_TOKEN": "test-token"}), \
+                patch.object(wg.urllib.request, "urlopen", side_effect=lambda *args, **kw: io.StringIO("{}")) as open_url:
+            for url in ("https://example.com", "http://127.0.0.1:4747", "http://localhost:4747", "http://[::1]:4747"):
+                with self.subTest(url=url), patch.dict(os.environ, {"WG_UI_URL": url}):
+                    wg.page_get("/healthz")
+                    self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer test-token")
+            err = io.StringIO()
+            with patch.dict(os.environ, {"WG_UI_URL": "http://example.com"}), \
+                    patch.object(wg, "_LINK_AUTH_WARNED", set()), contextlib.redirect_stderr(err):
+                wg.page_get("/healthz")
+                wg.page_get("/healthz")
+            self.assertIsNone(open_url.call_args.args[0].get_header("Authorization"))
+            self.assertEqual(err.getvalue().count("warn link:"), 1)
+            self.assertIn("HTTPS", err.getvalue())
 
     def test_doctor_reports_whether_the_page_accepted_the_token(self):
         token = "test-token-with-at-least-32-characters"
@@ -7807,6 +7884,9 @@ class DoctorTests(DirTests):
             self.assertEqual(ws.sent, [])
             client.connect.side_effect = ConnectionError("HTTP 403")
             self.assertEqual(wg.doctor_run("link", wg.doctor_link(self.d, self.p)), [("FAIL", "link: HTTP 403")])
+            client.connect.side_effect.response = Mock(status_code=404)
+            with patch.dict(os.environ, {"WG_LINK_TOKEN": "test-token"}):
+                self.assertEqual(wg.doctor_run("link", wg.doctor_link(self.d, self.p)), [("FAIL", "link: HTTP 404")])
         self.assertEqual(wg.doctor_link(self.d, self.p)()[0], "warn")  # WG_LINK=off in the tests
 
     def test_doctor_prints_each_line_and_exits_1_on_a_fail(self):

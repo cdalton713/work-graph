@@ -190,6 +190,8 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
 - `WG_LINK_TOKEN`: a shared secret of at least 32 characters. Set it on a hosted server that has a
   coordinator link. Give each coordinator the same value in `WG_LINK_TOKEN` or in
   `~/.config/work-graph/link-token` with mode 600. Use HTTPS for the hosted URL. Run `wg doctor` to check it.
+  An empty value on the server leaves token checks off. `wg` sends the token only over HTTPS or to
+  a loopback address (`127.0.0.1`, `localhost`, or `::1`).
 - `WG_STATE_DIR` (optional): a directory where the link keeps the queue of each project and the open worker
   questions over a restart. Without it, a restart loses them: a reply or a command that a coordinator did not get
   yet does not arrive. The server writes one file, `link-state.json` (mode 600), at most 1 s after a change, and

@@ -31,7 +31,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 // The one workspace of most tests. Its key is read when the app is made, as the server reads its config.
 const workWorkspace = () => ({ id: "work", name: "Work", team: "CD", key: process.env.LINEAR_API_KEY ?? "", teamLabels: true });
-const app = () => createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()] });
+const app = (linkToken?: string) => createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], linkToken });
 /** An issue that the page may change: in a project of the served team, with no node card. */
 const mine = { team: { key: "CD" }, project: { id: "p1" }, description: "", labels: { nodes: [] }, comments: { nodes: [] } };
 /** A fetch stub that answers each Linear call with `data`, and records the GraphQL variables. */
@@ -787,9 +787,8 @@ describe("coordinator link token", () => {
   afterEach(() => vi.unstubAllEnvs());
 
   it("rejects coordinator requests before looking up the project", async () => {
-    vi.stubEnv("WG_LINK_TOKEN", linkToken);
     const path = "/api/link?role=coordinator";
-    const server = app();
+    const server = app(linkToken);
     for (const authorization of ["", "Bearer wrong", `Bearer ${linkToken.slice(0, -1)}x`]) {
       const response = await server.request(path, { headers: { ...local, authorization } });
       expect(response.status).toBe(401);
@@ -801,8 +800,18 @@ describe("coordinator link token", () => {
   });
 
   it("refuses a short server token", () => {
-    vi.stubEnv("WG_LINK_TOKEN", "too-short");
-    expect(app).toThrow("WG_LINK_TOKEN must have at least 32 characters");
+    expect(() => app("too-short")).toThrow("WG_LINK_TOKEN must have at least 32 characters");
+  });
+
+  it("treats an empty token as unset", async () => {
+    const response = await app("").request("/api/link?role=coordinator", { headers: local });
+    expect(response.status).toBe(400);
+  });
+
+  it("leaves token configuration to the server entry point", async () => {
+    vi.stubEnv("WG_LINK_TOKEN", linkToken);
+    const response = await app().request("/api/link?role=coordinator", { headers: local });
+    expect(response.status).toBe(400);
   });
 });
 
@@ -812,7 +821,7 @@ describe("link sockets of the server", () => {
   const settle = () => new Promise((ok) => setTimeout(ok, 30));
 
   /** A server with a clock and link timers that move only when the test says so. */
-  async function start() {
+  async function start(linkToken?: string) {
     const clock = { at: Date.parse("2026-11-20T00:00:00Z") };
     const jobs: { fn: () => void; at: number; every: number | null; off: boolean }[] = [];
     const add = (fn: () => void, ms: number, every: boolean) => {
@@ -834,7 +843,7 @@ describe("link sockets of the server", () => {
       clock.at = end;
     };
     const portRules: Rules = { port: 0, tailnet: null };
-    const server = createApp(portRules, { team: "CD", dist, workspaces: [workWorkspace()], watchMs: 0, now: () => clock.at, linkTimers: timers });
+    const server = createApp(portRules, { team: "CD", dist, workspaces: [workWorkspace()], watchMs: 0, now: () => clock.at, linkTimers: timers, linkToken });
     const http = serve({ fetch: server.fetch, port: 0, hostname: "127.0.0.1" });
     server.injectWebSocket(http as never);
     await new Promise<void>((ok) => http.once("listening", () => ok()));
@@ -855,29 +864,24 @@ describe("link sockets of the server", () => {
 
   it("requires a token on the coordinator upgrade and accepts a page socket without one", async () => {
     const token = "a-test-token-with-32-characters-or-more";
-    vi.stubEnv("WG_LINK_TOKEN", token);
     linear({ teams: { nodes: [{ projects: {
       nodes: [{ id: "p1", name: "Example", url: "u", status: null }],
       pageInfo: { hasNextPage: false, endCursor: null },
     } }] } });
-    try {
-      const { port } = await start();
-      await page(port);
-      const upgrade = (headers: Record<string, string>) => new Promise<number>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=coordinator&project=p1`, { headers });
-        closers.push(() => ws.terminate());
-        ws.on("error", reject);
-        ws.on("unexpected-response", (_request, response) => {
-          response.resume();
-          resolve(response.statusCode ?? 0);
-        });
-        ws.on("open", () => resolve(101));
+    const { port } = await start(token);
+    await page(port);
+    const upgrade = (headers: Record<string, string>) => new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=coordinator&project=p1`, { headers });
+      closers.push(() => ws.terminate());
+      ws.on("error", reject);
+      ws.on("unexpected-response", (_request, response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
       });
-      expect(await upgrade({})).toBe(401);
-      expect(await upgrade({ authorization: `Bearer ${token}` })).toBe(101);
-    } finally {
-      vi.unstubAllEnvs();
-    }
+      ws.on("open", () => resolve(101));
+    });
+    expect(await upgrade({})).toBe(401);
+    expect(await upgrade({ authorization: `Bearer ${token}` })).toBe(101);
   });
 
   it("terminates a socket 45 s after its last pong, also one that sends messages, and keeps one that sends pongs", async () => {
@@ -1302,7 +1306,7 @@ describe("read-only viewer", () => {
 describe("sign-in of the viewer", () => {
   const hosted: Rules = { port: 4747, tailnet: null, hosted: { host: "view.example.com" } };
   const auth = { domains: ["example.com"], clientId: "client-1", clientSecret: "client-secret", secret: "a-session-secret-of-32-characters" };
-  const signedIn = () => createApp(hosted, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true, auth });
+  const signedIn = (linkToken?: string) => createApp(hosted, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true, auth, linkToken });
   const host = { host: "view.example.com" };
 
   it("gives 401 for the API without a session, and still serves the page, the config, and the health check", async () => {
@@ -1322,16 +1326,11 @@ describe("sign-in of the viewer", () => {
   });
 
   it("accepts only the correct bearer token for a read without a session", async () => {
-    vi.stubEnv("WG_LINK_TOKEN", "a-test-token-with-32-characters-or-more");
-    try {
-      const page = signedIn();
-      const headers = { ...host, authorization: "Bearer a-test-token-with-32-characters-or-more" };
-      expect((await page.request("/api/status", { headers })).status).toBe(200);
-      expect((await page.request("/api/status", { headers: { ...headers, authorization: "Bearer wrong" } })).status).toBe(401);
-      expect((await page.request("/api/issues/i1/comments", { method: "POST", headers })).status).toBe(405);
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    const page = signedIn("a-test-token-with-32-characters-or-more");
+    const headers = { ...host, authorization: "Bearer a-test-token-with-32-characters-or-more" };
+    expect((await page.request("/api/status", { headers })).status).toBe(200);
+    expect((await page.request("/api/status", { headers: { ...headers, authorization: "Bearer wrong" } })).status).toBe(401);
+    expect((await page.request("/api/issues/i1/comments", { method: "POST", headers })).status).toBe(405);
   });
 
   /** An ID token as Google's token endpoint gives it: the claims are the middle part. */

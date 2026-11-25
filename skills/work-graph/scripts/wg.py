@@ -4282,48 +4282,81 @@ LINK_COMMANDS = ("next", "dispatch", "pause", "resume", "autonomy")
 LINK_REPLAYED = ("state", "asks", "progress")
 
 
+LINK_TOKEN_FILE = Path.home() / ".config/work-graph/link-token"
+
+
+class LinkTokenError(ReadError):
+    pass
+
+
 def link_token():
     """Read the environment or a private file. Never include the value in an error."""
-    if token := os.environ.get("WG_LINK_TOKEN", "").strip():
-        return token
-    path = Path.home() / ".config/work-graph/link-token"
-    try:
-        with path.open(encoding="utf-8") as file:
-            if stat.S_IMODE(os.fstat(file.fileno()).st_mode) != 0o600:
-                raise ReadError("link-token file must have mode 600")
-            return file.read().strip()
-    except FileNotFoundError:
-        return ""
-    except (OSError, UnicodeError):
-        raise ReadError("cannot read link-token file") from None
+    source = "WG_LINK_TOKEN"
+    token = os.environ.get(source, "")
+    if not token:
+        source = LINK_TOKEN_FILE
+        try:
+            with source.open(encoding="utf-8") as file:
+                if stat.S_IMODE(os.fstat(file.fileno()).st_mode) != 0o600:
+                    raise LinkTokenError(f"{source} must have mode 600")
+                token = file.read().removesuffix("\n")
+        except FileNotFoundError:
+            return ""
+        except (OSError, UnicodeError):
+            raise LinkTokenError(f"{source} cannot be read") from None
+    if "\n" in token or "\r" in token:
+        raise LinkTokenError(f"{source} must contain one line")
+    if any(not (" " <= char <= "~") for char in token):
+        raise LinkTokenError(f"{source} cannot be sent in an Authorization header")
+    return token.strip()
 
 
-class LinkUnauthorized(ReadError):
+def link_token_for(url):
+    token = link_token()
+    if token:
+        target = urllib.parse.urlsplit(url)
+        if target.scheme not in ("https", "wss") and target.hostname not in ("127.0.0.1", "localhost", "::1"):
+            raise LinkTokenError("the link token requires HTTPS for a page outside loopback")
+    return token
+
+
+class LinkResponseError(ReadError):
+    pass
+
+
+class LinkUnauthorized(LinkResponseError):
     pass
 
 
 _LINK_AUTH_WARNED = set()
 
 
-def warn_link_unauthorized():
+def warn_link_token(problem, *, polling=False):
     base = page_base()
     if base not in _LINK_AUTH_WARNED:
         _LINK_AUTH_WARNED.add(base)
-        print("warn link: HTTP 401. Check WG_LINK_TOKEN. Polling Linear instead.", file=sys.stderr, flush=True)
+        fallback = " Polling Linear instead." if polling else ""
+        print(f"warn link: {problem}.{fallback}", file=sys.stderr, flush=True)
+
+
+LINK_UNAUTHORIZED = "HTTP 401. Check WG_LINK_TOKEN"
 
 
 @contextlib.contextmanager
 def link_socket(url, **options):
     from websockets.sync.client import connect
-    token = link_token()
+    token = link_token_for(url)
     if token:
         options["additional_headers"] = {"Authorization": f"Bearer {token}"}
     try:
         ws = connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1, **options)
     except Exception as error:
-        if getattr(getattr(error, "response", None), "status_code", None) == 401:
-            raise LinkUnauthorized("HTTP 401") from None
         if token:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            if status == 401:
+                raise LinkUnauthorized("HTTP 401") from None
+            if isinstance(status, int):
+                raise LinkResponseError(f"HTTP {status}") from None
             raise ReadError(f"connection failed ({type(error).__name__})") from None
         raise
     with ws:
@@ -4375,8 +4408,9 @@ class Link:
                 stack.close()
             self.ws = None
             self.retry_at = time.monotonic() + 30
-            if isinstance(e, LinkUnauthorized):
-                warn_link_unauthorized()
+            if isinstance(e, (LinkUnauthorized, LinkTokenError)):
+                warn_link_token(LINK_UNAUTHORIZED if isinstance(e, LinkUnauthorized) else e, polling=True)
+                self.warned = True
             elif not self.warned:
                 print(f"warn link: {self.url.split('?')[0]}: {e}. Polling Linear instead.", file=sys.stderr, flush=True)
                 self.warned = True
@@ -4495,7 +4529,10 @@ def flush_writes(plan_dir, plan, link=None):
             ws.send(link_envelope(session, project, "wrote", payload))
         return True
     except LinkUnauthorized:
-        warn_link_unauthorized()
+        warn_link_token(LINK_UNAUTHORIZED)
+        return False
+    except LinkTokenError as error:
+        warn_link_token(error)
         return False
     except Exception:  # no package, no server, or an old server: the server's check sees the change later
         return False
@@ -4895,11 +4932,6 @@ def page_waiting(plan, project_id):
         presence = page_get(f"/api/projects/{urllib.parse.quote(project_id)}/presence",
                             headers={"x-workspace": plan_workspace(plan)})
         return int(presence.get("waiting") or 0)
-    except urllib.error.HTTPError as error:
-        with error:
-            if error.code == 401:
-                warn_link_unauthorized()
-        return 0
     except (ReadError, OSError, ValueError, TypeError, http.client.HTTPException):
         return 0
 
@@ -5931,7 +5963,11 @@ def watch_poll(memory, state, roots=None, clock=time.monotonic):
                 send_agents(path, plan, rows)
                 mine.update(digest=digest, at=clock())
             except LinkUnauthorized:
-                warn_link_unauthorized()
+                warn_link_token(LINK_UNAUTHORIZED)
+            except LinkTokenError as error:
+                warn_link_token(error)
+            except LinkResponseError as error:
+                print(f"warn link: {plan['effort']['name']}: {error}", file=sys.stderr, flush=True)
             except Exception as e:  # no server, an old server, or a project that the server does not list: try again
                 print(f"warn link: {plan['effort']['name']}: {type(e).__name__}", file=sys.stderr, flush=True)
         key = f"{plan_workspace(plan)}/{project}"
@@ -6133,15 +6169,24 @@ def page_base():
 
 def page_get(path, timeout=10, headers=None, *, use_token=True):
     request = urllib.request.Request(f"{page_base()}{path}", headers=headers or {})
-    token = link_token() if use_token else ""
+    try:
+        token = link_token_for(request.full_url) if use_token else ""
+    except LinkTokenError as error:
+        warn_link_token(error)
+        token = ""
     if token:
         # Do not forward the credential on a redirect.
         request.add_unredirected_header("Authorization", f"Bearer {token}")
     try:
         response = urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        if token and error.code == 401:
+            warn_link_token(LINK_UNAUTHORIZED)
+        raise
     except ValueError:
         if token:
-            raise ReadError("could not send page request") from None
+            warn_link_token("the token could not be sent in the page request")
+            raise ValueError("could not send page request") from None
         raise
     with response:
         return json.load(response)

@@ -185,7 +185,8 @@ Set the optional `agents` object to choose who starts the coordinator and worker
 Both roles accept `agent`, `model`, and `effort`. Use `claude` or `codex` for
 `agent`. Use a model ID and effort level that Orca accepts. Effort needs a model.
 For each field, a command flag wins over `effort.agents` in the plan, then the
-installation config. The default worker is Codex. The default coordinator is
+installation config. Changing the agent drops the model and effort from the
+lower-priority setting for the previous agent. The default worker is Codex. The default coordinator is
 Orca's default agent. `wg config [<plan-dir>]` shows the resolved roles.
 
 A follow-up job uses the settings in the node's run row before the plan and

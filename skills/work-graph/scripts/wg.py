@@ -99,6 +99,17 @@ AGENT_FIELDS = ("agent", "model", "effort")
 AGENT_DEFAULTS = {"coordinator": {}, "worker": {"agent": "codex"}}
 
 
+def safe_agent_value(value):
+    return (isinstance(value, str) and bool(value) and value.isprintable()
+            and not value.startswith("-") and not any(char.isspace() for char in value))
+
+
+def merge_agent_settings(lower, higher):
+    if lower.get("agent") and higher.get("agent", lower["agent"]) != lower["agent"]:
+        return dict(higher)
+    return lower | higher
+
+
 def agent_setting_errors(settings, field, inherited):
     if not isinstance(settings, dict):
         return [f"{field}: must be an object"]
@@ -115,28 +126,42 @@ def agent_setting_errors(settings, field, inherited):
                     errors.append(f"{path}.{key}: unknown field")
                 elif key == "agent" and value not in ("claude", "codex"):
                     errors.append(f"{path}.agent: must be claude or codex")
-                elif not isinstance(value, str) or not value.strip():
-                    errors.append(f"{path}.{key}: must be nonempty text")
-            resolved = inherited.get(role, {}) | values
+                elif key != "agent" and not safe_agent_value(value):
+                    errors.append(f"{path}.{key}: must be nonempty text with no leading dash, spaces, or control characters")
+            resolved = merge_agent_settings(AGENT_DEFAULTS[role] | inherited.get(role, {}), values)
             if resolved.get("effort") and not resolved.get("model"):
                 errors.append(f"{path}.effort: needs a model")
     return errors
 
 
 def resolve_agent(plan, role, agent=None, model=None, effort=None, row=None):
-    settings = (AGENT_DEFAULTS[role] | CONFIG.get("agents", {}).get(role, {})
-                | plan.get("effort", {}).get("agents", {}).get(role, {}))
-    if row:
-        settings.update((field, row[field]) for field in AGENT_FIELDS if field in row)
-    settings.update((field, value) for field, value in zip(AGENT_FIELDS, (agent, model, effort)) if value is not None)
+    if row and any(row.get(field) for field in ("dispatch", *AGENT_FIELDS)):
+        settings = AGENT_DEFAULTS[role] | {field: row[field] for field in AGENT_FIELDS if field in row}
+    else:
+        settings = AGENT_DEFAULTS[role] | CONFIG.get("agents", {}).get(role, {})
+        settings = merge_agent_settings(settings, plan.get("effort", {}).get("agents", {}).get(role, {}))
+    flags = {field: value for field, value in zip(AGENT_FIELDS, (agent, model, effort)) if value is not None}
+    settings = merge_agent_settings(settings, flags)
+    for field in ("model", "effort"):
+        if field in settings and not safe_agent_value(settings[field]):
+            die(f"agents.{role}.{field}: must be nonempty text with no leading dash, spaces, or control characters")
     if settings.get("effort") and not settings.get("model"):
         die(f"agents.{role}.effort: needs a model")
     return settings
 
 
 def model_args(settings):
+    for field in ("model", "effort"):
+        if field in settings and not safe_agent_value(settings[field]):
+            die(f"{field}: must be nonempty text with no leading dash, spaces, or control characters")
     return [arg for field in ("model", "effort") if settings.get(field)
             for arg in (f"--{field}", settings[field])]
+
+
+def automation_model_args(agent, settings):
+    if agent == "codex" and settings.get("effort"):
+        return shlex.join(["--model", settings["model"], "-c", f"model_reasoning_effort={settings['effort']}"])
+    return shlex.join(model_args(settings))
 
 
 def printed_model_args(settings):
@@ -5510,12 +5535,12 @@ def autostart_command(plan_dir, plan, install, uninstall, agent=None, model=None
         agents = orca("agent", "installed")["agents"]
         return next((a["id"] for a in agents if a.get("default")), "claude")
 
-    extra = shlex.join(model_args(settings))
     if current:
         # Install again: refresh the precheck and the prompt, and turn the automation on.
         changes = []
         if settings or run.get("autostart_configured"):
-            changes = ["--provider", provider(), f"--extra-agent-args={extra}"]
+            agent = provider()
+            changes = ["--provider", agent, f"--extra-agent-args={automation_model_args(agent, settings)}"]
         orca("automations", "edit", current, "--precheck", precheck, "--prompt", autostart_prompt(here),
              "--enabled", *changes)
         if changes:
@@ -5524,6 +5549,7 @@ def autostart_command(plan_dir, plan, install, uninstall, agent=None, model=None
         return 0
     worktree = orca("worktree", "show", "--worktree", f"path:{here}")["worktree"]["id"]
     agent = provider()
+    extra = automation_model_args(agent, settings)
     created = orca("automations", "create", "--name", f"wg coordinator: {plan['effort']['name']}",
                    "--trigger", WAKE_SCHEDULE, "--prompt", autostart_prompt(here), "--provider", agent,
                    "--workspace", f"id:{worktree}", "--precheck", precheck, "--precheck-timeout", "120",
@@ -6765,7 +6791,7 @@ def doctor_autostart(plans):
             name = f"autostart {path}: automation {automation}"
             if "agentId" in shown or "extraAgentArgs" in shown:
                 settings = resolve_agent(load_plan(path), "coordinator")
-                extra = shlex.join(model_args(settings))
+                extra = automation_model_args(settings.get("agent") or shown.get("agentId"), settings)
                 agent_differs = ("agentId" in shown and settings.get("agent")
                                  and shown["agentId"] != settings["agent"])
                 if agent_differs or (shown.get("extraAgentArgs") or "") != extra:
@@ -8261,6 +8287,8 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=Non
         if not send:
             take_claim(plan_dir, plan, key, entry, issue, agent)
         row.update(state="starting", job=job)
+        for field in AGENT_FIELDS:
+            row.pop(field, None)
         row.update(settings)
         if fresh and row.get("dispatch"):
             row["fresh_worker"] = True
@@ -8538,10 +8566,16 @@ def ui(port, project, no_open, no_tailnet=False, workspace=DEFAULT_WORKSPACE_ID)
         return 0
 
 
+def agent_flag_value(value):
+    if not safe_agent_value(value):
+        raise argparse.ArgumentTypeError("use nonempty text with no leading dash, spaces, or control characters")
+    return value
+
+
 def add_agent_flags(parser):
     parser.add_argument("--agent", choices=("codex", "claude"))
-    parser.add_argument("--model", help="the provider model id")
-    parser.add_argument("--effort", help="the effort level for the model")
+    parser.add_argument("--model", type=agent_flag_value, help="the provider model id")
+    parser.add_argument("--effort", type=agent_flag_value, help="the effort level for the model")
 
 
 def cli_parser():

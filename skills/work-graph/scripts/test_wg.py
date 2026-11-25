@@ -2608,6 +2608,26 @@ class JobTests(LaneTests):
         self.effort = wg.run_row(wg.load_keymap(self.d), "@effort")
         return out, err
 
+    def test_dispatch_resolves_each_field_within_the_selected_agent(self):
+        config = {"agent": "codex", "model": "base", "effort": "low"}
+        plan = {"agent": "codex", "model": "planned", "effort": "high"}
+        cases = (
+            ({}, {}, (None, None, None), ("codex", None, None)),
+            (config, {}, (None, None, None), ("codex", "base", "low")),
+            (config, plan, (None, None, None), ("codex", "planned", "high")),
+            (config, plan, (None, "flag", "medium"), ("codex", "flag", "medium")),
+            (config, {}, ("claude", None, None), ("claude", None, None)),
+            (config, {"agent": "claude", "model": "opus"}, (None, None, None), ("claude", "opus", None)),
+            (config, {"agent": "claude", "model": "opus"}, ("codex", None, None), ("codex", None, None)),
+        )
+        for defaults, overrides, (agent, model, effort), expected in cases:
+            with self.subTest(defaults=defaults, overrides=overrides, flags=(agent, model, effort)):
+                self.p["effort"]["agents"] = {"worker": overrides}
+                with patch.dict(wg.CONFIG, {"agents": {"worker": defaults}}):
+                    self.job(wg.dispatch, "a", agent, None, model, effort,
+                             live={"a": "Todo", "s": "Done"}, effort={"wave": "a"})
+                self.assertEqual(tuple(self.row("a").get(field) for field in ("agent", "model", "effort")), expected)
+
     def test_dispatch_refuses_each_missing_condition(self):
         ok = dict(live={"s": "Done"}, rows={"a": {"approved": "x"}}, effort={"wave": "a"})
         cases = [
@@ -3399,7 +3419,7 @@ class OneCommandTests(LaneTests):
     def test_dispatch_run_resolves_each_worker_setting(self):
         self.fake()
         self.p["effort"]["agents"] = {"worker": {"agent": "claude"}}
-        with patch.dict(wg.CONFIG, {"agents": {"worker": {"agent": "codex", "model": "base", "effort": "high"}}}):
+        with patch.dict(wg.CONFIG, {"agents": {"worker": {"agent": "claude", "model": "base", "effort": "high"}}}):
             self.job(wg.dispatch_run, "a", None, "flag",
                      live={"s": "Done", "a": "Todo"}, rows={"a": {"approved": "x"}},
                      effort={"wave": "a"})
@@ -3781,12 +3801,32 @@ class OneCommandTests(LaneTests):
         self.update.assert_not_called()
         self.assertEqual(self.calls(), [])
 
-    def send(self, row, code=0, fail=None, job="review", live=None, **kwargs):
+    def send(self, row, code=0, fail=None, job="review", live=None, agent="codex", **kwargs):
         self.fake(fail=fail)
         work = self.d / "work.md"
         work.write_text("Fix the two review findings.\n")
-        return self.job(wg.claim, "a", job, "codex", True, str(work), live=live or {"a": "In Review", "s": "Done"},
+        return self.job(wg.claim, "a", job, agent, True, str(work), live=live or {"a": "In Review", "s": "Done"},
                         rows={"a": row}, code=code, **kwargs)
+
+    def test_claim_send_keeps_the_workers_recorded_default_model(self):
+        defaults = {"worker": {"agent": "codex", "model": "codex-model", "effort": "high"}}
+        for writer in ("codex", "claude"):
+            with self.subTest(writer=writer), patch.dict(wg.CONFIG, {"agents": defaults}):
+                self.send(BRANCH | {"pr": "7", "dispatch": "d1", "path": "/w", "agent": writer}, agent=None)
+                self.assertEqual(len(self.calls()), 1)
+                self.assertIn("orchestration send --to dispatch:d1", self.calls()[0])
+                self.assertNotIn("model", self.row("a"))
+                self.assertNotIn("effort", self.row("a"))
+                self.assertEqual(self.updates, [("a", {"addedLabelIds": [f"L-{writer}"]})])
+
+    def test_claim_send_changes_agent_without_the_previous_agents_model(self):
+        self.send(BRANCH | {"pr": "7", "dispatch": "d1", "path": "/w",
+                            "agent": "codex", "model": "codex-model", "effort": "high"}, agent="claude")
+        self.assertIn("orchestration worker-start", self.calls()[0])
+        self.assertIn("--agent claude --environment local --json", self.calls()[0])
+        self.assertNotIn("model", self.row("a"))
+        self.assertNotIn("effort", self.row("a"))
+        self.assertEqual(self.updates, [("a", {"addedLabelIds": ["L-claude"]})])
 
     def test_claim_send_appends_the_work_sends_the_job_and_records_the_new_ids(self):
         out, _ = self.send(BRANCH | {"pr": "7", "dispatch": "d1", "task": "t1", "worktree": "repo::x", "path": "/w"})
@@ -8288,14 +8328,27 @@ class DoctorTests(DirTests):
             self.assertEqual(wg.doctor_tick()[0], "warn")
 
     def test_autostart_installs_the_coordinator_settings(self):
-        self.keymap()
-        self.p["effort"]["agents"] = {"coordinator": {"agent": "codex", "model": "example", "effort": "high"}}
-        results = [{"worktree": {"id": "core"}}, {"automation": {"id": "auto1"}}]
-        with patch.object(wg, "command", side_effect=[done_proc(json.dumps({"result": r})) for r in results]) as orca:
-            self.call(wg.autostart_command, self.d, self.p, True, False)
-        args = orca.call_args.args
-        self.assertEqual(args[args.index("--provider") + 1], "codex")
-        self.assertIn("--extra-agent-args=--model example --effort high", args)
+        for agent, effort_args in (("codex", "-c model_reasoning_effort=high"), ("claude", "--effort high")):
+            with self.subTest(agent=agent):
+                self.keymap()
+                self.p["effort"]["agents"] = {"coordinator": {"agent": agent, "model": "example", "effort": "high"}}
+                results = [{"worktree": {"id": "core"}}, {"automation": {"id": "auto1"}}, {}]
+                with patch.object(wg, "command", side_effect=[done_proc(json.dumps({"result": r})) for r in results]) as orca:
+                    self.call(wg.autostart_command, self.d, self.p, True, False)
+                    self.call(wg.autostart_command, self.d, self.p, True, False)
+                for call in orca.call_args_list[1:]:
+                    args = call.args
+                    self.assertEqual(args[args.index("--provider") + 1], agent)
+                    self.assertIn(f"--extra-agent-args=--model example {effort_args}", args)
+
+    def test_cli_rejects_unsafe_model_and_effort_flags(self):
+        for field in ("model", "effort"):
+            for value in ("--environment", "-x", "two words", "a\tb", "a\x7fb"):
+                with self.subTest(field=field, value=value), contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as raised:
+                        wg.main(["wg", "dispatch", str(self.d), "a", f"--{field}={value}"])
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertIn(f"--{field}", err.getvalue())
 
     def test_check_and_doctor_name_invalid_agent_settings(self):
         for settings, field in (
@@ -8303,6 +8356,9 @@ class DoctorTests(DirTests):
             ({"worker": {"unknown": "x"}}, "agents.worker.unknown"),
             ({"worker": {"agent": "unknown"}}, "agents.worker.agent"),
             ({"coordinator": {"effort": "high"}}, "agents.coordinator.effort"),
+            ({"worker": {"model": "--spec"}}, "agents.worker.model"),
+            ({"worker": {"model": "example", "effort": "a b"}}, "agents.worker.effort"),
+            ({"worker": {"model": "a\x7fb"}}, "agents.worker.model"),
         ):
             with self.subTest(field=field):
                 self.p["effort"]["agents"] = settings

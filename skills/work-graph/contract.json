@@ -419,6 +419,10 @@
       "pause",
       "resume",
       "autonomy"
-    ]
+    ],
+    "close_codes": {
+      "restart": 1012,
+      "recycle": 4001
+    }
   }
 }

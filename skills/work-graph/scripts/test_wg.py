@@ -5510,6 +5510,7 @@ class LinkTests(unittest.TestCase):
         self.got, self.requests, self.to_send, self.conns = [], [], [], []
         self.event = threading.Event()
         self.reject_token = False
+        self.recycle_code = None
 
         def process_request(conn, request):
             if self.reject_token:
@@ -5523,6 +5524,10 @@ class LinkTests(unittest.TestCase):
                 self.got.append(m)
                 self.event.set()
                 if m["type"] == "state" and m["payload"]["mode"] == "waiting":
+                    if self.recycle_code is not None:
+                        code, self.recycle_code = self.recycle_code, None
+                        conn.close(code)
+                        return
                     while self.to_send:
                         conn.send(json.dumps(self.to_send.pop(0)))
         self.server = ws_server.serve(handler, "127.0.0.1", 0, process_request=process_request)
@@ -5661,6 +5666,17 @@ class LinkTests(unittest.TestCase):
         self.assertIn("do dispatch a CD-1", out)
         self.assertEqual(err.count("warn link:"), 1)
         self.assertIn("Polling Linear instead", err)
+
+    def test_planned_close_reconnects_while_next_waits(self):
+        for code in (4001, 1012):
+            with self.subTest(code=code):
+                self.recycle_code = code
+                self.to_send.append({"v": 1, "type": "answer", "id": str(code),
+                                     "payload": {"issue": "WG-1", "key": "a", "body": "go ahead"}})
+                out, err, took = self.run_next([("phase 1", [("wait", "worker a")])] * 2, wait=True)
+                self.assertEqual(out.count("go ahead"), 1)
+                self.assertEqual(err, "")
+                self.assertLess(took, 4)
 
     def wait_for(self, kind):
         for _ in range(100):

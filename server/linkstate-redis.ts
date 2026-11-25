@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Envelope, ProjectRef } from "../src/lib/link.ts";
-import { emptyRoom, pruneRoom, QUEUE_MAX, type Coordinator, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
+import { emptyRoom, expireReconnectGrace, pruneRoom, QUEUE_MAX, type Coordinator, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
 import { LINK_PREFIX, type RedisLink } from "./redis.ts";
 import { ASKS_MAX } from "./store.ts";
 
@@ -256,7 +256,7 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
         return room;
       });
     },
-    async prune(cutoff) {
+    async prune(cutoff, now) {
       const changed: LinkRoom[] = [];
       const keys = await roomKeys();
       const min = keys.length ? await pageCutoff() : "+inf";
@@ -265,7 +265,8 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
         const pages = await redis.run((client) => client.zcount(pageKey, min, "+inf"));
         const result = await update(roomKey, null, (room, expired) => {
           if (!pruneRoom(room, cutoff) && pages === 0) return false;
-          return expired ? room : true;
+          const graceExpired = now !== undefined && expireReconnectGrace(room, now);
+          return expired || graceExpired ? room : true;
         }, { prune: true });
         if (result && result !== true) changed.push(result);
       }

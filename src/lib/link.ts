@@ -6,6 +6,12 @@ import type { SiteConfig } from "./types";
 import { type Signal, ageText } from "./graph.ts";
 
 export const LINK_VERSION = 1;
+export const RESTART_CODE = 1012;
+export const RECYCLE_CODE = 4001;
+
+export function reconnectImmediately(code: number): boolean {
+  return code === RESTART_CODE || code === RECYCLE_CODE;
+}
 /** The message types of each direction, and the commands. contract.json `link` must hold the same lists. */
 export const LINK_TO_COORDINATOR = ["changed", "answer", "reply", "command"] as const;
 export const LINK_FROM_COORDINATOR = ["hello", "state", "asks", "progress", "ack", "wrote", "agents"] as const;

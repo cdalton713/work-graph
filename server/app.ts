@@ -74,6 +74,8 @@ export interface AppOptions {
   now?: () => number;
   /** The timers of the link heartbeat (tests). */
   linkTimers?: Timers;
+  linkMaxAgeMs?: number;
+  linkPongMs?: number;
   linkState?: LinkRoomState;
   linkBus?: LinkBus;
   redisUrl?: string;
@@ -139,7 +141,7 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  * The app for `rules`. `rules` is read on each request, so a change of `rules.tailnet` takes
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
-export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, human, stateDir = process.env.WG_STATE_DIR || undefined,
+export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, linkMaxAgeMs, linkPongMs, human, stateDir = process.env.WG_STATE_DIR || undefined,
   version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linkToken, linkState, linkBus, redisUrl, redisPrefix, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   if (linkToken && [...linkToken].length < 32) {
     throw new Error("WG_LINK_TOKEN must have at least 32 characters");
@@ -185,6 +187,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const hub = new LinkHub(
     now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers,
     store, redisState ?? linkState, redis && !readOnly ? redisLinkBus(redis, redisPrefix) : linkBus, rememberEnded,
+    { maxAgeMs: linkMaxAgeMs, pongMs: linkPongMs },
   );
   let logoutTimer: ReturnType<typeof setInterval> | undefined;
   let flushing: Promise<void> | undefined;

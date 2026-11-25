@@ -2558,7 +2558,8 @@ def contract():
         "statuses": list(CONTRACT_STATUSES),
         "satisfied": edges,
         "link": {"version": LINK_VERSION, "path": "/api/link", "to_coordinator": list(LINK_TO_COORDINATOR),
-                 "from_coordinator": list(LINK_FROM_COORDINATOR), "commands": list(LINK_COMMANDS)},
+                 "from_coordinator": list(LINK_FROM_COORDINATOR), "commands": list(LINK_COMMANDS),
+                 "close_codes": LINK_CLOSE_CODES},
     }
 
 
@@ -4286,6 +4287,7 @@ def publish(plan_dir, plan, head, lines, wait_interval=None, *, expected=None):
 # ---------------------------------------------------------------- link to the page server
 
 LINK_VERSION = 1  # the protocol `wg-link/1` (src/lib/link.ts of the page)
+LINK_CLOSE_CODES = {"restart": 1012, "recycle": 4001}
 LINK_OPEN_TIMEOUT = 3
 LINK_TO_COORDINATOR = ("changed", "answer", "reply", "command")
 LINK_FROM_COORDINATOR = ("hello", "state", "asks", "progress", "ack", "wrote", "agents")
@@ -4395,6 +4397,7 @@ class Link:
         self.workspace = workspace
         self.inbox, self.ws, self.reader = [], None, None
         self.cond = __import__("threading").Condition()
+        self.connection_lock = __import__("threading").RLock()
         self.retry_at = 0.0
         self.warned = False
         # The last state, asks and progress, sent again after each hello: a restarted server forgets them.
@@ -4417,6 +4420,10 @@ class Link:
         return link_envelope(self.session, self.project, kind, payload)
 
     def connect(self):
+        with self.connection_lock:
+            return self._connect()
+
+    def _connect(self):
         if self.ws or time.monotonic() < self.retry_at:
             return self.ws is not None
         stack = contextlib.ExitStack()
@@ -4446,6 +4453,9 @@ class Link:
         return True
 
     def read(self, ws):
+        from websockets.exceptions import ConnectionClosed
+
+        planned = False
         try:
             for raw in ws:
                 try:
@@ -4456,28 +4466,35 @@ class Link:
                     with self.cond:
                         self.inbox.append(message)
                         self.cond.notify_all()
+        except ConnectionClosed as error:
+            planned = error.rcvd is not None and error.rcvd.code in LINK_CLOSE_CODES.values()
         except Exception:
             pass
-        with self.cond:
+        with self.connection_lock:
             if self.ws is ws:
-                self.ws = None
-                self.retry_at = time.monotonic() + 5
-            self.cond.notify_all()
+                with self.cond:
+                    self.ws = None
+                    self.retry_at = 0 if planned else time.monotonic() + 5
+                    self.cond.notify_all()
+                if planned:
+                    self._connect()
+        with contextlib.suppress(Exception):
+            ws.stack.close()
 
     def send(self, kind, payload):
-        fresh = self.ws is None
-        if kind in LINK_REPLAYED:
-            self.last[kind] = payload
-        if not self.connect():
-            return False
-        if fresh and kind in LINK_REPLAYED:
-            return True  # connect sent it after hello
-        try:
-            self.ws.send(self.envelope(kind, payload))
-            return True
-        except Exception:
-            self.ws = None
-            return False
+        with self.connection_lock:
+            fresh = self.ws is None
+            if kind in LINK_REPLAYED:
+                self.last[kind] = payload
+            if not self._connect():
+                return False
+            if fresh and kind in LINK_REPLAYED:
+                return True  # connect sent it after hello
+            try:
+                self.ws.send(self.envelope(kind, payload))
+                return True
+            except Exception:
+                return False  # the reader handles the close and the retry
 
     def take(self, timeout=0.0):
         """The messages that came, after waiting up to `timeout` seconds for the first one."""
@@ -4506,7 +4523,8 @@ class Link:
         return []
 
     def close(self):
-        ws, self.ws = self.ws, None
+        with self.connection_lock:
+            ws, self.ws = self.ws, None
         if ws:
             with contextlib.suppress(Exception):
                 ws.stack.close()
@@ -4871,11 +4889,14 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
     print each `wait` and `note` line in full (terminal_lines)."""
     link = Link.open(plan_dir, plan)
     messages = link.take() if link else []
+    handled = set()
     try:
         while True:
             try:
                 keys = {e.get("identifier"): k for k, e in load_keymap(plan_dir).get("nodes", {}).items()}
-                extra, settled = link_lines(messages, keys, plan_dir)
+                unique = {m["id"]: m for m in messages}
+                extra, settled = link_lines([m for mid, m in unique.items() if mid not in handled], keys, plan_dir)
+                settled.extend(mid for mid in unique if mid in handled)
                 answers = answer_lines(plan_dir)
                 # An answer in Linear and its message give one line; the label also holds after a server restart.
                 marked = {text.split(":", 1)[0] for level, text in answers if level == "do"}
@@ -4911,6 +4932,7 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                     notify_effort(plan_dir, plan, lines, paused)
                     return 0
                 if link and settled:  # a `changed` that did not wake the coordinator is still read
+                    handled.update(settled)
                     link.send("ack", {"ids": settled})
                 notify_effort(plan_dir, plan, lines, paused)
             except (ReadError, OSError, json.JSONDecodeError) as e:

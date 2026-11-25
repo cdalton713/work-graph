@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import contract from "../../skills/work-graph/contract.json";
 import { ANSWERED_LABEL, AUTONOMY_DEFAULT, AUTONOMY_GROUP, AUTONOMY_LEVELS, autonomyOf, PAUSED_LABEL, pausedOf } from "./autonomy";
 import { REVIEW_DEFAULT, REVIEW_GROUP, REVIEW_LEVELS, REVIEW_PREFIX, reviewOf } from "./review";
-import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, agentState, agentsShown, liveJob, presenceText, canCommandCoordinator, pageLinkPath } from "./link";
+import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, RECYCLE_CODE, RESTART_CODE, agentState, agentsShown, liveJob, presenceText, canCommandCoordinator, pageLinkPath, reconnectImmediately } from "./link";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
+it("keeps the page connected across planned reconnects", () => {
+  expect([4001, 1012, 1000, 1006].map(reconnectImmediately)).toEqual([true, true, false, false]);
+});
 const coordinator = (over: Partial<CoordinatorPresence>): CoordinatorPresence => ({
   session: "s", host: "mac", plan: "/plans/a", connected: true, mode: "waiting", head: "phase 1", since: "2026-11-20T11:00:00Z", lastSeen: "2026-11-20T11:54:00Z", paused: false, ...over,
 });
@@ -77,10 +80,11 @@ describe("liveJob", () => {
 });
 
 describe("the link agrees with wg (contract.json)", () => {
-  it("has the same version, path, message types, and commands", () => {
+  it("has the same version, path, message types, commands, and close codes", () => {
     expect(contract.link).toEqual({
       version: LINK_VERSION, path: "/api/link", to_coordinator: [...LINK_TO_COORDINATOR],
       from_coordinator: [...LINK_FROM_COORDINATOR], commands: [...LINK_COMMANDS],
+      close_codes: { restart: RESTART_CODE, recycle: RECYCLE_CODE },
     });
   });
 });

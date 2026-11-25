@@ -16,6 +16,8 @@ const root = process.cwd();
 const app = createApp({ port: 443, tailnet: null, hosted: { host: hostedName.toLowerCase() } }, {
   team: config.workspaces[0].team, dist: join(root, "dist") + sep, human: config.human, workspaces: config.workspaces, auth: config.auth,
   linkToken: process.env.WG_LINK_TOKEN,
+  linkMaxAgeMs: Number(process.env.WG_LINK_MAX_AGE ?? 0) * 1000,
+  linkPongMs: process.env.WG_LINK_PONG_MS ? Number(process.env.WG_LINK_PONG_MS) : undefined,
   redisUrl: process.env.WG_REDIS_URL,
   redisPrefix: process.env.WG_REDIS_PREFIX || undefined,
   readOnly: true, watchMs: 0,

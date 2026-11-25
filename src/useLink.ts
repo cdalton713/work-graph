@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { type Agents, type Ask, type Envelope, type Presence, type Progress, type ProjectRef, projectKey } from "./lib/link";
+import { type Agents, type Ask, type Envelope, type Presence, type Progress, type ProjectRef, projectKey, reconnectImmediately } from "./lib/link";
 import { pageLink } from "./lib/site";
 
 export interface LinkState {
@@ -42,9 +42,14 @@ export function useLink(ref: ProjectRef | null, onChanged: () => void): LinkStat
         else if (m.type === "agents") setState((s) => ({ ...s, agentsBy: new Map(s.agentsBy).set(projectKey(m.project), m.payload as Agents) }));
         else if (m.type === "changed") changed.current();
       };
-      socket.onclose = () => {
+      socket.onclose = ({ code }) => {
+        if (stopped) return;
+        if (reconnectImmediately(code)) {
+          open();
+          return;
+        }
         setState((s) => ({ ...s, connected: false }));
-        if (!stopped) timer = window.setTimeout(open, delay);
+        timer = window.setTimeout(open, delay);
         delay = Math.min(delay * 2, 30_000);
       };
     };

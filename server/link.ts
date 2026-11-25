@@ -4,15 +4,16 @@
 import { randomUUID } from "node:crypto";
 import {
   type AgentRow, type CoordinatorPresence, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
-  type Presence, type ProjectRef, type ToCoordinator, type ToPage, projectKey,
+  type Presence, type ProjectRef, type ToCoordinator, type ToPage, projectKey, RECYCLE_CODE, RESTART_CODE,
 } from "../src/lib/link.ts";
 import type { RoomCounts } from "../src/lib/types.ts";
 import { memoryLinkBus, type LinkBus, type LinkEvent } from "./linkbus.ts";
-import { memoryLinkState, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
+import { expireReconnectGrace, memoryLinkState, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
 import { RedisCommandFailed, RedisUnavailable } from "./redis.ts";
 import { ASKS_MAX, type LinkState as SavedState, type Store } from "./store.ts";
 
 export { QUEUE_MAX } from "./linkstate.ts";
+export { RECYCLE_CODE, RESTART_CODE } from "../src/lib/link.ts";
 
 /**
  * One open WebSocket, as the hub uses it. A peer with `ping` takes part in the heartbeat: the hub pings it and
@@ -31,8 +32,7 @@ export const GONE_MS = 24 * 60 * 60_000;
 export const PING_MS = 20_000;
 /** A socket that sent no pong for this long is dead: a machine that sleeps, or a lost network. Messages do not count. */
 export const DEAD_MS = 45_000;
-/** The WebSocket close code of a server restart. A client connects again. */
-export const RESTART_CODE = 1012;
+export const RECONNECT_GRACE_MS = 15_000;
 /** How long `shutdown` waits for the sockets to close. */
 export const SHUTDOWN_MS = 3_000;
 
@@ -54,6 +54,7 @@ interface Socket {
   audience: "coordinator" | "page" | "viewer" | null;
   allows?: (project: ProjectRef) => boolean;
   deadline: (() => void) | null;
+  recycleAt: number;
   arm: () => void;
   closed: (lost?: boolean) => Promise<void>;
 }
@@ -108,6 +109,8 @@ export class LinkHub {
   private readonly shared: LinkRoomState;
   private readonly bus: LinkBus;
   private readonly onEnded: (id: string, expiresAt: number) => void;
+  private readonly maxAgeMs: number;
+  private readonly pongMs: number;
 
   constructor(
     now: () => Date = () => new Date(),
@@ -117,6 +120,7 @@ export class LinkHub {
     store: Store | null = null,
     shared: LinkRoomState = memoryLinkState(store),
     bus: LinkBus = memoryLinkBus(),
+    { maxAgeMs = 0, pongMs = DEAD_MS }: { maxAgeMs?: number; pongMs?: number } = {},
     onEnded: (id: string, expiresAt: number) => void = () => {},
   ) {
     this.now = now;
@@ -125,6 +129,8 @@ export class LinkHub {
     this.shared = shared;
     this.bus = bus;
     this.onEnded = onEnded;
+    this.maxAgeMs = Number.isFinite(maxAgeMs) && maxAgeMs > 0 ? maxAgeMs : 0;
+    this.pongMs = Number.isFinite(pongMs) && pongMs >= 0 ? pongMs : DEAD_MS;
     this.unsubscribe = bus.subscribe((event) => this.deliver(event));
   }
 
@@ -199,6 +205,7 @@ export class LinkHub {
   }
 
   private sendTo(socket: Socket, message: Envelope, sequence?: number) {
+    if (!this.canUse(socket)) return;
     if (sequence !== undefined) {
       const key = JSON.stringify([projectKey(message.project), message.type]);
       if (sequence <= (socket.lastSent.get(key) ?? -1)) return;
@@ -208,6 +215,7 @@ export class LinkHub {
   }
 
   private sendQueue(socket: Socket, messages: Envelope[], sequence: number, replay = false) {
+    if (!this.canUse(socket)) return;
     const last = socket.lastSent.get("queue") ?? -1;
     const previous = socket.queuedMessages;
     if (sequence <= last) {
@@ -281,12 +289,13 @@ export class LinkHub {
 
   /** Ping local sockets and prune expired shared state. */
   async beat() {
-    for (const socket of this.sockets.values()) socket.peer.ping?.();
+    for (const socket of this.sockets.values()) if (this.canUse(socket)) socket.peer.ping?.();
     try {
       if (this.shared.recoverWrites) await this.shared.recoverWrites();
       if (this.shared.renew) await this.renewSockets();
     } finally {
-      const changed = await this.shared.prune(this.now().getTime() - GONE_MS);
+      const now = this.now().getTime();
+      const changed = await this.shared.prune(now - GONE_MS, now);
       if (changed?.length) await this.send(changed.map((room) => this.announce(room)));
     }
   }
@@ -332,21 +341,25 @@ export class LinkHub {
   private track(socket: Socket, closed: (lost: boolean) => Promise<void>): Connection {
     const { peer } = socket;
     let done = false;
+    const cancelRecycle = Number.isFinite(socket.recycleAt)
+      ? this.timers.after(() => { this.canUse(socket); }, socket.recycleAt - this.now().getTime())
+      : undefined;
     socket.arm = () => {
       socket.deadline?.();
       socket.deadline = null;
-      if (done || !peer.ping || !this.stopBeat || this.stopping) return;
+      if (done || !peer.ping || !this.stopBeat || this.stopping || this.pongMs === 0) return;
       socket.deadline = this.timers.after(() => {
         socket.deadline = null;
         if (peer.terminate) peer.terminate();
         else peer.close();
         // The transport calls closed too, possibly much later.
         void socket.closed(true).catch(reportLinkError);
-      }, DEAD_MS);
+      }, this.pongMs);
     };
     socket.closed = async (lost = false) => {
       if (done) return;
       done = true;
+      cancelRecycle?.();
       socket.deadline?.();
       socket.deadline = null;
       this.sockets.delete(socket.id);
@@ -360,14 +373,24 @@ export class LinkHub {
     };
     this.sockets.set(socket.id, socket);
     socket.arm();
-    return { receive: async () => {}, closed: () => socket.closed(), pong: () => {
+    return { receive: async () => { this.canUse(socket); }, closed: () => socket.closed(), pong: () => {
+      if (!this.canUse(socket)) return;
       socket.arm();
       if (this.shared.renew && socket.ref && socket.leaseReady && this.sockets.has(socket.id)) void this.renewDue([socket]).catch(reportLinkError);
     } };
   }
 
+  private canUse(socket: Socket): boolean {
+    if (!this.sockets.has(socket.id)) return false;
+    if (this.closing || this.now().getTime() < socket.recycleAt) return true;
+    socket.peer.close(RECYCLE_CODE, "reconnect");
+    void socket.closed().catch(reportLinkError);
+    return false;
+  }
+
   private socket(peer: Peer, ref: ProjectRef | null, audience: Socket["audience"], allows?: Socket["allows"]): Socket {
-    return { id: randomUUID(), peer, ref, lastSent: new Map(), queuedMessages: new Map(), renewedAt: -Infinity, leaseReady: false, room: ref && projectKey(ref), audience, allows, deadline: null, arm: () => {}, closed: async () => {} };
+    const recycleAt = this.maxAgeMs > 0 ? this.now().getTime() + Math.floor(this.maxAgeMs * (1 - Math.random() / 10)) : Infinity;
+    return { id: randomUUID(), peer, ref, lastSent: new Map(), queuedMessages: new Map(), renewedAt: -Infinity, leaseReady: false, room: ref && projectKey(ref), audience, allows, deadline: null, recycleAt, arm: () => {}, closed: async () => {} };
   }
 
   /** An upgrade that the transport admitted while the hub stops also gets a restart close. */
@@ -402,11 +425,12 @@ export class LinkHub {
   }
 
   private roomPresence(room: LinkRoom): Presence {
-    const cutoff = this.now().getTime() - GONE_MS;
+    const now = this.now().getTime();
+    const cutoff = now - GONE_MS;
     const coordinators: CoordinatorPresence[] = [...room.coordinators.values()]
       .filter((c) => c.socket || Date.parse(c.lastSeen) >= cutoff)
       .map((c) => ({
-        session: c.hello.session, host: c.hello.host, plan: c.hello.plan, connected: !!c.socket,
+        session: c.hello.session, host: c.hello.host, plan: c.hello.plan, connected: !!c.socket || (c.reconnectUntil ?? 0) > now,
         mode: c.state?.mode ?? null, head: c.state?.head ?? null, since: c.since, lastSeen: c.lastSeen, lost: !!c.lost,
         paused: !!c.state?.lines.some((l) => l.level === "wait" && l.text.startsWith("paused ")),
       }))
@@ -542,19 +566,30 @@ export class LinkHub {
     const socket = this.socket(peer, ref, "coordinator");
     let session: string | null = null;
     const fail = (reason: string) => peer.close(1008, reason);
-    const release = (room: LinkRoom, at: string, lost = false) => {
+    const release = (room: LinkRoom, at: string, lost = false, reconnectUntil?: number) => {
       const current = [...room.coordinators.values()].find((coordinator) => coordinator.socket === socket.id);
       if (!current) return false;
       Object.assign(current, { socket: null, lost, lastSeen: at });
+      if (reconnectUntil !== undefined) current.reconnectUntil = reconnectUntil;
       return true;
     };
     const connection = this.track(socket, async (lost) => {
       const at = this.now().toISOString();
+      const grace = this.maxAgeMs > 0;
+      const reconnectUntil = grace ? Date.parse(at) + RECONNECT_GRACE_MS : undefined;
       const room = await this.shared.edit(ref, (room) => {
         room.sockets.delete(socket.id);
-        return release(room, at, lost) ? room : null;
+        return release(room, at, lost, reconnectUntil) ? room : null;
       });
-      if (room) await this.send([this.announce(room)]);
+      if (!room) return;
+      if (reconnectUntil === undefined) {
+        await this.send([this.announce(room)]);
+      } else {
+        this.timers.after(() => {
+          void this.shared.edit(ref, (room) => expireReconnectGrace(room, this.now().getTime()) ? room : null)
+            .then((expired) => expired && this.send([this.announce(expired)])).catch(reportLinkError);
+        }, Math.max(0, reconnectUntil - this.now().getTime()));
+      }
     });
     try {
       await this.shared.edit(ref, (room) => { room.sockets.set(socket.id, "coordinator"); });
@@ -567,6 +602,7 @@ export class LinkHub {
       pong: connection.pong,
       closed: connection.closed,
       receive: async (raw) => {
+        if (!this.canUse(socket)) return;
         let message: unknown;
         try { message = JSON.parse(raw); } catch { return fail("message is not JSON"); }
         if (!isObject(message) || message.v !== LINK_VERSION || typeof message.type !== "string") return fail(`not a wg-link/${LINK_VERSION} message`);
@@ -604,7 +640,8 @@ export class LinkHub {
             if (session !== hello.session) release(room, at);
             const old = room.coordinators.get(hello.session);
             room.coordinators.set(hello.session, {
-              socket: socket.id, hello, state: old?.state ?? null, since: old?.socket ? old.since : at, lastSeen: at,
+              socket: socket.id, hello, state: old?.state ?? null,
+              since: old && (old.socket || (old.reconnectUntil ?? 0) > Date.parse(at)) ? old.since : at, lastSeen: at,
             });
             return { room, replaced: old?.socket };
           });

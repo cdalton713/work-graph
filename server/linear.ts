@@ -1,6 +1,7 @@
 // Linear GraphQL access for the work-graph UI. The API key stays in this process.
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Comment, GraphData, Issue, IssuePatch, IssueRef, Label, Milestone, Person, Project, PullRequest, State, Team } from "../src/lib/types.ts";
-import { currentSite } from "../src/lib/site.ts";
+import { serverSite } from "./site.ts";
 import { ANSWERED_LABEL, AUTONOMY_GROUP, type AutonomyLevel, autonomyOf, PAUSED_LABEL, pausedOf, SHARED_LABEL, sharedOf } from "../src/lib/autonomy.ts";
 import { REVIEW_GROUP, type ReviewEffort, reviewLabel, reviewOf } from "../src/lib/review.ts";
 import { linearWorkspace } from "./workspaces.ts";
@@ -119,12 +120,28 @@ export interface LinearBudget {
   /** When the server read these values, epoch ms. */
   at: number;
 }
-const budgets = new Map<string, LinearBudget>();
-const workspaceId = () => linearWorkspace.getStore()?.id ?? "default";
+type LinearMeta = { at: number; teams: Record<string, Team>; labels: Label[] };
+
+export function createLinearCache() {
+  return { budgets: new Map<string, LinearBudget>(), meta: new Map<string, LinearMeta>() };
+}
+
+export const linearCache = new AsyncLocalStorage<ReturnType<typeof createLinearCache>>();
+function currentCache() {
+  const cache = linearCache.getStore();
+  if (!cache) throw new Error("Linear operation needs a tenant");
+  return cache;
+}
+
+function workspaceOf() {
+  const workspace = linearWorkspace.getStore();
+  if (!workspace) throw new Error("Linear operation needs a workspace");
+  return workspace;
+}
 
 /** The last rate-limit values of a workspace (default: the workspace of this request), or null before the first response. */
-export function linearBudget(workspace: string = workspaceId()): LinearBudget | null {
-  return budgets.get(workspace) ?? null;
+export function linearBudget(workspace: string = workspaceOf().id): LinearBudget | null {
+  return currentCache().budgets.get(workspace) ?? null;
 }
 
 function keepBudget(headers: Headers | undefined): void {
@@ -141,7 +158,7 @@ function keepBudget(headers: Headers | undefined): void {
     complexityReset: number("complexity-reset"),
     at: transport.now(),
   };
-  if (Object.entries(budget).some(([k, v]) => k !== "at" && v !== null)) budgets.set(workspaceId(), budget);
+  if (Object.entries(budget).some(([k, v]) => k !== "at" && v !== null)) currentCache().budgets.set(workspaceOf().id, budget);
 }
 
 /** Why a try failed, as far as the retry rule needs it. */
@@ -196,7 +213,9 @@ function transportFailure(error: unknown): { failure: Failure; error: LinearErro
 interface GraphQLError { message: string; extensions?: { code?: string } }
 
 export async function gql(query: string, variables: Record<string, unknown> = {}): Promise<Data> {
-  const key = linearWorkspace.getStore()?.key ?? process.env.LINEAR_API_KEY;
+  const { key } = workspaceOf();
+  currentCache();
+  serverSite();
   if (!key) throw new LinearError("LINEAR_API_KEY is not set", 500);
   const mutation = isMutation(query);
   const init = (): RequestInit => ({
@@ -442,7 +461,7 @@ async function setGroupLabel(projectId: string, teamKey: string, teamScoped: boo
  * so a pause survives a restart of this server; `wg next` reads it. Same scope rule as the autonomy label.
  */
 export const setPaused = (projectId: string, paused: boolean, teamKey: string, teamScoped: boolean): Promise<void> =>
-  setPlainLabel(projectId, PAUSED_LABEL, paused, teamKey, teamScoped, `work-graph: the coordinator holds each action until ${currentSite().human} resumes the effort.`);
+  setPlainLabel(projectId, PAUSED_LABEL, paused, teamKey, teamScoped, `work-graph: the coordinator holds each action until ${serverSite().human} resumes the effort.`);
 
 /** Shares a project with the read-only viewer, or stops that: the plain project label `shared` is the record. */
 export const setShared = (projectId: string, shared: boolean, teamKey: string, teamScoped: boolean): Promise<void> =>
@@ -619,7 +638,6 @@ export async function changedProjects(ids: string[], since: string): Promise<Map
 
 /** The states, members, and labels of the teams change seldom: one load serves ten minutes. */
 const META_MS = 10 * 60_000;
-const metaCache = new Map<string, { at: number; teams: Record<string, Team>; labels: Label[] }>();
 
 export async function loadGraph(projectId: string): Promise<GraphData> {
   const head = await gql(
@@ -659,7 +677,8 @@ export async function loadGraph(projectId: string): Promise<GraphData> {
   await addReviewUrls(issues);
   let teams: Record<string, Team> = {};
   let labels: Label[] = [];
-  const metaKey = `${linearWorkspace.getStore()?.id ?? currentSite().defaultWorkspace}:${[...teamIds].sort().join(",")}`;
+  const metaKey = `${workspaceOf().id}:${[...teamIds].sort().join(",")}`;
+  const metaCache = currentCache().meta;
   const meta = metaCache.get(metaKey);
   if (meta && Date.now() - meta.at < META_MS) ({ teams, labels } = meta);
   else if (teamIds.length) {

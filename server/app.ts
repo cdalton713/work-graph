@@ -1,5 +1,6 @@
 // The Hono app of the work-graph UI: static files from dist/ and a small JSON API over Linear.
-import { createHash, timingSafeEqual } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
@@ -11,14 +12,14 @@ import { compress } from "hono/compress";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { type OverviewData, type ProjectSummary, summarize } from "../src/lib/overview.ts";
 import { parseCard, statusName } from "../src/lib/graph.ts";
-import { type Changed, type ProjectRef, projectKey } from "../src/lib/link.ts";
+import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from "../src/lib/link.ts";
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal } from "./access.ts";
 import { type Auth, type Session, LOGIN_PATH, authRoutes, sessionOf } from "./auth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { LinearError, addComment, linearBudget, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
+import { LinearError, addComment, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, LinkHub, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
@@ -27,8 +28,9 @@ import { connectRedis, RedisCommandFailed, RedisUnavailable } from "./redis.ts";
 import type { LinkRoomState } from "./linkstate.ts";
 import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
-import { createSite, currentSite, DEFAULT_HUMAN } from "../src/lib/site.ts";
-import { requestSite } from "./site.ts";
+import { createSite, DEFAULT_HUMAN } from "../src/lib/site.ts";
+import { requestSite, serverSite } from "./site.ts";
+import { CONFIG_TENANT_ID, configTenants, TENANT_IDLE_MS, type Tenant, type Tenants } from "./tenants.ts";
 
 /** How many project graphs the overview loads at the same time. */
 const OVERVIEW_LOADS = 4;
@@ -61,6 +63,7 @@ async function json<T>(body: Promise<T>): Promise<T> {
 }
 
 export interface AppOptions {
+  tenants?: Tenants;
   /** The configured workspaces; the first is the default. */
   workspaces?: Workspace[];
   /** The human's name (config `human`). */
@@ -143,33 +146,65 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
 export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, linkMaxAgeMs, linkPongMs, human, stateDir = process.env.WG_STATE_DIR || undefined,
-  version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linkToken, linkState, linkBus, redisUrl, redisPrefix, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
+  version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linkToken, linkState, linkBus, redisUrl, redisPrefix, tenants, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   if (linkToken && [...linkToken].length < 32) {
     throw new Error("WG_LINK_TOKEN must have at least 32 characters");
   }
   const digest = (value: string) => createHash("sha256").update(value).digest();
-  const linkCredential = linkToken ? digest(`Bearer ${linkToken}`) : null;
-  const hasLinkToken = (authorization: string | undefined) =>
-    linkCredential !== null && authorization !== undefined && timingSafeEqual(digest(authorization), linkCredential);
   // A sign-in gives each account of the domain the same rights, so it is only for a page that changes nothing.
   // Google sends the browser back to the HTTPS name of the page, which only a hosted page has.
   if (auth && !rules.hosted) throw new Error("the sign-in needs a hosted page (WG_HOSTED)");
-  if (auth && !readOnly && !auth.owners?.length) throw new Error("the sign-in needs auth.owners on a full page");
-  if (auth && !readOnly && !linkCredential) throw new Error("the sign-in needs WG_LINK_TOKEN on a full page");
-  const roleOf = (email: string | undefined): SiteConfig["role"] => {
-    if (auth && !email) return null;
-    if (readOnly || (email && !auth?.owners?.includes(email))) return "viewer";
-    return "owner";
-  };
-  // The overview and the graph rules on the server use the same names as the page.
-  const installationSite = createSite(human ?? DEFAULT_HUMAN, workspaces[0].id);
+  if (!tenants && auth && !readOnly && !auth.owners?.length) throw new Error("the sign-in needs auth.owners on a full page");
+  if (!tenants && auth && !readOnly && !linkToken) throw new Error("the sign-in needs WG_LINK_TOKEN on a full page");
+  const configured = configTenants({ human: human ?? DEFAULT_HUMAN, workspaces, auth, linkToken, readOnly });
+  const directory = tenants ?? configured;
+  const requiresLinkToken = !!linkToken;
+  // The config link uses workspace IDs for rooms. It needs tenant-aware rooms before it can serve other providers.
+  const linkEnabled = !tenants && !readOnly;
+  const siteOf = (tenant: Tenant) => createSite(tenant.human, tenant.workspaces[0]?.id ?? "default");
+  const installationSite = createSite(human ?? DEFAULT_HUMAN, workspaces[0]?.id ?? "default");
   const clock = now ?? Date.now;
   const started = clock();
   const contract = contractHash(contractFile);
   const app = new Hono();
-  app.use((_c, next) => requestSite.run(installationSite, next));
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
-  const caches = new Map(workspaces.map((w) => [w.id, createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now })]));
+  type CachedList = { at: number; list: ProjectList | null };
+  const newList = (): CachedList => ({ at: 0, list: null });
+  const newState = () => ({
+    graphs: new Map<string, ReturnType<typeof createGraphCache>>(),
+    linear: createLinearCache(),
+    names: newList(), sharedNames: newList(),
+    lists: { started: 0, stored: 0 },
+    sharedRefresh: undefined as Promise<ProjectList> | undefined,
+    seen: new Map<string, Map<string, string>>(),
+    lastUsed: clock(), active: 0,
+  });
+  const states = new Map<string, ReturnType<typeof newState>>();
+  const tenantScope = new AsyncLocalStorage<{ tenant: Tenant; state: ReturnType<typeof newState> }>();
+  const scope = () => {
+    const current = tenantScope.getStore();
+    if (!current) throw new Error("server operation needs a tenant");
+    serverSite();
+    return current;
+  };
+  const stopWatching = directory.onChange((id) => { states.delete(id); });
+  const runInTenant = async <T>(tenant: Tenant, run: () => Promise<T>): Promise<T> => {
+    let state = states.get(tenant.id);
+    if (!state) states.set(tenant.id, state = newState());
+    state.active++;
+    try {
+      return await tenantScope.run({ tenant, state }, () => requestSite.run(siteOf(tenant), () => linearCache.run(state.linear, run)));
+    } finally {
+      state.active--;
+      state.lastUsed = clock();
+    }
+  };
+  const graphCache = (id: string) => {
+    const { graphs } = scope().state;
+    let cache = graphs.get(id);
+    if (!cache) graphs.set(id, cache = createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now }));
+    return cache;
+  };
   // `wrote` from wg: forget the cached graph of that project, so the pages that load again see the change.
   const ended = new Map<string, number>();
   const pendingLogout = new Map<string, number>();
@@ -177,20 +212,35 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     for (const [session, expiry] of ended) if (expiry <= clock()) ended.delete(session);
     if (expiresAt > clock()) ended.set(id, Math.max(expiresAt, ended.get(id) ?? 0));
   };
-  const redis = redisUrl ? connectRedis(redisUrl, redisPrefix, (ready) => {
+  const redis = !tenants && redisUrl ? connectRedis(redisUrl, redisPrefix, (ready) => {
     if (ready) {
-      for (const cache of caches.values()) cache.clear();
+      for (const cache of states.get(CONFIG_TENANT_ID)?.graphs.values() ?? []) cache.clear();
       void flushLogouts();
     } else if (hub.hasSockets) hub.restartSockets();
   }, readOnly, undefined, () => hub.hasSockets) : null;
   const redisState = redis ? redisLinkState(redis, redisPrefix, undefined, linkMaxAgeMs ? RECONNECT_GRACE_MS : 0) : null;
   if (redis && stateDir) console.log("Redis link store ignores WG_STATE_DIR");
-  const store = redis || linkState ? null : linkStore(stateDir, dist, workspaces, (linkTimers ?? realLinkTimers).after);
+  const store = tenants || redis || linkState ? null : linkStore(stateDir, dist, workspaces, (linkTimers ?? realLinkTimers).after);
   const hub = new LinkHub(
-    now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers,
-    store, redisState ?? linkState, redis && !readOnly ? redisLinkBus(redis, redisPrefix) : linkBus,
+    now ? () => new Date(now()) : undefined, (ref) => {
+      if (!tenants) states.get(CONFIG_TENANT_ID)?.graphs.get(ref.workspace)?.clear(ref.id || undefined);
+    }, linkTimers,
+    store, tenants ? undefined : redisState ?? linkState, redis && !readOnly ? redisLinkBus(redis, redisPrefix) : tenants ? undefined : linkBus,
     { maxAgeMs: linkMaxAgeMs, pongMs: linkPongMs, site: installationSite }, rememberEnded,
   );
+  const dropIdle = async (id: string) => {
+    const state = states.get(id);
+    if (!state) return;
+    const idle = () => !state.active && clock() - state.lastUsed >= TENANT_IDLE_MS;
+    if (!idle()) return;
+    if (linkEnabled && id === CONFIG_TENANT_ID
+      && (await linkRead(() => hub.active({ includeGrace: false }), [])).length) return;
+    if (states.get(id) === state && idle()) states.delete(id);
+  };
+  const idleTimer = setInterval(() => {
+    void Promise.all([...states.keys()].map(dropIdle)).catch(reportLinkError);
+  }, TENANT_IDLE_MS);
+  idleTimer.unref();
   let logoutTimer: ReturnType<typeof setInterval> | undefined;
   let flushing: Promise<void> | undefined;
   function flushLogouts(): Promise<void> {
@@ -266,7 +316,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       reportLinkError(error);
     }
   };
-  if (!readOnly) hub.start();
+  if (linkEnabled) hub.start();
   app.use(async (c, next) => {
     await next();
     // Vite puts a hash of the content in each name under assets/, so such a file never changes.
@@ -288,7 +338,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
   app.get("/healthz", (c) => c.json({ ok: true }));
 
-  const graphs = () => caches.get(linearWorkspace.getStore()!.id)!;
+  const graphs = () => graphCache(linearWorkspace.getStore()!.id);
   /**
    * The graph as this page may show it. The full page shows each issue of another project that has a blocks
    * relation with an issue of the project. The viewer shows the project only: such an issue can be in a project
@@ -325,8 +375,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
    * graphs of the workspace.
    */
   const wrote = async <T>(result: T, projectId: string | null | undefined): Promise<T> => {
-    graphs().clear(projectId ?? undefined);
-    await hub.invalidate({ workspace: linearWorkspace.getStore()!.id, id: projectId ?? "" });
+    const workspace = linearWorkspace.getStore()!.id;
+    states.get(scope().tenant.id)?.graphs.get(workspace)?.clear(projectId ?? undefined);
+    if (linkEnabled) await hub.invalidate({ workspace, id: projectId ?? "" });
     return result;
   };
   /** Records the project of the issue that a write changes, for `wrote`. */
@@ -335,9 +386,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     return seen;
   };
   /** One request for each workspace: which of these projects changed. Then each `get` of an unchanged project is free. */
-  const checkAll = (refs: { workspace?: string; id: string }[]) => Promise.all(workspaces.map((workspace) => {
+  const checkAll = (refs: { workspace?: string; id: string }[]) => Promise.all(scope().tenant.workspaces.map((workspace) => {
     const ids = refs.filter((r) => r.workspace === workspace.id).map((r) => r.id);
-    return ids.length ? linearWorkspace.run(workspace, () => caches.get(workspace.id)!.check(ids)) : null;
+    return ids.length ? linearWorkspace.run(workspace, () => graphCache(workspace.id).check(ids)) : null;
   }));
   /** The project of a page request (`x-project`), for the link. A request with no project tells no coordinator. */
   const pageProject = (header: (name: string) => string | undefined): ProjectRef | null => {
@@ -360,11 +411,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   };
   const noticeId = (key: string | undefined, route: string) =>
     key && key.length <= 256 ? digest(JSON.stringify([route, key])).toString("hex") : undefined;
+  const enqueueLink = <T extends keyof ToCoordinator>(ref: ProjectRef, type: T, payload: ToCoordinator[T], answeredAsk?: string, id?: string) =>
+    linkEnabled ? hub.enqueue(ref, type, payload, answeredAsk, id) : Promise.resolve({ queued: 0 });
   const pageChanged = async (ref: ProjectRef | null, what: Changed["what"], issues: string[], id?: string) => {
-    if (ref) await notify(() => hub.enqueue(ref, "changed", { by: "page", what, issues }, undefined, id), undefined);
+    if (ref) await notify(() => enqueueLink(ref, "changed", { by: "page", what, issues }, undefined, id), undefined);
   };
-  /** The count of lists started and the order of the latest list used for shared access. */
-  const lists = { started: 0, stored: 0 };
   // wg doctor uses status. wg wake uses project presence.
   const coordinatorReads = [/^\/api\/status$/, /^\/api\/projects\/[^/]+\/presence$/];
   const api = new Hono<{ Variables: { viewer: boolean } }>();
@@ -381,44 +432,63 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       await redis.checkWrites();
       await flushLogouts();
     }
-    const role = roleOf(session?.email);
+    const membership = await directory.fromSession(session);
+    const role = membership?.role ?? null;
     const viewer = readOnly || role === "viewer";
     if (viewer && method !== "GET" && method !== "HEAD") return c.json({ error: "this page is read-only" }, 405);
     const reason = refusal(method, header, rules);
     if (reason) return c.json({ error: reason }, 403);
     if (c.req.path === "/api/config" && (method === "GET" || method === "HEAD")) {
+      const tenant = membership?.tenant ?? (!tenants ? await directory.byId(CONFIG_TENANT_ID) : null);
+      const site = tenant ? siteOf(tenant) : createSite(DEFAULT_HUMAN, "default");
+      if (membership) {
+        await dropIdle(membership.tenant.id);
+        const state = states.get(membership.tenant.id);
+        if (state) state.lastUsed = clock();
+      }
       return c.json<SiteConfig & { linkStore?: ServerStatus["linkStore"] }>({
-        human: currentSite().human, defaultWorkspace: currentSite().defaultWorkspace, contract, version,
-        readOnly: viewer, auth: !!auth, user: session?.email ?? null, role,
+        human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version,
+        readOnly: viewer, auth: !!auth, user: membership ? session?.email ?? null : null, role,
         linkStore: readOnly ? undefined : redis ? "redis" : "memory",
-        link: !readOnly && role ? "/api/link" : null,
+        link: linkEnabled && role ? "/api/link" : null,
       });
     }
-    const tokenRead = method === "GET" && (readOnly || coordinatorReads.some((route) => route.test(c.req.path)))
-      && hasLinkToken(header("authorization"));
-    if (auth && !session && !tokenRead) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
-    c.set("viewer", viewer);
-    await next();
+    const tokenTenant = method === "GET" && (readOnly || coordinatorReads.some((route) => route.test(c.req.path)))
+      ? await directory.fromToken(header("authorization")) : null;
+    const tenant = tokenTenant ?? membership?.tenant;
+    if (!tenant) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    const listsWorkspaces = /^\/api\/(status|projects|overview)$/.test(c.req.path);
+    const selected = !tenants && listsWorkspaces ? undefined : header("x-workspace") || c.req.query("workspace");
+    const id = selected || tenant.workspaces[0]?.id;
+    const workspace = tenant.workspaces.find((w) => w.id === id);
+    if (!workspace && (selected || !listsWorkspaces)) {
+      return c.json({ error: `workspace ${id ?? "default"} is not configured` }, 400);
+    }
+    c.set("viewer", tenants && tokenTenant ? readOnly : viewer);
+    await dropIdle(tenant.id);
+    await runInTenant(tenant, () => workspace ? linearWorkspace.run(workspace, next) : next());
   });
   // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
   api.get("/status", async (c) => {
-    const rooms = (redis && (readOnly || !redis.ready)) || (!readOnly && c.var.viewer)
+    const { tenant, state } = scope();
+    const rooms = tenants || (redis && (readOnly || !redis.ready)) || (!readOnly && c.var.viewer)
       ? [] : await linkRead(() => hub.counts(), []);
     return c.json<ServerStatus & Pick<SiteConfig, "readOnly" | "link">>({
       version, contract, uptime: Math.floor((clock() - started) / 1000),
-      readOnly: c.var.viewer, link: readOnly ? null : "/api/link",
-      workspaces: workspaces.map(({ id, name }) => {
+      readOnly: c.var.viewer, link: linkEnabled ? "/api/link" : null,
+      workspaces: tenant.workspaces.map(({ id, name }) => {
         const budget = linearBudget(id);
         return { id, name, requestsRemaining: budget?.requestsRemaining ?? null, requestsLimit: budget?.requestsLimit ?? null,
           requestsReset: budget?.requestsReset ?? null, complexityRemaining: budget?.complexityRemaining ?? null,
           complexityReset: budget?.complexityReset ?? null, at: budget?.at ?? null };
       }),
-      cache: !readOnly && c.var.viewer ? 0 : [...caches.values()].reduce((sum, cache) => sum + cache.size(), 0),
+      cache: !readOnly && c.var.viewer ? 0 : [...state.graphs.values()].reduce((sum, cache) => sum + cache.size(), 0),
       rooms, linkStore: redis ? "redis" : "memory", redisReady: redis?.ready ?? null,
     });
   });
   api.use(bodyLimit({ maxSize: 2_000_000, onError: (c) => c.json({ error: "request body too large" }, 413) }));
   const projectList = async (viewer = false): Promise<ProjectList> => {
+    const { tenant: { workspaces }, state: { lists, sharedNames } } = scope();
     const order = ++lists.started;
     const results = await Promise.allSettled(workspaces.map((workspace) =>
       linearWorkspace.run(workspace, () => listProjects(workspace.team)),
@@ -438,7 +508,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     };
     const shared = { ...list, projects: list.projects.filter((p) => p.shared) };
     // A slower list that started earlier cannot restore a share removed from the newer list.
-    if ((auth || readOnly) && order > lists.stored) {
+    if ((tenants || auth || readOnly) && order > lists.stored) {
       lists.stored = order;
       sharedNames.list = shared;
       sharedNames.at = Date.now();
@@ -449,6 +519,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // The projects with a summary of each open one. The graphs come from the same cache as the graph
   // route, a few at a time, so a poll of the overview costs about one cheap check for each project.
   api.get("/overview", async (c) => {
+    const { workspaces } = scope().tenant;
     const viewer = c.var.viewer;
     const list = await projectList(viewer);
     const open = list.projects.filter((p) => p.statusType !== "completed" && p.statusType !== "canceled");
@@ -461,7 +532,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const workspace = workspaces.find((w) => w.id === p.workspace)!;
         try {
           // The viewer takes no older graph when Linear fails (see the graph route).
-          const { data } = await linearWorkspace.run(workspace, () => caches.get(workspace.id)!.get(p.id, { fresh: viewer }));
+          const { data } = await linearWorkspace.run(workspace, () => graphs().get(p.id, { fresh: viewer }));
           summaries.push(summarize(shown(data, viewer), p.workspace));
         } catch (error) {
           summaries.push({ workspace: p.workspace, id: p.id, planned: 0, done: 0, counts: [], you: [], running: 0, review: 0, ready: 0,
@@ -472,12 +543,6 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await Promise.all(Array.from({ length: Math.min(OVERVIEW_LOADS, open.length) }, worker));
     return c.json<OverviewData>({ ...list, summaries });
   });
-  api.use(async (c, next) => {
-    const id = c.req.header("x-workspace") || currentSite().defaultWorkspace;
-    const workspace = workspaces.find((w) => w.id === id);
-    if (!workspace) return c.json({ error: `workspace ${id} is not configured` }, 400);
-    return linearWorkspace.run(workspace, next);
-  });
   /**
    * The viewer: the request may read this project only when its owner shared it. The list is at most 60 s old, so a
    * project that lost the label goes away in that time. A project that is not in the list makes the server read the
@@ -485,12 +550,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
    * When Linear does not give the list, the answer is 503 and no older list counts: the server gives a project only
    * while it knows that the project is shared. Each server process has its own list.
    */
-  let sharedRefresh: Promise<ProjectList> | undefined;
   const sharedProject = async (id: string | undefined, workspace = linearWorkspace.getStore()!.id): Promise<string> => {
+    const { state } = scope();
+    const { sharedNames } = state;
     const find = () => sharedNames.list?.projects.find((p) => p.workspace === workspace && p.id === id);
     if (id && Date.now() - sharedNames.at > (find() ? 60_000 : 5_000)) {
-      sharedRefresh ??= projectList().finally(() => { sharedRefresh = undefined; });
-      await sharedRefresh;
+      state.sharedRefresh ??= projectList().finally(() => { state.sharedRefresh = undefined; });
+      await state.sharedRefresh;
     }
     if (sharedNames.list?.workspaces.find((w) => w.id === workspace)?.error) throw new LinearError("Linear did not confirm that this project is shared. Try again.", 503);
     if (!id || !find()) throw new LinearError("no shared project with this id", 404);
@@ -538,10 +604,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (name === "pause" || name === "resume") {
       const workspace = linearWorkspace.getStore()!;
       await setPaused(ref.id, name === "pause", workspace.team, workspace.teamLabels);
-      names.at = 0;
+      scope().state.names.at = 0;
       await wrote(null, ref.id);
     }
-    const enqueue = () => hub.enqueue(ref, "command", { name, key: typeof key === "string" ? key : null, issue: identifier },
+    const enqueue = () => enqueueLink(ref, "command", { name, key: typeof key === "string" ? key : null, issue: identifier },
       undefined, noticeId(c.req.header("Idempotency-Key"), name));
     const { queued } = name === "next" ? await enqueue() : await notify(enqueue, { queued: 0 });
     return c.json({ ok: true, queued });
@@ -552,8 +618,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const ref = { workspace: linearWorkspace.getStore()!.id, id: c.req.param("id") };
     if (!readOnly && c.var.viewer) {
       await sharedProject(ref.id, ref.workspace);
+      if (tenants) return c.json({ coordinators: [], queued: 0, waiting: 0 });
       return c.json({ ...await linkRead(() => hub.viewerPresence(ref), { coordinators: [], queued: 0 }), waiting: 0 });
     }
+    if (tenants) return c.json({ coordinators: [], queued: 0, waiting: 0 });
     const presence = await linkRead(async () => ({ ...await hub.presence(ref), waiting: await hub.waiting(ref) }), {
       coordinators: [], queued: 0, waiting: 0,
     });
@@ -567,9 +635,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const workspace = linearWorkspace.getStore()!;
     const ref = { workspace: workspace.id, id: c.req.param("id") };
     await setAutonomy(ref.id, level, workspace.team, workspace.teamLabels);
-    names.at = 0;
+    scope().state.names.at = 0;
     await wrote(null, ref.id);
-    const { queued } = await notify(() => hub.enqueue(ref, "command", { name: "autonomy", key: null, issue: null, level },
+    const { queued } = await notify(() => enqueueLink(ref, "command", { name: "autonomy", key: null, issue: null, level },
       undefined, noticeId(c.req.header("Idempotency-Key"), "autonomy")), { queued: 0 });
     return c.json({ ok: true, level, queued });
   });
@@ -581,9 +649,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const workspace = linearWorkspace.getStore()!;
     const ref = { workspace: workspace.id, id: c.req.param("id") };
     await setReviewEffort(ref.id, level, workspace.team, workspace.teamLabels);
-    names.at = 0;
+    scope().state.names.at = 0;
     await wrote(null, ref.id);
-    const { queued } = await notify(() => hub.enqueue(ref, "command", { name: "next", key: null, issue: null },
+    const { queued } = await notify(() => enqueueLink(ref, "command", { name: "next", key: null, issue: null },
       undefined, noticeId(c.req.header("Idempotency-Key"), "review-effort")), { queued: 0 });
     return c.json({ ok: true, level, queued });
   });
@@ -594,6 +662,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (typeof shared !== "boolean") throw new LinearError("shared must be true or false", 400);
     const workspace = linearWorkspace.getStore()!;
     await setShared(c.req.param("id"), shared, workspace.team, workspace.teamLabels);
+    const { names, sharedNames, lists } = scope().state;
     names.at = 0;
     // A viewer can get 404 while the list is empty, until the next list confirms the share.
     sharedNames.at = 0;
@@ -608,7 +677,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const { body } = await json(c.req.json<{ body?: unknown }>());
     if (typeof body !== "string" || !body.trim()) throw new LinearError("reply body is empty", 400);
     const ref = { workspace: linearWorkspace.getStore()!.id, id: c.req.param("id") };
-    const ask = await hub.ask(ref, c.req.param("ask"));
+    const ask = linkEnabled ? await hub.ask(ref, c.req.param("ask")) : null;
     if (!ask) throw new LinearError("no open question with this id: it was answered, or the coordinator has not reported it", 404);
     // Which issues are in the project decides whether the reply is saved in Linear: a stale graph is not enough.
     // A failed refresh stops the route here, and the question stays open.
@@ -652,7 +721,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // The comment is saved before the label: when the label fails, the answer is still 200. A retry from
     // the page would write a second comment, so the coordinator gets the message, and `answered: false`
     // tells the page that the label is missing.
-    if (ref && info?.status === currentSite().waitStatus) {
+    if (ref && info?.status === serverSite().waitStatus) {
       let answered = true;
       try {
         await markAnswered(c.req.param("id"));
@@ -661,7 +730,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         console.warn(`wg ui: comment saved, but the answered label failed: ${(error as Error).message}`);
       }
       await wrote(null, written.id);
-      await notify(() => hub.enqueue(ref, "answer", { issue: info.identifier, key: info.key, body: comment.body },
+      await notify(() => enqueueLink(ref, "answer", { issue: info.identifier, key: info.key, body: comment.body },
         undefined, noticeId(c.req.header("Idempotency-Key"), "answer:" + c.req.param("id"))), undefined);
       return c.json({ ...comment, answered });
     }
@@ -670,9 +739,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   api.all("*", (c) => c.json({ error: `no route ${c.req.method} ${c.req.path}` }, 404));
   // The link (src/lib/link.ts): `?role=page|coordinator&workspace=<id>&project=<id or name>`. A page
   // with no project is the overview. Each coordinator of each project has its own connection.
-  const names = { at: 0, list: null as ProjectList | null };
-  const sharedNames = { at: 0, list: null as ProjectList | null };
   const resolve = async (workspace: string, wanted: string): Promise<Project | null> => {
+    const { names } = scope().state;
     const find = (list: ProjectList | null) => list?.projects.find((p) => p.workspace === workspace
       && (p.id === wanted || p.name.toLowerCase() === wanted.toLowerCase())) ?? null;
     let found = Date.now() - names.at < 60_000 ? find(names.list) : null;
@@ -685,11 +753,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   };
   app.get("/api/link", async (c, next) => {
     // The viewer has no link: a coordinator connects to the full page only.
-    if (readOnly) return c.json({ error: "this page has no link" }, 404);
+    if (!linkEnabled) return c.json({ error: "this page has no link" }, 404);
     const role = c.req.query("role") ?? "";
     const reason = linkRefusal(role, (name) => c.req.header(name), rules);
     if (reason) return c.json({ error: reason }, 403);
-    if (role === "coordinator" && linkCredential !== null && !hasLinkToken(c.req.header("authorization"))) {
+    const tokenTenant = role === "coordinator" && requiresLinkToken ? await directory.fromToken(c.req.header("authorization")) : null;
+    if (role === "coordinator" && requiresLinkToken && !tokenTenant) {
       return c.json({ error: "coordinator token required" }, 401);
     }
     const restarting = () => c.json({ error: "the server restarts" }, 503);
@@ -697,12 +766,17 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (redis) { await redis.checkWrites(); await flushLogouts(); }
     const session = auth && role === "page" ? await sessionOf(c, auth, clock) : null;
     if (auth && role === "page" && (!session || !await sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
-    const viewer = role === "page" && roleOf(session?.email) === "viewer";
-    const workspace = c.req.query("workspace") || currentSite().defaultWorkspace;
-    if (!workspaces.some((w) => w.id === workspace)) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
+    const membership = role === "page" ? await directory.fromSession(session) : null;
+    const tenant = tokenTenant ?? membership?.tenant ?? (await directory.byId(CONFIG_TENANT_ID))!;
+    const viewer = membership?.role === "viewer";
+    const workspace = c.req.query("workspace") || siteOf(tenant).defaultWorkspace;
+    const selected = tenant.workspaces.find((w) => w.id === workspace);
+    if (!selected) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
     const wanted = c.req.query("project");
     if (!wanted && role === "coordinator") return c.json({ error: "a coordinator names its project" }, 400);
-    const id = wanted ? viewer ? await sharedProject(wanted, workspace) : (await resolve(workspace, wanted))?.id : null;
+    await dropIdle(tenant.id);
+    const id = await runInTenant(tenant, () => linearWorkspace.run(selected, async () =>
+      wanted ? viewer ? await sharedProject(wanted, workspace) : (await resolve(workspace, wanted))?.id : null));
     if (wanted && !id) return c.json({ error: `no project "${wanted}" in ${workspace}` }, 404);
     if (redis) await redis.waitReady();
     if (hub.closing) return restarting();
@@ -728,7 +802,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const raw = ws.raw as import("ws").WebSocket;
         let permitted = true;
         const valid = () => permitted && (!session
-          || (clock() < session.expiresAt && roleOf(session.email) === (viewer ? "viewer" : "owner")));
+          || (clock() < session.expiresAt && configured.fromSession(session)?.role === (viewer ? "viewer" : "owner")));
         const end = () => {
           permitted = false;
           ws.close(1008, "session ended");
@@ -757,9 +831,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           if (session && !await verify()) return;
           if (!linkAvailable()) return ws.close(RESTART_CODE, "server restart");
           connection = role === "coordinator" ? await hub.joinCoordinator(peer, ref!)
-            : viewer ? await hub.joinViewer(peer, ref, (project) =>
-            Date.now() - sharedNames.at <= 60_000 && !!sharedNames.list?.projects.some(
-              (p) => p.workspace === project.workspace && p.id === project.id), resume)
+            : viewer ? await hub.joinViewer(peer, ref, (project) => {
+              const sharedNames = states.get(CONFIG_TENANT_ID)?.sharedNames;
+              return !!sharedNames && Date.now() - sharedNames.at <= 60_000 && !!sharedNames.list?.projects.some(
+                (p) => p.workspace === project.workspace && p.id === project.id);
+            }, resume)
             : await hub.joinPage(peer, ref, resume);
         })().catch(unavailable);
         raw.on("pong", () => connection?.pong());
@@ -808,49 +884,61 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
   // Linear edits that did not come through this page: for each project with a connected coordinator,
   // the cached graph (its cheap check) shows which issues changed since the last look.
-  const seen = new Map<string, Map<string, string>>();
   // A hash of the node card: two card texts of the same length are still a change.
   const cardHash = (body: string | undefined) => (body === undefined ? "" : createHash("sha1").update(body).digest("hex"));
   const fingerprint = (data: GraphData) => new Map(data.issues.map((i) => [i.id, `${i.updatedAt}|${i.state.id}|${cardHash(i.card?.body)}`]));
-  const check = () => requestSite.run(installationSite, async () => {
-    if (readOnly || !linkAvailable()) return;
+  const check = async () => {
+    if (!linkEnabled || !linkAvailable()) return;
+    const tenant = await directory.byId(CONFIG_TENANT_ID);
+    if (!tenant) return;
     const active = await hub.active({ forCheck: true });
     const present = new Set((linkMaxAgeMs ? await hub.active({ forCheck: true, includeGrace: true }) : active).map(projectKey));
-    for (const key of seen.keys()) if (!present.has(key)) seen.delete(key);
-    await checkAll(active);
-    for (const ref of active) {
-      const workspace = workspaces.find((w) => w.id === ref.workspace);
-      if (!workspace) continue;
-      // The coordinator can go away while the check of all projects waits for Linear: then no load for it.
-      if (!(await hub.active({ forCheck: true })).some((r) => projectKey(r) === projectKey(ref))) {
-        continue;
+    const seen = states.get(tenant.id)?.seen;
+    for (const key of seen?.keys() ?? []) if (!present.has(key)) seen?.delete(key);
+    if (!active.length) return;
+    await runInTenant(tenant, async () => {
+      const { seen } = scope().state;
+      await checkAll(active);
+      for (const ref of active) {
+        const workspace = tenant.workspaces.find((w) => w.id === ref.workspace);
+        if (!workspace) continue;
+        // The coordinator can go away while the check of all projects waits for Linear: then no load for it.
+        if (!(await hub.active({ forCheck: true })).some((r) => projectKey(r) === projectKey(ref))) {
+          continue;
+        }
+        try {
+          const { data } = await linearWorkspace.run(workspace, () => graphs().get(ref.id));
+          const now = fingerprint(data), before = seen.get(projectKey(ref));
+          seen.set(projectKey(ref), now);
+          if (!before) continue;
+          const changed = data.issues.filter((i) => before.get(i.id) !== now.get(i.id)).map((i) => i.identifier);
+          if (changed.length) await hub.publish(ref, "changed", { by: "linear", what: "issue", issues: changed });
+        } catch (error) {
+          console.error(`link: Linear check of ${projectKey(ref)} failed: ${(error as Error).message}`);
+        }
       }
-      try {
-        const { data } = await linearWorkspace.run(workspace, () => caches.get(workspace.id)!.get(ref.id));
-        const now = fingerprint(data), before = seen.get(projectKey(ref));
-        seen.set(projectKey(ref), now);
-        if (!before) continue;
-        const changed = data.issues.filter((i) => before.get(i.id) !== now.get(i.id)).map((i) => i.identifier);
-        if (changed.length) await hub.publish(ref, "changed", { by: "linear", what: "issue", issues: changed });
-      } catch (error) {
-        console.error(`link: Linear check of ${projectKey(ref)} failed: ${(error as Error).message}`);
-      }
-    }
-  });
+    });
+  };
   let checking = false;
-  const timer = !readOnly && watchMs > 0 ? setInterval(() => {
+  const timer = linkEnabled && watchMs > 0 ? setInterval(() => {
     if (checking) return;
     checking = true;
     void check().catch(reportLinkError).finally(() => { checking = false; });
   }, watchMs) : null;
   timer?.unref();
+  const stopTimers = () => {
+    if (logoutTimer) clearInterval(logoutTimer);
+    if (timer) clearInterval(timer);
+    clearInterval(idleTimer);
+    stopWatching();
+  };
 
   return Object.assign(app, {
     injectWebSocket: (server: Server) => injectWebSocket(server),
     link: {
       hub, check,
-      stop: () => { if (logoutTimer) clearInterval(logoutTimer); if (timer) clearInterval(timer); hub.stop(); redis?.close(); },
-      shutdown: () => { if (logoutTimer) clearInterval(logoutTimer); if (timer) clearInterval(timer); return hub.shutdown().finally(() => redis?.close()); },
+      stop: () => { stopTimers(); hub.stop(); redis?.close(); },
+      shutdown: () => { stopTimers(); return hub.shutdown().finally(() => redis?.close()); },
     },
   });
 }

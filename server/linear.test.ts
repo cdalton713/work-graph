@@ -1,9 +1,25 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, aroundEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   CHANGED_PAGES, INITIATIVE_GROUP, LinearError, MAX_PARALLEL, addComment, addReviewUrls, changedProjects, changedSince, gql, initiativeOf, linearBudget, loadGraph,
-  delay, isMutation, mapLimit, pullRequestsOf, setTransport,
+  createLinearCache, delay, isMutation, linearCache, mapLimit, pullRequestsOf, setTransport,
 } from "./linear.ts";
+import { createSite } from "../src/lib/site.ts";
+import { requestSite } from "./site.ts";
+import { linearWorkspace } from "./workspaces.ts";
+
+aroundEach((run) => requestSite.run(createSite("Human", "default"), () =>
+  linearCache.run(createLinearCache(), () => linearWorkspace.run({
+    id: "default", name: "Linear", team: "WG", teamLabels: true,
+    get key() { return process.env.LINEAR_API_KEY ?? ""; },
+  }, run))));
+
+it("requires a workspace, a tenant and a site before reaching Linear", async () => {
+  const query = "query{ viewer{id} }";
+  await expect(linearWorkspace.exit(() => gql(query))).rejects.toThrow("needs a workspace");
+  await expect(linearCache.exit(() => gql(query))).rejects.toThrow("needs a tenant");
+  await expect(requestSite.exit(() => gql(query))).rejects.toThrow("needs a site");
+});
 
 const pr = (n: number, extra: Record<string, unknown> = {}) => ({ url: `https://github.com/o/r/pull/${n}`, title: `PR ${n}`, sourceType: "github", metadata: { title: `t${n}`, status: "draft", ...extra } });
 

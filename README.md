@@ -11,6 +11,9 @@ holds two parts:
 - The page (`src/`, `server/`): a web app that shows each effort as a graph of its nodes (phases, lanes, merge
   and ship points), with an issue panel to edit and comment, and a live link to the coordinator.
 
+The page server uses a tenant provider to find the human and Linear workspaces for a request.
+The config supplies one tenant. The server keeps Linear data in separate caches for each tenant.
+
 The skill expects these tools: [Linear](https://linear.app), the GitHub CLI (`gh`),
 [stax](https://github.com/cesarferreira/stax) (`st`) for stacked branches, [Orca](https://github.com/stablyai/orca)
 for worker agents and worktrees, and [uv](https://docs.astral.sh/uv/) to run `wg`. The page needs Node 24 and pnpm.

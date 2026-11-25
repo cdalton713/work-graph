@@ -2,6 +2,7 @@ import { api as browserApi } from "../src/api.ts";
 import { configureSite, site } from "../src/lib/site.ts";
 import { connectRedis } from "./redis.ts";
 import { localRedis, startLocalRedis } from "./testing/redis.ts";
+import { testTenants } from "./testing/tenants.ts";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
@@ -1206,6 +1207,99 @@ const rolesPage = (now?: () => number) => createApp(hostedRoles, {
   team: "CD", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth, linkToken: rolesToken, watchMs: 0, now,
 });
 
+it("isolates site, projects, graphs and budgets for tenants with the same workspace id", async () => {
+  const { state } = graphLinear();
+  const issue = rawIssue("i1", `${TEAM}-1`, "p1");
+  state.issues.p1 = [{ ...issue, labels: { nodes: [{ name: "needs-ada" }, { name: "needs-grace" }] } }];
+  const respond = vi.mocked(fetch).getMockImplementation()!;
+  const loads: string[] = [];
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let hold = true;
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    const key = new Headers(init?.headers).get("authorization")!;
+    const { query } = JSON.parse(init!.body as string);
+    const human = key === "ada-key" ? "Ada" : "Grace";
+    if (query.includes("viewer{")) loads.push(human);
+    if (hold && human === "Ada" && query.includes("projects(first:50")) {
+      hold = false;
+      enter();
+      await held;
+    }
+    const body = query.includes("members(first") ? { data: { teams: { nodes: [
+      { id: "team", key: human, states: { nodes: [] }, members: { nodes: [] } },
+    ] } } } : await (await respond(url, init)).json();
+    if (body.data.project?.name) body.data.project.name = human;
+    for (const project of body.data.teams?.nodes[0]?.projects?.nodes ?? []) {
+      project.name = human;
+      if (human === "Ada" && project.id === "p1") project.labels = { nodes: [{ name: "shared", parent: null }] };
+    }
+    return Response.json(body, { headers: { "x-ratelimit-requests-remaining": human === "Ada" ? "11" : "22" } });
+  });
+  const directory = testTenants(TEAM);
+  let time = Date.now() - 30 * 60_000;
+  const page = createApp(hostedRoles, { team: TEAM, dist, auth: rolesAuth, tenants: directory.tenants, watchMs: 0, now: () => time });
+  const ada = await rolesHeaders("ada@example.com");
+  const grace = await rolesHeaders("grace@example.com");
+  const get = (path: string, headers: Record<string, string>) => Promise.resolve(page.request("/api" + path, { headers }));
+  const overview = get("/overview", ada);
+  try {
+    const first = await Promise.race([entered.then(() => null), overview]);
+    expect(first).toBeNull();
+    for (const [headers, human, token, budget] of [[grace, "Grace", "grace", 22], [ada, "Ada", "ada", 11]] as const) {
+      expect(await (await get("/config", headers)).json()).toMatchObject({ human, defaultWorkspace: "default" });
+      expect(await (await get("/projects", headers)).json()).toMatchObject({ projects: expect.arrayContaining([expect.objectContaining({ name: human })]) });
+      expect(await (await get("/projects/p1/graph", headers)).json()).toMatchObject({ project: { name: human }, teams: { team: { key: human } } });
+      const status = await (await get("/status", { ...rolesHost, authorization: "Bearer " + token })).json();
+      expect(status.workspaces).toHaveLength(human === "Ada" ? 1 : 2);
+      expect(status.workspaces[0]).toMatchObject({ name: human, requestsRemaining: budget });
+    }
+    expect(await (await get("/overview", grace)).json()).toMatchObject({ summaries: expect.arrayContaining([
+      expect.objectContaining({ id: "p1", you: [expect.objectContaining({ why: "Needs Grace" })] }),
+    ]) });
+    release();
+    expect(await (await overview).json()).toMatchObject({ summaries: expect.arrayContaining([
+      expect.objectContaining({ id: "p1", you: [expect.objectContaining({ why: "Needs Ada" })] }),
+    ]) });
+    const adaViewer = await rolesHeaders("ada-viewer@example.com");
+    const graceViewer = await rolesHeaders("grace-viewer@example.com");
+    expect((await get("/projects/p1/graph", adaViewer)).status).toBe(200);
+    expect((await get("/projects/p1/graph", graceViewer)).status).toBe(404);
+    expect(await (await get("/projects/p1/graph", { ...ada, "x-workspace": "extra" })).json())
+      .toEqual({ error: "workspace extra is not configured" });
+    const comment = await page.request("/api/issues/i1/comments", {
+      method: "POST", headers: { ...ada, origin: "https://view.example.com", "content-type": "application/json" },
+      body: JSON.stringify({ body: "A comment" }),
+    });
+    expect(comment.status).toBe(200);
+    loads.length = 0;
+    await get("/projects/p1/graph", grace);
+    await get("/projects/p1/graph", ada);
+    expect(loads).toEqual(["Ada"]);
+    const tenant = (await directory.tenants.byId("grace"))!;
+    directory.change({ ...tenant, workspaces: tenant.workspaces.slice(0, 1) });
+    expect((await get("/projects/p1/graph?workspace=extra", grace)).status).toBe(400);
+    expect((await (await get("/status", { ...rolesHost, authorization: "Bearer grace" })).json()).workspaces)
+      .toMatchObject([{ id: "default", requestsRemaining: null }]);
+    loads.length = 0;
+    await get("/projects/p1/graph", ada);
+    await get("/projects/p1/graph", grace);
+    expect(loads).toEqual(["Grace"]);
+    time += 30 * 60_000;
+    expect((await (await get("/status", { ...rolesHost, authorization: "Bearer ada" })).json()).workspaces)
+      .toMatchObject([{ id: "default", requestsRemaining: null }]);
+    loads.length = 0;
+    await get("/projects/p1/graph", ada);
+    expect(loads).toEqual(["Ada"]);
+  } finally {
+    release();
+    await overview.catch(() => {});
+    page.link.stop();
+  }
+});
+
 describe("read-only viewer", () => {
   const viewer = () => createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true });
 
@@ -1277,7 +1371,7 @@ describe("read-only viewer", () => {
         data = { viewer: { id: "me" }, project: { id: variables.id, name: "Shared", url: "u", projectMilestones: { nodes: [] }, documents: { nodes: [{ content: status, updatedAt: "2026-11-20T00:00:00Z" }] } } };
       }
       // The issue of the private project that blocks CD-1: the full page shows it as an outside node.
-      else if (variables.ids) data = { issues: { nodes: [raw("o1", "CD-9", "Private plan", "p2", {
+      else if (query.includes("issues(first:25,filter:")) data = { issues: { nodes: [raw("o1", "CD-9", "Private plan", "p2", {
         state: { id: "s2", name: "Needs Human", type: "started", color: "" },
         comments: { nodes: [{ id: "c9", body: "**work-graph node card** `private-key`\n\n```json\n{\"wg\":1,\"key\":\"private-key\",\"next\":\"private next step\"}\n```" }] },
       })] } };

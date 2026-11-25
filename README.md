@@ -252,9 +252,10 @@ The command checks the token with the page and stores it in a private file for t
 It shows the workspaces the page serves and the config entries to add. Run `wg doctor`
 to check the token and `wg logout [<page-url>]` to remove the saved copy.
 
-The client uses a workspace-specific token environment variable first when the workspace
-has its own page. Next it checks `WG_LINK_TOKEN`, then `<id>-link-token`, then `link-token`,
-then the token saved by `wg login`.
+For a workspace with its own page, the client checks `WG_<ID>_LINK_TOKEN` and then
+`<id>-link-token`. For a workspace that uses the top-level page, it checks `WG_LINK_TOKEN`
+and then `link-token`. If neither source exists, it checks the token saved for that page
+by `wg login`.
   Leave the setting blank or set it to 0 to turn off the age limit. With a limit set, the page and the
   presence API show a coordinator as connected for up to 15 seconds after any close, including a
   deliberate exit. Autostart uses the queued work count and the Orca agent list to decide when to start.

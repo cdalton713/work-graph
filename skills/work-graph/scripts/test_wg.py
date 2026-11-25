@@ -8068,6 +8068,7 @@ class PageLoginTests(unittest.TestCase):
         self.enterContext(patch.object(wg, "LINK_TOKEN_FILE", self.legacy))
         self.enterContext(patch.dict(os.environ, {}, clear=True))
         self.answers = [200]
+        self.auth = True
         self.requests = []
         self.secret = "example-private-coordinator-token"
         test = self
@@ -8075,14 +8076,20 @@ class PageLoginTests(unittest.TestCase):
         class Page(BaseHTTPRequestHandler):
             def do_GET(self):
                 test.requests.append((self.path, self.headers.get("Authorization")))
-                status = test.answers.pop(0)
+                if self.path == "/api/config":
+                    status, body = 200, {"auth": test.auth}
+                elif self.path == "/api/link?role=coordinator":
+                    status = 400 if self.headers.get("Authorization") == "Bearer " + test.secret else 401
+                    body = {}
+                else:
+                    status = test.answers.pop(0)
+                    body = {"ok": True} if self.path == "/healthz" else {"workspaces": [
+                        {"id": "work", "name": "Work"}, {"id": "home", "name": "Home"},
+                    ]}
                 self.send_response(status)
                 if status == 503:
-                    self.send_header("Retry-After", "9" if len(test.requests) == 1 else "invalid")
+                    self.send_header("Retry-After", "9" if sum(path == self.path for path, _ in test.requests) == 1 else "invalid")
                 self.end_headers()
-                body = {"ok": True} if self.path == "/healthz" else {"workspaces": [
-                    {"id": "work", "name": "Work"}, {"id": "home", "name": "Home"},
-                ]}
                 self.wfile.write(json.dumps(body).encode())
 
             def log_message(self, *args):
@@ -8109,7 +8116,7 @@ class PageLoginTests(unittest.TestCase):
 
     def test_login_and_logout(self):
         self.assertEqual(self.command("login", "--token-stdin"), 0)
-        self.assertEqual(self.requests, [("/api/status", "Bearer " + self.secret)])
+        self.assertEqual([auth for path, auth in self.requests if path == "/api/status"], ["Bearer " + self.secret])
         self.assertEqual(self.path.read_text(), self.secret + "\n")
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
@@ -8157,19 +8164,56 @@ class PageLoginTests(unittest.TestCase):
         for file, value in ((self.legacy, "shared"), (scoped, "workspace")):
             file.write_text(value)
             file.chmod(0o600)
-        self.answers[:] = [200, 200, 200, 403]
-        with patch.dict(os.environ, {"WG_LINK_TOKEN": "environment"}):
+        self.answers[:] = [200, 200, 403]
+        self.requests.clear()
+        with patch.dict(os.environ, {"WG_WORK_LINK_TOKEN": "environment", "WG_LINK_TOKEN": "shared-env"}):
             self.assertIn("accepted", wg.doctor_link_token("work")[1])
         self.assertIn("accepted", wg.doctor_link_token("work")[1])
         scoped.unlink()
-        self.assertIn("accepted", wg.doctor_link_token("work")[1])
-        self.legacy.unlink()
         self.assertIn("refused", wg.doctor_run("link token", lambda: wg.doctor_link_token("work"))[0][1])
-        self.assertEqual([auth for _, auth in self.requests[1:]],
-                         ["Bearer environment", "Bearer workspace", "Bearer shared", "Bearer " + self.secret])
+        self.assertEqual([auth for path, auth in self.requests if path == "/api/status"],
+                         ["Bearer environment", "Bearer workspace", "Bearer " + self.secret])
         self.path.chmod(0o644)
         with self.assertRaisesRegex(wg.LinkTokenError, "must have mode 600"):
             wg.doctor_link_token("work")
+
+    def test_workspace_page_does_not_receive_shared_credentials(self):
+        self.legacy.write_text("shared-file")
+        self.legacy.chmod(0o600)
+        self.answers[:] = [200, 200, 200, 200]
+        wg.page_get("/api/status", workspace="work")
+        with patch.dict(os.environ, {"WG_LINK_TOKEN": "shared-env"}):
+            wg.page_get("/api/status", workspace="work")
+        self.assertEqual(self.requests, [("/api/status", None)] * 2)
+        self.assertEqual(self.command("login", "--token-stdin"), 0)
+        wg.page_get("/api/status", workspace="work")
+        self.assertEqual(self.requests[-1], ("/api/status", "Bearer " + self.secret))
+
+    def test_login_and_doctor_verify_the_link_token_without_sign_in(self):
+        self.auth = False
+        self.answers[:] = [200, 200]
+        with patch.object(sys, "stdin", io.StringIO("wrong-token")), self.assertRaises(SystemExit):
+            self.command("login", "--token-stdin")
+        self.assertFalse(self.path.exists())
+        self.assertIn("the page refused the token", self.errors.getvalue())
+        with patch.dict(os.environ, {"WG_WORK_LINK_TOKEN": "wrong-token"}):
+            level, message = wg.doctor_run("link token", lambda: wg.doctor_link_token("work"))[0]
+        self.assertEqual(level, "FAIL")
+        self.assertIn("the page refused the token", message)
+        self.assertEqual(self.command("login", "--token-stdin"), 0)
+        self.assertTrue(self.path.exists())
+        self.assertEqual(wg.doctor_link_token("work")[0], "ok")
+        self.assertIn(("/api/link?role=coordinator", None), self.requests)
+
+    def test_malformed_host_is_refused_before_request_and_save_errors_are_clear(self):
+        with patch("urllib.request.urlopen") as request, self.assertRaises(SystemExit):
+            self.command("login", "https://" + "a" * 300, "--token-stdin")
+        request.assert_not_called()
+        self.assertIn("253", self.errors.getvalue())
+        self.path.parent.write_text("occupied")
+        with self.assertRaises(SystemExit):
+            self.command("login", "--token-stdin")
+        self.assertIn("cannot save the page token", self.errors.getvalue())
 
     def test_page_retries_503_before_reporting_failure(self):
         with patch.object(wg.time, "sleep") as sleep:
@@ -8394,7 +8438,7 @@ class DoctorTests(DirTests):
 
         with patch.dict(wg.WORKSPACES["home"], {"page_url": "https://home.example.com/"}), \
                 patch.object(wg, "LINK_TOKEN_FILE", directory / "link-token"), \
-                patch.dict(os.environ, {}, clear=True), \
+                patch.dict(os.environ, {"WG_LINK_TOKEN": "shared-token"}, clear=True), \
                 patch.object(wg.urllib.request, "urlopen", side_effect=response) as open_url:
             self.assertEqual(wg.page_waiting(home, "p1"), 2)
             req = open_url.call_args.args[0]
@@ -8418,9 +8462,8 @@ class DoctorTests(DirTests):
             self.assertIsNone(open_url.call_args.args[0].get_header("Authorization"))
             self.assertEqual(err.getvalue().count("warn link:"), 1)
             self.assertIn("home-link-token must have mode 600", err.getvalue())
-            with patch.dict(os.environ, {"WG_LINK_TOKEN": "shared-token"}):
-                self.assertEqual(wg.page_waiting(work, "p1"), 2)
-                self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer shared-token")
+            self.assertEqual(wg.page_waiting(work, "p1"), 2)
+            self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer shared-token")
             path.chmod(0o600)
             with patch.dict(os.environ, {"WG_UI_URL": "https://override.example.com"}):
                 self.assertEqual(wg.page_waiting(home, "p1"), 2)
@@ -8656,7 +8699,7 @@ class DoctorTests(DirTests):
             contract = wg.contract_hash() if request.full_url.startswith("https://new.example.com/") else "old"
             return io.StringIO(json.dumps({"contract": contract}))
 
-        with patch.dict(os.environ, {}, clear=True), \
+        with patch.dict(os.environ, {"WG_LINK_TOKEN": "shared-token"}, clear=True), \
                 patch.object(wg.urllib.request, "urlopen", side_effect=response) as open_url:
             self.assertTrue(PAGE_CONTRACT_NOTE(self.d, self.p))
             with patch.dict(os.environ, {"WG_UI_URL": "https://new.example.com"}):

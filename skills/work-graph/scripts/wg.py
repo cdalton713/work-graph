@@ -4711,6 +4711,8 @@ def page_origin(url):
     if (target.scheme not in ("http", "https", "ws", "wss") or not host
             or not re.fullmatch(r"[a-z0-9.:-]+", host) or target.username is not None):
         raise LinkTokenError(problem)
+    if len(host) > 253:
+        raise LinkTokenError("the page host must have at most 253 characters")
     return target.scheme, host, port
 
 
@@ -4734,7 +4736,10 @@ def page_token_path(url):
     _, host, port = page_origin(url)
     # Colons in IPv6 literals are valid on the systems that run wg.
     name = f"{host}_{port}" if port is not None else host
-    return LINK_TOKEN_FILE.parent / "pages" / f"{name}-token"
+    filename = f"{name}-token"
+    if len(filename) > 255:
+        raise LinkTokenError("the page host and port are too long for a token file")
+    return LINK_TOKEN_FILE.parent / "pages" / filename
 
 
 def clean_link_token(token, source):
@@ -4747,18 +4752,20 @@ def clean_link_token(token, source):
 
 def link_token(workspace=None, *, url=None):
     """Read the first credential source that exists. An empty source disables the token."""
-    for source in dict.fromkeys((link_token_env(workspace), "WG_LINK_TOKEN")):
-        if source in os.environ:
-            return clean_link_token(os.environ[source], source)
-    paths = [LINK_TOKEN_FILE]
-    if workspace is not None:
-        paths.insert(0, LINK_TOKEN_FILE.with_name(f"{workspace}-link-token"))
-    # Read the page token for the actual destination, including a URL override.
-    for source in paths:
-        token = read_link_token_file(source)
-        if token is not None:
-            return token
-    return read_link_token_file(page_token_path(url or page_base(workspace))) or ""
+    source = link_token_env(workspace)
+    if source in os.environ:
+        return clean_link_token(os.environ[source], source)
+    path = LINK_TOKEN_FILE.with_name(f"{workspace}-link-token") if workspace_page(workspace) else LINK_TOKEN_FILE
+    token = read_link_token_file(path)
+    if token is not None:
+        return token
+    page_url = (workspace_page(workspace) or PAGE_URL).rstrip("/")
+    if url:
+        scheme, host, port = page_origin(url)
+        scheme = {"ws": "http", "wss": "https"}.get(scheme, scheme)
+        if (scheme, host, port) != page_origin(page_url):
+            return ""
+    return read_link_token_file(page_token_path(page_url)) or ""
 
 
 def read_link_token_file(source):
@@ -4833,18 +4840,23 @@ def login_page_url(url, workspace):
     return url
 
 
-def check_page_token(url, token):
-    request = urllib.request.Request(f"{url}/api/status")
-    request.add_unredirected_header("Authorization", f"Bearer {token}")
+def token_page_request(url, path, token="", *, expected_error=()):
+    request = urllib.request.Request(f"{url}{path}")
+    if token:
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
     try:
         with open_page_request(request, 10) as response:
             if response.geturl() != request.full_url:
-                raise LinkTokenError("the page redirected the status request")
+                raise LinkTokenError("the page redirected the token check")
             if response.status != 200:
                 raise LinkTokenError(f"the page answered HTTP {response.status}")
             return json.load(response)
     except urllib.error.HTTPError as error:
         with error:
+            if error.geturl() != request.full_url:
+                raise LinkTokenError("the page redirected the token check") from None
+            if error.code in expected_error:
+                return error.code
             if error.code in (401, 403):
                 raise LinkTokenError(f"the page refused the token (HTTP {error.code})") from None
             raise LinkTokenError(f"the page answered HTTP {error.code}") from None
@@ -4852,27 +4864,46 @@ def check_page_token(url, token):
         reason = getattr(error, "reason", error)
         raise LinkTokenError(f"connection failed ({type(reason).__name__})") from None
     except ValueError:
-        raise LinkTokenError("the page returned an invalid status response") from None
+        raise LinkTokenError("the page returned an invalid token check response") from None
+
+
+def check_page_token(url, token):
+    config = token_page_request(url, "/api/config", token)
+    if not isinstance(config, dict) or not isinstance(config.get("auth"), bool):
+        raise LinkTokenError("the page did not report whether sign-in is enabled")
+    if not config["auth"]:
+        # The coordinator must name a project after it passes the link's token check.
+        path = "/api/link?role=coordinator"
+        with_token = token_page_request(url, path, token, expected_error=(400,))
+        without_token = token_page_request(url, path, expected_error=(400, 401, 403))
+        if with_token != 400 or without_token not in (401, 403):
+            raise LinkTokenError("the page did not confirm the token")
+    return token_page_request(url, "/api/status", token)
 
 
 def save_page_token(path, token):
-    directory = path.parent
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if directory.is_symlink() or stat.S_IMODE(directory.stat().st_mode) != 0o700:
-        raise LinkTokenError(f"{directory} must be a directory with mode 700")
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as file:
-        temporary = Path(file.name)
-        try:
-            os.fchmod(file.fileno(), 0o600)
-            file.write(token + "\n")
-            file.close()
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
+    try:
+        directory = path.parent
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if directory.is_symlink() or stat.S_IMODE(directory.stat().st_mode) != 0o700:
+            raise LinkTokenError(f"{directory} must be a directory with mode 700")
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as file:
+            temporary = Path(file.name)
+            try:
+                os.fchmod(file.fileno(), 0o600)
+                file.write(token + "\n")
+                file.close()
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+    except OSError as error:
+        reason = error.strerror or type(error).__name__
+        raise LinkTokenError(f"cannot save the page token at {path}: {reason}") from None
 
 
 def page_login(ns):
     url = login_page_url(ns.page_url, ns.workspace)
+    path = page_token_path(url)
     if ns.token_stdin:
         raw = sys.stdin.readline().removesuffix("\n")
     else:
@@ -4887,7 +4918,6 @@ def page_login(ns):
         raise LinkTokenError("the token is empty")
     status = check_page_token(url, token)
     rows = status.get("workspaces", []) if isinstance(status, dict) else []
-    path = page_token_path(url)
     save_page_token(path, token)
 
     def report(message):

@@ -44,12 +44,13 @@ Set `WG_LINK_TOKEN` on the hosted server to require a bearer token on coordinato
 with at least 32 characters. On the coordinator's machine, run `wg login <page-url>` and enter the token.
 See [Coordinator token](setup.md#coordinator-token) for the commands.
 
-For a workspace with its own `page_url`, `WG_<ID>_LINK_TOKEN` takes precedence. Use uppercase
-and replace hyphens with underscores in the variable name. Next, `wg` checks `WG_LINK_TOKEN`,
-then the mode-600 files `<id>-link-token` and `link-token` in `~/.config/work-graph`.
-If these sources are absent, `wg` reads the token that `wg login` saved for the destination
-page. When you set `WG_UI_URL`, the override is the destination. An empty environment
-variable disables the token.
+A workspace with its own page uses only its own token. For that workspace, `wg` checks
+`WG_<ID>_LINK_TOKEN` and then the mode-600 file `<id>-link-token` in `~/.config/work-graph`.
+Use uppercase and replace hyphens with underscores in the variable name. For a workspace
+that uses the top-level page, `wg` checks `WG_LINK_TOKEN` and then the mode-600 file
+`link-token` in the same directory. An empty environment variable disables the token.
+If neither source exists, `wg` checks the token that `wg login` saved for the configured page.
+An override from `WG_UI_URL` uses that saved token only if the origin matches the configured page.
 
 `wg` sends tokens over HTTPS, to a loopback address, or to a tailnet address configured
 as the page URL.

@@ -2,7 +2,7 @@ import type { AutonomyLevel } from "./lib/autonomy";
 import type { ReviewEffort } from "./lib/review";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
-import type { Comment, GraphData, Issue, IssuePatch, ProjectList, ServerStatus } from "./lib/types";
+import type { Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectList, ServerStatus } from "./lib/types";
 
 /** The open project. A write names it (`x-project`), so the server can tell its coordinator at once. */
 let openProject: string | null = null;
@@ -30,6 +30,26 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
   if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
   return body as T;
 }
+
+function accountWrite<T>(path: string, method: string, data?: object) {
+  return call<T>(`account${path}`, { method, body: data && JSON.stringify(data) });
+}
+
+export const accountApi = {
+  read: (signal?: AbortSignal) => call<Account>("account", { signal }),
+  saveName: (human: string) => accountWrite("", "PATCH", { human }),
+  onboarding: (state: { name?: true; skipped?: boolean }) => accountWrite("/onboarding", "POST", state),
+  attach: (key: string) => accountWrite("/workspaces", "POST", { key }),
+  replace: (id: string, key: string) => accountWrite(`/workspaces/${id}/key`, "PUT", { key }),
+  teams: async (id: string, signal?: AbortSignal) =>
+    (await call<{ teams: AccountTeam[] }>(`account/workspaces/${id}/teams`, { signal })).teams,
+  updateWorkspace: (id: string, settings: { team?: string; team_labels?: boolean; position?: number }) =>
+    accountWrite(`/workspaces/${id}`, "PATCH", settings),
+  removeWorkspace: (id: string) => accountWrite(`/workspaces/${id}`, "DELETE"),
+  makeToken: (name: string) => accountWrite<{ token: string }>("/tokens", "POST", { name }),
+  revokeToken: (id: string) => accountWrite(`/tokens/${id}`, "DELETE"),
+  delete: () => accountWrite<{ message?: string }>("", "DELETE", { confirm: "delete" }),
+};
 
 export const api = {
   closeProject: (projectId: string, workspace?: string) => call<{ completedIssues: number }>(`projects/${projectId}/close`, { method: "POST", body: JSON.stringify({ confirm: true }) }, workspace),

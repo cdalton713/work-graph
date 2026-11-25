@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, setOpenProject } from "./api";
+import { accountApi, api, setOpenProject } from "./api";
+import { Onboarding } from "./components/Onboarding";
+import { AccountError, Settings, useAccountAction } from "./components/Settings";
+import { firstStep } from "./lib/onboarding";
 import { Board } from "./components/Board";
 import { Canvas } from "./components/Canvas";
 import { Overview } from "./components/Overview";
@@ -12,9 +15,9 @@ import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner,
 import { agentsFresh, canCommandCoordinator, liveJob, presenceText } from "./lib/link";
 import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, summaryKey } from "./lib/overview";
 import { ownerWords } from "./lib/words";
-import { site, statusOrder } from "./lib/site";
+import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
-import type { GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
+import type { Account, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
 import { useLink } from "./useLink";
 
 const POLL_MS = 15_000;
@@ -50,7 +53,48 @@ export function projectFromQuery(directory: ProjectList | null, query: URLSearch
   return { project, missing };
 }
 
-export function App() {
+export function ServiceApp() {
+  const [query, navigate] = useQuery();
+  const [account, setAccount] = useState<Account | null>(null);
+  const { error, busy, run } = useAccountAction();
+  const sequence = useRef(0);
+  const refresh = useCallback(async () => {
+    const request = ++sequence.current;
+    const account = await accountApi.read();
+    if (request === sequence.current) {
+      configureSite({ human: account.human, defaultWorkspace: account.connections[0]?.workspace_id });
+      setAccount(account);
+    }
+    return account;
+  }, []);
+  useEffect(() => { void run(async () => { await refresh(); }); }, [refresh]);
+  const [guide, setGuide] = useState(false);
+  const page = query.get("page");
+  const route = (page: string | null) => navigate({ page }, true);
+  const overview = () => { setGuide(false); navigate({ page: null, project: null, workspace: null }, true); };
+  const showGuide = !!account && (page === "setup" || (!account.onboarding.skipped && (guide || !!firstStep(account.onboarding))));
+  useEffect(() => {
+    if (account && firstStep(account.onboarding)) setGuide(true);
+  }, [account]);
+  if (account && page !== "settings" && !showGuide) return <App openSettings={() => route("settings")} />;
+  return <div className="app">
+    <header className="bar account-bar">
+      <span className="brand">work-graph</span><span className="station-fill" />
+      {page === "settings" ?
+        <button onClick={() => route(null)}>{showGuide ? "Setup guide" : "Overview"}</button> :
+        <button onClick={() => route("settings")}>Settings</button>}
+      <a className="bar-user" href="/auth/logout">Sign out</a>
+    </header>
+    {!account ? <main className="account-page"><div className="account-content">
+      {error ? <><AccountError error={error} /><button disabled={busy} onClick={() => void run(async () => { await refresh(); })}>Retry</button></> :
+        <p role="status">Loading your account…</p>}
+    </div></main> : page === "settings" ?
+      <Settings account={account} refresh={refresh} openGuide={() => route("setup")} /> :
+      <Onboarding account={account} refresh={refresh} overview={overview} />}
+  </div>;
+}
+
+export function App({ openSettings }: { openSettings?: () => void } = {}) {
   const [query, setQuery] = useQuery();
   const [directory, setDirectory] = useState<ProjectList | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
@@ -479,6 +523,7 @@ export function App() {
         )}
         {versionText(status) && <span className="bar-version mono" title={`The build of the server: ${status!.version}`}>{versionText(status)}</span>}
         <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} title="Keyboard keys (?)">?</button>
+        {openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>}
         {site.user && <a className="bar-user" href="/auth/logout" title={`Signed in as ${site.user}. Select to sign out.`}>Sign out</a>}
         {/* Apart from the view toggles: it changes every issue of the project in Linear. */}
         {!viewer && project && project.statusType !== "completed" && project.statusType !== "canceled" && (

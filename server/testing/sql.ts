@@ -1,19 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { PGlite } from "@electric-sql/pglite";
 import { describe } from "vitest";
-import { postgresSql, safeQuery, type Database, type Query } from "../db/sql.ts";
+import { postgresSql, type Database } from "../db/sql.ts";
 
-export async function pgliteSql(): Promise<Database> {
-  const db = new PGlite();
-  function query(client: Pick<PGlite, "query">): Query {
-    return safeQuery((text, params) => client.query(text, params));
-  }
-  return {
-    query: query(db),
-    transaction: (run) => db.transaction((tx) => run({ query: query(tx) })),
-    close: () => db.close(),
-  };
-}
+import { pgliteSql } from "./pglite.ts";
+export { pgliteSql } from "./pglite.ts";
 
 async function isolatedPostgres(url: string): Promise<Database> {
   const schema = "test_" + randomUUID().replaceAll("-", "");

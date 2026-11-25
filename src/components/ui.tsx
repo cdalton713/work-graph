@@ -27,7 +27,7 @@ async function copyText(text: string) {
 }
 
 /** A small button that copies `text`, then shows "Copied" for a short time. */
-export function CopyButton({ text, label, className }: { text: string; label: string; className?: string }) {
+export function CopyButton({ text, label, className, secret }: { text: string; label: string; className?: string; secret?: boolean }) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -36,7 +36,7 @@ export function CopyButton({ text, label, className }: { text: string; label: st
   }, [copied]);
   return (
     <button type="button" className={`ghost copy${copied ? " is-copied" : ""}${className ? ` ${className}` : ""}`}
-      title={`${label}: ${text}`} aria-label={copied ? "Copied" : label}
+      title={secret ? label : `${label}: ${text}`} aria-label={copied ? "Copied" : label}
       onClick={(e) => { e.stopPropagation(); void copyText(text).then(() => setCopied(true)); }}>
       {copied ? "Copied" : "Copy"}
     </button>

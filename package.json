@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "dev": "vite",
+    "service:dev": "node server/testing/service-dev.ts",
     "start": "node server/main.ts",
     "test": "vitest run"
   },

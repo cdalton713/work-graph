@@ -394,6 +394,8 @@ After you sign in, you can attach more Linear workspaces with personal API keys.
 
 Use Linear organization IDs in `WG_ALLOWED_ORGS` for a stable sign-up list. Workspace URL keys can change and another workspace can take an old key. In your account, you can set your name, complete or skip onboarding, and create or revoke coordinator tokens for `wg login`. Copy each token when you create it. If you change your name, set the same `human` in the `wg` config. If you delete your account and Linear cannot revoke its access, remove the app in Linear's settings.
 
+The setup guide leads you through your name, Linear workspaces and teams, local `wg` setup, and the first connection. Use Settings to change these details, manage tokens, reopen the guide, or delete your account. To try the guide with a temporary database and stub Linear, run `pnpm build` and `pnpm service:dev`. Open the loopback address shown in the terminal. Use `lin_api_example00000000000000000000` to attach the second workspace. Stop the preview with Ctrl-C.
+
 ## Host a read-only viewer
 
 A viewer is a second deployment of the page for other people: they sign in and read the projects that you

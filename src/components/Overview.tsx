@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type OverviewData, type OverviewFilter, type OverviewRow, type ProjectSummary, NO_INITIATIVE, PROJECT_LAMP, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, summaryKey } from "../lib/overview";
+import { ownerWords } from "../lib/words";
+import { type OverviewData, type OverviewFilter, type OverviewRow, type ProjectSummary, NO_INITIATIVE, PROJECT_LAMP, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, summaryKey } from "../lib/overview";
 import { ageText } from "../lib/graph";
 import { type Agents, type Ask, type Presence, agentName, agentState, agentsFresh, agentsShown, presenceText } from "../lib/link";
 import type { Project, ProjectList } from "../lib/types";
@@ -51,6 +52,7 @@ export interface OverviewProps {
  * `/` finds a project, the arrow keys move, Enter opens.
  */
 export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, initiative = null, onInitiative, budget = [] }: OverviewProps) {
+  const words = ownerWords();
   const list = useMemo<OverviewData | ProjectList>(() => ("summaries" in given && (asks?.size || agents?.size)
     ? { ...given, summaries: given.summaries.map((s) => ({ ...s, you: movesWithAgents(movesWithAsks(s.you, asks?.get(summaryKey(s))), agents?.get(summaryKey(s)), now) })) }
     : given), [given, asks, agents, now]);
@@ -118,8 +120,8 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
               {p.autonomy && <span className={`ov-auto auto-${p.autonomy}`} title="Autonomy level of the coordinator">{p.autonomy}</span>}
               {coordinator && <span className={`ov-coord coord-${coordinator.state}`} title={coordinator.title}>{coordinator.text}</span>}
             </span>
-            <span className={`ov-you${you.length ? "" : " is-zero"}`} title="Issues in Your move">
-              {you.length ? <><b className="mono">{you.length}</b> for you</> : s ? "—" : ""}
+            <span className={`ov-you${you.length ? "" : " is-zero"}`} title={`Issues in ${words.move}`}>
+              {you.length ? <><b className="mono">{you.length}</b> {words.forOwner}</> : s ? "—" : ""}
             </span>
             <span className="ov-progress">
               {s && s.planned > 0 && (
@@ -180,8 +182,8 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
         <p className={`ov-sum${waiting.length ? " is-you" : ""}`} role="status">
           {"summaries" in list
             ? waiting.length
-              ? <><Lamp signal="stop" /><b>{waiting.length}</b> {waiting.length === 1 ? "project waits" : "projects wait"} on you · <b>{waitingIssues}</b> {waitingIssues === 1 ? "issue" : "issues"}</>
-              : <><Lamp signal="done" />Nothing waits on you.</>
+              ? <><Lamp signal="stop" /><b>{waiting.length}</b> {waiting.length === 1 ? "project waits" : "projects wait"} {words.onOwner} · <b>{waitingIssues}</b> {waitingIssues === 1 ? "issue" : "issues"}</>
+              : <><Lamp signal="done" />{words.clear}</>
             : "Loading the projects…"}
           {loading && "summaries" in list && <span className="sync-dot is-busy" aria-label="Refreshing" />}
         </p>
@@ -190,20 +192,21 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       {missing && <p className="empty" role="status">{missing}</p>}
 
       {inbox.length > 0 && (
-        <section className="inbox" aria-label="Your move in all projects">
-          <h2 className="inbox-head"><span>Your move</span><b className="mono">{inbox.length}</b><span className="inbox-note">oldest first</span></h2>
+        <section className="inbox" aria-label={`${words.move} in all projects`}>
+          <h2 className="inbox-head"><span>{words.move}</span><b className="mono">{inbox.length}</b><span className="inbox-note">oldest first</span></h2>
           <ul>
             {(allMoves ? inbox : inbox.slice(0, INBOX)).map(({ project: p, move: m }) => {
               const age = m.updatedAt ? ageText(now - Date.parse(m.updatedAt)) : null;
               // A reason that is the title (a decision: its question) shows once.
-              const title = m.why.trim() !== m.title.trim() && !m.why.includes(m.title.trim()) ? m.title : null;
+              const why = overviewMoveReason(m.why);
+              const title = why.trim() !== m.title.trim() && !why.includes(m.title.trim()) ? m.title : null;
               return (
                 <li key={`${summaryKey(p)}:${m.identifier}`} className="inbox-row">
                   <button type="button" className="inbox-open" onClick={() => onOpen(p, m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier)} title={`${p.name}: ${m.title}`}>
                     <Lamp signal="stop" />
                     <span className="inbox-id mono">{m.identifier}</span>
                     <span className="inbox-text">
-                      <span className="inbox-why">{m.why}</span>
+                      <span className="inbox-why">{why}</span>
                       {title && <span className="inbox-title">{title}</span>}
                     </span>
                     <span className="inbox-project">{p.name}</span>
@@ -251,7 +254,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
           </Picker>
         )}
         <button type="button" className={`toggle${filter.mine ? " is-on" : ""}`} aria-pressed={filter.mine} onClick={() => set({ mine: !filter.mine })}
-          title="Show only the projects that have an issue in Your move.">Waits on me</button>
+          title={`Show only the projects that have an issue in ${words.move}.`}>{words.waitsFilter}</button>
         {closedCount > 0 && (
           <button type="button" className={`toggle${filter.closed ? " is-on" : ""}`} aria-pressed={filter.closed} onClick={() => set({ closed: !filter.closed })}
             title="Also show the completed and canceled projects.">Closed <span className="mono">{closedCount}</span></button>
@@ -278,7 +281,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                 {section.planned > 0 && ` · ${section.done}/${section.planned} done`}
                 {section.running > 0 && ` · ${section.running} running`}
               </span>
-              {section.you > 0 && <span className="ov-section-you"><Lamp signal="stop" /><b className="mono">{section.you}</b> for you</span>}
+              {section.you > 0 && <span className="ov-section-you"><Lamp signal="stop" /><b className="mono">{section.you}</b> {words.forOwner}</span>}
             </h2>
             <ul className="ov-list">{section.rows.map((row, i) => renderRow(row, first + i))}</ul>
           </section>

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { NO_INITIATIVE, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, summarize, type OverviewData, type ProjectSummary } from "./overview";
+import { afterEach, describe, expect, it } from "vitest";
+import { NO_INITIATIVE, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, overviewMoveReason, summarize, type OverviewData, type ProjectSummary } from "./overview";
+import { DEFAULT_HUMAN, configureSite } from "./site";
 import type { GraphData, Issue, State } from "./types";
 
 const state = (name: string, type: State["type"] = "unstarted"): State => ({ id: name, name, type, color: "#000" });
@@ -152,5 +153,19 @@ describe("movesWithAsks", () => {
   });
   it("counts a question of an issue once, and a question with no issue", () => {
     expect(movesWithAsks([], [ask("q1", "CD-2"), ask("q2", "CD-2"), ask("q3", null)]).map((m) => m.identifier)).toEqual(["CD-2", "worker"]);
+  });
+});
+
+describe("overview move wording", () => {
+  afterEach(() => configureSite({ human: DEFAULT_HUMAN, readOnly: false }));
+
+  it("keeps wire reasons and names the owner when displaying them in the viewer", () => {
+    const input = graph([issue("1", { card: nextCard("wait human\ndo ask: Verify the release.") })]);
+    const reason = "It waits on you. Your step: Verify the release.";
+    expect(overviewMoveReason(reason)).toBe(reason);
+    configureSite({ human: "Ada", readOnly: true });
+    expect(summarize(input, "work").you[0].why).toBe(reason);
+    expect(overviewMoveReason(reason)).toBe("It waits on Ada. Ada's step: Verify the release.");
+    expect(overviewMoveReason("Do you approve the release?")).toBe("Do you approve the release?");
   });
 });

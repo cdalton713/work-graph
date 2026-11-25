@@ -1,7 +1,7 @@
 // Linear GraphQL access for the work-graph UI. The API key stays in this process.
 import type { Comment, GraphData, Issue, IssuePatch, IssueRef, Label, Milestone, Person, Project, PullRequest, State, Team } from "../src/lib/types.ts";
 import { site } from "../src/lib/site.ts";
-import { ANSWERED_LABEL, AUTONOMY_GROUP, type AutonomyLevel, autonomyOf, PAUSED_LABEL, pausedOf } from "../src/lib/autonomy.ts";
+import { ANSWERED_LABEL, AUTONOMY_GROUP, type AutonomyLevel, autonomyOf, PAUSED_LABEL, pausedOf, SHARED_LABEL, sharedOf } from "../src/lib/autonomy.ts";
 import { REVIEW_GROUP, type ReviewEffort, reviewLabel, reviewOf } from "../src/lib/review.ts";
 import { linearWorkspace } from "./workspaces.ts";
 
@@ -367,10 +367,12 @@ export async function listProjects(teamKey: string): Promise<Project[]> {
   type RawProject = {
     id: string; name: string; url: string; status: { name: string; type: string } | null;
     labels?: { nodes: { name: string; parent: { name: string } | null }[] } | null;
+    marks?: { nodes: { name: string; parent: { name: string } | null }[] } | null;
   };
   const projects = await pages<RawProject>(
     `query($k:String!,$after:String){ teams(first:1,filter:{key:{eq:$k}}){ nodes{
-       projects(first:50,after:$after){ nodes{id name url status{name type} labels(first:20){nodes{name parent{name}}}}
+       projects(first:50,after:$after){ nodes{id name url status{name type} labels(first:20){nodes{name parent{name}}}
+           marks: labels(first:10, filter:{name:{in:["${PAUSED_LABEL}","${SHARED_LABEL}"]}}){nodes{name parent{name}}}}
          pageInfo{hasNextPage endCursor} } } } }`,
     { k: teamKey },
     (data) => {
@@ -379,7 +381,8 @@ export async function listProjects(teamKey: string): Promise<Project[]> {
     },
   );
   return projects
-    .map((p) => ({ id: p.id, name: p.name, url: p.url, status: p.status?.name ?? "", statusType: p.status?.type ?? "", initiative: initiativeOf(p.labels?.nodes), autonomy: autonomyOf(p.labels?.nodes), review: reviewOf(p.labels?.nodes), paused: pausedOf(p.labels?.nodes) }))
+    .map((p) => ({ id: p.id, name: p.name, url: p.url, status: p.status?.name ?? "", statusType: p.status?.type ?? "", initiative: initiativeOf(p.labels?.nodes), autonomy: autonomyOf(p.labels?.nodes), review: reviewOf(p.labels?.nodes), // The two plain marks also come by name: a project can have more labels than the first 20.
+      paused: pausedOf(p.labels?.nodes) || pausedOf(p.marks?.nodes), shared: sharedOf(p.labels?.nodes) || sharedOf(p.marks?.nodes) }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -438,28 +441,43 @@ async function setGroupLabel(projectId: string, teamKey: string, teamScoped: boo
  * Pause or resume the effort: the plain project label `paused`, made when it is missing. The label is the record,
  * so a pause survives a restart of this server; `wg next` reads it. Same scope rule as the autonomy label.
  */
-export async function setPaused(projectId: string, paused: boolean, teamKey: string, teamScoped: boolean): Promise<void> {
+export const setPaused = (projectId: string, paused: boolean, teamKey: string, teamScoped: boolean): Promise<void> =>
+  setPlainLabel(projectId, PAUSED_LABEL, paused, teamKey, teamScoped, `work-graph: the coordinator holds each action until ${site.human} resumes the effort.`);
+
+/** Shares a project with the read-only viewer, or stops that: the plain project label `shared` is the record. */
+export const setShared = (projectId: string, shared: boolean, teamKey: string, teamScoped: boolean): Promise<void> =>
+  setPlainLabel(projectId, SHARED_LABEL, shared, teamKey, teamScoped, "work-graph: the read-only viewer shows this project.");
+
+/**
+ * Puts the plain project label `name` on a project of the team, or removes it. It makes the label when the team
+ * (or the workspace, with `teamScoped` false) has none.
+ */
+async function setPlainLabel(projectId: string, name: string, on: boolean, teamKey: string, teamScoped: boolean, description: string): Promise<void> {
   const info = await gql(`query($id:String!,$k:String!){ project(id:$id){ id teams(first:10){nodes{key}} labels(first:50){nodes{id name parent{id}}} }
     teams(first:1,filter:{key:{eq:$k}}){ nodes{id} } }`, { id: projectId, k: teamKey });
   const project = info.project as { teams: { nodes: { key: string }[] }; labels: { nodes: { id: string; name: string; parent: { id: string } | null }[] } } | null;
   if (!project) throw new LinearError("project not found", 404);
   if (!project.teams.nodes.some((t) => t.key === teamKey)) throw new LinearError(`the project is not in team ${teamKey}`, 403);
-  const on = project.labels.nodes.find((l) => !l.parent && l.name === PAUSED_LABEL);
-  if (!paused) {
-    if (on) await gql(`mutation($id:String!,$l:String!){ projectRemoveLabel(id:$id, labelId:$l){ success } }`, { id: projectId, l: on.id });
+  const has = project.labels.nodes.find((l) => !l.parent && l.name === name);
+  if (!on) {
+    if (has && !(await gql(`mutation($id:String!,$l:String!){ projectRemoveLabel(id:$id, labelId:$l){ success } }`, { id: projectId, l: has.id })).projectRemoveLabel.success) {
+      throw new LinearError(`Linear did not remove the project label ${name}`, 502);
+    }
     return;
   }
-  if (on) return;
+  if (has) return;
   const teamId = info.teams.nodes[0]?.id as string | undefined;
   if (!teamId) throw new LinearError(`team ${teamKey} not found`, 404);
   const scope = teamScoped ? { team: { id: { eq: teamId } } } : { team: { null: true } };
   const labels = (await gql(`query($f:ProjectLabelFilter!){ projectLabels(first:250, filter:$f){ nodes{id name isGroup retiredAt parent{id}} } }`,
     { f: scope })).projectLabels.nodes as { id: string; name: string; isGroup: boolean; retiredAt: string | null; parent: { id: string } | null }[];
-  const found = labels.find((l) => !l.isGroup && !l.parent && l.name === PAUSED_LABEL);
-  if (found?.retiredAt) throw new LinearError(`the project label ${PAUSED_LABEL} is retired; restore it in Linear`, 409);
+  const found = labels.find((l) => !l.isGroup && !l.parent && l.name === name);
+  if (found?.retiredAt) throw new LinearError(`the project label ${name} is retired; restore it in Linear`, 409);
   const labelId = found?.id ?? (await gql(`mutation($i:ProjectLabelCreateInput!){ projectLabelCreate(input:$i){ projectLabel{id} } }`,
-    { i: { name: PAUSED_LABEL, ...(teamScoped ? { teamId } : {}), description: `work-graph: the coordinator holds each action until ${site.human} resumes the effort.` } })).projectLabelCreate.projectLabel.id as string;
-  await gql(`mutation($id:String!,$l:String!){ projectAddLabel(id:$id, labelId:$l){ success } }`, { id: projectId, l: labelId });
+    { i: { name, ...(teamScoped ? { teamId } : {}), description } })).projectLabelCreate.projectLabel.id as string;
+  if (!(await gql(`mutation($id:String!,$l:String!){ projectAddLabel(id:$id, labelId:$l){ success } }`, { id: projectId, l: labelId })).projectAddLabel.success) {
+    throw new LinearError(`Linear did not add the project label ${name}`, 502);
+  }
 }
 
 /**
@@ -766,12 +784,16 @@ const comment = (c: RawComment): Comment => ({
   author: c.user ? c.user.displayName || c.user.name : c.botActor?.name ?? "unknown",
 });
 
-export async function listComments(issueId: string): Promise<Comment[]> {
+export async function listComments(issueId: string, inProject?: string): Promise<Comment[]> {
   const nodes = await pages<RawComment>(
-    `query($id:String!,$after:String){ issue(id:$id){ comments(first:50,after:$after){
+    `query($id:String!,$after:String){ issue(id:$id){ project{id} comments(first:50,after:$after){
        nodes{${COMMENT}} pageInfo{hasNextPage endCursor} } } }`,
     { id: issueId },
-    (data) => data.issue.comments,
+    (data) => {
+      // The same answer of Linear gives the project and the comments, so no older copy of the graph decides.
+      if (inProject !== undefined && data.issue?.project?.id !== inProject) throw new LinearError("no issue with this id in the shared project", 404);
+      return data.issue.comments;
+    },
   );
   return nodes.map(comment).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }

@@ -25,6 +25,8 @@ export interface PanelProps {
   progress?: Progress;
   /** The agent in this node's worktree, as Orca reports it (`wg agents`). */
   agent?: AgentRow;
+  /** The viewer: the panel shows the issue with no control that writes. */
+  readOnly?: boolean;
 }
 
 /** `note` says how many of these relations still hold, in the words of the canvas key. */
@@ -43,11 +45,13 @@ function Links({ title, ids, graph, onGo, note, clear }: { title: string; ids: s
   );
 }
 
-export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress, agent }: PanelProps) {
+export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress, agent, readOnly = false }: PanelProps) {
   const { issue, card } = node;
   const elapsed = runTime(card, now);
   const team = data.teams[issue.teamId];
-  const locked = issue.external || !team;
+  // The issue of another team, and each issue on the viewer, has no control that writes.
+  const foreign = issue.external || !team;
+  const locked = foreign || readOnly;
   const [title, setTitle] = useState(issue.title);
   const [draft, setDraft] = useState<string | null>(null);
   // The description that the draft started from. The server refuses a save when Linear has another text.
@@ -136,7 +140,7 @@ export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError,
       </header>
 
       <div className="panel-body" key={issue.id}>
-        {locked && (
+        {foreign && !readOnly && (
           <p className="notice">
             {issue.external
               ? `${issue.identifier} is in team ${issue.teamKey}, outside this project${card ? "; wg maps it as a node of this effort" : ""}. `
@@ -306,9 +310,13 @@ export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError,
               <Rich text={c.body} />
             </article>
           ))}
-          <textarea className="editor" rows={3} placeholder="Add a comment (Markdown). ⌘↵ sends it." value={reply} onChange={(e) => setReply(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && reply.trim() && !sending) void send(); }} />
-          <div className="row"><button type="button" className="primary" disabled={!reply.trim() || sending} onClick={() => void send()}>{sending ? "Sending…" : "Comment"}</button></div>
+          {!readOnly && (
+            <>
+              <textarea className="editor" rows={3} placeholder="Add a comment (Markdown). ⌘↵ sends it." value={reply} onChange={(e) => setReply(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && reply.trim() && !sending) void send(); }} />
+              <div className="row"><button type="button" className="primary" disabled={!reply.trim() || sending} onClick={() => void send()}>{sending ? "Sending…" : "Comment"}</button></div>
+            </>
+          )}
         </section>
       </div>
     </aside>

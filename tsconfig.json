@@ -5,5 +5,5 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"], "types": ["vite/client", "node"], "noEmit": true,
     "allowImportingTsExtensions": true, "erasableSyntaxOnly": true, "verbatimModuleSyntax": true
   },
-  "include": ["src", "server"]
+  "include": ["src", "server", "api"]
 }

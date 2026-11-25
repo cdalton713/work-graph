@@ -10,6 +10,7 @@ const write = (headers: Head, method = "PATCH", r: Rules = rules) =>
 
 describe("refusal", () => {
   it("lets this machine read under its two local names", () => {
+    expect(refuse("HEAD", (name) => ({ host: "127.0.0.1:4747" } as Head)[name], rules)).toBeNull();
     expect(get({ host: "127.0.0.1:4747" })).toBeNull();
     expect(get({ host: "localhost:4747" })).toBeNull();
   });

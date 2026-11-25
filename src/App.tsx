@@ -41,8 +41,9 @@ function useQuery() {
 export function projectFromQuery(directory: ProjectList | null, query: URLSearchParams) {
   const wanted = query.get("project") || null;
   const workspace = query.get("workspace") ?? site.defaultWorkspace;
-  const project = directory?.projects.find((p) => p.workspace === workspace
-    && (p.id === wanted || p.name.toLowerCase() === wanted?.toLowerCase())) ?? null;
+  // An id is exact, so it comes first: a project whose name is the id of another one does not take its link.
+  const here = directory?.projects.filter((p) => p.workspace === workspace) ?? [];
+  const project = here.find((p) => p.id === wanted) ?? here.find((p) => p.name.toLowerCase() === wanted?.toLowerCase()) ?? null;
   const entry = directory?.workspaces.find((w) => w.id === workspace);
   const missing = directory && wanted && !project && !entry?.error ? `No project "${wanted}" in ${entry?.name ?? workspace}` : null;
   return { project, missing };
@@ -228,6 +229,29 @@ export function App() {
   };
   const review = project?.review ?? REVIEW_DEFAULT;
 
+  // The viewer (a read-only page) shows the same graph with no control that writes.
+  const viewer = site.readOnly;
+  // Share with the viewer: the project label `shared` is the record. The link opens the project on the viewer of
+  // its workspace (config `share_url`), which names the workspace with the same id. It has the id of the project,
+  // not its name: two projects can have one name.
+  const shareUrl = project ? directory?.workspaces.find((w) => w.id === project.workspace)?.shareUrl : undefined;
+  const shareLink = project && shareUrl
+    ? `${shareUrl}/?${new URLSearchParams({ workspace: project.workspace ?? site.defaultWorkspace, project: project.id })}` : null;
+  const [shareBusy, setShareBusy] = useState(false);
+  const setShared = async (shared: boolean) => {
+    if (!project || shareBusy) return;
+    const target = project;
+    setShareBusy(true);
+    try {
+      await api.share(target.id, shared, target.workspace);
+      setDirectory((list) => list && { ...list, projects: list.projects.map((p) => p.id === target.id && p.workspace === target.workspace ? { ...p, shared } : p) });
+    } catch (e) {
+      setError(`share: ${(e as Error).message}`);
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
   const closeProject = async () => {
     if (!project || closing || pending.current) return;
     const target = project;
@@ -408,20 +432,30 @@ export function App() {
         </Picker>
         {project && <CopyButton text={project.name} label="Copy the project name" />}
         {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
-          <Picker wide value={[autonomy]} onChange={([level]) => void setAutonomy(level as AutonomyLevel)} disabled={autonomyBusy}
+          <Picker wide value={[autonomy]} onChange={([level]) => void setAutonomy(level as AutonomyLevel)} disabled={autonomyBusy || viewer}
             title={`Autonomy level: what the coordinator may do without you.${project.autonomy ? "" : " No label on the project: standard."} A change tells the coordinator at once.`}
             options={AUTONOMY_LEVELS.map((level) => ({ id: level, label: level, hint: AUTONOMY_HINTS[level] }))}>
             <span className={`bar-autonomy auto-${autonomy}`}>{autonomyBusy ? "Autonomy…" : <>Autonomy <b>{autonomy}</b></>}</span><span className="caret">▾</span>
           </Picker>
         )}
         {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
-          <Picker wide value={[review]} onChange={([level]) => void setReviewEffort(level as ReviewEffort)} disabled={reviewBusy}
+          <Picker wide value={[review]} onChange={([level]) => void setReviewEffort(level as ReviewEffort)} disabled={reviewBusy || viewer}
             title={`Review effort: how much review each PR gets.${project.review ? "" : " No label on the project: thorough."} A change tells the coordinator at once.`}
             options={REVIEW_LEVELS.map((level) => ({ id: level, label: level, hint: REVIEW_HINTS[level] }))}>
             <span className={`bar-review review-${review}`}>{reviewBusy ? "Review…" : <>Review <b>{review}</b></>}</span><span className="caret">▾</span>
           </Picker>
         )}
+        {!viewer && project && shareLink && (project.shared ? (
+          <span className="bar-share" title="Each account that may sign in to the viewer can read this project there. It cannot change it.">
+            <b>Shared</b><CopyButton text={shareLink} label="Copy the viewer link" />
+            <button type="button" className="ghost" disabled={shareBusy} onClick={() => void setShared(false)} title="Remove this project from the viewer.">Stop</button>
+          </span>
+        ) : (
+          <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void setShared(true)}
+            title="Show this project on the read-only viewer, for each account that may sign in there. The link to copy shows here then.">{shareBusy ? "Sharing…" : "Share"}</button>
+        ))}
         <span className="station-fill" />
+        {viewer && <span className="bar-viewer" title="This page changes nothing. The owner of the project changes it on their own page.">view only</span>}
         {full && (
           <>
             <button type="button" className={`toggle toggle-board${board ? " is-on" : ""}`} aria-pressed={board} onClick={() => setBoard(!board)}
@@ -443,8 +477,9 @@ export function App() {
         )}
         {versionText(status) && <span className="bar-version mono" title={`The build of the server: ${status!.version}`}>{versionText(status)}</span>}
         <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} title="Keyboard keys (?)">?</button>
+        {site.user && <a className="bar-user" href="/auth/logout" title={`Signed in as ${site.user}. Select to sign out.`}>Sign out</a>}
         {/* Apart from the view toggles: it changes every issue of the project in Linear. */}
-        {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
+        {!viewer && project && project.statusType !== "completed" && project.statusType !== "canceled" && (
           <button type="button" className="ghost bar-close" disabled={closing || busy} onClick={() => void closeProject()}
             title="Mark every issue in this project Done and complete the project.">{closing ? "Closing…" : "Close project"}</button>
         )}
@@ -530,7 +565,7 @@ export function App() {
             initiative={query.get("initiative")} onInitiative={(name) => setQuery({ initiative: name }, true)} />
         )}
         {project && !data && !error && <div className="blank">Loading {project.name}…</div>}
-        {board && full && full.nodes.length > 0 && <Board graph={full} now={now} selectedId={selected?.id ?? null} onPick={pick} onHover={setHoverId} onReview={canReview ? onReview : undefined}
+        {board && full && full.nodes.length > 0 && <Board graph={full} now={now} selectedId={selected?.id ?? null} onPick={pick} onHover={setHoverId} onReview={canReview && !viewer ? onReview : undefined}
           asked={asked}
           live={new Map(link.progress.flatMap((p) => { const job = liveJob(p); return job && p.issue ? [[p.issue, job] as [string, string]] : []; }))} />}
         {graph && data && !graph.nodes.length && <div className="blank">{openOnly ? "No open issues. Turn off “Open issues only” under View to see all." : "This project has no issues."}</div>}
@@ -542,7 +577,7 @@ export function App() {
           <Panel node={selected} now={now} graph={full} data={data} asks={link.asks.filter((a) => a.issue === selected.issue.identifier)}
             progress={link.progress.find((p) => p.issue === selected.issue.identifier)}
             agent={agentsFresh(agents, now) ? agents.agents.find((a) => a.issue === selected.issue.identifier) : undefined}
-            onDispatch={coordinator ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview ? onReview : undefined}
+            onDispatch={coordinator ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer}
             onGo={(id) => { select(id); setFocus({ id, tick: Date.now() }); }} />
         )}
       </main>

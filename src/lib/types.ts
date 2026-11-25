@@ -42,8 +42,14 @@ export interface Project {
   review?: ReviewEffort | null;
   /** The project has the plain label `paused`: the coordinator holds each action until Resume. */
   paused?: boolean;
+  /** The project has the plain label `shared`: the viewer shows it. */
+  shared?: boolean;
 }
-export interface WorkspaceSummary { id: string; name: string; error?: string }
+export interface WorkspaceSummary {
+  id: string; name: string; error?: string;
+  /** The address of the read-only viewer of this workspace (config `share_url`). None: the page has no Share button. */
+  shareUrl?: string;
+}
 export interface ProjectList {
   workspaces: WorkspaceSummary[];
   projects: (Project & { workspace: string; workspaceName: string })[];
@@ -90,6 +96,11 @@ export interface SiteConfig {
   contract: string | null;
   /** The commit of the build (`WG_VERSION`), or `dev`. */
   version: string;
+  /** The viewer: the page shows no edit control and no command, and opens no link. */
+  readOnly: boolean;
+  /** The page has a sign-in. Then `user` is the email of the session, or null: the page shows the sign-in screen. */
+  auth: boolean;
+  user: string | null;
 }
 /** The counts of one link room. No message text. */
 export interface RoomCounts { workspace: string; project: string; coordinators: number; pages: number; queued: number; asks: number }

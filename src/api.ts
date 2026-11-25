@@ -8,12 +8,19 @@ import type { Comment, GraphData, Issue, IssuePatch, ProjectList, ServerStatus }
 let openProject: string | null = null;
 export const setOpenProject = (id: string | null) => { openProject = id; };
 
+let reloading = false;
+
 async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "x-workspace": workspace };
   if (openProject) headers["x-project"] = openProject;
   const response = await fetch(`/api/${path}`, { ...init, headers });
   if (response.status === 204) return null as T; // the graph did not change
   const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+  // The session ended: load the page again, which shows the sign-in screen. One time, so a server fault makes no loop.
+  if (response.status === 401 && body.login && !reloading) {
+    reloading = true;
+    location.reload();
+  }
   if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
   return body as T;
 }
@@ -36,6 +43,9 @@ export const api = {
   /** Set the review effort of the project; the coordinator gets it at once. */
   reviewEffort: (projectId: string, level: ReviewEffort, workspace?: string) =>
     call<{ ok: boolean; level: ReviewEffort; queued: number }>(`projects/${projectId}/review-effort`, { method: "POST", body: JSON.stringify({ level }) }, workspace),
+  /** Share the project with the read-only viewer, or stop that (the project label `shared`). */
+  share: (projectId: string, shared: boolean, workspace?: string) =>
+    call<{ ok: boolean; shared: boolean }>(`projects/${projectId}/share`, { method: "POST", body: JSON.stringify({ shared }) }, workspace),
   /** The human's reply to a worker's question; the coordinator sends it to the worker. */
   reply: (projectId: string, askId: string, body: string, workspace?: string) => call<{ ok: boolean; recorded: boolean }>(`projects/${projectId}/asks/${encodeURIComponent(askId)}/reply`, { method: "POST", body: JSON.stringify({ body }) }, workspace),
   update: (issueId: string, patch: IssuePatch, workspace?: string) => call<Issue>(`issues/${issueId}`, { method: "PATCH", body: JSON.stringify(patch) }, workspace),

@@ -14,10 +14,11 @@ import { parseCard, statusName } from "../src/lib/graph.ts";
 import { type Changed, type ProjectRef, projectKey } from "../src/lib/link.ts";
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal } from "./access.ts";
+import { type Auth, LOGIN_PATH, authRoutes, sessionOf } from "./auth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { LinearError, addComment, linearBudget, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, updateIssue } from "./linear.ts";
+import { LinearError, addComment, linearBudget, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, LinkHub, QUEUE_MAX, realTimers as realLinkTimers, type Timers } from "./link.ts";
 import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
@@ -77,6 +78,16 @@ export interface AppOptions {
   version?: string;
   /** The page contract file whose hash `/api/config` gives. Default: the `contract.json` of the skill. */
   contractFile?: URL | string;
+  /**
+   * The viewer (README "Host a read-only viewer"): the API takes only GET, and there is no link. Default: `WG_READ_ONLY`
+   * is set to a value other than `0`.
+   */
+  readOnly?: boolean;
+  /**
+   * The sign-in of a hosted viewer (`server/auth.ts`). With it, the API needs a session, except `/api/config`.
+   * None: the host check is the only gate.
+   */
+  auth?: Auth | null;
 }
 
 /** The app, and what the server process needs besides `fetch`. */
@@ -118,7 +129,11 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
 export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, human, stateDir = process.env.WG_STATE_DIR || undefined,
-  version = process.env.WG_VERSION || "dev", contractFile, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
+  version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
+  // A sign-in gives each account of the domain the same rights, so it is only for a page that changes nothing.
+  // Google sends the browser back to the HTTPS name of the page, which only a hosted page has.
+  if (auth && !rules.hosted) throw new Error("the sign-in needs a hosted page (WG_HOSTED)");
+  if (auth && !readOnly) throw new Error("the sign-in needs the read-only mode (WG_READ_ONLY): a signed-in account would get each write of the page");
   // The overview and the graph rules on the server use the same names as the page.
   configureSite({ human, defaultWorkspace: workspaces[0].id });
   const clock = now ?? Date.now;
@@ -153,6 +168,36 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const caches = new Map(workspaces.map((w) => [w.id, createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now })]));
   const graphs = () => caches.get(linearWorkspace.getStore()!.id)!;
   /**
+   * The graph as this page may show it. The full page shows each issue of another project that has a blocks
+   * relation with an issue of the project. The viewer shows the project only: such an issue can be in a project
+   * that its owner did not share, and its title, text, and node card are in the graph.
+   */
+  const shown = (data: GraphData): GraphData => (readOnly ? {
+    ...data,
+    issues: data.issues.filter((i) => !i.external)
+      .map((i) => ({ ...i, blocks: i.blocks.filter((r) => r.inProject), blockedBy: i.blockedBy.filter((r) => r.inProject) })),
+    status: statusShown(data),
+  } : data);
+  /**
+   * The status document for the viewer: its data block only. A plan can map an issue of another project as a
+   * node, and the document names nodes in three places. `lines` (what `wg next` said about each node) goes, and
+   * the text around the block, which repeats the lines. The wave keeps only the keys of the nodes that the viewer
+   * shows, in `wave` and in the end of the status text (`; wave a,b`, as `wg next` writes it).
+   */
+  const statusShown = ({ status, issues }: GraphData): GraphData["status"] => {
+    try {
+      const block = status?.content.match(/```json\s*\n([\s\S]*?)\n```/);
+      if (!status || !block) return null;
+      const data = JSON.parse(block[1]) as Record<string, unknown>;
+      const keys = new Set(issues.filter((i) => !i.external).map((i) => parseCard(i.card?.body)?.key));
+      const wave = (Array.isArray(data.wave) ? data.wave : []).filter((key): key is string => typeof key === "string" && keys.has(key));
+      const head = typeof data.status === "string" ? data.status.replace(/; wave [\s\S]*$/, "") + (wave.length ? `; wave ${wave.join(",")}` : "") : data.status;
+      return { ...status, content: "```json\n" + JSON.stringify({ ...data, status: head, wave, lines: [] }) + "\n```" };
+    } catch {
+      return null;
+    }
+  };
+  /**
    * A write changed Linear: the next poll of each tab must see it. It forgets only the graph of the project
    * of the written issue (from Linear, not from the request); a write with no known project forgets all
    * graphs of the workspace.
@@ -186,16 +231,33 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const pageChanged = (ref: ProjectRef | null, what: Changed["what"], issues: string[]) => {
     if (ref) hub.publish(ref, "changed", { by: "page", what, issues });
   };
+  /** The count of the project lists that started, and the number of the list that `names` holds. */
+  const lists = { started: 0, stored: 0 };
   const api = new Hono();
   // The API can change Linear with the user's key. Accept only this page as the caller.
   api.use(async (c, next) => {
-    const reason = refusal(c.req.method, (name) => c.req.header(name), rules);
+    const header = (name: string) => c.req.header(name);
+    const host = refusal("GET", header, rules);
+    if (host) return c.json({ error: host }, 403);
+    // The viewer changes nothing: not Linear, and not a coordinator. The method decides this before the headers
+    // of a write and before the session, so each write gets the same answer.
+    if (readOnly && c.req.method !== "GET" && c.req.method !== "HEAD") return c.json({ error: "this page is read-only" }, 405);
+    const reason = refusal(c.req.method, header, rules);
     if (reason) return c.json({ error: reason }, 403);
     await next();
   });
   // The human's name and the default workspace, for the page before its first render (src/main.tsx).
   // `contract` and `version` let a deploy check see which commit and which page contract run.
-  api.get("/config", (c) => c.json<SiteConfig>({ human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version }));
+  api.get("/config", async (c) => c.json<SiteConfig>({
+    human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version, readOnly,
+    auth: !!auth, user: auth ? (await sessionOf(c, auth, clock))?.email ?? null : null,
+  }));
+  // Each route from here needs a session, on a page with a sign-in. The config above is open: the page needs it to
+  // show the sign-in screen.
+  api.use(async (c, next) => {
+    if (auth && !(await sessionOf(c, auth, clock))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    await next();
+  });
   // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
   api.get("/status", (c) => c.json<ServerStatus>({
     version, contract, uptime: Math.floor((clock() - started) / 1000),
@@ -210,17 +272,29 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   }));
   api.use(bodyLimit({ maxSize: 2_000_000, onError: (c) => c.json({ error: "request body too large" }, 413) }));
   const projectList = async (): Promise<ProjectList> => {
+    const order = ++lists.started;
     const results = await Promise.allSettled(workspaces.map((workspace) =>
       linearWorkspace.run(workspace, () => listProjects(workspace.team)),
     ));
-    return {
-      workspaces: workspaces.map(({ id, name }, at) => results[at].status === "fulfilled"
-        ? { id, name }
-        : { id, name, error: `${name} is unavailable. Reload to try again.` }),
+    const list: ProjectList = {
+      workspaces: workspaces.map(({ id, name, shareUrl }, at) => ({
+        id, name, ...(shareUrl ? { shareUrl } : {}),
+        ...(results[at].status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
+      })),
+      // The viewer has only the projects that their owner shared (the project label `shared`).
       projects: results.flatMap((result, at) => result.status === "fulfilled"
-        ? result.value.map((p) => ({ ...p, workspace: workspaces[at].id, workspaceName: workspaces[at].name }))
+        ? result.value.filter((p) => !readOnly || p.shared).map((p) => ({ ...p, workspace: workspaces[at].id, workspaceName: workspaces[at].name }))
         : []),
     };
+    // On the viewer, the list that started last decides which projects are shared: a share that ended in it ends
+    // for each later request at once. A list that started before it and ends after it changes nothing. The full
+    // page keeps the list of its link (`resolve`), which a list with a failed workspace must not replace.
+    if (readOnly && order > lists.stored) {
+      lists.stored = order;
+      names.list = list;
+      names.at = Date.now();
+    }
+    return list;
   };
   api.get("/projects", async (c) => c.json<ProjectList>(await projectList()));
   // The projects with a summary of each open one. The graphs come from the same cache as the graph
@@ -236,8 +310,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const p = open[next++];
         const workspace = workspaces.find((w) => w.id === p.workspace)!;
         try {
-          const { data } = await linearWorkspace.run(workspace, () => caches.get(workspace.id)!.get(p.id));
-          summaries.push(summarize(data, p.workspace));
+          // The viewer takes no older graph when Linear fails (see the graph route).
+          const { data } = await linearWorkspace.run(workspace, () => caches.get(workspace.id)!.get(p.id, { fresh: readOnly }));
+          summaries.push(summarize(shown(data), p.workspace));
         } catch (error) {
           summaries.push({ workspace: p.workspace, id: p.id, planned: 0, done: 0, counts: [], you: [], running: 0, review: 0, ready: 0,
             effort: null, freshness: null, updatedAt: null, error: (error as Error).message });
@@ -253,12 +328,31 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (!workspace) return c.json({ error: `workspace ${id} is not configured` }, 400);
     return linearWorkspace.run(workspace, next);
   });
+  /**
+   * The viewer: the request may read this project only when its owner shared it. The list is at most 60 s old, so a
+   * project that lost the label goes away in that time. A project that is not in the list makes the server read the
+   * list again, at most each 5 s: a new share works in that time, and a wrong id cannot use up the Linear budget.
+   * When Linear does not give the list, the answer is 503 and no older list counts: the server gives a project only
+   * while it knows that the project is shared. Each server process has its own list.
+   */
+  const sharedProject = async (id: string | undefined): Promise<string> => {
+    const workspace = linearWorkspace.getStore()!.id;
+    const find = () => names.list?.projects.find((p) => p.workspace === workspace && p.id === id);
+    if (id && Date.now() - names.at > (find() ? 60_000 : 5_000)) await projectList();
+    if (names.list?.workspaces.find((w) => w.id === workspace)?.error) throw new LinearError("Linear did not confirm that this project is shared. Try again.", 503);
+    if (!id || !find()) throw new LinearError("no shared project with this id", 404);
+    return id;
+  };
   // `?have=<version>`: the page has this version already. Then the answer has no body, except while the graph is stale.
   api.get("/projects/:id/graph", async (c) => {
+    if (readOnly) await sharedProject(c.req.param("id"));
     // A stale graph (the refresh failed) also carries `stale`, the error, and its load time, so the page can show them.
-    const { data, version, stale, error, loadedAt } = await graphs().get(c.req.param("id"));
+    // The viewer gets the error of the refresh in its place: an issue of the older graph can be in another project
+    // now. A graph in memory can still have an issue that left the project, until its full reload (`FULL_MS`):
+    // the check for changes does not see an issue that is in the project no more.
+    const { data, version, stale, error, loadedAt } = await graphs().get(c.req.param("id"), { fresh: readOnly });
     if (!stale && c.req.query("have") === version) return c.body(null, 204);
-    return c.json({ ...data, version, workspace: linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
+    return c.json({ ...shown(data), version, workspace: linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
   });
   api.post("/projects/:id/close", async (c) => {
     const { confirm } = await json(c.req.json<{ confirm?: unknown }>());
@@ -328,6 +422,16 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     hub.publish(ref, "command", { name: "next", key: null, issue: null });
     return c.json({ ok: true, level, queued: hub.presence(ref).queued });
   });
+  // Share a project with the read-only viewer, or stop that. The project label `shared` is the record: the viewer
+  // reads it from Linear. No coordinator acts on it.
+  api.post("/projects/:id/share", async (c) => {
+    const { shared } = await json(c.req.json<{ shared?: unknown }>());
+    if (typeof shared !== "boolean") throw new LinearError("shared must be true or false", 400);
+    const workspace = linearWorkspace.getStore()!;
+    await setShared(c.req.param("id"), shared, workspace.team, workspace.teamLabels);
+    names.at = 0;
+    return c.json({ ok: true, shared });
+  });
   // The human's reply to a worker's question (an Orca ask that the coordinator reported). The reply is a
   // comment on the worker's issue at once; the coordinator sends it to the worker at its next `wg next`.
   api.post("/projects/:id/asks/:ask/reply", async (c) => {
@@ -358,7 +462,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     pageChanged(ref, what, [issue.identifier]);
     return c.json(issue);
   });
-  api.get("/issues/:id/comments", async (c) => c.json(await listComments(c.req.param("id"))));
+  api.get("/issues/:id/comments", async (c) => {
+    // The viewer reads the comments of an issue only through its shared project (`x-project`). Linear says in the
+    // same answer which project the issue is in now: an issue that moved to another project gives 404.
+    if (readOnly) return c.json(await listComments(c.req.param("id"), await sharedProject(c.req.header("x-project"))));
+    return c.json(await listComments(c.req.param("id")));
+  });
   api.post("/issues/:id/comments", async (c) => {
     const { body } = await json(c.req.json<{ body?: unknown }>());
     const ref = pageProject((name) => c.req.header(name));
@@ -401,6 +510,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     return found;
   };
   app.get("/api/link", async (c, next) => {
+    // The viewer has no link: a coordinator connects to the full page only.
+    if (readOnly) return c.json({ error: "this page has no link" }, 404);
     const role = c.req.query("role") ?? "";
     const reason = linkRefusal(role, (name) => c.req.header(name), rules);
     if (reason) return c.json({ error: reason }, 403);
@@ -436,6 +547,15 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     };
   }));
   app.route("/api", api);
+  if (auth) {
+    // The sign-in answers only under the name of the page, as the API does.
+    app.use("/auth/*", async (c, next) => {
+      const reason = refusal("GET", (name) => c.req.header(name), rules);
+      if (reason) return c.json({ error: reason }, 403);
+      await next();
+    });
+    app.route("/auth", authRoutes(auth, () => `https://${rules.hosted!.host}`, clock));
+  }
 
   app.get("*", async (c) => {
     const file = normalize(join(dist, c.req.path === "/" ? "index.html" : c.req.path));

@@ -24,7 +24,8 @@ export function refusal(method: string, header: (name: string) => string | undef
   const get = (name: string) => header(name) ?? "";
   const page = pageOf(get, rules);
   if (page.refused) return page.refused;
-  if (method !== "GET" && (get("origin") !== page.origin || !get("content-type").startsWith("application/json"))) return "bad origin";
+  // HEAD reads, as GET does: the server answers it from the GET route, with no body.
+  if (method !== "GET" && method !== "HEAD" && (get("origin") !== page.origin || !get("content-type").startsWith("application/json"))) return "bad origin";
   return null;
 }
 

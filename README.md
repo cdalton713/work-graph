@@ -70,7 +70,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
     "codex": {"features": {"apps": false}, "agents": {"enabled": false}}
   },
   "workspaces": [
-    {"id": "work", "name": "Work", "team": "ENG", "key_env": ["LINEAR_API_KEY"]},
+    {"id": "work", "name": "Work", "team": "ENG", "key_env": ["LINEAR_API_KEY"], "share_url": "https://view.example.com"},
     {"id": "home", "name": "Home", "team": "HOME", "teams": ["HOME"], "key_env": [], "team_labels": false}
   ]
 }
@@ -92,7 +92,8 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | `health_interval`, `health_agent` | The status check (`wg health`, `skills/work-graph/references/health.md`): the hours from one check to the next (1 to 168, default 6), and the Orca agent that does the check (default `codex`). |
 | `test_runner` | The default test command of `wg evidence`. A node runs the moon test tasks that its diff affects; `@full-<phase>` runs `suite`. `commit_marker` is a regular expression for the line where the runner prints the commit it tests; without it, the exit code is the proof. `lint` is the lint command of the worker spec's push checks, as a list of arguments; each `{lower}` is the node's diff base. Without it, the spec has no lint step. A plan's `effort.lint` replaces it, and a plan with `effort.test` does not use it (`skills/work-graph/references/graph.md`). |
 | `worker_settings` | The session settings of a worker, per agent. Before a worker starts in a worktree, `wg dispatch` and `wg claim` merge `claude` into the worktree's `.claude/settings.local.json` and `codex` into its `.codex/config.toml` (as TOML). The merge keeps the other keys of a file that exists. A value of the config replaces a value of a different type in the file (a `false` replaces a table), and a list gets the config's items that it does not have yet, each one time. `wg` adds the file to the repository's `.git/info/exclude`, so the tree stays clean. It does not change a file that git tracks, a symlink, or a file that a `.gitignore` rule keeps in `git status`; it prints one line and the dispatch continues. Codex reads `.codex/config.toml` only in a project that it trusts. Use it to turn off what a worker does not need (plugins, MCP servers, tools, skills), so that each worker starts with less context. Default: none, and `wg` writes no file (`skills/work-graph/references/setup.md` "Worker sessions"). |
-| `workspaces` | The Linear workspaces. The first is the default. `team` is the default team of a plan; `teams` limits a workspace to those teams; `team_labels: false` makes project labels workspace labels (Linear's team project labels need the Business plan). |
+| `workspaces` | The Linear workspaces. The first is the default. `team` is the default team of a plan; `teams` limits a workspace to those teams; `team_labels: false` makes project labels workspace labels (Linear's team project labels need the Business plan). `share_url` is the address of the read-only viewer of the workspace: with it, the page has a **Share** button on each project ("Host a read-only viewer"). |
+| `auth` | Only in the config of a read-only viewer: `{"domains": ["example.com"]}` names the Google Workspace domains whose accounts may sign in ("Host a read-only viewer"). `wg` does not read it. |
 
 A workspace's key comes from `LINEAR_<ID>_API_KEY`, then the `key_env` names, then the private file
 `~/.config/work-graph/<id>-linear-api-key` (mode 600). Keys never go in the config.
@@ -219,13 +220,68 @@ path, the status, and the duration. The server compresses static files and JSON 
 the client accepts it. `index.html` has a weak `ETag` and `Vary: Accept-Encoding`, also on a 304.
 
 The server listens on `127.0.0.1:4747`. It does not check who the user is: keep it on a private network, such as a
-tailnet, or put an authenticating proxy in front of it. Then set `page_url` in the config of each machine that
+tailnet, or put an authenticating proxy in front of it. To let other people read a project, use a viewer
+("Host a read-only viewer"), not this page. Then set `page_url` in the config of each machine that
 runs `wg`.
 
 The server pings each link socket every 20 s. It closes a socket that sent no pong for 45 s (messages do not count), so the
 page shows a coordinator whose machine sleeps as not connected. On `SIGTERM` or `SIGINT`, the server closes each
 link socket with code 1012 (restart), and stops after the sockets close or after 3 s. A proxy in front of the server
 must keep a WebSocket open for longer than 20 s with no data.
+
+## Host a read-only viewer
+
+A viewer is a second deployment of the page for other people: they sign in and read the projects that you
+shared, and they can change nothing. Your own page stays where it is, and each coordinator stays connected to it.
+
+- **What a viewer shows.** The graph, the issues, their comments, and the `work-graph status` document, all from
+  Linear. It has no link, so it does not show live job progress, worker questions, or the agent lines of
+  `wg agents`. A change shows at the next poll (15 s for a graph, 60 s for the overview). It shows only the issues
+  of the project: an issue of another project that blocks one of them (an outside node of your own page) is not in
+  the graph of the viewer, and neither is the relation to it. From the status document it shows the status text,
+  the times, and the wave, with only the nodes that the viewer shows. It does not show the lines of `wg next`:
+  a line can name an issue that the plan maps from another project.
+  The graph also has the status names, the member names, and the label names of the team.
+- **Read-only.** `WG_READ_ONLY=1` (or `createApp({ readOnly: true })`): each API request with a method that
+  changes data (`POST`, `PATCH`, `PUT`, `DELETE`) gives 405, `/api/link` gives 404, and the page shows no edit
+  control and no command. Give the viewer a Linear key
+  that can only read the team, so that a fault in the page cannot write.
+- **Sign-in.** The config field `auth` names the Google Workspace domains, and the environment gives the secrets:
+  `WG_AUTH_CLIENT_ID` and `WG_AUTH_CLIENT_SECRET` (a Google OAuth client of type "Web application" whose redirect
+  URI is `https://<WG_HOSTED>/auth/callback`), and `WG_SESSION_SECRET` (32 random characters or more). The server
+  accepts an account only when Google says that its email is verified, and both its Workspace domain (`hd`) and
+  the domain of its address are in the list. A personal Google account has no Workspace domain. A session is a
+  signed cookie that lasts 7 days. A new `WG_SESSION_SECRET` ends each session, and a domain that leaves the list
+  ends the sessions of its accounts at their next request. Without a
+  session, each API route except `/api/config` gives 401. The server refuses to start a sign-in on a page that
+  is not read-only or not hosted, and with a secret that is missing.
+- **Share a project.** The plain Linear project label `shared` is the record. A viewer lists a project, and
+  gives its graph and comments, only for a project that has the label; each other project gives 404. Set the label
+  with the **Share** button of your own page (it needs `share_url` in the config of the workspace), or in Linear.
+  The button then shows the link to copy: `<share_url>/?workspace=<id>&project=<project id>`. The viewer must name
+  the workspace with the same `id`.
+- **When a share ends.** The viewer decides from its newest project list from Linear. It reads the list for each
+  overview poll of each open page, and again when its copy is 60 s old. So a project that loses the label leaves
+  the viewer at the next list, in at most 60 s. Each server process has its own list: where a host runs more than
+  one instance of the function, the 60 s hold for each instance. While Linear does not give the list, the viewer
+  gives no project (503): it does not use an older list. When Linear does not give a graph, the viewer gives an
+  error, not its last graph.
+- **When an issue leaves a shared project.** Its comments stop at once: Linear says in the same answer as the
+  comments which project the issue is in. Its title and text, as they were in the shared project, can stay in the
+  graph of the viewer for at most 5 minutes (the full reload of a graph in memory). A page that a person has open
+  keeps what it loaded before. To take a project away from the viewers sooner, stop its share.
+
+On Vercel: `vercel.json` builds the page (`dist/`) as static files and sends `/api/*`, `/auth/*`, and `/healthz` to
+the function `api/index.ts`, which is always read-only. Set these environment values in the Vercel project:
+`WG_HOSTED` (the production name, for example `view.example.com`), `WG_CONFIG_JSON` (`human`, the shared
+`workspaces`, and `auth`), the Linear key of each workspace, and the three sign-in values. A preview deployment
+has another name, so its API answers 403 (`bad host`) unless `WG_HOSTED` of the preview environment names it.
+The full page does not run on Vercel: the link needs one process that lives as long as its sockets.
+
+With the `Dockerfile`: the same container with `WG_READ_ONLY=1`, `WG_HOSTED`, and the same values.
+
+Checks of a viewer: `GET /healthz` gives `{"ok":true}`; `GET /api/config` gives `"readOnly":true,"auth":true`;
+`GET /api/projects` without a session gives 401; a `POST` to any API path gives 405.
 
 ## The contract between `wg` and the page
 

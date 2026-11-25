@@ -520,6 +520,12 @@ button.copy.is-copied { color: var(--lamp-done); }
 .bar-version { font-size: 11px; color: var(--ink-3); }
 .bar-keys.is-on { color: var(--ink-1); }
 .bar-close { color: var(--ink-4); }
+.bar-share { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-3); }
+.bar-share b { color: var(--lamp-done); font-weight: 500; }
+.bar-viewer { font-size: 11px; color: var(--ink-3); border: 1px solid var(--rail-2); border-radius: var(--r-1); padding: 1px 6px; }
+.bar-user { font-size: 12px; color: var(--ink-3); }
+.signin { text-align: center; }
+.signin-go { display: inline-block; margin-top: 8px; padding: 6px 14px; border: 1px solid var(--lamp-done); border-radius: var(--r-1); color: var(--lamp-done); text-decoration: none; }
 .bar-close:hover:not(:disabled) { color: var(--lamp-stop); border-color: var(--lamp-stop); }
 .keys { position: fixed; z-index: 50; top: 52px; right: 16px; width: min(380px, calc(100vw - 32px)); padding: 10px 14px 12px; border: 1px solid var(--rail-2); border-radius: var(--r-2); background: var(--cab-1); box-shadow: 0 8px 24px rgb(0 0 0 / 0.4); font-size: 12px; }
 .keys header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; color: var(--ink-1); }

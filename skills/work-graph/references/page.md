@@ -11,6 +11,8 @@ The page reads Linear. It needs no plan directory. It groups the projects by con
 - `wg move … "Needs <human>"` prints `page <url>` for one issue. The URL also has `&issue=<identifier>`.
 - `wg ui [--workspace <id>] [--port N] [--project <name>] [--no-open] [--no-tailnet]` serves the page from the root of this repository (or `WG_UI_DIR`) at `http://127.0.0.1:4747` by default. It needs the key for the selected workspace. Start it in the background when the human asks or the hosted page is down. The first run installs and builds it in about 1 minute. If the port already serves the page, the command prints the address, opens it, and exits. Tailscale Serve gives it the address `https://<this machine>.<tailnet>.ts.net`. Use `--no-tailnet` to serve it only on this machine.
 
+- **Share**: where the config of the workspace has `share_url`, the top bar of a project has a **Share** button. It sets the project label `shared`, and the read-only viewer at that address then shows the project to each account that may sign in there (the repository README "Host a read-only viewer"). The viewer changes nothing in Linear and sends the coordinator nothing. Do not paste secrets into issue text of a shared project.
+
 ## Edits
 
 The human can edit the description, status, priority, assignee, and labels, or add a comment. They can add or remove the `reviewed` label for the wave review and merge review. `plan.json` defines the graph and node titles. The graph, issue titles, claim labels, kind labels, and ENG nodes are read-only. The page requires a note to set an `ops` or `decision` node to `Done`.

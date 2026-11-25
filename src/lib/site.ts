@@ -17,17 +17,21 @@ export interface Site {
   waitLabel: string;
   /** The workspace of a link or a request that names none: the first configured workspace. */
   defaultWorkspace: string;
+  /** The viewer: the page shows no edit control and no command, and opens no link. */
+  readOnly: boolean;
+  /** The email of the session, on a page with a sign-in. */
+  user: string | null;
 }
 
-function make(human: string, defaultWorkspace: string): Site {
-  return { human, waitStatus: `Needs ${human}`, waitLabel: `needs-${humanSlug(human)}`, defaultWorkspace };
+function make(human: string, defaultWorkspace: string, readOnly = false, user: string | null = null): Site {
+  return { human, waitStatus: `Needs ${human}`, waitLabel: `needs-${humanSlug(human)}`, defaultWorkspace, readOnly, user };
 }
 
 /** The current settings. Change them only with `configureSite`, before the first render or request. */
 export const site: Site = make(DEFAULT_HUMAN, "default");
 
-export function configureSite({ human, defaultWorkspace }: { human?: string; defaultWorkspace?: string }) {
-  Object.assign(site, make(human ?? site.human, defaultWorkspace ?? site.defaultWorkspace));
+export function configureSite({ human, defaultWorkspace, readOnly, user }: { human?: string; defaultWorkspace?: string; readOnly?: boolean; user?: string | null }) {
+  Object.assign(site, make(human ?? site.human, defaultWorkspace ?? site.defaultWorkspace, readOnly ?? site.readOnly, user === undefined ? site.user : user));
 }
 
 /** The statuses in the order of a project's flow, for the counts. */

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { type Agents, type Ask, type Envelope, type Presence, type Progress, type ProjectRef, projectKey } from "./lib/link";
+import { site } from "./lib/site";
 
 export interface LinkState {
   /** The presence of each project, by `workspace:id`. The overview gets every project, a project page its own. */
@@ -24,6 +25,8 @@ export function useLink(ref: ProjectRef | null, onChanged: () => void): LinkStat
   useEffect(() => {
     let socket: WebSocket | null = null, timer = 0, stopped = false, delay = 1000;
     setState({ presence: new Map(), asks: [], progress: [], asksBy: new Map(), agentsBy: new Map(), connected: false });
+    // The viewer has no link: its server refuses the socket.
+    if (site.readOnly) return;
     const open = () => {
       const query = new URLSearchParams({ role: "page", ...(ref ? { workspace: ref.workspace, project: ref.id } : {}) });
       socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/link?${query}`);

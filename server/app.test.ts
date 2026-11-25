@@ -71,6 +71,9 @@ describe("project links", () => {
     };
     expect(projectFromQuery(directory, new URLSearchParams("project=p1")).project).toEqual(project);
     expect(projectFromQuery(directory, new URLSearchParams("project=A+PROJECT")).project).toEqual(project);
+    // A project whose name is the id of another one does not take its link.
+    const named = { ...project, id: "p0", name: "p1" };
+    expect(projectFromQuery({ ...directory, projects: [named, project] }, new URLSearchParams("project=p1")).project).toEqual(project);
     expect(projectFromQuery(directory, new URLSearchParams("workspace=home&project=A+project"))).toEqual({
       project: null, missing: 'No project "A project" in Home',
     });
@@ -94,8 +97,8 @@ describe("api", () => {
     expect(await response.json()).toEqual({
       workspaces: [{ id: "work", name: "Work" }],
       projects: [
-        { id: "p1", name: "A", url: "u", status: "Started", statusType: "started", initiative: "Tooling", autonomy: "full", review: "light", paused: true, workspace: "work", workspaceName: "Work" },
-        { id: "p2", name: "B", url: "u", status: "", statusType: "", initiative: null, autonomy: null, review: null, paused: false, workspace: "work", workspaceName: "Work" },
+        { id: "p1", name: "A", url: "u", status: "Started", statusType: "started", initiative: "Tooling", autonomy: "full", review: "light", paused: true, shared: false, workspace: "work", workspaceName: "Work" },
+        { id: "p2", name: "B", url: "u", status: "", statusType: "", initiative: null, autonomy: null, review: null, paused: false, shared: false, workspace: "work", workspaceName: "Work" },
       ],
     });
   });
@@ -162,7 +165,7 @@ describe("api", () => {
         { id: "work", name: "Work" },
         { id: "home", name: "Home", error: "Home is unavailable. Reload to try again." },
       ],
-      projects: [{ id: "work-project", name: "Work", url: "u", status: "", statusType: "", initiative: null, autonomy: null, review: null, paused: false, workspace: "work", workspaceName: "Work" }],
+      projects: [{ id: "work-project", name: "Work", url: "u", status: "", statusType: "", initiative: null, autonomy: null, review: null, paused: false, shared: false, workspace: "work", workspaceName: "Work" }],
     });
   });
   it("loads project issues across pages without mixing workspace graph caches", async () => {
@@ -1008,5 +1011,433 @@ describe("server status", () => {
       }
     }
     expect((await app().request("/", { headers: { ...local, "if-none-match": '"other"' } })).status).toBe(200);
+  });
+});
+
+describe("read-only viewer", () => {
+  const viewer = () => createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true });
+
+  it("refuses each write and the link, and says in the config that it is read-only", async () => {
+    linear({});
+    const patch = await viewer().request("/api/issues/i1", { method: "PATCH", headers: write, body: JSON.stringify({ priority: 1 }) });
+    expect(patch.status).toBe(405);
+    expect(await patch.json()).toEqual({ error: "this page is read-only" });
+    const command = await viewer().request("/api/projects/p1/commands", { method: "POST", headers: write, body: JSON.stringify({ name: "next" }) });
+    expect(command.status).toBe(405);
+    // The method decides, not the headers of a write: a POST with no Origin and no JSON type gets the same answer.
+    for (const method of ["POST", "PATCH", "PUT", "DELETE"]) {
+      expect([method, (await viewer().request("/api/projects/p1/share", { method, headers: local })).status]).toEqual([method, 405]);
+    }
+    expect((await viewer().request("/api/projects/p1/share", { method: "POST", headers: { host: "evil.example" } })).status).toBe(403);
+    // HEAD reads, as GET does.
+    expect((await viewer().request("/api/config", { method: "HEAD", headers: local })).status).toBe(200);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect((await viewer().request("/api/link?role=coordinator&project=p1", { headers: local })).status).toBe(404);
+    expect(await (await viewer().request("/api/config", { headers: local })).json()).toMatchObject({ readOnly: true });
+    expect(await (await app().request("/api/config", { headers: local })).json()).toMatchObject({ readOnly: false });
+  });
+  it("lists only the projects that have the label shared", async () => {
+    const shared = { nodes: [{ name: "shared", parent: null }] };
+    // A child label of a group with the same name does not share the project.
+    const child = { nodes: [{ name: "shared", parent: { name: "Initiative" } }] };
+    const projects = { nodes: [{ id: "p1", name: "A", url: "u", status: null, labels: shared }, { id: "p2", name: "B", url: "u", status: null },
+      { id: "p3", name: "C", url: "u", status: null, labels: child }], pageInfo: { hasNextPage: false, endCursor: null } };
+    linear({ teams: { nodes: [{ projects }] } });
+    const list = await (await viewer().request("/api/projects", { headers: local })).json();
+    expect(list.projects.map((p: { id: string; shared: boolean }) => [p.id, p.shared])).toEqual([["p1", true]]);
+    const full = await (await app().request("/api/projects", { headers: local })).json();
+    expect(full.projects.map((p: { id: string; shared: boolean }) => [p.id, p.shared])).toEqual([["p1", true], ["p2", false], ["p3", false]]);
+  });
+  it("finds the label shared on a project that has more than 20 labels", async () => {
+    // The list reads the first 20 labels of a project, and asks for the marks by name: here only the second answer has it.
+    const many = { nodes: Array.from({ length: 20 }, (_, at) => ({ name: `label ${at}`, parent: null })) };
+    const projects = { nodes: [{ id: "p1", name: "A", url: "u", status: null, labels: many, marks: { nodes: [{ name: "shared", parent: null }, { name: "paused", parent: null }] } }],
+      pageInfo: { hasNextPage: false, endCursor: null } };
+    const calls = linear({ teams: { nodes: [{ projects }] } });
+    const list = await (await viewer().request("/api/projects", { headers: local })).json();
+    expect(list.projects).toMatchObject([{ id: "p1", shared: true, paused: true }]);
+    expect(calls).toHaveLength(1);
+  });
+  it("gives the graph and the comments only for a shared project, with no issue of another project", async () => {
+    const asked: string[] = [];
+    // The project of each issue in Linear now. i1 moves later.
+    const home: Record<string, string> = { i1: "p1", i9: "p9" };
+    const none = { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+    const raw = (id: string, identifier: string, title: string, project: string, over: Record<string, unknown> = {}) => ({
+      id, identifier, title, description: `text of ${title}`, priority: 0, url: "u", sortOrder: 0, updatedAt: "2026-11-20T00:00:00Z",
+      team: { id: "team", key: "CD" }, state: { id: "s", name: "Todo", type: "unstarted", color: "" }, assignee: null,
+      labels: { nodes: [] }, projectMilestone: null, relations: none, inverseRelations: none,
+      comments: { nodes: [] }, attachments: { nodes: [] }, project: { id: project }, ...over,
+    });
+    const outside = { id: "o1", identifier: "CD-9", title: "Private plan", url: "u", team: { key: "CD" }, state: { id: "s", name: "Todo", type: "unstarted", color: "" }, project: { id: "p2" } };
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      let data;
+      if (query.includes("projects(first:50")) data = { teams: { nodes: [{ projects: { nodes: [
+        { id: "p1", name: "Shared", url: "u", status: null, labels: { nodes: [{ name: "shared", parent: null }] } },
+        { id: "p2", name: "Private", url: "u", status: null },
+      ], pageInfo: { hasNextPage: false, endCursor: null } } }] } };
+      else if (query.includes("viewer{")) {
+        asked.push(`graph ${variables.id}`);
+        // The status document of the project, as `wg next` writes it: a line can name an issue that the plan maps from another project.
+        const status = "work-graph status\n\n- do ask CD-9: private line\n\n```json\n" + JSON.stringify({ wg: 1, status: "phase 1: 2 tasks; wave a,private-key", wave: ["a", "private-key"], ran: "2026-11-20T00:00:00Z", lines: [{ level: "do", text: "ask CD-9: private line" }] }) + "\n```";
+        data = { viewer: { id: "me" }, project: { id: variables.id, name: "Shared", url: "u", projectMilestones: { nodes: [] }, documents: { nodes: [{ content: status, updatedAt: "2026-11-20T00:00:00Z" }] } } };
+      }
+      // The issue of the private project that blocks CD-1: the full page shows it as an outside node.
+      else if (variables.ids) data = { issues: { nodes: [raw("o1", "CD-9", "Private plan", "p2", {
+        state: { id: "s2", name: "Needs Human", type: "started", color: "" },
+        comments: { nodes: [{ id: "c9", body: "**work-graph node card** `private-key`\n\n```json\n{\"wg\":1,\"key\":\"private-key\",\"next\":\"private next step\"}\n```" }] },
+      })] } };
+      else if (query.includes("issues(first:25")) data = { project: { issues: { nodes: [raw("i1", "CD-1", "One", "p1", {
+        comments: { nodes: [{ id: "c1", body: "**work-graph node card** `a`\n\n```json\n{\"wg\":1,\"key\":\"a\"}\n```" }] },
+        inverseRelations: { nodes: [{ type: "blocks", issue: outside }], pageInfo: { hasNextPage: false, endCursor: null } },
+      })], pageInfo: { hasNextPage: false, endCursor: null } } } };
+      else if (query.includes("comments(first:50")) {
+        asked.push(`comments ${variables.id}`);
+        data = { issue: home[variables.id] ? { project: { id: home[variables.id] }, comments: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } : null };
+      }
+      else if (query.includes("members(first")) data = { teams: { nodes: [] } };
+      else data = { issueLabels: { nodes: [], pageInfo: { hasNextPage: false } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const page = viewer();
+    const get = (path: string, project?: string) => page.request(path, { headers: { ...local, ...(project ? { "x-project": project } : {}) } });
+    const graph = await get("/api/projects/p1/graph");
+    expect(graph.status).toBe(200);
+    const text = await graph.text();
+    expect(JSON.parse(text).issues.map((i: { identifier: string; blockedBy: unknown[] }) => [i.identifier, i.blockedBy])).toEqual([["CD-1", []]]);
+    for (const secret of ["Private plan", "CD-9", "private next step", "private line", "private-key"]) expect(text).not.toContain(secret);
+    // The status of the effort stays: its counts, its times, and the nodes of the wave that the viewer shows.
+    // The lines of the coordinator and the key of the outside node do not.
+    expect(JSON.parse(JSON.parse(text).status.content.match(/```json\n([\s\S]*?)\n```/)[1])).toEqual({ wg: 1, status: "phase 1: 2 tasks; wave a", wave: ["a"], ran: "2026-11-20T00:00:00Z", lines: [] });
+    // The full page shows the outside issue: the test data has it.
+    const full = await (await app().request("/api/projects/p1/graph", { headers: local })).text();
+    expect(full).toContain("Private plan");
+    expect(full).toContain("private next step");
+    expect(full).toContain("private line");
+    expect(full).toContain("wave a,private-key");
+    const hidden = await get("/api/projects/p2/graph");
+    expect(hidden.status).toBe(404);
+    expect(await hidden.json()).toEqual({ error: "no shared project with this id" });
+    asked.length = 0;
+    expect((await get("/api/issues/i1/comments", "p1")).status).toBe(200);
+    // The comments need the shared project of the issue: no project, a private one, an issue of another project,
+    // and an issue that Linear does not have give 404.
+    expect((await get("/api/issues/i1/comments")).status).toBe(404);
+    expect((await get("/api/issues/i1/comments", "p2")).status).toBe(404);
+    expect((await get("/api/issues/i9/comments", "p1")).status).toBe(404);
+    expect((await get("/api/issues/gone/comments", "p1")).status).toBe(404);
+    // The issue moves to the private project. The graph of p1 in memory still has it; Linear decides.
+    home.i1 = "p2";
+    expect((await get("/api/issues/i1/comments", "p1")).status).toBe(404);
+    expect(asked).toEqual(["comments i1", "comments i9", "comments gone", "comments i1"]);
+    // The overview counts no outside issue, and does not name it as a move of the human's.
+    const overview = await (await get("/api/overview")).json();
+    expect(overview.summaries).toMatchObject([{ id: "p1", planned: 1, you: [] }]);
+    for (const secret of ["Private plan", "private-key"]) expect(JSON.stringify(overview)).not.toContain(secret);
+    expect(overview.summaries[0].effort.status).toBe("phase 1: 2 tasks; wave a");
+    expect((await (await app().request("/api/overview", { headers: local })).json()).summaries[0]).toMatchObject({ planned: 2, you: [{ identifier: "CD-9" }] });
+  });
+  it("stops giving a project at once when a list from Linear shows that it is not shared now", async () => {
+    let shared = true;
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      let data;
+      if (query.includes("projects(first:50")) data = { teams: { nodes: [{ projects: { nodes: [
+        { id: "p1", name: "Shared", url: "u", status: null, labels: { nodes: shared ? [{ name: "shared", parent: null }] : [] } },
+      ], pageInfo: { hasNextPage: false, endCursor: null } } }] } };
+      else if (query.includes("viewer{")) data = { viewer: { id: "me" }, project: { id: variables.id, name: "Shared", url: "u", projectMilestones: { nodes: [] } } };
+      else if (query.includes("issues(first:25")) data = { project: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
+      else if (query.includes("comments(first:50")) data = { issue: { project: { id: "p1" }, comments: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
+      else if (query.includes("members(first")) data = { teams: { nodes: [] } };
+      else data = { issueLabels: { nodes: [], pageInfo: { hasNextPage: false } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const page = viewer();
+    expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+    // The owner stops the share. The next list that any viewer loads (the overview polls it) ends the grant.
+    shared = false;
+    expect((await (await page.request("/api/projects", { headers: local })).json()).projects).toEqual([]);
+    expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(404);
+    expect((await page.request("/api/issues/i1/comments", { headers: { ...local, "x-project": "p1" } })).status).toBe(404);
+  });
+  it("does not take an older list that ends after a newer one", async () => {
+    // Each list request waits until the test lets it go, with the answer of the time when it started.
+    const waiting: { shared: boolean; go: () => void }[] = [];
+    let shared = true, hold = false;
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      let data;
+      if (query.includes("projects(first:50")) {
+        const then = shared;
+        if (hold) await new Promise<void>((go) => waiting.push({ shared: then, go }));
+        data = { teams: { nodes: [{ projects: { nodes: [
+          { id: "p1", name: "Shared", url: "u", status: null, labels: { nodes: then ? [{ name: "shared", parent: null }] : [] } },
+        ], pageInfo: { hasNextPage: false, endCursor: null } } }] } };
+      }
+      else if (query.includes("viewer{")) data = { viewer: { id: "me" }, project: { id: variables.id, name: "Shared", url: "u", projectMilestones: { nodes: [] } } };
+      else if (query.includes("issues(first:25")) data = { project: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
+      else if (query.includes("members(first")) data = { teams: { nodes: [] } };
+      else data = { issueLabels: { nodes: [], pageInfo: { hasNextPage: false } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const page = viewer();
+    expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+    hold = true;
+    const older = page.request("/api/projects", { headers: local });
+    await vi.waitFor(() => expect(waiting).toHaveLength(1));
+    shared = false;
+    const newer = page.request("/api/projects", { headers: local });
+    await vi.waitFor(() => expect(waiting).toHaveLength(2));
+    waiting[1].go();
+    expect((await (await newer).json()).projects).toEqual([]);
+    waiting[0].go();
+    expect((await (await older).json()).projects).toHaveLength(1);
+    hold = false;
+    expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(404);
+  });
+  it("gives no project while Linear does not confirm that it is shared", async () => {
+    let down = false, graphDown = false;
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      if (down || (graphDown && !query.includes("projects(first:50"))) return { ok: false, status: 503, json: async () => null };
+      let data;
+      if (query.includes("projects(first:50")) data = { teams: { nodes: [{ projects: { nodes: [
+        { id: "p1", name: "Shared", url: "u", status: null, labels: { nodes: [{ name: "shared", parent: null }] } },
+      ], pageInfo: { hasNextPage: false, endCursor: null } } }] } };
+      // The check of the cache: nothing changed in the project.
+      else if (query.includes("issues(first:1,")) data = { issues: { nodes: [] }, comments: { nodes: [] }, project: { documents: { nodes: [] } } };
+      else if (query.includes("viewer{")) data = { viewer: { id: "me" }, project: { id: variables.id, name: "Shared", url: "u", projectMilestones: { nodes: [] } } };
+      else if (query.includes("issues(first:25")) data = { project: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
+      else if (query.includes("members(first")) data = { teams: { nodes: [] } };
+      else data = { issueLabels: { nodes: [], pageInfo: { hasNextPage: false } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const start = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+    try {
+      const page = viewer();
+      expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+      // The list is too old now, and Linear is down: the server cannot know that the project is still shared.
+      down = true;
+      clock.mockReturnValue(start + 61_000);
+      const closed = await page.request("/api/projects/p1/graph", { headers: local });
+      expect(closed.status).toBe(503);
+      expect(await closed.json()).toEqual({ error: "Linear did not confirm that this project is shared. Try again." });
+      expect((await page.request("/api/issues/i1/comments", { headers: { ...local, "x-project": "p1" } })).status).toBe(503);
+      down = false;
+      clock.mockReturnValue(start + 70_000);
+      expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+      // Linear gives the list but not the graph: the viewer gives no older graph, in which an issue can be that
+      // moved to another project since. The full page gives its last graph, marked stale.
+      const owner = app();
+      expect((await owner.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+      graphDown = true;
+      clock.mockReturnValue(start + 100_000);
+      const old = await page.request("/api/projects/p1/graph", { headers: local });
+      expect(old.status).toBeGreaterThanOrEqual(500);
+      expect(await old.json()).not.toHaveProperty("issues");
+      expect(await (await owner.request("/api/projects/p1/graph", { headers: local })).json()).toMatchObject({ stale: true });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
+
+describe("sign-in of the viewer", () => {
+  const hosted: Rules = { port: 4747, tailnet: null, hosted: { host: "view.example.com" } };
+  const auth = { domains: ["example.com"], clientId: "client-1", clientSecret: "client-secret", secret: "a-session-secret-of-32-characters" };
+  const signedIn = () => createApp(hosted, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true, auth });
+  const host = { host: "view.example.com" };
+
+  it("gives 401 for the API without a session, and still serves the page, the config, and the health check", async () => {
+    linear({ teams: { nodes: [{ projects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+    const page = signedIn();
+    for (const path of ["/api/projects", "/api/overview", "/api/status", "/api/projects/p1/graph", "/api/issues/i1/comments"]) {
+      const response = await page.request(path, { headers: host });
+      expect([path, response.status]).toEqual([path, 401]);
+      expect(await response.json()).toEqual({ error: "sign in", login: "/auth/login" });
+    }
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(await (await page.request("/api/config", { headers: host })).json()).toMatchObject({ readOnly: true, auth: true, user: null });
+    expect(await (await page.request("/", { headers: host })).text()).toBe("<html>wg</html>");
+    expect((await page.request("/healthz")).status).toBe(200);
+    // A page with no sign-in says so, and takes each caller that the host check lets through.
+    expect(await (await app().request("/api/config", { headers: local })).json()).toMatchObject({ auth: false, user: null });
+  });
+
+  /** An ID token as Google's token endpoint gives it: the claims are the middle part. */
+  const idToken = (claims: Record<string, unknown>) => `h.${Buffer.from(JSON.stringify({
+    iss: "https://accounts.google.com", aud: "client-1", exp: Math.floor(Date.now() / 1000) + 600, email_verified: true, ...claims,
+  })).toString("base64url")}.s`;
+  const cookies = (response: Response) => Object.fromEntries(response.headers.getSetCookie().map((line) => {
+    const [pair] = line.split(";");
+    return [pair.slice(0, pair.indexOf("=")), pair.slice(pair.indexOf("=") + 1)];
+  }));
+  /** Google and Linear: the token endpoint gives `token`, each other call is a Linear call with an empty project list. */
+  const google = (token: unknown) => {
+    const sent: URLSearchParams[] = [];
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      if (String(url) === "https://oauth2.googleapis.com/token") {
+        sent.push(init.body as URLSearchParams);
+        return { ok: token !== null, json: async () => token };
+      }
+      return { ok: true, json: async () => ({ data: { teams: { nodes: [{ projects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } }] } } }) };
+    }));
+    return sent;
+  };
+  /** Starts a sign-in and comes back from Google with `code`. */
+  const signIn = async (page: ReturnType<typeof signedIn>, next = "") => {
+    const login = await page.request(`/auth/login${next}`, { headers: host });
+    const to = new URL(login.headers.get("location")!);
+    const callback = await page.request(`/auth/callback?code=code-1&state=${to.searchParams.get("state")}`, {
+      headers: { ...host, cookie: `__Host-wg_signin=${cookies(login)["__Host-wg_signin"]}` },
+    });
+    return { login, to, callback };
+  };
+
+  it("signs in an account of the domain, and then the API answers", async () => {
+    const sent = google({ id_token: idToken({ email: "Ada@Example.com", hd: "example.com" }) });
+    const page = signedIn();
+    const { login, to, callback } = await signIn(page, "?next=/%3Fproject%3DA");
+    expect(login.status).toBe(302);
+    expect(to.origin + to.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
+    expect(Object.fromEntries(to.searchParams)).toMatchObject({
+      client_id: "client-1", redirect_uri: "https://view.example.com/auth/callback", response_type: "code", scope: "openid email", hd: "example.com",
+    });
+    expect(login.headers.getSetCookie()[0]).toMatch(/^__Host-wg_signin=.*; Max-Age=600; Path=\/; HttpOnly; Secure; SameSite=Lax$/);
+    expect(Object.fromEntries(sent[0])).toEqual({
+      code: "code-1", client_id: "client-1", client_secret: "client-secret", redirect_uri: "https://view.example.com/auth/callback", grant_type: "authorization_code",
+    });
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe("https://view.example.com/?project=A");
+    const session = callback.headers.getSetCookie().find((line) => line.startsWith("__Host-wg_session="))!;
+    expect(session).toMatch(/; Max-Age=604800; Path=\/; HttpOnly; Secure; SameSite=Lax$/);
+    const cookie = `__Host-wg_session=${cookies(callback)["__Host-wg_session"]}`;
+    expect((await page.request("/api/projects", { headers: { ...host, cookie } })).status).toBe(200);
+    expect(await (await page.request("/api/config", { headers: { ...host, cookie } })).json()).toMatchObject({ auth: true, user: "ada@example.com" });
+    // A changed cookie is no session.
+    expect((await page.request("/api/projects", { headers: { ...host, cookie: `${cookie.slice(0, -3)}abc` } })).status).toBe(401);
+    const out = await page.request("/auth/logout", { headers: { ...host, cookie } });
+    expect(out.headers.get("location")).toBe("https://view.example.com/");
+    expect(out.headers.getSetCookie()[0]).toMatch(/^__Host-wg_session=; Max-Age=0/);
+  });
+  it("gives no session to an account that may not use the page", async () => {
+    const page = signedIn();
+    const refused = async (token: unknown) => {
+      google(token);
+      const { callback } = await signIn(page);
+      expect(callback.headers.getSetCookie().some((line) => line.startsWith("__Host-wg_session="))).toBe(false);
+      return [callback.status, (await callback.json()).error];
+    };
+    expect(await refused({ id_token: idToken({ email: "eve@other.example", hd: "other.example" }) })).toEqual([403, "this account may not use this page"]);
+    // A personal Google account with an address of the domain has no `hd`.
+    expect(await refused({ id_token: idToken({ email: "eve@example.com" }) })).toEqual([403, "this account may not use this page"]);
+    expect(await refused({ id_token: idToken({ email: "ada@example.com", hd: "example.com", email_verified: false }) })).toEqual([403, "the account has no verified email"]);
+    expect(await refused({ id_token: idToken({ email: "ada@example.com", hd: "example.com", aud: "another-client" }) })).toEqual([403, "the ID token is not for this page"]);
+    expect(await refused({ id_token: idToken({ email: "ada@example.com", hd: "example.com", exp: 1 }) })).toEqual([403, "the ID token ended"]);
+    expect((await refused(null))[0]).toBe(502);
+  });
+  it("needs both the Workspace domain and the domain of the address in the list", async () => {
+    // An organization with two domains: `hd` is its first domain, also for an address of the second one.
+    const two = { ...auth, domains: ["example.com", "example.org"] };
+    const page = createApp(hosted, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true, auth: two });
+    const status = async (claims: Record<string, unknown>) => {
+      google({ id_token: idToken(claims) });
+      return (await signIn(page)).callback.status;
+    };
+    expect(await status({ email: "ada@example.org", hd: "example.com" })).toBe(302);
+    expect(await status({ email: "ada@example.net", hd: "example.com" })).toBe(403);
+    expect(await status({ email: "ada@example.org", hd: "example.net" })).toBe(403);
+    // A session holds both domains: a config that no longer names one of them ends it.
+    google({ id_token: idToken({ email: "ada@example.org", hd: "example.com" }) });
+    const cookie = `__Host-wg_session=${cookies((await signIn(page)).callback)["__Host-wg_session"]}`;
+    const withDomains = (domains: string[]) => createApp(hosted, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true, auth: { ...auth, domains } })
+      .request("/api/projects", { headers: { ...host, cookie } });
+    expect((await withDomains(["example.com", "example.org"])).status).toBe(200);
+    expect((await withDomains(["example.org"])).status).toBe(401);
+    expect((await withDomains(["example.com"])).status).toBe(401);
+  });
+  it("refuses a callback that this page did not start, and a path to another site after the sign-in", async () => {
+    const sent = google({ id_token: idToken({ email: "ada@example.com", hd: "example.com" }) });
+    const page = signedIn();
+    const login = await page.request("/auth/login", { headers: host });
+    const cookie = `__Host-wg_signin=${cookies(login)["__Host-wg_signin"]}`;
+    expect((await page.request("/auth/callback?code=code-1&state=another", { headers: { ...host, cookie } })).status).toBe(400);
+    expect((await page.request("/auth/callback?code=code-1&state=x", { headers: host })).status).toBe(400);
+    expect(sent).toEqual([]);
+    expect((await page.request("/auth/login", { headers: { host: "evil.example" } })).status).toBe(403);
+    // A browser removes a tab and a line break from a URL, so `/<tab>/evil.example` is `//evil.example` to it.
+    for (const next of ["//evil.example/", "https://evil.example/", "/\\evil.example", "/\t/evil.example", "/\n/evil.example", "\t//evil.example", "javascript:alert(1)"]) {
+      const { callback } = await signIn(page, `?next=${encodeURIComponent(next)}`);
+      expect([next, callback.headers.get("location")]).toEqual([next, "https://view.example.com/"]);
+    }
+    expect((await signIn(page, `?next=${encodeURIComponent("/?project=A b&issue=CD-1#x")}`)).callback.headers.get("location")).toBe("https://view.example.com/?project=A%20b&issue=CD-1#x");
+    // A path that the parser makes shorter can start with `//` then: as a relative Location it would name another
+    // site, so the Location is always the full address of this page.
+    for (const next of ["/.//evil.example", "/x/..//evil.example"]) {
+      const to = (await signIn(page, `?next=${encodeURIComponent(next)}`)).callback.headers.get("location")!;
+      expect([next, new URL(to).origin, to.startsWith("https://view.example.com/")]).toEqual([next, "https://view.example.com", true]);
+    }
+  });
+  it("ends a session after 7 days", async () => {
+    google({ id_token: idToken({ email: "ada@example.com", hd: "example.com" }) });
+    let now = Date.now();
+    const page = createApp(hosted, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true, auth, now: () => now });
+    const { callback } = await signIn(page);
+    const cookie = `__Host-wg_session=${cookies(callback)["__Host-wg_session"]}`;
+    now += 7 * 24 * 3600_000 - 1000;
+    expect((await page.request("/api/projects", { headers: { ...host, cookie } })).status).toBe(200);
+    now += 1000;
+    expect((await page.request("/api/projects", { headers: { ...host, cookie } })).status).toBe(401);
+  });
+  it("starts only as a hosted read-only page", () => {
+    expect(() => createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()], readOnly: true, auth })).toThrow("the sign-in needs a hosted page");
+    expect(() => createApp(hosted, { team: "CD", dist, workspaces: [workWorkspace()], auth })).toThrow("the sign-in needs the read-only mode");
+  });
+});
+
+describe("share a project with the viewer", () => {
+  it("sets and removes the project label shared, and gives the viewer address of the workspace", async () => {
+    const marks = { shared: false, created: [] as unknown[] };
+    let refuse = false;
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      const labels = { nodes: marks.shared ? [{ id: "shared-id", name: "shared", parent: null }] : [] };
+      let data;
+      if (query.includes("projectLabelCreate")) { marks.created.push(variables.i); data = { projectLabelCreate: { projectLabel: { id: "shared-id" } } }; }
+      else if (query.includes("projectAddLabel")) { marks.shared = !refuse; data = { projectAddLabel: { success: !refuse } }; }
+      else if (query.includes("projectRemoveLabel")) { marks.shared = false; data = { projectRemoveLabel: { success: true } }; }
+      else if (query.includes("projectLabels(first:250")) data = { projectLabels: { nodes: [] } };
+      else if (query.includes("projects(first:50")) data = { teams: { nodes: [{ projects: { nodes: [{ id: "p1", name: "A", url: "u", status: null, labels }], pageInfo: { hasNextPage: false, endCursor: null } } }] } };
+      else data = { project: { id: "p1", teams: { nodes: [{ key: variables.id === "foreign" ? "ENG" : "CD" }] }, labels }, teams: { nodes: [{ id: "team" }] } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const page = createApp(rules, { team: "CD", dist, workspaces: [{ ...workWorkspace(), shareUrl: "https://view.example.com" }] });
+    const share = (body: unknown, id = "p1") => page.request(`/api/projects/${id}/share`, { method: "POST", headers: write, body: JSON.stringify(body) });
+    const list = async () => (await page.request("/api/projects", { headers: local })).json();
+
+    const on = await share({ shared: true });
+    expect([on.status, await on.json()]).toEqual([200, { ok: true, shared: true }]);
+    expect(marks.created).toEqual([{ name: "shared", teamId: "team", description: "work-graph: the read-only viewer shows this project." }]);
+    expect(await list()).toMatchObject({ workspaces: [{ id: "work", name: "Work", shareUrl: "https://view.example.com" }], projects: [{ id: "p1", shared: true }] });
+    expect((await share({ shared: false })).status).toBe(200);
+    expect(marks.shared).toBe(false);
+    expect((await list()).projects[0].shared).toBe(false);
+
+    const bad = await share({ shared: "yes" });
+    expect([bad.status, await bad.json()]).toEqual([400, { error: "shared must be true or false" }]);
+    expect((await share({ shared: true }, "foreign")).status).toBe(403);
+    expect(marks.shared).toBe(false);
+    // Linear answers, but does not add the label: the page must not show the project as shared.
+    refuse = true;
+    const failed = await share({ shared: true });
+    expect([failed.status, await failed.json()]).toEqual([502, { error: "Linear did not add the project label shared" }]);
   });
 });

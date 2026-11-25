@@ -42,4 +42,23 @@ describe("the work-graph config", () => {
     const config = readConfig("CD", { WG_CONFIG_JSON: JSON.stringify({ human: "Bo", workspaces: [{ id: "x", team: "X" }] }), LINEAR_X_API_KEY: "k" }, home());
     expect(config).toEqual({ human: "Bo", workspaces: [{ id: "x", name: "x", team: "X", key: "k", teamLabels: true }] });
   });
+
+  it("reads the viewer address of a workspace, with no / at its end", () => {
+    const text = JSON.stringify({ workspaces: [{ id: "x", team: "X", share_url: "https://view.example.com/" }] });
+    expect(readConfig("CD", { WG_CONFIG_JSON: text, LINEAR_X_API_KEY: "k" }, home()).workspaces[0].shareUrl).toBe("https://view.example.com");
+  });
+
+  it("reads the sign-in: the domains from the config, the secrets from the environment", () => {
+    const text = JSON.stringify({ workspaces: [{ id: "x", team: "X" }], auth: { domains: ["Example.com"] } });
+    const secrets = { WG_AUTH_CLIENT_ID: "client-1", WG_AUTH_CLIENT_SECRET: "client-secret", WG_SESSION_SECRET: "a-session-secret-of-32-characters" };
+    const read = (env: Record<string, string>) => readConfig("CD", { WG_CONFIG_JSON: text, LINEAR_X_API_KEY: "k", ...env }, home());
+    expect(read(secrets).auth).toEqual({ domains: ["example.com"], clientId: "client-1", clientSecret: "client-secret", secret: "a-session-secret-of-32-characters" });
+    // A config that asks for a sign-in never gives a page without one.
+    expect(() => read({ ...secrets, WG_AUTH_CLIENT_SECRET: "" })).toThrow("the sign-in needs WG_AUTH_CLIENT_SECRET");
+    expect(() => read({ ...secrets, WG_SESSION_SECRET: "short" })).toThrow("WG_SESSION_SECRET must have 32 characters or more");
+    const none = (auth: unknown) => () => readConfig("CD", { WG_CONFIG_JSON: JSON.stringify({ workspaces: [{ id: "x", team: "X" }], auth }), LINEAR_X_API_KEY: "k", ...secrets }, home());
+    expect(none({ domains: [] })).toThrow("auth.domains must name one domain or more");
+    expect(none({ domains: ["a@example.com"] })).toThrow("auth.domains must name one domain or more");
+    expect(none({})).toThrow("auth.domains must name one domain or more");
+  });
 });

@@ -2,6 +2,7 @@
   "name": "work-graph",
   "private": true,
   "type": "module",
+  "engines": { "node": "24.x" },
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "dev": "vite",

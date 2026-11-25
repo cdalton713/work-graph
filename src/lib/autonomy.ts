@@ -31,3 +31,9 @@ export const ANSWERED_LABEL = "answered";
 /** Does the project have the pause label? */
 export const pausedOf = (labels: { name: string; parent: { name: string } | null }[] | undefined): boolean =>
   !!labels?.some((l) => !l.parent && l.name === PAUSED_LABEL);
+
+/** The plain project label that shares a project with the viewer (README "Host a read-only viewer"). */
+export const SHARED_LABEL = "shared";
+/** True when the project has the plain label `shared`. A child of a label group with that name does not count. */
+export const sharedOf = (labels: { name: string; parent: { name: string } | null }[] | undefined): boolean =>
+  !!labels?.some((l) => !l.parent && l.name === SHARED_LABEL);

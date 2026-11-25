@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
-import { App } from "./App";
+import { App, ServiceApp } from "./App";
 import { SignIn } from "./components/SignIn";
 import { configureSite, pageLink } from "./lib/site";
 import { signInSettings } from "./lib/site";
@@ -20,5 +20,6 @@ fetch("/api/config")
     signInSettings.provider = config.signIn;
     pageLink.path = pageLinkPath(config);
     const signIn = !!config.auth && !config.user;
-    createRoot(document.getElementById("root")!).render(<StrictMode>{signIn ? <SignIn /> : <App />}</StrictMode>);
+    const page = signIn ? <SignIn /> : config.signIn === "linear" && config.user && !config.readOnly ? <ServiceApp /> : <App />;
+    createRoot(document.getElementById("root")!).render(<StrictMode>{page}</StrictMode>);
   });

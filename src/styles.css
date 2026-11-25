@@ -598,3 +598,49 @@ button.copy.is-copied { color: var(--lamp-done); }
    A large phone, such as one unfolded, is wider than 720px, so this goes by the pointer and not the width. */
 /* It is last, so that it comes after each rule that sets the font of a field. */
 @media (pointer: coarse) { input, textarea, select { font-size: 16px; } }
+
+/* Service account pages */
+.account-page { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.account-content { width: min(100%, 920px); padding: 32px 20px; margin: 0 auto; display: grid; gap: 16px; }
+.account-content h1, .account-content h2, .account-content h3, .account-content p, .account-dialog h2, .account-dialog p { margin: 0; }
+.account-content h1 { font-size: 26px; }
+.account-content h2, .account-dialog h2 { font-size: 18px; }
+.account-content h3 { font-size: 14px; }
+.account-content code { font-family: var(--mono); overflow-wrap: anywhere; }
+.account-heading, .account-actions, .account-check { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.account-heading { justify-content: space-between; }
+.account-guide { display: grid; grid-template-columns: minmax(0, 190px) minmax(0, 1fr); align-items: start; gap: 16px; }
+.account-guide ol { display: grid; gap: 4px; padding: 0; margin: 0; list-style: none; }
+.account-guide li button { width: 100%; display: flex; align-items: center; gap: 8px; text-align: left; padding: 8px 12px; border-color: transparent; }
+.account-guide li button[aria-current="step"] { background: var(--cab-3); border-color: var(--rail-2); color: var(--ink-1); }
+#setup-step-heading:focus { outline: none; }
+.account-key-locations { margin: 0; padding-inline-start: 20px; }
+.account-done { color: var(--lamp-done); }
+.account-pending, .account-muted { color: var(--ink-3); }
+.account-card, .account-item, .account-step, .account-step section, .account-form, .account-dialog[open] { display: grid; min-width: 0; gap: 12px; overflow-wrap: anywhere; }
+.account-card { padding: 20px; background: var(--cab-1); border: 1px solid var(--rail-2); border-radius: var(--r-2); }
+.account-item { padding: 12px 0; border-top: 1px solid var(--rail); }
+.account-form label { display: grid; gap: 4px; width: min(100%, 420px); }
+.account-form input, .account-form select {
+  width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--rail-2);
+  border-radius: var(--r-1); background: var(--inset); color: var(--ink-1); font: inherit;
+}
+.account-error { color: var(--lamp-stop); }
+.account-command {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px;
+  padding: 8px; background: var(--inset); border: 1px solid var(--rail); border-radius: var(--r-1);
+}
+.account-command pre { font: 12px/1.5 var(--mono); margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.account-dialog {
+  width: min(calc(100% - 32px), 440px); max-height: calc(100% - 32px); color: var(--ink-1);
+  padding: 20px; background: var(--cab-2); border: 1px solid var(--rail-3); border-radius: var(--r-2);
+}
+.account-dialog > button { justify-self: start; }
+.account-dialog::backdrop { background: var(--rail-3); }
+
+@media (max-width: 640px) {
+  .account-content { padding: 20px 12px; }
+  .account-guide { grid-template-columns: minmax(0, 1fr); }
+  .account-card { padding: 12px; }
+  .account-bar { gap: 8px; }
+}

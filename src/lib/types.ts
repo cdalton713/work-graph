@@ -123,3 +123,45 @@ export interface ServerStatus {
   linkStore?: "memory" | "redis";
   redisReady?: boolean | null;
 }
+
+export interface OnboardingState {
+  name: boolean;
+  workspaces: boolean;
+  teams: boolean;
+  token: boolean;
+  connected: boolean;
+  skipped: boolean;
+}
+
+export interface AccountConnection {
+  id: string;
+  workspace_id: string;
+  name: string;
+  kind: "oauth" | "api_key";
+  status: "ok" | "needs_key";
+  team: string;
+  team_labels: boolean;
+  position: number;
+  owner_name: string;
+  created_at: string;
+}
+
+export interface CoordinatorToken {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface Account {
+  human: string;
+  pageUrl: string;
+  connections: AccountConnection[];
+  tokens: CoordinatorToken[];
+  onboarding: OnboardingState;
+}
+
+export interface AccountTeam {
+  key: string;
+  name: string;
+}

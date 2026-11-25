@@ -11,6 +11,8 @@ import { createApp } from "./app.ts";
 import { linkSettings, stopOnSignals } from "./link.ts";
 import { serve as serveTailnet } from "./tailnet.ts";
 import { readConfig } from "./workspaces.ts";
+import { readLinearAuth, serviceSetting } from "./linearauth.ts";
+import { openServiceTenants } from "./tenants.ts";
 
 const { values } = parseArgs({
   options: {
@@ -21,16 +23,22 @@ const { values } = parseArgs({
   },
 });
 // `--hosted <name>` or WG_HOSTED: the public name of a hosted page (README "Host the page").
-const hostedName = values.hosted ?? process.env.WG_HOSTED;
+const service = !!process.env.DATABASE_URL;
+const missing = service ? serviceSetting(process.env) : undefined;
+if (missing) throw new Error(`The service requires ${missing}`);
+const hostedName = service ? process.env.WG_HOSTED!.trim() : values.hosted ?? process.env.WG_HOSTED;
 const hosted = hostedName ? { host: hostedName.toLowerCase() } : null;
 const port = Number(values.port);
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 // `tailnet` is set while Tailscale Serve sends requests to this server (see below).
 const rules: Rules = { port, tailnet: null, hosted };
-const config = readConfig(values.team);
+const config = service ? null : readConfig(values.team);
+const linearAuth = service ? readLinearAuth(process.env) : undefined;
+const tenants = linearAuth ? await openServiceTenants(process.env, linearAuth) : undefined;
 const app = createApp(rules, {
-  team: config.workspaces[0].team, dist, human: config.human, workspaces: config.workspaces, auth: config.auth,
-  linkToken: process.env.WG_LINK_TOKEN,
+  team: config?.workspaces[0].team ?? "", dist, human: config?.human, workspaces: config?.workspaces ?? [], auth: config?.auth,
+  linkToken: service ? undefined : process.env.WG_LINK_TOKEN,
+  ...(service ? { linearAuth, tenants, readOnly: false } : {}),
   ...linkSettings(process.env),
   redisUrl: process.env.WG_REDIS_URL,
   redisPrefix: process.env.WG_REDIS_PREFIX || undefined,
@@ -38,7 +46,7 @@ const app = createApp(rules, {
 
 // A signal must end the process through `exit`, so that Tailscale Serve stops with it. Before that, the link
 // closes each socket with a close frame of code 1012 (server restart). Each client decides when it connects again.
-stopOnSignals(() => app.link.shutdown(), (signal, fn) => process.on(signal, fn), (code) => process.exit(code));
+stopOnSignals(() => app.link.shutdown().finally(() => tenants?.close()), (signal, fn) => process.on(signal, fn), (code) => process.exit(code));
 
 const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, () => {
   if (hosted) {

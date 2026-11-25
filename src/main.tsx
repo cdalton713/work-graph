@@ -5,6 +5,7 @@ import "./styles.css";
 import { App } from "./App";
 import { SignIn } from "./components/SignIn";
 import { configureSite, pageLink } from "./lib/site";
+import { signInSettings } from "./lib/site";
 import { pageLinkPath } from "./lib/link";
 import type { SiteConfig } from "./lib/types";
 
@@ -16,6 +17,7 @@ fetch("/api/config")
   .catch(() => ({}))
   .then((config: Partial<SiteConfig>) => {
     configureSite(config);
+    signInSettings.provider = config.signIn;
     pageLink.path = pageLinkPath(config);
     const signIn = !!config.auth && !config.user;
     createRoot(document.getElementById("root")!).render(<StrictMode>{signIn ? <SignIn /> : <App />}</StrictMode>);

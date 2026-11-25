@@ -16,6 +16,7 @@ import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from ".
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal } from "./access.ts";
 import { type Auth, type Session, LOGIN_PATH, authRoutes, sessionOf } from "./auth.ts";
+import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
@@ -64,6 +65,8 @@ async function json<T>(body: Promise<T>): Promise<T> {
 
 export interface AppOptions {
   tenants?: Tenants;
+  linearAuth?: LinearAuth;
+  serviceReady?: () => Promise<boolean>;
   /** The configured workspaces; the first is the default. */
   workspaces?: Workspace[];
   /** The human's name (config `human`). */
@@ -146,7 +149,7 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
 export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, linkMaxAgeMs, linkPongMs, human, stateDir = process.env.WG_STATE_DIR || undefined,
-  version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linkToken, linkState, linkBus, redisUrl, redisPrefix, tenants, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
+  version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linearAuth, serviceReady, linkToken, linkState, linkBus, redisUrl, redisPrefix, tenants, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   if (linkToken && [...linkToken].length < 32) {
     throw new Error("WG_LINK_TOKEN must have at least 32 characters");
   }
@@ -154,6 +157,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // A sign-in gives each account of the domain the same rights, so it is only for a page that changes nothing.
   // Google sends the browser back to the HTTPS name of the page, which only a hosted page has.
   if (auth && !rules.hosted) throw new Error("the sign-in needs a hosted page (WG_HOSTED)");
+  if (linearAuth && (!rules.hosted || !tenants?.signIn)) throw new Error("Linear sign-in needs a hosted page and a database");
   if (!tenants && auth && !readOnly && !auth.owners?.length) throw new Error("the sign-in needs auth.owners on a full page");
   if (!tenants && auth && !readOnly && !linkToken) throw new Error("the sign-in needs WG_LINK_TOKEN on a full page");
   const configured = configTenants({ human: human ?? DEFAULT_HUMAN, workspaces, auth, linkToken, readOnly });
@@ -164,9 +168,15 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const siteOf = (tenant: Tenant) => createSite(tenant.human, tenant.workspaces[0]?.id ?? "default");
   const installationSite = createSite(human ?? DEFAULT_HUMAN, workspaces[0]?.id ?? "default");
   const clock = now ?? Date.now;
+  const readSession = (c: Parameters<typeof sessionOf>[0]) =>
+    linearAuth ? linearSessionOf(c, linearAuth, clock) : auth ? sessionOf(c, auth, clock) : null;
   const started = clock();
   const contract = contractHash(contractFile);
   const app = new Hono();
+  if (serviceReady) app.use(async (c, next) => {
+    if (!await serviceReady()) return c.text("Vercel full page requires DATABASE_URL", 500);
+    await next();
+  });
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   type CachedList = { at: number; list: ProjectList | null };
   const newList = (): CachedList => ({ at: 0, list: null });
@@ -445,7 +455,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (host) return c.json({ error: host }, 403);
     const method = c.req.method;
     const read = method === "GET" || method === "HEAD";
-    const signed = auth ? await sessionOf(c, auth, clock) : null;
+    const signed = await readSession(c);
     const session = signed && await sessionActive(signed, read) ? signed : null;
     if (redis && !read && !readOnly) {
       await redis.checkWrites();
@@ -462,6 +472,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (c.req.path === "/api/config" && (method === "GET" || method === "HEAD")) {
       const tenant = membership?.tenant ?? (!tenants ? await directory.byId(CONFIG_TENANT_ID) : null);
       const site = tenant ? siteOf(tenant) : createSite(DEFAULT_HUMAN, "default");
+      const disconnected = !!linearAuth && !!tenant?.workspaces[0]?.needsKey;
       if (membership) {
         await dropIdle(membership.tenant.id);
         const state = states.get(membership.tenant.id);
@@ -469,9 +480,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       }
       return c.json<SiteConfig & { linkStore?: ServerStatus["linkStore"] }>({
         human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version,
-        readOnly: viewer, auth: !!auth, user: membership ? session?.email ?? null : null, role,
+        readOnly: viewer, auth: !!(auth || linearAuth), user: membership && !disconnected ? session?.email ?? null : null,
+        role: disconnected ? null : role, ...(linearAuth ? { signIn: "linear" as const } : {}),
         linkStore: readOnly ? undefined : redis ? "redis" : "memory",
-        link: linkEnabled && role ? "/api/link" : null,
+        link: linkEnabled && role && !disconnected ? "/api/link" : null,
       });
     }
     const tokenTenant = method === "GET" && (readOnly || coordinatorReads.some((route) => route.test(c.req.path)))
@@ -483,6 +495,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const selected = listsWorkspaces ? undefined : header("x-workspace");
     const id = selected || tenant.workspaces[0]?.id;
     const workspace = tenant.workspaces.find((w) => w.id === id);
+    if (workspace?.needsKey) throw new LinearSignInRequired();
     if (!workspace && (selected || !listsWorkspaces)) {
       return c.json({ error: `workspace ${id ?? "default"} is not configured` }, 400);
     }
@@ -513,8 +526,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const { tenant: { workspaces }, state: { lists, sharedNames } } = scope();
     const order = ++lists.started;
     const results = await Promise.allSettled(workspaces.map((workspace) =>
-      linearWorkspace.run(workspace, () => listProjects(workspace.team)),
+      linearWorkspace.run(workspace, () => workspace.kind === "oauth" && !workspace.team ? Promise.resolve([]) : listProjects(workspace.team)),
     ));
+    const refused = results.find((result) => result.status === "rejected" && result.reason instanceof LinearSignInRequired);
+    if (refused?.status === "rejected") throw refused.reason;
     const list: ProjectList = {
       workspaces: workspaces.map(({ id, name, shareUrl }, at) => {
         const address = shareUrl ?? (auth && !readOnly ? `https://${rules.hosted!.host}` : undefined);
@@ -785,8 +800,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const restarting = () => c.json({ error: "the server restarts" }, 503);
     if (hub.closing) return restarting();
     if (redis) { await redis.checkWrites(); await flushLogouts(); }
-    const session = auth && role === "page" ? await sessionOf(c, auth, clock) : null;
-    if ((auth || tenants) && role === "page" && (!session || !await sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    const session = role === "page" ? await readSession(c) : null;
+    if ((auth || linearAuth || tenants) && role === "page" && (!session || !await sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     const membership = role === "page" ? await directory.fromSession(session) : null;
     const tenant = tokenTenant ?? membership?.tenant ?? (!tenants ? await directory.byId(CONFIG_TENANT_ID) : null);
     if (!tenant) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
@@ -794,6 +809,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const viewer = membership?.role === "viewer";
     const workspace = c.req.query("workspace") || siteOf(tenant).defaultWorkspace;
     const selected = tenant.workspaces.find((w) => w.id === workspace);
+    if (selected?.needsKey) throw new LinearSignInRequired();
     if (!selected) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
     const wanted = c.req.query("project");
     if (!wanted && role === "coordinator") return c.json({ error: "a coordinator names its project" }, 400);
@@ -889,14 +905,15 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     };
   }));
   app.route("/api", api);
-  if (auth) {
+  if (auth || linearAuth) {
     // The sign-in answers only under the name of the page, as the API does.
     app.use("/auth/*", async (c, next) => {
       const reason = refusal("GET", (name) => c.req.header(name), rules);
       if (reason) return c.json({ error: reason }, 403);
       await next();
     });
-    app.route("/auth", authRoutes(auth, () => `https://${rules.hosted!.host}`, clock, signOut));
+    const origin = () => `https://${rules.hosted!.host}`;
+    app.route("/auth", linearAuth ? linearAuthRoutes(linearAuth, origin, clock, tenants!.signIn!, signOut) : authRoutes(auth!, origin, clock, signOut));
   }
 
   app.get("*", async (c) => {
@@ -918,6 +935,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
 
   app.onError((error, c) => {
+    if (error instanceof LinearSignInRequired) return c.json({ error: error.message, login: LOGIN_PATH }, 401);
     const status = ((error instanceof RedisUnavailable || error instanceof RedisCommandFailed) ? 503 : error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;
     // An API request writes its one log line in the request log above. Another route writes the error here.
     if (status === 500 && !c.req.path.startsWith("/api/")) console.error(error);

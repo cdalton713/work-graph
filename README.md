@@ -382,6 +382,14 @@ After a pause, it checks a timed-out connection with a fresh ping before it reco
 to check the mode (`readOnly` and `link`) and Redis (`linkStore` and `redisReady`). Redis can be
 unavailable while `/healthz` returns 200.
 
+## Sign in with Linear (the service mode)
+
+Set `DATABASE_URL` to enable the service. The server applies the database migrations at startup. Set `WG_HOSTED` to the public host name, `WG_DATA_KEY` to a base64 key of 32 bytes, and `WG_SESSION_SECRET` to a secret of at least 32 characters. Set `WG_REDIS_URL` on a function host.
+
+Set `WG_LINEAR_CLIENT_ID` and `WG_LINEAR_CLIENT_SECRET` from the Linear OAuth application. Register `https://<WG_HOSTED>/auth/callback` as the redirect address. The service requests `read` for projects and issues and `write` for comments, labels, and status changes.
+
+To limit sign-up, set `WG_ALLOWED_ORGS` to the Linear workspace URL keys, separated by commas or spaces.
+
 ## Host a read-only viewer
 
 A viewer is a second deployment of the page for other people: they sign in and read the projects that you

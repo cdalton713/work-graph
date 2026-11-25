@@ -49,3 +49,5 @@ export const statusOrder = () => ["Triage", "Backlog", "Todo", "Ready", "In Prog
 
 // The server gives the link path with the signed-in role. Older servers use the default path for the full page.
 export const pageLink = { path: "/api/link" as string | null };
+
+export const signInSettings: { provider?: "linear" } = {};

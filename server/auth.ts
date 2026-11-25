@@ -17,25 +17,25 @@ export interface Auth {
   /** The key that signs the cookies (`WG_SESSION_SECRET`), at least 32 characters. */
   secret: string;
 }
-export interface Session { email: string; id: string; expiresAt: number }
+export interface Session { email: string; id: string; expiresAt: number; accountId?: string }
 /** What the session cookie holds: the address, the Workspace domain of its account, and the end time (epoch s). */
 interface SessionValue { email: string; hd: string; exp: number; id?: string }
 
 /** The path that starts a sign-in. A 401 of the API names it. */
 export const LOGIN_PATH = "/auth/login";
-const SESSION_COOKIE = "wg_session";
-const STATE_COOKIE = "wg_signin";
+export const SESSION_COOKIE = "wg_session";
+export const STATE_COOKIE = "wg_signin";
 /** How long a session lasts, and how long a sign-in may take, in seconds. */
 export const SESSION_S = 7 * 24 * 3600;
-const STATE_S = 600;
+export const STATE_S = 600;
 const AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 export const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const ISSUERS = new Set(["https://accounts.google.com", "accounts.google.com"]);
 
 /** `__Host-` cookies: the browser sends them only to this host, over HTTPS, and no other host can set them. */
-const cookie = (maxAge: number) => ({ path: "/", secure: true, httpOnly: true, sameSite: "Lax", maxAge, prefix: "host" }) as const;
-const pack = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
-const unpack = (text: string | false | undefined): Record<string, unknown> | null => {
+export const cookie = (maxAge: number) => ({ path: "/", secure: true, httpOnly: true, sameSite: "Lax", maxAge, prefix: "host" }) as const;
+export const pack = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+export const unpack = (text: string | false | undefined): Record<string, unknown> | null => {
   if (!text) return null;
   try {
     const value: unknown = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
@@ -67,7 +67,7 @@ export async function sessionOf(c: Context, auth: Auth, now: () => number): Prom
  * site gives the start of this page. The result is the full address, never a path: the parser makes `/.//name`
  * into the path `//name`, which a browser reads as another site when it comes alone.
  */
-function localUrl(next: unknown, origin: string): string {
+export function localUrl(next: unknown, origin: string): string {
   const home = `${origin}/`;
   if (typeof next !== "string") return home;
   try {

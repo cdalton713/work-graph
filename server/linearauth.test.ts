@@ -14,7 +14,8 @@ const access = "test-access-credential";
 const refresh = "test-refresh-credential";
 const code = "test-authorization-code";
 const now = Date.now();
-const auth = { clientId: "client", clientSecret: "test-client-secret", secret, allowedOrgs: ["allowed-org"] };
+const allowedOrgId = "36cb71b8-7e95-418c-8bf8-4d1f42e2e196";
+const auth = { clientId: "client", clientSecret: "test-client-secret", secret, allowedOrgs: [allowedOrgId] };
 const rules = { port: 443, tailnet: null, hosted: { host } };
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
@@ -45,7 +46,7 @@ databaseSuites((open) => {
     const second = createApp(rules, { ...options, tenants: other });
     const request = (path: string, cookie?: string, server = app) =>
       server.request(`https://${host}${path}`, { headers: { host, ...(cookie ? { cookie } : {}) } });
-    let user = "ada", orgId = "allowed-org", issued = 0, refreshed = 0, fail = false, refuse = false, rejectAccess = "";
+    let user = "ada", orgId = allowedOrgId, orgKey = "work", issued = 0, refreshed = 0, fail = false, refuse = false, rejectAccess = "";
     const revoked: string[] = [];
     const output: string[] = [];
     for (const level of ["log", "warn", "error"] as const) vi.spyOn(console, level).mockImplementation((...args) => output.push(args.join(" ")));
@@ -72,7 +73,7 @@ databaseSuites((open) => {
       const { query, variables } = JSON.parse(String(init.body));
       if (query.includes("viewer")) return Response.json({ data: {
         viewer: { id: user, name: "Ada", email: "ada@example.com" },
-        organization: { id: orgId, name: "Work", urlKey: "work" },
+        organization: { id: orgId, name: "Work", urlKey: orgKey },
         teams: { nodes: [{ key: "WG" }] },
       } });
       if (header === rejectAccess) return Response.json({ error: access }, { status: 401 });
@@ -125,11 +126,13 @@ databaseSuites((open) => {
       fail = true;
       expect((await callback(flow, state)).status).toBe(502);
       fail = false;
-      orgId = "closed";
+      orgId = "e3888764-5a0f-472a-8262-4fdd4bb4dd79";
+      orgKey = allowedOrgId;
       expect((await callback(flow, state)).status).toBe(403);
       expect(await sql.query("SELECT id FROM users")).toEqual([]);
-      expect(revoked).toEqual([access + "1"]);
-      orgId = "allowed-org";
+      expect(revoked).toEqual([refresh + "1"]);
+      orgId = allowedOrgId;
+      orgKey = "work";
       issued = 0;
       const first = await signIn();
       const again = await signIn();

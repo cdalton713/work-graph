@@ -177,6 +177,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const app = new Hono();
   if (serviceReady) app.use(async (c, next) => {
     const ready = await serviceReady();
+    if (ready === "schema-too-new") return c.text("The database schema is newer than this server.", 500);
     if (ready === false) return c.text("The database did not answer.", 503);
     if (typeof ready === "string") return c.text(`Vercel full page requires ${ready}`, 500);
     await next();

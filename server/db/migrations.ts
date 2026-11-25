@@ -1,5 +1,7 @@
 import type { Sql } from "./sql.ts";
 
+export const NEWER_SCHEMA_ERROR = "Database schema is newer than this server";
+
 const migrations = [
   [
     `CREATE TABLE users (
@@ -69,6 +71,7 @@ const migrations = [
 export async function migrate(sql: Sql): Promise<void> {
   for (;;) {
     const applied = await sql.transaction(async ({ query }) => {
+      await query("SET LOCAL statement_timeout = 0");
       await query("SELECT pg_advisory_xact_lock(1970310516, 1)");
       await query(`CREATE TABLE IF NOT EXISTS schema_migrations (
         version integer PRIMARY KEY,
@@ -77,7 +80,7 @@ export async function migrate(sql: Sql): Promise<void> {
       const versions = new Set((await query<{ version: number }>("SELECT version FROM schema_migrations"))
         .map(({ version }) => version));
       if ([...versions].some((version) => version > migrations.length)) {
-        throw new Error("Database schema is newer than this server");
+        throw new Error(NEWER_SCHEMA_ERROR);
       }
       const index = migrations.findIndex((_, i) => !versions.has(i + 1));
       if (index === -1) return false;

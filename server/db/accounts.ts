@@ -376,15 +376,18 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       });
     },
 
-    deleteAccount(tenant: string, revoke?: (token: string) => Promise<boolean>) {
+    deleteAccount(tenant: string, revocation?: { id: string; refreshToken: string }) {
       return change(tenant, async (query, { owner }) => {
         let revoked = false;
-        if (revoke) {
-          // Lock the OAuth row so a refresh cannot replace the token during revocation.
+        if (revocation) {
+          // A sign-in or refresh can rotate the credential while revocation is in flight.
           const [row] = await query<EncryptedConnection>(`SELECT ${encryptedFields} FROM linear_connections
-            WHERE tenant_id = $1 AND kind = 'oauth' FOR UPDATE`, [tenant]);
+            WHERE tenant_id = $1 AND id = $2 AND kind = 'oauth' FOR UPDATE`, [tenant, revocation.id]);
           if (row?.credential) {
-            try { revoked = await revoke(decrypt(row).key); } catch { /* Delete even if we cannot revoke. */ }
+            try {
+              const current = decrypt(row);
+              revoked = current.kind === "oauth" && current.refreshToken === revocation.refreshToken;
+            } catch { /* Delete even if the credential cannot be read. */ }
           }
         }
         await query("DELETE FROM users WHERE id = $1", [owner]);

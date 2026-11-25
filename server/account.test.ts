@@ -91,15 +91,23 @@ databaseSuites((open) => {
       } });
     });
     vi.stubGlobal("fetch", fetch);
+    async function request(path: string, cookie: string, method = "GET", body?: object, extra?: Record<string, string>) {
+      const response = await app.request(path, {
+        method, headers: { host, cookie, origin: "https://" + host, "content-type": "application/json", ...extra },
+        body: body && JSON.stringify(body),
+      });
+      if (method !== "POST" || path !== root + "/tokens") output.push(await response.clone().text());
+      return response;
+    }
     return {
-      app, owner, output, identities, revoked, fetch, tenants, sql, revocations,
-      async request(path: string, cookie: string, method = "GET", body?: object, extra?: Record<string, string>) {
-        const response = await app.request(path, {
-          method, headers: { host, cookie, origin: "https://" + host, "content-type": "application/json", ...extra },
-          body: body && JSON.stringify(body),
-        });
-        if (method !== "POST" || path !== root + "/tokens") output.push(await response.clone().text());
-        return response;
+      app, owner, output, identities, revoked, fetch, tenants, sql, revocations, request,
+      async signIn() {
+        const login = await request("/auth/login", "");
+        const state = new URL(login.headers.get("location")!).searchParams.get("state");
+        const flow = login.headers.getSetCookie()[0].split(";")[0];
+        const callback = await request("/auth/callback?code=test-code&state=" + state, flow);
+        expect(callback.status).toBe(302);
+        return callback.headers.getSetCookie().find((value) => value.startsWith("__Host-wg_session="))!.split(";")[0];
       },
       async close() { app.link.stop(); tenants.close(); await sql.close(); },
     };
@@ -114,7 +122,7 @@ databaseSuites((open) => {
         pageUrl: "https://" + host,
         onboarding: { name: false, workspaces: true, teams: true, token: false, connected: false, skipped: false },
       });
-      for (const human of [" ", "a".repeat(41), "Ada\n", "A\u0085da", null]) {
+      for (const human of [" ", "a".repeat(41), "Ada\n", "A\u0085da", "A\u202Eda", "A\u2028da", null]) {
         expect((await t.request(root, cookie, "PATCH", { human })).status).toBe(400);
       }
       const response = await t.request(root, cookie, "PATCH", { human: "  Grace  " });
@@ -160,6 +168,7 @@ databaseSuites((open) => {
       const { accountId, cookie } = await t.owner("ada");
       const other = await t.owner("other");
       const path = root + "/tokens";
+      expect((await t.request(path, cookie, "POST", { name: "De\u200Bsk\u2029" })).status).toBe(400);
       const created = await t.request(path, cookie, "POST", { name: "Desk" });
       expect(created.status).toBe(201);
       expect(created.headers.get("cache-control")).toBe("no-store");
@@ -221,17 +230,12 @@ databaseSuites((open) => {
         expect(await response.json()).toMatchObject({ ok: true, revoked: !fails, ...(fails ? { message: expect.stringContaining("Linear") } : {}) });
         expect((await closed)[0]).toBe(RESTART_CODE);
       } finally { await link.close(); }
-      expect(t.revocations).toEqual(["test-access"]);
+      expect(t.revocations).toEqual(["test-refresh"]);
       expect((await t.request(root, cookie)).status).toBe(401);
       for (const table of ["users", "tenants", "linear_connections", "coordinator_tokens"]) {
         expect(await t.sql.query("SELECT id FROM " + table)).toEqual([]);
       }
-      const login = await t.request("/auth/login", "");
-      const state = new URL(login.headers.get("location")!).searchParams.get("state");
-      const flow = login.headers.getSetCookie()[0].split(";")[0];
-      const callback = await t.request("/auth/callback?code=test-code&state=" + state, flow);
-      expect(callback.status).toBe(302);
-      const nextCookie = callback.headers.getSetCookie().find((value) => value.startsWith("__Host-wg_session="))!.split(";")[0];
+      const nextCookie = await t.signIn();
       const tenants = await t.sql.query<{ id: string }>("SELECT id FROM tenants");
       expect(tenants).toHaveLength(1);
       expect(tenants[0].id).not.toBe(accountId);
@@ -241,6 +245,55 @@ databaseSuites((open) => {
       expect((await t.request(root, cookie)).status).toBe(401);
       for (const secret of [personal, token, "test-access", "test-refresh"]) expect(t.output.join("\n")).not.toContain(secret);
     } finally { await t.close(); }
+  });
+
+  it("allows another write while revocation waits and deletes after its timeout", async () => {
+    const t = await setup();
+    try {
+      const { cookie } = await t.owner("ada");
+      let revocationSignal: AbortSignal | undefined;
+      t.fetch.mockImplementationOnce(async (url, init) => {
+        expect(url).toBe("https://api.linear.app/oauth/revoke");
+        expect(Object.fromEntries(init.body as URLSearchParams)).toEqual({
+          token: "test-refresh", token_type_hint: "refresh_token",
+        });
+        revocationSignal = init.signal!;
+        return new Promise((_, reject) => init.signal!.addEventListener("abort", () => reject(init.signal!.reason), { once: true }));
+      });
+      const deletion = t.request(root, cookie, "DELETE", { confirm: "delete" });
+      await vi.waitFor(() => expect(revocationSignal).toBeDefined());
+      expect((await t.request(root, cookie, "PATCH", { human: "Grace" })).status).toBe(200);
+      expect(revocationSignal?.aborted).toBe(false);
+      expect(await (await deletion).json()).toMatchObject({ ok: true, revoked: false });
+      expect((await t.request(root, cookie)).status).toBe(401);
+    } finally { await t.close(); }
+  });
+
+  it("keeps a new sign-in when an earlier delete finishes after another delete", async () => {
+    const t = await setup();
+    let finishRevocation: (() => void) | undefined;
+    try {
+      const { cookie } = await t.owner("ada");
+      t.fetch.mockImplementationOnce(async () => new Promise<Response>((resolve) => {
+        finishRevocation = () => resolve(new Response(null, { status: 200 }));
+      }));
+      const deletion = t.request(root, cookie, "DELETE", { confirm: "delete" });
+      await vi.waitFor(() => expect(finishRevocation).toBeDefined());
+      expect((await t.request(root, cookie, "DELETE", { confirm: "delete" })).status).toBe(200);
+      const nextCookie = await t.signIn();
+      finishRevocation!();
+      expect((await deletion).status).toBe(404);
+      expect((await t.request(root, cookie)).status).toBe(401);
+      expect(await (await t.request(root, nextCookie)).json()).toMatchObject({
+        connections: [{ kind: "oauth" }], tokens: [], onboarding: { connected: false },
+      });
+      for (const table of ["users", "tenants", "linear_connections"]) {
+        expect(await t.sql.query("SELECT id FROM " + table)).toHaveLength(1);
+      }
+    } finally {
+      finishRevocation?.();
+      await t.close();
+    }
   });
 
   it("attaches a private workspace, checks its team, and removes it", async () => {

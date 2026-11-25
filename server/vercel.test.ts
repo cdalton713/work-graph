@@ -56,8 +56,11 @@ it.each(["WG_DATA_KEY", "WG_DATA_KEY_OLD"])("reports an invalid %s without readi
   }
 });
 
-it("reports a database connection failure without exposing the connection string", async () => {
-  const open = vi.spyOn(tenantService, "openServiceTenants").mockRejectedValue(new Error("Database connection failed"));
+it.each([
+  ["Database connection failed", 503, "The database did not answer."],
+  ["Database schema is newer than this server", 500, "The database schema is newer than this server."],
+])("reports %s without exposing the connection string", async (error, status, message) => {
+  const open = vi.spyOn(tenantService, "openServiceTenants").mockRejectedValue(new Error(error));
   const { app } = createVercelApp({
     ...env, DATABASE_URL: "postgres://example.com/database",
     WG_DATA_KEY: Buffer.alloc(32).toString("base64"), WG_LINEAR_CLIENT_ID: "linear-client",
@@ -65,8 +68,8 @@ it("reports a database connection failure without exposing the connection string
   });
   try {
     const response = await app.request("/healthz");
-    expect(response.status).toBe(503);
-    expect(await response.text()).toBe("The database did not answer.");
+    expect(response.status).toBe(status);
+    expect(await response.text()).toBe(message);
   } finally {
     if ("link" in app) app.link.stop();
     open.mockRestore();

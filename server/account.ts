@@ -73,7 +73,7 @@ async function body(c: Context): Promise<Record<string, unknown>> {
 }
 
 function displayName(value: unknown) {
-  if (typeof value !== "string" || /\p{Cc}|\p{Cs}/u.test(value)) return null;
+  if (typeof value !== "string" || /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(value)) return null;
   const name = value.trim();
   return name && [...name].length <= 40 ? name : null;
 }
@@ -209,7 +209,12 @@ export function accountRoutes(options: Options) {
   routes.delete("/", async (c) => {
     if ((await body(c)).confirm !== "delete") return c.json({ error: "Enter delete to confirm account deletion" }, 400);
     const { accounts, account, session } = c.var;
-    const revoked = await accounts.deleteAccount(account.id, revokeLinearToken);
+    const oauth = account.connections.find(({ kind }) => kind === "oauth");
+    const credential = oauth && await accounts.readCredential(account.id, oauth.id).catch(() => null);
+    const revocation = oauth && credential?.kind === "oauth" && await revokeLinearToken(credential.refreshToken)
+      ? { id: oauth.id, refreshToken: credential.refreshToken }
+      : undefined;
+    const revoked = await accounts.deleteAccount(account.id, revocation);
     await options.endSession(c, session);
     return c.json(revoked ? { ok: true, revoked } : {
       ok: true, revoked, message: "You can remove the app under Authorized applications in Linear's settings.",

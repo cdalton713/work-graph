@@ -70,11 +70,11 @@ async function requestToken(auth: LinearAuth, params: Record<string, string>, no
 export const refreshLinearToken = (auth: LinearAuth, token: string, now: () => number) =>
   requestToken(auth, { grant_type: "refresh_token", refresh_token: token }, now);
 
-export async function revokeLinearToken(token: string): Promise<boolean> {
+export async function revokeLinearToken(refreshToken: string): Promise<boolean> {
   try {
     const response = await fetch("https://api.linear.app/oauth/revoke", {
       method: "POST",
-      body: new URLSearchParams({ token, token_type_hint: "access_token" }),
+      body: new URLSearchParams({ token: refreshToken, token_type_hint: "refresh_token" }),
       signal: AbortSignal.timeout(2_000),
       redirect: "error",
     });
@@ -139,9 +139,10 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
     const data = credential && await identity(credential.key);
     if (!credential || !data) return c.json({ error: "Linear did not complete the sign-in: open the page again" }, 502);
     const { viewer, organization, teams } = data;
-    if (auth.allowedOrgs && !auth.allowedOrgs.includes(organization.id.toLowerCase()) &&
-        !auth.allowedOrgs.includes(organization.urlKey.toLowerCase())) {
-      await revokeLinearToken(credential.key);
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (auth.allowedOrgs && !auth.allowedOrgs.some((entry) =>
+      entry.toLowerCase() === (uuid.test(entry) ? organization.id : organization.urlKey).toLowerCase())) {
+      await revokeLinearToken(credential.refreshToken);
       return c.text("This service is not open for your workspace.", 403);
     }
     const accountId = await save({ linearUserId: viewer.id, linearOrgId: organization.id, name: viewer.name, email: viewer.email }, {

@@ -4,6 +4,8 @@ import { serve } from "@hono/node-server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { Envelope } from "../src/lib/link.ts";
+import { createSite } from "../src/lib/site.ts";
+import { serverSite } from "./site.ts";
 import { linkRefusal, type Rules } from "./access.ts";
 import { createApp, type AppOptions } from "./app.ts";
 import { memoryLinkState } from "./linkstate.ts";
@@ -55,6 +57,92 @@ const msg = (type: string, payload: unknown = {}) => JSON.stringify({ v: 1, type
 const hello = (session: string) => msg("hello", { plan: "/plans/a", session, host: "mac", wg: "1" });
 
 describe("LinkHub", () => {
+  it("runs socket delivery, heartbeat and timeout in the socket site", async () => {
+    const time = fakeTime();
+    const sites = new Map([["a", createSite("Ada", "work")], ["b", createSite("Grace", "work")]]);
+    const hub = new LinkHub(time.now, undefined, time.timers, null, undefined, undefined, { tenantSite: (id) => sites.get(id) });
+    const events: string[] = [];
+    const observe = (kind: string) => { events.push(kind + ":" + serverSite().human); };
+    const a = { ...A, tenant: "a" }, b = { ...A, tenant: "b" };
+    hub.start();
+    try {
+      await hub.joinPage({ send: () => observe("send"), close: () => observe("close"), ping: () => observe("ping") }, a);
+      const second = await hub.joinPage({ send: () => observe("send"), close: () => observe("close"), ping: () => observe("ping") }, b);
+      expect(events).toEqual(["send:Ada", "send:Ada", "send:Ada", "send:Grace", "send:Grace", "send:Grace"]);
+      events.length = 0;
+      await hub.beat();
+      expect(events).toEqual(["ping:Ada", "ping:Grace"]);
+      events.length = 0;
+      time.advance(DEAD_MS - 1);
+      second.pong();
+      time.advance(1);
+      expect(events.filter((event) => event.startsWith("close"))).toEqual(["close:Ada"]);
+      hub.restartSockets("b");
+      expect(events.at(-1)).toBe("close:Grace");
+      await expect(hub.joinCoordinator(peer(), { ...A, tenant: "" })).rejects.toThrow("invalid link tenant");
+      await expect(hub.joinCoordinator(peer(), { ...A, tenant: "a\n" })).rejects.toThrow("invalid link tenant");
+    } finally {
+      hub.stop();
+    }
+  });
+
+  it("checks the tenant on direct socket bus events", async () => {
+    const bus = memoryLinkBus();
+    const shared = memoryLinkState();
+    const hub = new LinkHub(undefined, undefined, undefined, null, shared, bus);
+    const client = peer();
+    const ref = { ...A, tenant: "a" };
+    const join = await hub.joinCoordinator(client, ref);
+    await join.receive(hello("same"));
+    const socket = (await shared.read(ref))!.coordinators.get("same")!.socket!;
+    const message: Envelope = { v: 1, type: "command", id: "next", project: A, at: "", payload: {} };
+    await bus.publish([{ kind: "sockets", tenant: "b", sockets: [socket], messages: [message] }, { kind: "replaced", tenant: "b", socket }]);
+    expect(client.sent).toEqual([]);
+    expect(client.closed).toEqual([]);
+    await bus.publish([{ kind: "sockets", tenant: "a", sockets: [socket], messages: [message] }, { kind: "replaced", tenant: "a", socket }]);
+    expect(client.sent).toEqual([message]);
+    expect(client.closed).toHaveLength(1);
+  });
+
+  it("revokes a coordinator without grace or later messages after its room was dropped", async () => {
+    const time = fakeTime();
+    const shared = memoryLinkState();
+    const hub = new LinkHub(time.now, undefined, time.timers, null, shared, undefined, { maxAgeMs: 60_000 });
+    const client = peer();
+    const ref = { ...A, tenant: "a" };
+    const connection = await hub.joinCoordinator(client, ref);
+    await connection.receive(hello("open"));
+    hub.restartSockets(ref.tenant);
+    expect(await hub.active()).toEqual([]);
+    await shared.drop(ref);
+    await connection.receive(msg("agents", { agents: [{ id: "late" }] }));
+    expect(await shared.rooms()).toEqual([]);
+
+    const late = await hub.joinCoordinator(peer(), ref);
+    await shared.drop(ref);
+    await late.closed();
+    expect(await shared.rooms()).toEqual([]);
+  });
+
+  it("sends heartbeat grace expiry only to the room tenant", async () => {
+    const time = fakeTime();
+    const shared = memoryLinkState();
+    const hub = new LinkHub(time.now, undefined, { ...time.timers, after: () => () => {} }, null, shared, undefined, { maxAgeMs: 60_000 });
+    const ref = { ...A, tenant: "a" };
+    const client = peer();
+    await hub.joinPage(client, ref);
+    const coordinator = await hub.joinCoordinator(peer(), ref);
+    await coordinator.receive(hello("open"));
+    await coordinator.closed();
+    const foreign = peer();
+    await hub.joinPage(foreign, { ...A, tenant: "b" });
+    expect(client.of("presence").at(-1)?.payload).toMatchObject({ coordinators: [{ connected: true }] });
+    time.advance(16_000);
+    await hub.beat();
+    expect(client.of("presence").at(-1)?.payload).toMatchObject({ coordinators: [{ connected: false }] });
+    expect(foreign.of("presence")).toHaveLength(1);
+  });
+
   it("recycles every short-lived page with real timers", async () => {
     const hub = new LinkHub(undefined, undefined, undefined, null, undefined, undefined, { maxAgeMs: 40 });
     const pages = Array.from({ length: 300 }, () => peer());

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, vi, expect, it } from "vitest";
+import { redisLinkBus } from "./linkbus-redis.ts";
 import { redisLinkState } from "./linkstate-redis.ts";
 import { linkStateContract } from "./testing/linkstate-contract.ts";
 import { connectRedis, type RedisLink } from "./redis.ts";
@@ -21,6 +22,28 @@ describe.skipIf(!testRedis)("Redis link state", () => {
     return {
       a: redisLinkState(first, prefix), b: redisLinkState(second, prefix), cleanup: () => {},
     };
+  });
+
+  it("uses the config Redis room and event formats from main", async () => {
+    const prefix = `test:${randomUUID()}:`;
+    const redis = connectRedis(server.url, prefix);
+    const ref = { workspace: "work", id: "p1" };
+    const message = { v: 1 as const, type: "command", id: "next", project: ref, at: "", payload: { name: "next", key: null, issue: null } };
+    const room = prefix + 'room:["work","p1"]';
+    try {
+      await redis.waitReady();
+      const state = redisLinkState(redis, prefix);
+      await state.append(ref, message);
+      const keys = await redis.run((client) => client.keys(prefix + "*"));
+      expect(keys.filter((key) => !key.startsWith(prefix + "write-check:")).sort()).toEqual([room, prefix + "sequence"]);
+      const saved = await redis.run((client) => client.get(room));
+      expect(saved).toBe('1\n{"ref":{"workspace":"work","id":"p1"},"queue":[{"v":1,"type":"command","id":"next","project":{"workspace":"work","id":"p1"},"at":"","payload":{"name":"next","key":null,"issue":null}}],"asks":[],"coordinators":[],"sockets":[],"progress":[],"agents":null}');
+      const received = new Promise<string>((resolve) => redis.onMessage(resolve));
+      await redisLinkBus(redis, prefix).publish([{ kind: "wrote", ref }]);
+      expect(await received).toBe('[{"kind":"wrote","ref":{"workspace":"work","id":"p1"}}]');
+    } finally {
+      redis.close();
+    }
   });
 
   it("updates last seen at a heartbeat and marks a coordinator lost after its instance dies", async () => {

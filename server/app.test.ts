@@ -1280,7 +1280,7 @@ it("isolates site, projects, graphs and budgets for tenants with the same worksp
     expect(loads).toEqual(["Ada"]);
     const tenant = (await directory.tenants.byId("grace"))!;
     directory.change({ ...tenant, workspaces: tenant.workspaces.slice(0, 1) });
-    expect((await get("/projects/p1/graph?workspace=extra", grace)).status).toBe(400);
+    expect((await get("/projects/p1/graph", { ...grace, "x-workspace": "extra" })).status).toBe(400);
     expect((await (await get("/status", { ...rolesHost, authorization: "Bearer grace" })).json()).workspaces)
       .toMatchObject([{ id: "default", requestsRemaining: null }]);
     loads.length = 0;
@@ -1296,6 +1296,100 @@ it("isolates site, projects, graphs and budgets for tenants with the same worksp
   } finally {
     release();
     await overview.catch(() => {});
+    page.link.stop();
+  }
+});
+
+it.each(["session", "token"] as const)("discards cache fills when a change races a %s lookup", async (lookup) => {
+  graphLinear();
+  const respond = vi.mocked(fetch).getMockImplementation()!;
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    const key = new Headers(init?.headers).get("authorization");
+    const { data } = await (await respond(url, init)).json();
+    if (data.project?.name) data.project.name = key;
+    const project = data.teams?.nodes[0]?.projects?.nodes[0];
+    if (project && key === "grace-key") project.labels = { nodes: [{ name: "shared", parent: null }] };
+    return Response.json({ data }, { headers: { "x-ratelimit-requests-remaining": key === "grace-key" ? "22" : "33" } });
+  });
+  const directory = testTenants(TEAM);
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let held = false;
+  const hold = async <T,>(value: T): Promise<T> => {
+    if (!held) {
+      held = true;
+      enter();
+      await gate;
+    }
+    return value;
+  };
+  const original = directory.tenants;
+  const tenants = {
+    ...original,
+    fromSession: async (session: Parameters<typeof original.fromSession>[0]) => {
+      const membership = await original.fromSession(session);
+      return lookup === "session" ? hold(membership) : membership;
+    },
+    fromToken: async (value: string | undefined) => {
+      const tenant = await original.fromToken(value);
+      return lookup === "token" ? hold(tenant) : tenant;
+    },
+  };
+  const page = createApp(hostedRoles, { team: TEAM, dist, auth: rolesAuth, tenants, watchMs: 0 });
+  const headers = await rolesHeaders(lookup === "session" ? "grace@example.com" : "grace-viewer@example.com");
+  const graph = "/api/projects/p1/graph";
+  const first = Promise.resolve(page.request(lookup === "session" ? graph : "/api/projects/p1/presence", { headers }));
+  try {
+    expect(await Promise.race([entered, first])).toBeUndefined();
+    const tenant = (await original.byId("grace"))!;
+    directory.change({ ...tenant, workspaces: [{ ...tenant.workspaces[0], key: "grace-key-2" }] });
+    release();
+    expect((await first).status).toBe(200);
+    const next = await page.request(graph, { headers });
+    if (lookup === "token") expect(next.status).toBe(404);
+    else expect(await next.json()).toMatchObject({ project: { name: "grace-key-2" } });
+    const status = await page.request("/api/status", { headers: { ...rolesHost, authorization: "Bearer grace", "x-workspace": "unknown" } });
+    expect(await status.json()).toMatchObject({ workspaces: [{ requestsRemaining: 33 }] });
+  } finally {
+    release();
+    await first.catch(() => {});
+    page.link.stop();
+  }
+});
+
+it("keeps config workspace selection and errors on the same routes", async () => {
+  graphLinear();
+  const workspaces = ["a", "b"].map((id) => ({ ...workWorkspace(), id }));
+  const page = createApp(rules, { team: TEAM, dist, human: "Ada", workspaces, watchMs: 0 });
+  const ask = (path: string, workspace?: string) =>
+    page.request(path, { headers: { ...local, ...(workspace ? { "x-workspace": workspace } : {}) } });
+  const graph = "/api/projects/p1/graph";
+  try {
+    expect(await (await ask("/api/config")).json()).toMatchObject({ human: "Ada", defaultWorkspace: "a" });
+    for (const [path, header, selected] of [[graph, undefined, "a"], [graph, "b", "b"],
+      [graph + "?workspace=b", undefined, "a"], [graph + "?workspace=bogus", undefined, "a"]] as const) {
+      const response = await ask(path, header);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ workspace: selected });
+    }
+    for (const path of [graph, "/api/nope"]) {
+      const response = await ask(path, "bogus");
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "workspace bogus is not configured" });
+    }
+    for (const [path, header] of [["/api/projects", "bogus"], ["/api/overview", "bogus"],
+      ["/api/status", "bogus"], ["/api/status", undefined]] as const) {
+      const response = await ask(path, header);
+      expect(response.status).toBe(200);
+      expect((await response.json()).workspaces.map(({ id }: { id: string }) => id)).toEqual(["a", "b"]);
+    }
+    expect((await ask("/api/projects/p1/presence")).status).toBe(200);
+    const link = "/api/link?role=page&workspace=bogus";
+    expect((await ask(link)).status).toBe(403);
+    expect((await page.request(link, { headers: write })).status).toBe(400);
+  } finally {
     page.link.stop();
   }
 });

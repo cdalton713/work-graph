@@ -187,10 +187,17 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     serverSite();
     return current;
   };
-  const stopWatching = directory.onChange((id) => { states.delete(id); });
-  const runInTenant = async <T>(tenant: Tenant, run: () => Promise<T>): Promise<T> => {
-    let state = states.get(tenant.id);
-    if (!state) states.set(tenant.id, state = newState());
+  let revision = 0;
+  const stopWatching = directory.onChange((id) => {
+    revision++;
+    states.delete(id);
+  });
+  const runInTenant = async <T>(tenant: Tenant, run: () => Promise<T>, lookupRevision = revision): Promise<T> => {
+    // The lookup can return an old tenant after a notice. Keep that request's cache private.
+    // One revision also covers lookups that have not yet identified a tenant.
+    const canShare = lookupRevision === revision;
+    const state = (canShare ? states.get(tenant.id) : undefined) ?? newState();
+    if (canShare) states.set(tenant.id, state);
     state.active++;
     try {
       return await tenantScope.run({ tenant, state }, () => requestSite.run(siteOf(tenant), () => linearCache.run(state.linear, run)));
@@ -376,7 +383,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
    */
   const wrote = async <T>(result: T, projectId: string | null | undefined): Promise<T> => {
     const workspace = linearWorkspace.getStore()!.id;
-    states.get(scope().tenant.id)?.graphs.get(workspace)?.clear(projectId ?? undefined);
+    const { tenant, state } = scope();
+    state.graphs.get(workspace)?.clear(projectId ?? undefined);
+    const shared = states.get(tenant.id);
+    if (shared !== state) shared?.graphs.get(workspace)?.clear(projectId ?? undefined);
     if (linkEnabled) await hub.invalidate({ workspace, id: projectId ?? "" });
     return result;
   };
@@ -432,6 +442,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       await redis.checkWrites();
       await flushLogouts();
     }
+    const lookupRevision = revision;
     const membership = await directory.fromSession(session);
     const role = membership?.role ?? null;
     const viewer = readOnly || role === "viewer";
@@ -458,7 +469,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const tenant = tokenTenant ?? membership?.tenant;
     if (!tenant) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     const listsWorkspaces = /^\/api\/(status|projects|overview)$/.test(c.req.path);
-    const selected = !tenants && listsWorkspaces ? undefined : header("x-workspace") || c.req.query("workspace");
+    const selected = listsWorkspaces ? undefined : header("x-workspace");
     const id = selected || tenant.workspaces[0]?.id;
     const workspace = tenant.workspaces.find((w) => w.id === id);
     if (!workspace && (selected || !listsWorkspaces)) {
@@ -466,7 +477,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }
     c.set("viewer", tenants && tokenTenant ? readOnly : viewer);
     await dropIdle(tenant.id);
-    await runInTenant(tenant, () => workspace ? linearWorkspace.run(workspace, next) : next());
+    await runInTenant(tenant, () => workspace ? linearWorkspace.run(workspace, next) : next(), lookupRevision);
   });
   // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
   api.get("/status", async (c) => {

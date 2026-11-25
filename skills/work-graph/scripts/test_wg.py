@@ -3631,6 +3631,254 @@ class OneCommandTests(LaneTests):
         self.assertIn("orca worktree create", out)
 
 
+class WorkerSettingsTests(unittest.TestCase):
+    """The config worker_settings: wg dispatch merges them into the worker worktree before the worker starts."""
+
+    def repo(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name).resolve()
+        for args in (("init", "-q"), ("config", "core.excludesFile", "/dev/null"), ("config", "user.email", "t@t"),
+                     ("config", "user.name", "t")):
+            subprocess.run(["git", *args], cwd=root, check=True)
+        (root / "a.txt").write_text("a\n")
+        subprocess.run(["git", "add", "a.txt"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "a", "--no-verify"], cwd=root, check=True)
+        return root
+
+    def status(self, root):
+        return subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout
+
+    def settings(self, values):
+        return patch.dict(wg.CONFIG, {"worker_settings": values})
+
+    def test_without_the_key_wg_changes_nothing(self):
+        root = self.repo()
+        exclude = (root / ".git/info/exclude").read_text()
+        for values in ({}, {"codex": {"features": {"apps": False}}}):
+            with self.settings(values):
+                self.assertIsNone(wg.write_worker_settings(root, "claude"))
+        self.assertFalse((root / ".claude").exists())
+        self.assertEqual((root / ".git/info/exclude").read_text(), exclude)
+        self.assertEqual(wg.read_config(Path(tempfile.mkdtemp()) / "none.json")["worker_settings"], {})
+
+    def test_claude_settings_merge_into_the_file_and_stay_out_of_git(self):
+        root = self.repo()
+        path = root / ".claude/settings.local.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"model": "m", "permissions": {"allow": ["Bash(ls)"], "deny": ["Agent"]}}))
+        values = {"enabledPlugins": {"p@m": False}, "permissions": {"deny": ["Agent", "Workflow"]}}
+        with self.settings({"claude": values}):
+            self.assertIsNone(wg.write_worker_settings(root, "claude"))
+            self.assertIsNone(wg.write_worker_settings(root, "claude"))  # a second dispatch changes nothing
+        self.assertEqual(json.loads(path.read_text()), {
+            "model": "m", "permissions": {"allow": ["Bash(ls)"], "deny": ["Agent", "Workflow"]},
+            "enabledPlugins": {"p@m": False}})
+        self.assertEqual(self.status(root), "")
+        self.assertEqual((root / ".git/info/exclude").read_text().count("/.claude/settings.local.json"), 1)
+        # The shared helper: a new file in a worktree that git ignores already gets no exclude line.
+        other = self.repo()
+        (other / ".gitignore").write_text(".claude/\n")
+        wg.merge_claude_settings(other, {"env": {"A": "1"}})
+        self.assertEqual(json.loads((other / ".claude/settings.local.json").read_text()), {"env": {"A": "1"}})
+        self.assertNotIn("settings.local.json", (other / ".git/info/exclude").read_text())
+
+    def test_a_tracked_file_or_a_file_that_is_not_json_stays_as_it_is(self):
+        root = self.repo()
+        path = root / ".claude/settings.local.json"
+        path.parent.mkdir()
+        for text, message in (("{}\n", "is tracked in"), ("{oops", "not JSON"), ("[]", "not a JSON object")):
+            with self.subTest(message=message):
+                path.write_text(text)
+                if message == "is tracked in":
+                    subprocess.run(["git", "add", str(path)], cwd=root, check=True)
+                with self.settings({"claude": {"env": {"A": "1"}}}):
+                    warning = wg.write_worker_settings(root, "claude")
+                self.assertIn(message, warning)
+                self.assertEqual(path.read_text(), text)
+                subprocess.run(["git", "rm", "-q", "--cached", "--ignore-unmatch", str(path)], cwd=root, check=True)
+
+    def test_codex_settings_merge_into_the_project_config_as_toml(self):
+        root = self.repo()
+        path = root / ".codex/config.toml"
+        path.parent.mkdir()
+        path.write_text('# mine\nmodel = "x"\n[features]\napps = true\nhooks = true\n')
+        values = {"features": {"apps": False}, "agents": {"enabled": False},
+                  "plugins": {"a@b": {"enabled": False}, "c.d@e": {"enabled": False}},
+                  "skills": {"config": [{"path": "/s/one/SKILL.md", "enabled": False}]}}
+        with self.settings({"codex": values}):
+            self.assertIsNone(wg.write_worker_settings(root, "codex"))
+        self.assertEqual(wg.tomllib.loads(path.read_text()), {
+            "model": "x", "features": {"apps": False, "hooks": True}, "agents": {"enabled": False},
+            "plugins": {"a@b": {"enabled": False}, "c.d@e": {"enabled": False}},
+            "skills": {"config": [{"path": "/s/one/SKILL.md", "enabled": False}]}})
+        self.assertEqual(self.status(root), "")
+
+    def test_the_config_key_maps_an_agent_to_an_object(self):
+        path = Path(tempfile.mkdtemp()) / "config.json"
+        for bad in ([], {"cursor": {}}, {"claude": []}):
+            path.write_text(json.dumps({"worker_settings": bad}))
+            with self.assertRaises(SystemExit):
+                wg.read_config(path)
+        path.write_text(json.dumps({"worker_settings": {"claude": {"env": {}}, "codex": {}}}))
+        self.assertEqual(wg.read_config(path)["worker_settings"]["claude"], {"env": {}})
+
+    def work(self, test):
+        work = test.d / "work.md"
+        work.write_text("Fix CI.\n")
+        return work
+
+    def test_codex_text_holds_any_unicode_and_a_file_that_would_not_parse_is_not_replaced(self):
+        root = self.repo()
+        path = root / ".codex/config.toml"
+        values = {"notice": 'rocket \U0001F680 "q" back\\slash tab\t del\x7f é', "k é y": {"x": 1}}
+        with self.settings({"codex": values}):
+            self.assertIsNone(wg.write_worker_settings(root, "codex"))
+        self.assertEqual(wg.tomllib.loads(path.read_text(encoding="utf-8")), values)
+        text = path.read_text(encoding="utf-8")
+        with self.settings({"codex": {"other": True}}), patch.object(wg, "toml_text", return_value="x = [\n"):
+            warning = wg.write_worker_settings(root, "codex")
+        self.assertIn("does not parse", warning)
+        self.assertEqual(path.read_text(encoding="utf-8"), text)
+        with self.settings({"codex": {"bad": "\ud83d"}}):  # a lone surrogate has no TOML text
+            self.assertIn("lone surrogate", wg.write_worker_settings(root, "codex"))
+        self.assertEqual(path.read_text(encoding="utf-8"), text)
+
+    def test_codex_merge_keeps_dates_and_times_of_the_file(self):
+        root = self.repo()
+        path = root / ".codex/config.toml"
+        path.parent.mkdir()
+        path.write_text("stamp = 2026-11-24\nat = 07:32:00\nwhen = 2026-11-24T07:32:00Z\nlocal = 2026-11-24T07:32:00\n"
+                        "big = 1e100\nn = inf\n[t]\nlist = [2026-01-01, 2026-01-02]\n")
+        old = wg.tomllib.loads(path.read_text())
+        with self.settings({"codex": {"features": {"apps": False}}}):
+            self.assertIsNone(wg.write_worker_settings(root, "codex"))
+        self.assertEqual(wg.tomllib.loads(path.read_text()), old | {"features": {"apps": False}})
+
+    def test_a_symlink_is_not_written_through(self):
+        for agent, name in (("claude", ".claude/settings.local.json"), ("codex", ".codex/config.toml")):
+            for linked in ("file", "folder"):
+                with self.subTest(agent=agent, linked=linked):
+                    root, outside = self.repo(), Path(tempfile.mkdtemp())
+                    path = root / name
+                    if linked == "file":
+                        path.parent.mkdir()
+                        (outside / "target").write_text("{}\n")
+                        path.symlink_to(outside / "target")
+                    else:
+                        path.parent.symlink_to(outside)
+                    with self.settings({agent: {"a": 1}}):
+                        warning = wg.write_worker_settings(root, agent)
+                    self.assertIn("is a symlink; wg does not write through it", warning)
+                    self.assertEqual(sorted(p.name for p in outside.iterdir()), ["target"] if linked == "file" else [])
+                    if linked == "file":
+                        self.assertEqual((outside / "target").read_text(), "{}\n")
+
+    def test_a_gitignore_rule_that_overrides_the_exclude_stops_the_write(self):
+        root = self.repo()
+        (root / ".gitignore").write_text("!/.claude/settings.local.json\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "g", "--no-verify"], cwd=root, check=True)
+        with self.settings({"claude": {"a": 1}}):
+            warning = wg.write_worker_settings(root, "claude")
+        self.assertIn("git does not ignore .claude/settings.local.json", warning)
+        self.assertFalse((root / ".claude/settings.local.json").exists())
+        self.assertEqual(self.status(root), "")
+
+    def test_true_is_not_1_nan_is_nan_the_mode_stays_and_a_refusal_adds_one_exclude_line(self):
+        self.assertEqual(wg.merged_settings([1], [True, 2, 2]), [1, True, 2])
+        self.assertEqual(wg.merged_settings({"a": [0]}, {"a": [False, 0.0]}), {"a": [0, False, 0.0]})
+        root = self.repo()
+        path = root / ".codex/config.toml"
+        path.parent.mkdir()
+        path.write_text("a = nan\n")
+        path.chmod(0o640)
+        with self.settings({"codex": {"features": {"apps": False}}}):
+            self.assertIsNone(wg.write_worker_settings(root, "codex"))
+        new = wg.tomllib.loads(path.read_text())
+        self.assertTrue(wg.math.isnan(new["a"]))
+        self.assertEqual(new["features"], {"apps": False})
+        self.assertEqual(wg.stat.S_IMODE(path.stat().st_mode), 0o640)
+        claude = root / ".claude/settings.local.json"
+        claude.parent.mkdir()
+        claude.write_text("{}\n")
+        claude.chmod(0o640)
+        with self.settings({"claude": {"a": True}}):
+            self.assertIsNone(wg.write_worker_settings(root, "claude"))
+            claude.write_text('{"a": 1}\n')  # 1 is not true: the merge writes true
+            self.assertIsNone(wg.write_worker_settings(root, "claude"))
+        self.assertEqual(json.loads(claude.read_text()), {"a": True})
+        self.assertEqual(wg.stat.S_IMODE(claude.stat().st_mode), 0o640)
+        other = self.repo()
+        (other / ".gitignore").write_text("!/.claude/settings.local.json\n")
+        with self.settings({"claude": {"a": 1}}):
+            for _ in range(3):
+                self.assertIn("git does not ignore", wg.write_worker_settings(other, "claude"))
+        self.assertEqual((other / ".git/info/exclude").read_text().count("/.claude/settings.local.json"), 1)
+
+    def test_a_config_value_replaces_a_value_of_another_type_and_a_list_gets_new_items_once(self):
+        old = {"plugins": {"p": {"enabled": True}}, "deny": ["A"], "keep": 1, "one": "x"}
+        new = {"plugins": {"p": False}, "deny": ["B", "A", "B"], "one": ["y", "y"]}
+        self.assertEqual(wg.merged_settings(old, new), {"plugins": {"p": False}, "deny": ["A", "B"], "keep": 1,
+                                                        "one": ["y"]})
+
+    def fixture(self, cls, name):
+        test = cls(name)
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        return test
+
+    def test_each_path_that_starts_a_worker_writes_the_settings_first(self):
+        # --run: the settings are written after the worktree steps and before the worker-start.
+        one = self.fixture(OneCommandTests, "test_dispatch_run_does_every_step_and_prints_two_lines")
+        one.status = ("Todo", [])
+        seen = []
+        record = lambda path, agent: seen.append((str(path), agent, list(one.calls()))) or "it failed"
+        with patch.object(wg, "write_worker_settings", side_effect=record):
+            out, err = one.run_dispatch()
+        self.assertEqual([s[:2] for s in seen], [(one.child, "claude")])
+        self.assertFalse(any("worker-start" in c for c in seen[0][2]), seen[0][2])
+        self.assertIn("orca orchestration worker-start", one.calls()[-1])
+        self.assertIn("it failed", err)  # a warning: the worker still starts
+        self.assertIn("started a dispatch=ctx_1", out)
+        # A follow-up job that starts a new worker in the recorded worktree; a job sent to a running worker does not.
+        seen.clear()
+        record = lambda path, agent: seen.append((str(path), agent))
+        with patch.object(wg, "write_worker_settings", side_effect=record), self.settings({"codex": {"a": 1}}):
+            one.send(BRANCH | {"pr": "7", "worktree": "repo::w", "path": str(one.d)}, job="ci")
+            one.send(BRANCH | {"pr": "7", "dispatch": "d1", "worktree": "repo::w", "path": str(one.d)})
+            self.assertEqual(seen, [(str(one.d), "codex")])
+            # A row with only the Orca id of its worktree: Orca gives the path.
+            seen.clear()
+            one.fake(trees=[one.core, {"id": "repo::w", "path": str(one.d), "branch": "refs/heads/wg/ex-one-00-a"}])
+            one.keymap(rows={})
+            out, _ = one.job(wg.claim, "a", "ci", "codex", True, str(self.work(one)), live={"a": "In Review", "s": "Done"},
+                             rows={"a": BRANCH | {"pr": "7", "worktree": "repo::w"}})
+            self.assertEqual(seen, [(str(one.d), "codex")])
+            self.assertIn("started a dispatch=", out)
+            # An id that Orca does not know: one line says so, and the worker still starts.
+            seen.clear()
+            one.fake(trees=[one.core])
+            out, _ = one.job(wg.claim, "a", "ci", "codex", True, str(self.work(one)), live={"a": "In Review", "s": "Done"},
+                             rows={"a": BRANCH | {"pr": "7", "worktree": "repo::gone"}})
+            self.assertEqual(seen, [])
+            self.assertIn("warning: worker_settings: no local path for worktree repo::gone; the settings are not "
+                          "written\n", out)
+            self.assertIn("started a dispatch=", out)
+        one.doCleanups()  # its fakes end here
+        # The printed path: after the checks of the new worktree, before the spec.
+        job = self.fixture(JobTests, "test_dispatch_writes_the_spec_and_prints_the_worker_start")
+        seen.clear()
+        record = lambda path, agent: seen.append((str(path), agent)) or "it failed"
+        with patch.object(wg, "write_worker_settings", side_effect=record):
+            out, _ = job.worktree()
+        self.assertEqual(seen, [(str((job.d / "child").resolve()), "claude")])
+        self.assertIn("warning: it failed\nspec ", out)
+        with patch.object(wg, "write_worker_settings") as written:
+            job.worktree(code=1, dirty="?? x")
+        written.assert_not_called()
+
+
 class RehearsalTests(unittest.TestCase):
     """One lane of two tasks, an ops node, and a ship point, run with the commands of the skill text, in order.
 

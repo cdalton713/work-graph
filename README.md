@@ -62,6 +62,10 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
     "lint": ["moon", "run", ":lint", "--affected", "--base", "{lower}"],
     "commit_marker": "testing ([0-9a-f]{10})"
   },
+  "worker_settings": {
+    "claude": {"enabledPlugins": {"some-plugin@some-marketplace": false}, "permissions": {"deny": ["Agent"]}},
+    "codex": {"features": {"apps": false}, "agents": {"enabled": false}}
+  },
   "workspaces": [
     {"id": "work", "name": "Work", "team": "ENG", "key_env": ["LINEAR_API_KEY"]},
     {"id": "home", "name": "Home", "team": "HOME", "teams": ["HOME"], "key_env": [], "team_labels": false}
@@ -82,6 +86,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | `notify` | The channels that tell `human` that a move is theirs (see "Notices" below). Default: none. |
 | `health_interval`, `health_agent` | The status check (`wg health`, `skills/work-graph/references/health.md`): the hours from one check to the next (1 to 168, default 6), and the Orca agent that does the check (default `codex`). |
 | `test_runner` | The default test command of `wg evidence`. A node runs the moon test tasks that its diff affects; `@full-<phase>` runs `suite`. `commit_marker` is a regular expression for the line where the runner prints the commit it tests; without it, the exit code is the proof. `lint` is the lint command of the worker spec's push checks, as a list of arguments; each `{lower}` is the node's diff base. Without it, the spec has no lint step. A plan's `effort.lint` replaces it, and a plan with `effort.test` does not use it (`skills/work-graph/references/graph.md`). |
+| `worker_settings` | The session settings of a worker, per agent. Before a worker starts in a worktree, `wg dispatch` and `wg claim` merge `claude` into the worktree's `.claude/settings.local.json` and `codex` into its `.codex/config.toml` (as TOML). The merge keeps the other keys of a file that exists. A value of the config replaces a value of a different type in the file (a `false` replaces a table), and a list gets the config's items that it does not have yet, each one time. `wg` adds the file to the repository's `.git/info/exclude`, so the tree stays clean. It does not change a file that git tracks, a symlink, or a file that a `.gitignore` rule keeps in `git status`; it prints one line and the dispatch continues. Codex reads `.codex/config.toml` only in a project that it trusts. Use it to turn off what a worker does not need (plugins, MCP servers, tools, skills), so that each worker starts with less context. Default: none, and `wg` writes no file (`skills/work-graph/references/setup.md` "Worker sessions"). |
 | `workspaces` | The Linear workspaces. The first is the default. `team` is the default team of a plan; `teams` limits a workspace to those teams; `team_labels: false` makes project labels workspace labels (Linear's team project labels need the Business plan). |
 
 A workspace's key comes from `LINEAR_<ID>_API_KEY`, then the `key_env` names, then the private file

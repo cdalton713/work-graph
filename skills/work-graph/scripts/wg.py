@@ -66,11 +66,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date as datetime_date, datetime, time as datetime_time, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------- config
@@ -84,7 +85,10 @@ DEFAULT_CONFIG = {"human": "Human", "page_url": None, "github_user": None, "tick
                   "tick_label": "dev.work-graph.tick", "test_runner": None, "branch_prefix": "wg/",
                   "release_branch": "release", "rules": "~/.config/work-graph/rules.md",
                   "notify": [], "agent_merge": [], "health_interval": 6, "health_agent": "codex",
-                  "workspaces": [DEFAULT_WORKSPACE]}
+                  "worker_settings": {}, "workspaces": [DEFAULT_WORKSPACE]}
+# The session settings file of each agent in a worker worktree (config worker_settings). wg dispatch merges the
+# values of the worker's agent into this file before the worker starts.
+WORKER_SETTINGS_FILES = {"claude": ".claude/settings.local.json", "codex": ".codex/config.toml"}
 
 
 def read_config(path=CONFIG_PATH):
@@ -110,6 +114,10 @@ def read_config(path=CONFIG_PATH):
         raise SystemExit(f"{path}: health_interval must be a number of hours from 1 to 168")
     if not isinstance(config["health_agent"], str) or not re.fullmatch(r"[a-z0-9-]+", config["health_agent"]):
         raise SystemExit(f"{path}: health_agent must be an Orca agent id, such as codex or claude")
+    settings = config["worker_settings"]
+    if not isinstance(settings, dict) or not all(a in WORKER_SETTINGS_FILES and isinstance(v, dict)
+                                                 for a, v in settings.items()):
+        raise SystemExit(f"{path}: worker_settings must map {' or '.join(WORKER_SETTINGS_FILES)} to a JSON object")
     if problem := notify_problem(config["notify"]):
         raise SystemExit(f"{path}: notify: {problem}")
     return config | {"workspaces": workspaces}
@@ -6278,6 +6286,8 @@ def dispatch(plan_dir, plan, key, agent, worktree, model=None):
             refuse(ident, problems, "no worker spec")
         row.update(state="starting", path=str(path))
         save_keymap(plan_dir, km)
+        if warning := write_worker_settings(path, row.get("agent", agent)):
+            print(f"warning: {warning}")
         path, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
         spec, task_title = shlex.quote(str(path)), shlex.quote(title)
         chosen = row.get("model")
@@ -6660,6 +6670,8 @@ def first_job(plan_dir, plan, key, agent, model, warnings):
                 warnings.append(f"{entry['identifier']}: no worker spec; {continues}")
                 return 1
             row = update_row(plan_dir, key, state="starting")
+        if warning := write_worker_settings(path, row.get("agent", agent)):
+            warnings.append(warning)
         sent = Path(plan_dir).resolve() / "specs" / f"{key}.md"
         if row.get("retry_request") and sent.is_file():  # the spec of an unresolved request stays as it was sent
             spec = sent
@@ -6750,6 +6762,202 @@ def worktree_problems(node, row, path, stax, plan_dir=None):
         problems.append(f"{key}: stax does not track {row['branch']} on {row['parent']}: "
                         f"(cd {shlex.quote(str(path))} && st branch track --parent {shlex.quote(row['parent'])})")
     return problems
+
+
+# ---------------------------------------------------------------- worker session settings (config worker_settings)
+
+def same_settings(a, b):
+    """`a` and `b` are the same settings value: the same types (true is not 1) and values; NaN is NaN."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(same_settings(a[k], b[k]) for k in a)
+    if isinstance(a, list):
+        return len(a) == len(b) and all(same_settings(x, y) for x, y in zip(a, b))
+    if isinstance(a, float) and math.isnan(a):
+        return math.isnan(b)
+    return a == b
+
+
+def merged_settings(old, new):
+    """`new` merged into `old`: objects merge key by key, a list gets the items of `new` that it does not have
+    (once each), and any other value of `new` replaces the old one, also a value of another type. No key of
+    `old` goes away."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        return old | {k: merged_settings(old[k], v) if k in old else v for k, v in new.items()}
+    if isinstance(new, list):
+        out = list(old) if isinstance(old, list) else []
+        for v in new:
+            if not any(same_settings(v, x) for x in out):
+                out.append(v)
+        return out
+    return new
+
+
+def settings_target(worktree, name):
+    """The settings file `name` of `worktree`, after the checks that make it safe to write: not tracked, not a
+    symlink (nor its folder), and ignored by git (wg adds it to info/exclude first). ReadError says why not."""
+    path = Path(worktree) / name
+    for part in (path.parent, path):
+        if part.is_symlink():
+            raise ReadError(f"{part} is a symlink; wg does not write through it")
+    if not command("git", "ls-files", "--error-unmatch", name, cwd=worktree).returncode:
+        raise ReadError(f"{name} is tracked in {worktree}; wg does not change it")
+    if command("git", "check-ignore", "-q", name, cwd=worktree).returncode:
+        exclude = Path(worktree) / git_output("rev-parse", "--git-path", "info/exclude", cwd=worktree)
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        text = exclude.read_text() if exclude.exists() else ""
+        if f"/{name}" not in text.splitlines():  # a retry after a refusal adds no second line
+            exclude.write_text(text + ("" if not text or text.endswith("\n") else "\n") + f"/{name}\n")
+        if command("git", "check-ignore", "-q", name, cwd=worktree).returncode:
+            raise ReadError(f"git does not ignore {name} in {worktree} (a .gitignore rule overrides "
+                            "info/exclude); wg does not write it")
+    return path
+
+
+def write_settings_file(path, text):
+    """Write `text` to `path` through a temporary file in the same folder, so a failure leaves the old file.
+    A file that exists keeps its mode; a new file gets the mode of the umask."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        mode = stat.S_IMODE(path.stat().st_mode)
+    else:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+                                     delete=False) as f:
+        f.write(text)
+    os.chmod(f.name, mode)
+    os.replace(f.name, path)
+
+
+def merge_claude_settings(worktree, values):
+    """Merge `values` into the Claude Code file .claude/settings.local.json of `worktree`, and keep it out of git.
+    Other keys of a file that exists stay. A file that is not a JSON object, or a file wg may not write
+    (settings_target), stops with ReadError, unchanged."""
+    path = settings_target(worktree, WORKER_SETTINGS_FILES["claude"])
+    try:
+        old = json.loads(path.read_text()) if path.exists() else {}
+    except json.JSONDecodeError as e:
+        raise ReadError(f"{path}: not JSON ({e})")
+    if not isinstance(old, dict):
+        raise ReadError(f"{path}: not a JSON object")
+    new = merged_settings(old, values)
+    if not same_settings(new, old) or not path.exists():
+        write_settings_file(path, json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+    return path
+
+
+def toml_text(data):
+    """`data` as TOML: tables, arrays of tables, and inline values. It takes JSON values (no null) and each value
+    that tomllib returns (dates and times too); a string can hold any Unicode text."""
+    def string(s):
+        out = []
+        for c in s:
+            if c in '"\\':
+                out.append("\\" + c)
+            elif ord(c) < 0x20 or ord(c) == 0x7F:
+                out.append(f"\\u{ord(c):04X}")
+            elif 0xD800 <= ord(c) <= 0xDFFF:
+                raise ValueError(f"no TOML string for a lone surrogate in {s!r}")
+            else:
+                out.append(c)
+        return '"' + "".join(out) + '"'
+
+    def key(k):
+        return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else string(k)
+
+    def value(v):
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, int):
+            return str(v)
+        if isinstance(v, float):
+            return "nan" if math.isnan(v) else ("inf" if v > 0 else "-inf") if math.isinf(v) else repr(v)
+        if isinstance(v, str):
+            return string(v)
+        if isinstance(v, (datetime_date, datetime_time)):  # a datetime is a date too
+            return v.isoformat()
+        if isinstance(v, list):
+            return "[" + ", ".join(value(x) for x in v) + "]"
+        if isinstance(v, dict):
+            return "{" + ", ".join(f"{key(k)} = {value(x)}" for k, x in v.items()) + "}"
+        raise ValueError(f"no TOML value for {v!r}")
+
+    def tables(v):
+        return isinstance(v, list) and v and all(isinstance(x, dict) for x in v)
+
+    lines = []
+
+    def table(prefix, body, header):
+        inline = [(k, v) for k, v in body.items() if not isinstance(v, dict) and not tables(v)]
+        if prefix and (inline or not body or header.startswith("[[")):
+            lines.append(header)
+        lines.extend(f"{key(k)} = {value(v)}" for k, v in inline)
+        for k, v in body.items():
+            name = f"{prefix}.{key(k)}" if prefix else key(k)
+            if isinstance(v, dict):
+                table(name, v, f"[{name}]")
+            elif tables(v):
+                for item in v:
+                    table(name, item, f"[[{name}]]")
+
+    table("", data, "")
+    return "\n".join(lines) + "\n"
+
+
+def merge_codex_config(worktree, values):
+    """Merge `values` into the Codex project file .codex/config.toml of `worktree`, and keep it out of git.
+    wg writes the file again from its parsed values, so a comment in it does not stay. wg writes only text that
+    tomllib reads back as the merged values; else ReadError, and the file stays as it was."""
+    path = settings_target(worktree, WORKER_SETTINGS_FILES["codex"])
+    try:
+        old = tomllib.loads(path.read_text()) if path.exists() else {}
+    except tomllib.TOMLDecodeError as e:
+        raise ReadError(f"{path}: not TOML ({e})")
+    new = merged_settings(old, values)
+    if not same_settings(new, old) or not path.exists():
+        text = toml_text(new)
+        try:
+            back = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as e:
+            raise ReadError(f"{path}: the merged TOML does not parse ({e}); wg does not write it")
+        if not same_settings(back, new):
+            raise ReadError(f"{path}: the merged TOML does not read back as the values; wg does not write it")
+        write_settings_file(path, text)
+    return path
+
+
+def write_worker_settings(worktree, agent):
+    """Before a worker starts in `worktree`: merge the config worker_settings of `agent` into its settings file.
+    The warning to print, or None. Without settings for the agent, wg changes nothing. A failure does not stop
+    the start: the worker then starts with the settings of the machine."""
+    values = CONFIG["worker_settings"].get(agent)
+    if not values:
+        return None
+    try:
+        (merge_claude_settings if agent == "claude" else merge_codex_config)(worktree, values)
+    except (ReadError, OSError, ValueError, subprocess.SubprocessError) as e:
+        return f"worker_settings: {e}; the worker starts without them"
+    return None
+
+
+def start_settings(row, agent):
+    """write_worker_settings for a worker that starts in the worktree of a run row: its path, else the path that
+    Orca gives for its worktree id. The warning to print, or None."""
+    if not CONFIG["worker_settings"].get(agent):
+        return None
+    path = row.get("path")
+    if not path and row.get("worktree"):
+        try:
+            path = (orca_worktrees().get(row["worktree"]) or {}).get("path")
+        except (ReadError, OSError, subprocess.SubprocessError, KeyError, TypeError):
+            path = None
+    if not path or not Path(path).is_dir():
+        return (f"worker_settings: no local path for worktree {row.get('worktree') or path or '-'}; "
+                "the settings are not written")
+    return write_worker_settings(path, agent)
 
 
 def restack_line(plan_dir, plan, node, row, nodes, deps, st):
@@ -6880,6 +7088,8 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None):
     print(f"claimed {ident} agent:{agent} for job {job}")
     if restack:
         print(restack)
+    if fresh and (warning := start_settings(row, agent)):  # a new worker session starts in this worktree
+        print(f"warning: {warning}")
     if send:
         refresh_card(plan_dir, plan, key)
         if fresh:

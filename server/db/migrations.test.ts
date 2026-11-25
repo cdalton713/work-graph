@@ -18,7 +18,7 @@ databaseSuites((open) => {
     const sql = await database();
     await Promise.all([migrate(sql), migrate(sql)]);
     await migrate(sql);
-    expect(await sql.query("SELECT version FROM schema_migrations ORDER BY version")).toEqual([{ version: 1 }, { version: 2 }]);
+    expect(await sql.query("SELECT version FROM schema_migrations ORDER BY version")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
     for (const table of ["users", "tenants", "linear_connections", "coordinator_tokens"]) {
       expect(await sql.query(`SELECT * FROM ${table}`)).toEqual([]);
     }

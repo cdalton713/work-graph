@@ -15,12 +15,13 @@ import { parseCard, statusName } from "../src/lib/graph.ts";
 import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from "../src/lib/link.ts";
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal } from "./access.ts";
+import { accountRoutes } from "./account.ts";
 import { type Auth, type Session, LOGIN_PATH, authRoutes, sessionOf } from "./auth.ts";
 import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { LinearError, addComment, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
+import { LinearError, LinearKeyRequired, addComment, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, LinkHub, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
@@ -66,7 +67,7 @@ async function json<T>(body: Promise<T>): Promise<T> {
 export interface AppOptions {
   tenants?: Tenants;
   linearAuth?: LinearAuth;
-  serviceReady?: () => Promise<boolean>;
+  serviceReady?: () => Promise<boolean | string>;
   /** The configured workspaces; the first is the default. */
   workspaces?: Workspace[];
   /** The human's name (config `human`). */
@@ -162,6 +163,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   if (!tenants && auth && !readOnly && !linkToken) throw new Error("the sign-in needs WG_LINK_TOKEN on a full page");
   const configured = configTenants({ human: human ?? DEFAULT_HUMAN, workspaces, auth, linkToken, readOnly });
   const directory = tenants ?? configured;
+  const accountStore = tenants?.accountStore;
   const requiresLinkToken = !!tenants || !!linkToken;
   const linkEnabled = !readOnly;
   const roomRef = (ref: ProjectRef, tenant: Tenant): RoomRef => tenants ? { ...ref, tenant: tenant.id } : ref;
@@ -174,7 +176,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const contract = contractHash(contractFile);
   const app = new Hono();
   if (serviceReady) app.use(async (c, next) => {
-    if (!await serviceReady()) return c.text("Vercel full page requires DATABASE_URL", 500);
+    const ready = await serviceReady();
+    if (ready !== true) return c.text(`Vercel full page requires ${ready || "DATABASE_URL"}`, 500);
     await next();
   });
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
@@ -359,8 +362,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const start = clock();
     await next();
     const ms = clock() - start;
+    const path = /^\/api\/account(?:\/|$)/.test(c.req.path) ? "/api/account" : new URL(c.req.url).pathname;
     if (!(c.error instanceof RedisUnavailable || c.error instanceof RedisCommandFailed)
-        && (ms > SLOW_MS || c.res.status >= 500)) console.warn(`wg api: ${c.req.method} ${new URL(c.req.url).pathname} ${c.res.status} ${Math.round(ms)}ms`);
+        && (ms > SLOW_MS || c.res.status >= 500)) console.warn(`wg api: ${c.req.method} ${path} ${c.res.status} ${Math.round(ms)}ms`);
   });
   app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -472,7 +476,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (c.req.path === "/api/config" && (method === "GET" || method === "HEAD")) {
       const tenant = membership?.tenant ?? (!tenants ? await directory.byId(CONFIG_TENANT_ID) : null);
       const site = tenant ? siteOf(tenant) : createSite(DEFAULT_HUMAN, "default");
-      const disconnected = !!linearAuth && !!tenant?.workspaces[0]?.needsKey;
+      const disconnected = !!linearAuth && !!tenant?.workspaces.find((w) => w.kind === "oauth")?.needsKey;
       if (membership) {
         await dropIdle(membership.tenant.id);
         const state = states.get(membership.tenant.id);
@@ -495,6 +499,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const selected = listsWorkspaces ? undefined : header("x-workspace");
     const id = selected || tenant.workspaces[0]?.id;
     const workspace = tenant.workspaces.find((w) => w.id === id);
+    if (viewer && !tokenTenant && !listsWorkspaces && workspace?.rejectApiKey) return c.json({ error: "Workspace not found" }, 404);
     if (workspace?.needsKey) throw new LinearSignInRequired();
     if (!workspace && (selected || !listsWorkspaces)) {
       return c.json({ error: `workspace ${id ?? "default"} is not configured` }, 400);
@@ -523,27 +528,32 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
   api.use(bodyLimit({ maxSize: 2_000_000, onError: (c) => c.json({ error: "request body too large" }, 413) }));
   const projectList = async (viewer = false): Promise<ProjectList> => {
-    const { tenant: { workspaces }, state: { lists, sharedNames } } = scope();
+    const { tenant, state: { lists, sharedNames } } = scope();
+    const workspaces = viewer ? tenant.workspaces.filter((workspace) => !workspace.rejectApiKey) : tenant.workspaces;
     const order = ++lists.started;
     const results = await Promise.allSettled(workspaces.map((workspace) =>
-      linearWorkspace.run(workspace, () => workspace.kind === "oauth" && !workspace.team ? Promise.resolve([]) : listProjects(workspace.team)),
+      linearWorkspace.run(workspace, () => workspace.kind && !workspace.team ? Promise.resolve([]) : listProjects(workspace.team)),
     ));
     const refused = results.find((result) => result.status === "rejected" && result.reason instanceof LinearSignInRequired);
     if (refused?.status === "rejected") throw refused.reason;
     const list: ProjectList = {
-      workspaces: workspaces.map(({ id, name, shareUrl }, at) => {
+      workspaces: workspaces.flatMap(({ id, name, shareUrl }, at) => {
+        const result = results[at];
+        if (result.status === "rejected" && result.reason instanceof LinearKeyRequired) return [];
         const address = shareUrl ?? (auth && !readOnly ? `https://${rules.hosted!.host}` : undefined);
-        return {
+        return [{
           id, name, ...(address ? { shareUrl: address } : {}),
-          ...(results[at].status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
-        };
+          ...(result.status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
+        }];
       }),
       // The viewer has only the projects that their owner shared (the project label `shared`).
       projects: results.flatMap((result, at) => result.status === "fulfilled"
         ? result.value.map((p) => ({ ...p, workspace: workspaces[at].id, workspaceName: workspaces[at].name }))
         : []),
     };
-    const shared = { ...list, projects: list.projects.filter((p) => p.shared) };
+    const privateIds = new Set(workspaces.filter((workspace) => workspace.rejectApiKey).map(({ id }) => id));
+    const shared = { ...list, workspaces: list.workspaces.filter(({ id }) => !privateIds.has(id)),
+      projects: list.projects.filter((p) => p.shared && !privateIds.has(p.workspace)) };
     // A slower list that started earlier cannot restore a share removed from the newer list.
     if ((tenants || auth || readOnly) && order > lists.stored) {
       lists.stored = order;
@@ -696,6 +706,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const { shared } = await json(c.req.json<{ shared?: unknown }>());
     if (typeof shared !== "boolean") throw new LinearError("shared must be true or false", 400);
     const workspace = linearWorkspace.getStore()!;
+    if (workspace.rejectApiKey) throw new LinearError("Projects in an attached workspace are private", 403);
     await setShared(c.req.param("id"), shared, workspace.team, workspace.teamLabels);
     const { names, sharedNames, lists } = scope().state;
     names.at = 0;
@@ -809,6 +820,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const viewer = membership?.role === "viewer";
     const workspace = c.req.query("workspace") || siteOf(tenant).defaultWorkspace;
     const selected = tenant.workspaces.find((w) => w.id === workspace);
+    if (viewer && selected?.rejectApiKey) return c.json({ error: "Workspace not found" }, 404);
     if (selected?.needsKey) throw new LinearSignInRequired();
     if (!selected) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
     const wanted = c.req.query("project");
@@ -904,6 +916,25 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       onClose: () => afterOpen(() => connection?.closed()),
     };
   }));
+  if (accountStore) {
+    app.route("/api/account", accountRoutes({
+      now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX,
+      async access(c) {
+        const reason = refusal(c.req.method, (name) => c.req.header(name), rules);
+        if (reason) return c.json({ error: reason }, 403);
+        const signed = await readSession(c);
+        const read = c.req.method === "GET" || c.req.method === "HEAD";
+        const session = signed && await sessionActive(signed, read) ? signed : null;
+        const membership = session ? await directory.fromSession(session) : null;
+        if (!membership) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+        if (readOnly || membership.role !== "owner") return c.json({ error: "Account access requires the owner" }, 403);
+        const accounts = await accountStore();
+        if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
+        return { accounts, tenant: membership.tenant };
+      },
+    }));
+  }
+  app.all("/api/account/*", (c) => c.json({ error: "Account route not found" }, 404));
   app.route("/api", api);
   if (auth || linearAuth) {
     // The sign-in answers only under the name of the page, as the API does.

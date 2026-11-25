@@ -55,6 +55,11 @@ const migrations = [
       ))
     )`,
   ],
+  [
+    "ALTER TABLE linear_connections ADD COLUMN owner_name text, ADD COLUMN created_at timestamptz NOT NULL DEFAULT now()",
+    `UPDATE linear_connections c SET owner_name = u.name FROM tenants t JOIN users u ON u.id = t.owner_user_id
+      WHERE c.tenant_id = t.id AND c.kind = 'oauth'`,
+  ],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

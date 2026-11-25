@@ -5,7 +5,6 @@ import { Hono } from "hono";
 import { createApp } from "./app.ts";
 import { linkSettings } from "./link.ts";
 import { readConfig } from "./workspaces.ts";
-import { credentialCrypto } from "./db/crypto.ts";
 import { readLinearAuth, serviceSetting } from "./linearauth.ts";
 import { openServiceTenants, type Tenants } from "./tenants.ts";
 
@@ -96,9 +95,6 @@ export function createVercelApp(env: NodeJS.ProcessEnv) {
 function createVercelService(env: NodeJS.ProcessEnv) {
   const missing = serviceSetting(env, true);
   if (missing) return unavailable(missing);
-  try { credentialCrypto(env); } catch (error) {
-    return unavailable(error instanceof Error && error.message.startsWith("WG_DATA_KEY_OLD") ? "WG_DATA_KEY_OLD" : "WG_DATA_KEY");
-  }
   let socketSettings: ReturnType<typeof linkSettings>;
   try { socketSettings = vercelLinkSettings(env); } catch (error) {
     return unavailable(error instanceof Error && error.message.startsWith("WG_LINK_PONG_MS") ? "WG_LINK_PONG_MS" : "WG_LINK_MAX_AGE");
@@ -120,6 +116,7 @@ function createVercelService(env: NodeJS.ProcessEnv) {
     fromToken: async (authorization) => (await directory()).fromToken(authorization),
     byId: async (id) => (await directory()).byId(id),
     signIn: async (user, first) => (await directory()).signIn(user, first),
+    accountStore: async () => (await directory()).accountStore(),
     onChange(listener) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
@@ -133,7 +130,10 @@ function createVercelService(env: NodeJS.ProcessEnv) {
       redisUrl: env.WG_REDIS_URL, redisPrefix: env.WG_REDIS_PREFIX || undefined,
       contractFile: join(root, "skills/work-graph/contract.json"),
       version: env.WG_VERSION || env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "dev",
-      serviceReady: () => directory().then(() => true, () => false),
+      serviceReady: () => directory().then(() => true, (error: unknown) => {
+        const message = error instanceof Error ? error.message : "";
+        return ["WG_DATA_KEY", "WG_DATA_KEY_OLD"].find((name) => message.startsWith(name + " ")) ?? false;
+      }),
     });
   } catch (error) {
     if (error instanceof Error && error.message === "invalid Redis link configuration") return unavailable("WG_REDIS_URL");

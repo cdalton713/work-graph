@@ -213,8 +213,66 @@ function transportFailure(error: unknown): { failure: Failure; error: LinearErro
 
 interface GraphQLError { message: string; extensions?: { code?: string } }
 
+export class LinearKeyRequired extends LinearError {
+  constructor() { super("Linear refused the workspace key. Replace it in your account.", 401); }
+}
+
+type ReadableTeam = { key: string; name: string };
+type WorkspaceIdentity = { workspaceId: string; organization: string; name: string; ownerName: string };
+
+export async function readLinearTeams(key: string, kind: "api_key" | "oauth", identify: true):
+  Promise<{ teams: ReadableTeam[]; identity: WorkspaceIdentity }>;
+export async function readLinearTeams(key: string, kind: "api_key" | "oauth", identify?: false):
+  Promise<{ teams: ReadableTeam[] }>;
+export async function readLinearTeams(key: string, kind: "api_key" | "oauth", identify = false) {
+  const teams: ReadableTeam[] = [];
+  const cursors = new Set<string>();
+  const signal = AbortSignal.timeout(TIMEOUT_MS);
+  let identity: WorkspaceIdentity | undefined;
+  let after: string | null = null;
+  const text = (value: unknown): value is string =>
+    typeof value === "string" && !!value && !value.includes(key);
+  for (;;) {
+    const fields = identify && !identity ? "viewer { name } organization { id name urlKey }" : "";
+    const query = `query AccountTeams($after: String) {
+      ${fields}
+      teams(first: 100, after: $after) { nodes { key name } pageInfo { hasNextPage endCursor } }
+    }`;
+    try {
+      const response = await slot(() => transport.fetch(ENDPOINT, {
+        method: "POST", redirect: "error", signal,
+        headers: { Authorization: kind === "oauth" ? `Bearer ${key}` : key, "Content-Type": "application/json" },
+        body: JSON.stringify({ query, variables: { after } }),
+      }));
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new LinearError("Linear refused the workspace credential", response.status === 401 ? 401 : 400);
+      }
+      const { data, errors } = await response.json();
+      if (!data || errors?.length || !Array.isArray(data.teams?.nodes)) throw new Error();
+      if (fields) {
+        const { organization: org, viewer } = data;
+        if (!text(org?.id) || !text(org?.urlKey) || !text(org?.name) || !text(viewer?.name)) throw new Error();
+        identity = { workspaceId: org.urlKey, organization: org.id, name: org.name, ownerName: viewer.name };
+      }
+      for (const team of data.teams.nodes) {
+        if (!text(team?.key) || !text(team?.name)) throw new Error();
+        teams.push({ key: team.key, name: team.name });
+      }
+      if (!data.teams.pageInfo?.hasNextPage) return { identity, teams };
+      const cursor = data.teams.pageInfo.endCursor;
+      if (!text(cursor) || cursors.has(cursor)) throw new Error();
+      cursors.add(cursor);
+      after = cursor;
+    } catch (error) {
+      if (error instanceof LinearError && error.status === 401) throw new LinearError("Linear refused the workspace credential", 401);
+      throw new LinearError("Linear did not verify the workspace credential", 400);
+    }
+  }
+}
+
 export async function gql(query: string, variables: Record<string, unknown> = {}): Promise<Data> {
-  const { key, kind, oauthKey, needsKey } = workspaceOf();
+  const { key, kind, oauthKey, needsKey, rejectApiKey } = workspaceOf();
   currentCache();
   serverSite();
   if (needsKey) throw new LinearSignInRequired();
@@ -225,6 +283,7 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
     headers: { Authorization: kind === "oauth" ? `Bearer ${credential}` : credential, "Content-Type": "application/json" },
     body: JSON.stringify({ query, variables }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
+    ...(rejectApiKey ? { redirect: "error" as const } : {}),
   });
   for (let tryNumber = 1; ; tryNumber++) {
     // The slot is held for one try only, not during the delay before the next try.
@@ -232,7 +291,7 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       const credential = oauthKey ? await oauthKey() : key;
       const failed = (error: unknown) => {
         const result = transportFailure(error);
-        return kind === "oauth" ? { ...result, error: new LinearError("Linear request failed") } : result;
+        return kind === "oauth" || rejectApiKey ? { ...result, error: new LinearError("Linear request failed") } : result;
       };
       const send = async (value: string) => {
         try { return await transport.fetch(ENDPOINT, init(value)); } catch (error) { return failed(error); }
@@ -243,6 +302,11 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         await response.body?.cancel().catch(() => {});
         response = await send(await oauthKey(credential));
         if ("failure" in response) return response;
+      }
+      if (response.status === 401 && rejectApiKey) {
+        await response.body?.cancel().catch(() => {});
+        await rejectApiKey();
+        throw new LinearKeyRequired();
       }
       keepBudget(response.headers);
       let body: { data?: Data; errors?: GraphQLError[] } | null;
@@ -256,7 +320,7 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         body = null;
       }
       if (response.ok && body && !body.errors) return { data: body.data };
-      const detail = (kind !== "oauth" ? body?.errors?.map((e) => e.message).join("; ") : undefined) ?? `HTTP ${response.status}`;
+      const detail = (kind !== "oauth" && !rejectApiKey ? body?.errors?.map((e) => e.message).join("; ") : undefined) ?? `HTTP ${response.status}`;
       const rated = response.status === 429 || !!body?.errors?.some((e) => e.extensions?.code === "RATELIMITED");
       const failure: Failure = rated ? "rate" : response.status >= 500 ? "server" : "final";
       const retryAfter = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;

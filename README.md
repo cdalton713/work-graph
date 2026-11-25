@@ -390,6 +390,8 @@ Set `WG_LINEAR_CLIENT_ID` and `WG_LINEAR_CLIENT_SECRET` from the Linear OAuth ap
 
 To limit sign-up, set `WG_ALLOWED_ORGS` to the Linear workspace URL keys, separated by commas or spaces.
 
+After you sign in, you can attach more Linear workspaces with personal API keys. If a key can read more than one team, select a team for that workspace. The service encrypts each key and only uses it for your account. Projects in an attached workspace stay private. If Linear refuses a key later, replace it in your account to restore the workspace.
+
 ## Host a read-only viewer
 
 A viewer is a second deployment of the page for other people: they sign in and read the projects that you

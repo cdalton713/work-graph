@@ -13,16 +13,18 @@ export type ConnectionCredential =
   | { kind: "api_key"; key: string }
   | OAuthCredential;
 type Settings = { name: string; team: string; teamLabels: boolean };
-export type NewConnection = Settings & { workspaceId: string; linearOrgId: string; credential: ConnectionCredential };
+export type NewConnection = Settings & { workspaceId: string; linearOrgId: string; credential: ConnectionCredential; ownerName?: string };
 type Connection = Settings & {
   id: string; workspaceId: string; linearOrgId: string; position: number;
   kind: ConnectionCredential["kind"]; status: "ok" | "needs_key"; expiresAt: Date | null;
+  ownerName: string | null; createdAt: Date;
 };
 type EncryptedConnection = Connection & { tenantId: string; credential: string | null; refreshToken: string | null };
 type Token = { id: string; name: string; createdAt: Date; lastUsedAt: Date | null; revokedAt: Date | null };
 
 const connectionFields = `id, workspace_id AS "workspaceId", linear_org_id AS "linearOrgId",
-  name, team, team_labels AS "teamLabels", position, kind, status, expires_at AS "expiresAt"`;
+  name, team, team_labels AS "teamLabels", position, kind, status, expires_at AS "expiresAt",
+  owner_name AS "ownerName", created_at AS "createdAt"`;
 const encryptedFields = `${connectionFields}, tenant_id AS "tenantId", credential, refresh_token AS "refreshToken"`;
 const tokenFields = `id, name, created_at AS "createdAt", last_used_at AS "lastUsedAt", revoked_at AS "revokedAt"`;
 
@@ -58,10 +60,10 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
     const id = randomUUID();
     await query(`INSERT INTO linear_connections
       (id, tenant_id, workspace_id, linear_org_id, name, team, team_labels, position,
-       kind, credential, refresh_token, expires_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`, [
+       kind, credential, refresh_token, expires_at, owner_name)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [
       id, tenant, input.workspaceId, input.linearOrgId, input.name, input.team, input.teamLabels,
-      position, ...encrypt(tenant, id, input.credential),
+      position, ...encrypt(tenant, id, input.credential), input.ownerName ?? null,
     ]);
     return id;
   }
@@ -98,6 +100,14 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
     if (!rows.length) throw new Error("Connection not found");
   }
 
+  async function rejectApiKey(row: EncryptedConnection) {
+    // A late response for an old key must leave the replacement in place.
+    const changed = await sql.query(`UPDATE linear_connections SET status = 'needs_key', credential = NULL
+      WHERE tenant_id = $1 AND id = $2 AND kind = 'api_key' AND status = 'ok' AND credential = $3
+      RETURNING id`, [row.tenantId, row.id, row.credential]);
+    if (changed.length) await notify(row.tenantId);
+  }
+
   return {
     async signIn(user: User, first: NewConnection) {
       const tenant = await sql.transaction(async ({ query }) => {
@@ -111,7 +121,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
           const [{ id }] = await query<{ id: string }>(
             "INSERT INTO tenants (id, owner_user_id, human) VALUES ($1, $2, $3) RETURNING id",
             [randomUUID(), created.id, user.name]);
-          await insertConnection(query, id, first, 0);
+          await insertConnection(query, id, { ...first, ownerName: user.name }, 0);
           return id;
         }
         const [account] = await query<{ id: string; owner: string }>(`SELECT t.id, u.id AS owner
@@ -124,12 +134,12 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
           WHERE tenant_id = $1 AND linear_org_id = $2`, [id, first.linearOrgId]);
         if (connection) {
           await query(`UPDATE linear_connections SET kind = $3, credential = $4, refresh_token = $5,
-            expires_at = $6, status = 'ok' WHERE tenant_id = $1 AND id = $2`,
-          [id, connection.id, ...encrypt(id, connection.id, first.credential)]);
+            expires_at = $6, status = 'ok', owner_name = $7 WHERE tenant_id = $1 AND id = $2`,
+          [id, connection.id, ...encrypt(id, connection.id, first.credential), user.name]);
         } else {
           const rows = await orderedIds(query, id);
           if (rows.length >= MAX_CONNECTIONS) throw new Error("Connection limit reached");
-          await insertConnection(query, id, first, rows.length);
+          await insertConnection(query, id, { ...first, ownerName: user.name }, rows.length);
         }
         return id;
       });
@@ -171,7 +181,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
         await query("INSERT INTO users (id, linear_user_id, linear_org_id, email, name) VALUES ($1, $2, $3, $4, $5)",
           [owner, user.linearUserId, user.linearOrgId, user.email, user.name]);
         await query("INSERT INTO tenants (id, owner_user_id, human) VALUES ($1, $2, $3)", [tenant, owner, human]);
-        await insertConnection(query, tenant, first, 0);
+        await insertConnection(query, tenant, { ...first, ownerName: first.ownerName ?? user.name }, 0);
       });
       await notify(tenant);
       return tenant;
@@ -219,7 +229,9 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
               console.error(`Cannot decrypt database credential for connection ${row.id}`);
               return [];
             }
-            if (credential.kind === "api_key") return [{ ...workspace, key: credential.key }];
+            if (credential.kind === "api_key") {
+              return [{ ...workspace, kind: credential.kind, key: credential.key, rejectApiKey: () => rejectApiKey(row) }];
+            }
             return [{ ...workspace, kind: credential.kind, key: credential.key, oauthKey: oauthKey?.(row.id, credential) }];
           }),
         };
@@ -234,23 +246,36 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       });
     },
 
-    async replaceCredential(tenant: string, connection: string, credential: ConnectionCredential) {
+    async replaceCredential(tenant: string, connection: string, credential: ConnectionCredential,
+      verified?: { ownerName: string; organization: string; teams: string[] }) {
       requireUuid(connection);
       return change(tenant, async (query, account) => {
-        const [row] = await query<{ id: string }>(
-          "SELECT id FROM linear_connections WHERE tenant_id = $1 AND id = $2", [account.id, connection]);
+        const [row] = await query<Connection>(`SELECT ${connectionFields}
+          FROM linear_connections WHERE tenant_id = $1 AND id = $2`, [account.id, connection]);
         if (!row) throw new Error("Connection not found");
+        if (verified && (row.kind !== "api_key" || row.linearOrgId !== verified.organization)) {
+          throw new Error("The replacement key must belong to the same Linear organization");
+        }
+        const team = !verified || verified.teams.includes(row.team) ? row.team
+          : verified.teams.length === 1 ? verified.teams[0] : "";
         await query(`UPDATE linear_connections SET kind = $3, credential = $4,
-          refresh_token = $5, expires_at = $6, status = 'ok'
-          WHERE tenant_id = $1 AND id = $2`, [account.id, row.id, ...encrypt(account.id, row.id, credential)]);
+          refresh_token = $5, expires_at = $6, status = 'ok', owner_name = $7, team = $8
+          WHERE tenant_id = $1 AND id = $2`, [account.id, row.id, ...encrypt(account.id, row.id, credential), verified?.ownerName ?? row.ownerName, team]);
       });
     },
 
-    async updateConnectionSettings(tenant: string, connection: string, settings: Settings & { position?: number }) {
+    async updateConnectionSettings(tenant: string, connection: string, settings: Partial<Settings> & { position?: number }, checkedKey?: string) {
       requireUuid(connection);
       return change(tenant, async (query) => {
-        const [updated] = await query<{ id: string }>(`UPDATE linear_connections SET name = $3, team = $4, team_labels = $5
-          WHERE tenant_id = $1 AND id = $2 RETURNING id`, [tenant, connection, settings.name, settings.team, settings.teamLabels]);
+        if (checkedKey !== undefined) {
+          const [row] = await query<EncryptedConnection>(`SELECT ${encryptedFields} FROM linear_connections
+            WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, [tenant, connection]);
+          if (!row) throw new Error("Connection not found");
+          if (row.status !== "ok" || decrypt(row).key !== checkedKey) throw new Error("The workspace credential changed. Try again.");
+        }
+        const [updated] = await query<{ id: string }>(`UPDATE linear_connections SET
+          name = coalesce($3, name), team = coalesce($4, team), team_labels = coalesce($5, team_labels)
+          WHERE tenant_id = $1 AND id = $2 RETURNING id`, [tenant, connection, settings.name ?? null, settings.team ?? null, settings.teamLabels ?? null]);
         if (!updated) throw new Error("Connection not found");
         const { position } = settings;
         if (position === undefined) return;
@@ -264,10 +289,11 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       });
     },
 
-    async removeConnection(tenant: string, connection: string) {
+    async removeConnection(tenant: string, connection: string, apiKeyOnly = false) {
       requireUuid(connection);
       return change(tenant, async (query) => {
-        requireConnection(await query("DELETE FROM linear_connections WHERE tenant_id = $1 AND id = $2 RETURNING id", [tenant, connection]));
+        requireConnection(await query(`DELETE FROM linear_connections WHERE tenant_id = $1 AND id = $2
+          AND (NOT $3 OR kind = 'api_key') RETURNING id`, [tenant, connection, apiKeyOnly]));
         await updatePositions(query, tenant, await orderedIds(query, tenant));
       });
     },

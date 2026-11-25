@@ -41,6 +41,21 @@ it.each(["WG_HOSTED", "WG_DATA_KEY", "WG_SESSION_SECRET", "WG_LINEAR_CLIENT_ID",
   },
 );
 
+it.each(["WG_DATA_KEY", "WG_DATA_KEY_OLD"])("reports an invalid %s without reading its value back", async (setting) => {
+  const { app } = createVercelApp({
+    ...env, DATABASE_URL: "postgres://example.com/database",
+    WG_DATA_KEY: Buffer.alloc(32).toString("base64"), WG_LINEAR_CLIENT_ID: "linear-client",
+    WG_LINEAR_CLIENT_SECRET: "linear-client-secret", [setting]: "invalid-data-key",
+  });
+  try {
+    const response = await app.request("/healthz");
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe(`Vercel full page requires ${setting}`);
+  } finally {
+    if ("link" in app) app.link.stop();
+  }
+});
+
 it("waits for service migrations and starts without the config installation", async () => {
   const sql = await pgliteSql();
   const serviceEnv = {
@@ -60,6 +75,20 @@ it("waits for service migrations and starts without the config installation", as
     expect(await configResponse.json()).toMatchObject({ auth: true, signIn: "linear", user: null, readOnly: false });
     expect(new URL(login.headers.get("location")!).origin).toBe("https://linear.app");
     expect(await sql.query("SELECT id FROM tenants")).toEqual([]);
+    const directory = await open.mock.results[0].value;
+    const accountId = await directory.signIn({
+      linearUserId: "ada", linearOrgId: "work", name: "Ada", email: "ada@example.com",
+    }, {
+      workspaceId: "work", linearOrgId: "work", name: "Work", team: "WG", teamLabels: false,
+      credential: { kind: "oauth", key: "test-access", refreshToken: "test-refresh", expiresAt: new Date(Date.now() + 3600_000) },
+    });
+    const value = Buffer.from(JSON.stringify({
+      accountId, id: randomUUID(), email: "ada@example.com", exp: Math.floor(Date.now() / 1000) + 600,
+    })).toString("base64url");
+    const cookie = await serializeSigned("__Host-wg_session", value, env.WG_SESSION_SECRET, { secure: true, path: "/" });
+    const account = await app.request("/api/account", { headers: { ...headers, cookie: cookie.split(";")[0] } });
+    expect(account.status).toBe(200);
+    expect(await account.json()).toMatchObject({ human: "Ada", connections: [{ workspace_id: "work", kind: "oauth" }] });
     expect(open).toHaveBeenCalledTimes(1);
   } finally {
     if ("link" in app) app.link.stop();
@@ -88,6 +117,8 @@ it("keeps the signed-in viewer's config and read-only routes", async () => {
   expect((await app.request("/api/projects", { headers })).status).toBe(401);
   expect((await app.request("/api/projects/p1/commands", { method: "POST", headers: actor })).status).toBe(405);
   expect((await app.request("/api/link", { headers: actor })).status).toBe(404);
+  expect((await app.request("/api/account", { headers: actor })).status).toBe(404);
+  expect((await app.request("/api/account/workspaces", { method: "POST", headers: actor })).status).toBe(404);
 });
 
 it.each([undefined, "", "  "])("uses a 270-second age when the age is %s", (age) => {

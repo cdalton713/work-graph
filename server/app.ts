@@ -160,11 +160,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const directory = tenants ?? configured;
   const requiresLinkToken = !!tenants || !!linkToken;
   const linkEnabled = !readOnly;
-  const roomRef = (ref: ProjectRef, tenant: Tenant): RoomRef => {
-    if (!tenants) return ref;
-    checkLinkTenant(tenant.id);
-    return { ...ref, tenant: tenant.id };
-  };
+  const roomRef = (ref: ProjectRef, tenant: Tenant): RoomRef => tenants ? { ...ref, tenant: tenant.id } : ref;
   const siteOf = (tenant: Tenant) => createSite(tenant.human, tenant.workspaces[0]?.id ?? "default");
   const installationSite = createSite(human ?? DEFAULT_HUMAN, workspaces[0]?.id ?? "default");
   const clock = now ?? Date.now;
@@ -457,6 +453,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }
     const lookupRevision = revision;
     const membership = await directory.fromSession(session);
+    if (tenants && membership) checkLinkTenant(membership.tenant.id);
     const role = membership?.role ?? null;
     const viewer = readOnly || role === "viewer";
     if (viewer && method !== "GET" && method !== "HEAD") return c.json({ error: "this page is read-only" }, 405);
@@ -481,6 +478,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       ? await directory.fromToken(header("authorization")) : null;
     const tenant = tokenTenant ?? membership?.tenant;
     if (!tenant) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    if (tenants && tokenTenant) checkLinkTenant(tokenTenant.id);
     const listsWorkspaces = /^\/api\/(status|projects|overview)$/.test(c.req.path);
     const selected = listsWorkspaces ? undefined : header("x-workspace");
     const id = selected || tenant.workspaces[0]?.id;

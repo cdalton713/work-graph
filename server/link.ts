@@ -489,17 +489,12 @@ export class LinkHub {
 
   private pages<T extends keyof ToPage>(room: LinkRoom, type: T, payload: ToPage[T], overview = false): LinkEvent {
     const message = this.envelope(room.ref, type, payload);
-    const reduced = type === "progress" && room.ref.tenant !== undefined ? this.viewerProgress((payload as ToPage["progress"]).nodes)
-      : type === "presence" ? this.redactPresence(payload as Presence)
+    const reduced = type === "presence" ? this.redactPresence(payload as Presence)
       : type === "changed" ? { ...(payload as ToPage["changed"]), issues: [] } : null;
     return {
       kind: "pages", message, overview, sequence: room.sequence,
       ...(reduced && { viewer: this.envelope(room.ref, type, reduced) }),
     };
-  }
-
-  private viewerProgress(nodes: ToPage["progress"]["nodes"]): ToPage["progress"] {
-    return { nodes: nodes.map((node) => ({ ...node, evidence: null })) };
   }
 
   private announce(room: LinkRoom): LinkEvent {
@@ -547,7 +542,10 @@ export class LinkHub {
 
   /** For each room: the counts of connected coordinators, pages, queued messages, and asks. */
   async roomRefs(): Promise<RoomRef[]> {
-    return (await this.shared.rooms()).map(({ ref }) => ref);
+    const refs = new Map((await this.shared.rooms()).map(({ ref }) => [roomKey(ref), ref]));
+    // Another instance can delete a room before this instance checks its local sockets.
+    for (const { room, ref } of this.sockets.values()) if (room && ref) refs.set(room, ref);
+    return [...refs.values()];
   }
 
   async counts(tenant?: string): Promise<RoomCounts[]> {
@@ -641,7 +639,6 @@ export class LinkHub {
           if (ref) messages.push(this.envelope(room.ref, "progress", { nodes: room.progress }));
           if (room.agents) messages.push(this.envelope(room.ref, "agents", room.agents));
         }
-        if (allows && ref && tenant !== undefined) messages.push(this.envelope(room.ref, "progress", this.viewerProgress(room.progress)));
         if (ref && resume) messages.push(this.envelope(room.ref, "changed", { by: "page", what: "issue", issues: [] }));
         events.push({ kind: "sockets", sockets: [socket.id], messages, sequence: room.sequence });
       }

@@ -8,11 +8,10 @@ export const QUEUE_MAX = 100;
 export interface RoomRef extends ProjectRef { tenant?: string }
 
 export function checkLinkTenant(tenant?: string) {
-  if (tenant !== undefined && (!tenant || /[^a-zA-Z0-9_.-]/.test(tenant))) throw new Error("invalid link tenant");
+  if (tenant !== undefined && (!tenant || /\p{Cc}/u.test(tenant))) throw new Error("invalid link tenant");
 }
 
 export function roomKey({ workspace, id, tenant }: RoomRef): string {
-  checkLinkTenant(tenant);
   return JSON.stringify(tenant === undefined ? [workspace, id] : [workspace, id, tenant]);
 }
 

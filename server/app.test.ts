@@ -1229,6 +1229,133 @@ it("keeps queued commands and status in the request tenant", async () => {
   }
 });
 
+it.each(["org:1/a b", "org\n1", ""])("validates the tenant ID %j before a Linear write", async (id) => {
+  const { asked } = graphLinear();
+  const { tenants } = testTenants(TEAM);
+  const fromSession = tenants.fromSession;
+  tenants.fromSession = async (session) => {
+    const membership = await fromSession(session);
+    return membership && { ...membership, tenant: { ...membership.tenant, id } };
+  };
+  const page = createApp(hostedRoles, { team: TEAM, dist, auth: rolesAuth, tenants, watchMs: 0 });
+  try {
+    const headers = { ...await rolesHeaders("ada@example.com"), origin: "https://view.example.com", "content-type": "application/json" };
+    const post = (path: string, body: object) =>
+      page.request(path, { headers, method: "POST", body: JSON.stringify(body) });
+    const result = await post("/api/issues/i1/comments", { body: "One comment" });
+    if (id === "org:1/a b") {
+      expect(result.status).toBe(200);
+      expect(asked.comments).toEqual(["One comment"]);
+      expect(await (await post("/api/projects/p1/commands", { name: "next" })).json()).toEqual({ ok: true, queued: 1 });
+      expect(await (await page.request("/api/projects/p1/presence", { headers })).json()).toMatchObject({ queued: 1 });
+    } else {
+      expect(result.status).toBeGreaterThanOrEqual(400);
+      expect(asked.comments).toEqual([]);
+    }
+  } finally {
+    page.link.stop();
+  }
+});
+
+it.skipIf(!localRedis).each([
+  ["tenant", "remote"], ["tenant", "local"], ["workspace", "remote"], ["workspace", "local"],
+])("closes sockets for a removed %s when the %s Redis instance checks first", async (removed, order) => {
+  const redis = await startLocalRedis();
+  try {
+    const { tenants } = testTenants(TEAM);
+    const tenant = (await tenants.byId("ada"))!;
+    const options = { team: TEAM, dist, auth: rolesAuth, tenants, watchMs: 0, redisUrl: redis.url };
+    const local = createApp(hostedRoles, options);
+    const remote = createApp(hostedRoles, options);
+    try {
+      const headers = { ...rolesHost, authorization: "Bearer ada" };
+      const status = async (page: typeof local) => (await page.request("/api/status", { headers })).json();
+      await vi.waitFor(async () => expect((await status(remote)).redisReady).toBe(true));
+      await vi.waitFor(async () => expect((await status(local)).redisReady).toBe(true));
+      const ref = { workspace: "default", id: "p1", tenant: "ada" };
+      const close = vi.fn();
+      const socket = await local.link.hub.joinCoordinator({ close, send: () => {} }, ref);
+      await socket.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "open" } }));
+      const byId = tenants.byId;
+      tenants.byId = (id) => id === "ada" ? (removed === "tenant" ? null : { ...tenant, workspaces: [] }) : byId(id);
+      const checks = order === "remote" ? [remote, local] : [local, remote];
+      for (const page of checks) await page.link.check();
+      expect(close).toHaveBeenCalledExactlyOnceWith(RESTART_CODE, "server restart");
+      expect(await remote.link.hub.roomRefs()).toEqual([]);
+      await socket.closed();
+      expect(await local.link.hub.roomRefs()).toEqual([]);
+    } finally {
+      local.link.stop();
+      remote.link.stop();
+    }
+  } finally {
+    await redis.close();
+  }
+});
+
+it.each(["revoked token", "changed role", "changed tenant", "change notice", "notice at open"] as const)(
+  "refuses a socket when its identity changes at upgrade: %s", async (change) => {
+    graphLinear();
+    const directory = testTenants(TEAM);
+    const ada = (await directory.tenants.byId("ada"))!;
+    const grace = (await directory.tenants.byId("grace"))!;
+    let lookups = 0;
+    const coordinator = change === "revoked token" || change === "change notice" || change === "notice at open";
+    if (coordinator) {
+      directory.tenants.fromToken = () => {
+        lookups++;
+        if ((change === "change notice" && lookups === 1) || (change === "notice at open" && lookups === 2)) directory.change(ada);
+        return change === "revoked token" && lookups > 1 ? null : ada;
+      };
+    } else {
+      directory.tenants.fromSession = () => {
+        const first = ++lookups === 1;
+        return { tenant: !first && change === "changed tenant" ? grace : ada, role: !first && change === "changed role" ? "viewer" : "owner" };
+      };
+    }
+    const page = createApp(hostedRoles, { team: TEAM, dist, auth: rolesAuth, tenants: directory.tenants, watchMs: 0 });
+    const server = serve({ fetch: page.fetch, port: 0, hostname: "127.0.0.1" });
+    let ws: WebSocket | undefined;
+    try {
+      page.injectWebSocket(server as never);
+      if (!server.listening) await new Promise<void>((resolve) => server.once("listening", resolve));
+      const suffix = coordinator ? "coordinator&project=p1" : "page";
+      const headers = coordinator ? { ...rolesHost, authorization: "Bearer ada" }
+        : { ...await rolesHeaders("ada@example.com"), origin: "https://view.example.com" };
+      ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/link?role=${suffix}`, { headers });
+      let refusal: number | undefined;
+      ws.on("error", () => {});
+      ws.on("unexpected-response", (_request, response) => {
+        refusal = response.statusCode;
+        response.resume();
+      });
+      ws.on("close", (code) => { refusal = code; });
+      await vi.waitFor(() => expect(refusal).toBe(change === "change notice" ? 503 : coordinator ? RESTART_CODE : 1008));
+      expect(lookups).toBe(change === "change notice" ? 1 : 2);
+      expect(await page.link.hub.roomRefs()).toEqual([]);
+    } finally {
+      ws?.terminate();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      page.link.stop();
+    }
+  },
+);
+
+it("requires a session for a tenant page socket even if the directory accepts a null session", async () => {
+  const { tenants } = testTenants(TEAM);
+  const tenant = (await tenants.byId("ada"))!;
+  tenants.fromSession = () => ({ tenant, role: "owner" });
+  const page = createApp(hostedRoles, { team: TEAM, dist, tenants, watchMs: 0 });
+  try {
+    const response = await page.request("/api/link?role=page", {
+      headers: { ...rolesHost, origin: "https://view.example.com" },
+    });
+    expect(response.status).toBe(401);
+  } finally {
+    page.link.stop();
+  }
+});
+
 it.each(localRedis ? ["memory", "redis"] : ["memory"])("isolates socket rooms with the %s link store", async (storage) => {
   const { state } = graphLinear();
   const respond = vi.mocked(fetch).getMockImplementation()!;
@@ -1253,110 +1380,143 @@ it.each(localRedis ? ["memory", "redis"] : ["memory"])("isolates socket rooms wi
     return Response.json(body);
   });
   const redis = storage === "redis" ? await startLocalRedis() : null;
-  const directory = testTenants(TEAM);
-  let now = Date.now();
-  const options = { team: TEAM, dist, auth: rolesAuth, tenants: directory.tenants, watchMs: 0, redisUrl: redis?.url, now: () => now };
-  const first = createApp(hostedRoles, options);
-  const second = redis ? createApp(hostedRoles, options) : first;
-  const http = [...new Set([first, second])].map((page) => {
-    const server = serve({ fetch: page.fetch, port: 0, hostname: "127.0.0.1" });
-    page.injectWebSocket(server as never);
-    return server;
-  });
-  const sockets: WebSocket[] = [];
-  const origin = "https://view.example.com";
-  const ada = { ...await rolesHeaders("ada@example.com"), origin, "content-type": "application/json" };
-  const grace = { ...await rolesHeaders("grace@example.com"), origin, "content-type": "application/json" };
-  const viewer = { ...await rolesHeaders("ada-viewer@example.com"), origin };
-  const connect = async (server: typeof http[number], role: string, headers: Record<string, string>) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/link?role=${role}&project=p1`, { headers });
-    sockets.push(ws);
-    const messages: { type: string; project: unknown; payload: unknown }[] = [];
-    ws.on("message", (data) => messages.push(JSON.parse(data.toString())));
-    const closed = new Promise<number>((resolve) => ws.once("close", resolve));
-    await new Promise<void>((resolve, reject) => { ws.once("error", reject); ws.once("open", resolve); });
-    const send = (type: string, payload: unknown) => ws.send(JSON.stringify({ v: 1, type, payload }));
-    return { ws, closed, send, messages, of: (type: string) => messages.filter((message) => message.type === type) };
-  };
-  const token = (id: string) => ({ ...rolesHost, authorization: "Bearer " + id });
-  const post = async (path: string, headers: Record<string, string>, body: object) =>
-    second.request("/api/projects/p1/" + path, { method: "POST", headers, body: JSON.stringify(body) });
   try {
-    for (const server of http) if (!server.listening) await new Promise<void>((resolve) => server.once("listening", resolve));
-    const other = http.at(-1)!;
-    const a = await connect(http[0], "coordinator", token("ada"));
-    a.send("hello", { session: "same-session" });
-    const own = await connect(other, "page", ada);
-    const view = await connect(other, "page", viewer);
-    const foreign = await connect(other, "page", grace);
-    await vi.waitFor(() => {
-      expect(own.of("presence").at(-1)?.payload).toMatchObject({ coordinators: [{ connected: true }] });
-      expect(foreign.of("presence").at(-1)?.payload).toEqual({ coordinators: [], queued: 0 });
+    const directory = testTenants(TEAM);
+    let now = Date.now();
+    const options = { team: TEAM, dist, auth: rolesAuth, tenants: directory.tenants, watchMs: 0, redisUrl: redis?.url, now: () => now };
+    const first = createApp(hostedRoles, options);
+    const second = redis ? createApp(hostedRoles, options) : first;
+    const http = [...new Set([first, second])].map((page) => {
+      const server = serve({ fetch: page.fetch, port: 0, hostname: "127.0.0.1" });
+      page.injectWebSocket(server as never);
+      return server;
     });
-    a.send("asks", { asks: [{ id: "q", body: "Ada question" }] });
-    a.send("progress", { nodes: [{ key: "ada-node" }] });
-    a.send("agents", { agents: [{ id: "ada-agent" }] });
-    await vi.waitFor(() => {
-      expect(own.of("asks").at(-1)?.payload).toMatchObject({ asks: [{ id: "q" }] });
-      expect(own.of("agents")).toHaveLength(1);
-      expect(view.of("progress").at(-1)?.payload).toMatchObject({ nodes: [{ key: "ada-node" }] });
-    });
-    expect(view.of("asks")).toEqual([]);
-    expect(view.of("agents")).toEqual([]);
-    expect(JSON.stringify(foreign.messages)).not.toMatch(/Ada question|ada-node|ada-agent/);
-    expect((await post("asks/q/reply", grace, { body: "Wrong room" })).status).toBe(404);
-    expect((await post("asks/q/reply", ada, { body: "Own room" })).status).toBe(200);
-    expect(await (await post("commands", grace, { name: "next" })).json()).toEqual({ ok: true, queued: 1 });
+    const sockets: WebSocket[] = [];
+    const origin = "https://view.example.com";
+    const ada = { ...await rolesHeaders("ada@example.com"), origin, "content-type": "application/json" };
+    const grace = { ...await rolesHeaders("grace@example.com"), origin, "content-type": "application/json" };
+    const viewer = { ...await rolesHeaders("ada-viewer@example.com"), origin };
+    const connect = async (server: typeof http[number], role: string, headers: Record<string, string>, project = "&project=p1") => {
+      const ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/link?role=${role}${project}`, { headers });
+      sockets.push(ws);
+      const messages: { type: string; project: unknown; payload: unknown }[] = [];
+      ws.on("message", (data) => messages.push(JSON.parse(data.toString())));
+      const closed = new Promise<number>((resolve) => ws.once("close", resolve));
+      await new Promise<void>((resolve, reject) => { ws.once("error", reject); ws.once("open", resolve); });
+      const send = (type: string, payload: unknown) => ws.send(JSON.stringify({ v: 1, type, payload }));
+      return { ws, closed, send, messages, of: (type: string) => messages.filter((message) => message.type === type) };
+    };
+    const token = (id: string) => ({ ...rolesHost, authorization: "Bearer " + id });
+    const post = async (path: string, headers: Record<string, string>, body: object) =>
+      second.request("/api/projects/p1/" + path, { method: "POST", headers, body: JSON.stringify(body) });
+    try {
+      for (const server of http) if (!server.listening) await new Promise<void>((resolve) => server.once("listening", resolve));
+      const other = http.at(-1)!;
+      const a = await connect(http[0], "coordinator", token("ada"));
+      a.send("hello", { session: "same-session" });
+      const own = await connect(other, "page", ada);
+      const view = await connect(other, "page", viewer);
+      const foreign = await connect(other, "page", grace);
+      await vi.waitFor(() => {
+        expect(own.of("presence").at(-1)?.payload).toMatchObject({ coordinators: [{ connected: true }] });
+        expect(foreign.of("presence").at(-1)?.payload).toEqual({ coordinators: [], queued: 0 });
+      });
+      a.send("asks", { asks: [{ id: "q", body: "Ada question" }] });
+      a.send("progress", { nodes: [{ key: "ada-node" }] });
+      a.send("agents", { agents: [{ id: "ada-agent" }] });
+      await vi.waitFor(() => {
+        expect(own.of("asks").at(-1)?.payload).toMatchObject({ asks: [{ id: "q" }] });
+        expect(own.of("agents")).toHaveLength(1);
+        expect(own.of("progress").at(-1)?.payload).toMatchObject({ nodes: [{ key: "ada-node" }] });
+      });
+      expect(view.of("progress")).toEqual([]);
+      expect(view.of("asks")).toEqual([]);
+      expect(view.of("agents")).toEqual([]);
+      expect(JSON.stringify(foreign.messages)).not.toMatch(/Ada question|ada-node|ada-agent/);
+      expect((await post("asks/q/reply", grace, { body: "Wrong room" })).status).toBe(404);
+      expect((await post("asks/q/reply", ada, { body: "Own room" })).status).toBe(200);
+      expect(await (await post("commands", grace, { name: "next" })).json()).toEqual({ ok: true, queued: 1 });
 
-    const b = await connect(other, "coordinator", token("grace"));
-    b.send("hello", { session: "same-session" });
-    await vi.waitFor(() => expect(b.of("command")).toHaveLength(1));
-    await vi.waitFor(() => expect(a.of("reply")).toHaveLength(1));
-    expect(a.of("command")).toEqual([]);
-    expect(b.of("reply")).toEqual([]);
-    expect(a.ws.readyState).toBe(WebSocket.OPEN);
+      const b = await connect(other, "coordinator", token("grace"));
+      b.send("hello", { session: "same-session" });
+      await vi.waitFor(() => expect(b.of("command")).toHaveLength(1));
+      await vi.waitFor(() => expect(a.of("reply")).toHaveLength(1));
+      expect(a.of("command")).toEqual([]);
+      expect(b.of("reply")).toEqual([]);
+      expect(a.ws.readyState).toBe(WebSocket.OPEN);
 
-    b.send("wrote", { issues: [`${TEAM}-2`] });
-    await vi.waitFor(() => expect(foreign.of("changed")).toHaveLength(1));
-    expect(own.of("changed")).toEqual([]);
-    expect(a.of("changed")).toEqual([]);
+      b.send("wrote", { issues: [`${TEAM}-2`] });
+      await vi.waitFor(() => expect(foreign.of("changed")).toHaveLength(1));
+      expect(own.of("changed")).toEqual([]);
+      expect(a.of("changed")).toEqual([]);
 
-    await first.link.check();
-    if (redis) await second.link.check();
-    expect(new Set(graphKeys)).toEqual(new Set(["ada-key", "grace-key"]));
-    editAda = true;
-    state.changed = ["p1"];
-    now += 60_000;
-    await first.link.check();
-    if (redis) await second.link.check();
-    await vi.waitFor(() => expect(a.of("changed")).toHaveLength(1));
-    expect(b.of("changed")).toEqual([]);
+      const graceOverview = await connect(other, "page", grace, "");
+      await second.request("/api/projects", { headers: viewer });
+      const viewOverview = await connect(other, "page", viewer, "");
+      await vi.waitFor(() => {
+        expect(graceOverview.of("presence").at(-1)?.payload).toMatchObject({ coordinators: [{ connected: true }], queued: 1 });
+        expect(viewOverview.of("presence").at(-1)?.payload).toMatchObject({ coordinators: [{ session: "0" }], queued: 0 });
+      });
+      expect(graceOverview.messages.map(({ type }) => type)).toEqual(["presence"]);
+      const presence = async (headers: Record<string, string>) => (await second.request("/api/projects/p1/presence", { headers })).json();
+      expect(await presence(ada)).toMatchObject({ coordinators: [{ connected: true }], queued: 1 });
+      expect(await presence(viewer)).toMatchObject({ coordinators: [{ connected: true, session: "0" }], queued: 0 });
+      const unshared = await first.link.hub.joinCoordinator({ send: () => {}, close: () => {} },
+        { workspace: "default", id: "p2", tenant: "ada" });
+      const sendUnshared = (type: string, payload: object) => unshared.receive(JSON.stringify({ v: 1, type, payload }));
+      await sendUnshared("hello", { session: "unshared" });
+      await sendUnshared("asks", { asks: [{ id: "unshared" }] });
+      await sendUnshared("agents", { agents: [{ id: "unshared" }] });
+      await sendUnshared("progress", { nodes: [{ key: "unshared" }] });
+      await unshared.closed();
+      a.send("asks", { asks: [{ id: "private", body: "Ada only" }] });
+      a.send("agents", { agents: [{ id: "private" }] });
+      a.send("progress", { nodes: [{ key: "private" }] });
+      a.send("wrote", {});
+      await vi.waitFor(() => expect(viewOverview.of("changed")).toHaveLength(1));
+      expect(viewOverview.messages.map(({ type }) => type)).toEqual(["presence", "changed"]);
+      expect(graceOverview.messages.map(({ type }) => type)).toEqual(["presence"]);
 
-    const tenant = (await directory.tenants.byId("ada"))!;
-    directory.change(tenant);
-    expect(await a.closed).toBe(RESTART_CODE);
-    expect(await own.closed).toBe(RESTART_CODE);
-    expect(await view.closed).toBe(RESTART_CODE);
-    expect(b.ws.readyState).toBe(WebSocket.OPEN);
-    expect(foreign.ws.readyState).toBe(WebSocket.OPEN);
-    const again = await connect(other, "coordinator", token("ada"));
-    again.send("hello", { session: "same-session" });
-    await vi.waitFor(() => expect(again.of("reply")).toHaveLength(1));
-    expect(again.of("command")).toEqual([]);
-    for (const { project } of [...a.messages, ...b.messages, ...own.messages, ...view.messages, ...foreign.messages, ...again.messages]) {
-      expect(project).toEqual({ workspace: "default", id: "p1" });
+      await first.link.check();
+      if (redis) await second.link.check();
+      expect(new Set(graphKeys)).toEqual(new Set(["ada-key", "grace-key"]));
+      editAda = true;
+      state.changed = ["p1"];
+      now += 60_000;
+      await first.link.check();
+      if (redis) await second.link.check();
+      await vi.waitFor(() => expect(a.of("changed")).toHaveLength(1));
+      expect(b.of("changed")).toEqual([]);
+
+      const tenant = (await directory.tenants.byId("ada"))!;
+      directory.change(tenant);
+      await vi.waitFor(() => expect([a.ws, own.ws, view.ws].every((ws) => ws.readyState === WebSocket.CLOSED)).toBe(true));
+      expect(await a.closed).toBe(RESTART_CODE);
+      expect(await own.closed).toBe(RESTART_CODE);
+      expect(await view.closed).toBe(RESTART_CODE);
+      expect(b.ws.readyState).toBe(WebSocket.OPEN);
+      expect(foreign.ws.readyState).toBe(WebSocket.OPEN);
+      const again = await connect(other, "coordinator", token("ada"));
+      again.send("hello", { session: "same-session" });
+      await vi.waitFor(() => expect(again.of("reply")).toHaveLength(1));
+      expect(again.of("command")).toEqual([]);
+      for (const { project } of [...a.messages, ...b.messages, ...own.messages, ...view.messages, ...foreign.messages, ...again.messages]) {
+        expect(project).toEqual({ workspace: "default", id: "p1" });
+      }
+      directory.change({ ...tenant, workspaces: [] });
+      await vi.waitFor(() => expect(again.ws.readyState).toBe(WebSocket.CLOSED));
+      expect(await again.closed).toBe(RESTART_CODE);
+      await first.link.check();
+      const status = await (await second.request("/api/status", { headers: token("ada") })).json();
+      expect(status.rooms).toEqual([]);
+      expect(b.ws.readyState).toBe(WebSocket.OPEN);
+    } finally {
+      for (const socket of sockets) socket.terminate();
+      for (const server of http) await new Promise<void>((resolve) => server.close(() => resolve()));
+      first.link.stop();
+      if (redis) second.link.stop();
     }
-    directory.change({ ...tenant, workspaces: [] });
-    expect(await again.closed).toBe(RESTART_CODE);
-    await first.link.check();
-    const status = await (await second.request("/api/status", { headers: token("ada") })).json();
-    expect(status.rooms).toEqual([]);
-    expect(b.ws.readyState).toBe(WebSocket.OPEN);
   } finally {
-    for (const socket of sockets) socket.terminate();
-    for (const server of http) await new Promise<void>((resolve) => server.close(() => resolve()));
-    first.link.stop();
-    if (redis) second.link.stop();
     await redis?.close();
   }
 });

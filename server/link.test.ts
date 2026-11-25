@@ -723,7 +723,7 @@ describe("/api/link over a real socket", () => {
     const state = redisLinkState(redis);
     const hub = new LinkHub(undefined, undefined, undefined, null, state, redisLinkBus(redis));
     const page = peer();
-    for (let i = 0; i < 100; i++) await hub.joinPage(page, A);
+    await Promise.all(Array.from({ length: 100 }, () => hub.joinPage(page, A)));
     const before = (await state.read(A))?.sequence;
     const commandCounts = async () => {
       const info = await redis.run((client) => client.info("commandstats"));
@@ -736,6 +736,7 @@ describe("/api/link over a real socket", () => {
     expect(after.get - first.get).toBeLessThan(5);
     expect((await state.read(A))?.sequence).toBe(before);
     expect((await state.read(A))?.sockets.size).toBe(100);
+    expect(await redis.run((client) => client.keys("wg:link:*:seen"))).toEqual([]);
   });
 
   it.skipIf(!testRedis)("replays the queue on a second hello on the same socket", async () => {
@@ -760,11 +761,15 @@ describe("/api/link over a real socket", () => {
     const hub = new LinkHub(time.now, undefined, time.timers, null, { ...memoryLinkState(), renew });
     const page = await hub.joinPage(peer(), A);
     for (let i = 0; i < 100; i++) page.pong();
+    expect(renew.mock.calls).toHaveLength(1);
+    time.advance(PING_MS - 4);
     await hub.beat();
-    expect(renew.mock.calls.filter(([sockets]) => sockets.length)).toHaveLength(1);
+    expect(renew.mock.calls).toHaveLength(2);
+    page.pong();
+    expect(renew.mock.calls).toHaveLength(2);
     time.advance(PING_MS);
     page.pong();
-    expect(renew.mock.calls.filter(([sockets]) => sockets.length)).toHaveLength(2);
+    expect(renew.mock.calls).toHaveLength(3);
   });
 
   it("returns the saved Linear result when a follow-up notice fails", async () => {

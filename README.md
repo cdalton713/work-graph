@@ -224,9 +224,12 @@ The `Dockerfile` builds the page and its server. Run the container behind a prox
   The page and read API stay available. During an outage, a signed-in cookie can still read
   unless this instance already knows the session ended. A logged-out cookie can therefore read
   until Redis is back, and cannot write. Writes and link connections return HTTP 503.
-  A coordinator on a dead instance can still show as connected for up to 60 seconds after its
-  last heartbeat. If it held the Linear check, no instance runs that check for its project until
-  its lease expires.
+  A signed-in read can wait up to 500 ms when Redis does not answer. A new instance knows only
+  the ended sessions that Redis gives it.
+  A dead coordinator's lease expires within 60 seconds of its last heartbeat. An open page
+  can show it as connected for up to about 80 seconds, until a live instance's next heartbeat.
+  If the dead coordinator held the Linear check, no instance runs that check for its project
+  until the lease expires.
   Check `linkStore` and `redisReady` in `/api/status`.
 - `WG_REDIS_PREFIX` (optional): use a different prefix for each deployment that shares a Redis server.
   The default is `wg:link:`. Use the same prefix on all instances of a deployment.

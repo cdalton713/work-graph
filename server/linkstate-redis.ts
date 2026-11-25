@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { Envelope, ProjectRef } from "../src/lib/link.ts";
 import { emptyRoom, pruneRoom, QUEUE_MAX, type Coordinator, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
 import { LINK_PREFIX, type RedisLink } from "./redis.ts";
@@ -7,18 +9,36 @@ import { ASKS_MAX } from "./store.ts";
 const writeRoom = `
 local current = redis.call("GET", KEYS[1]) or ""
 if current ~= ARGV[1] then return 0 end
+if ARGV[4] == "1" then redis.call("SET", KEYS[3], current, "PX", 86400000) end
 local sequence = redis.call("INCR", KEYS[2])
 if ARGV[2] == "" then redis.call("DEL", KEYS[1])
 else redis.call("SET", KEYS[1], tostring(sequence) .. "\\n" .. ARGV[2]) end
-for i = 3, #KEYS do redis.call("SET", KEYS[i], "1", "PX", ARGV[3]) end
+for i = 4, #KEYS do redis.call("SET", KEYS[i], "1", "PX", ARGV[3]) end
 return sequence
 `;
-const renewLeases = `
+const pageClock = `
+local clock = redis.call("TIME")
+local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+`;
+const openPage = pageClock + `
+redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", now)
+redis.call("ZADD", KEYS[1], now + tonumber(ARGV[2]), ARGV[1])
+redis.call("PEXPIRE", KEYS[1], ARGV[2])
+`;
+const renewLeases = pageClock + `
 local renewed = {}
-for i = 1, #KEYS, 2 do
-  if redis.call("SET", KEYS[i], ARGV[1], "PX", ARGV[2], "XX") then
-    redis.call("SET", KEYS[i+1], ARGV[1], "PX", ARGV[3])
-    renewed[#renewed + 1] = (i + 1) / 2
+for i = 1, #KEYS do
+  local page = ARGV[3 + i]
+  if page ~= "" then
+    local expiry = redis.call("ZSCORE", KEYS[i], page)
+    if expiry and tonumber(expiry) > now then
+      redis.call("ZADD", KEYS[i], now + tonumber(ARGV[2]), page)
+      redis.call("PEXPIRE", KEYS[i], ARGV[2])
+      renewed[#renewed + 1] = i
+    end
+  elseif redis.call("SET", KEYS[i], ARGV[1], "PX", ARGV[2], "XX") then
+    redis.call("SET", KEYS[i] .. ":seen", ARGV[1], "PX", ARGV[3])
+    renewed[#renewed + 1] = i
   end
 end
 return renewed
@@ -44,12 +64,15 @@ function socketIds(room: LinkRoom): Set<string> {
 
 export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs = 60_000): LinkRoomState {
   const roomPrefix = prefix + "room:";
-  const key = ({ workspace, id }: ProjectRef) => roomPrefix + JSON.stringify([workspace, id]);
+  const pagePrefix = prefix + "pages:";
+  const refKey = ({ workspace, id }: ProjectRef) => JSON.stringify([workspace, id]);
+  const key = (ref: ProjectRef) => roomPrefix + refKey(ref);
+  const pageKey = (ref: ProjectRef) => pagePrefix + refKey(ref);
   const leaseKey = (roomKey: string, socket: string) => prefix + "socket:" + JSON.stringify([roomKey, socket]);
   const malformed = new Set<string>();
   const load = async (roomKey: string) => {
     const raw = await redis.run((client) => client.get(roomKey));
-    if (!raw) return { raw: "", json: "", room: null, expired: false };
+    if (raw === null) return { raw: "", json: "", room: null, expired: false };
     const separator = raw.indexOf("\n");
     const sequence = Number(raw.slice(0, separator));
     const json = raw.slice(separator + 1);
@@ -69,7 +92,7 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
     } catch {
       if (!malformed.has(roomKey)) console.warn("Redis skipped malformed room", roomKey);
       malformed.add(roomKey);
-      return { raw, json, room: null, expired: false };
+      return { raw, json, room: null, expired: false, corrupt: true };
     }
     const ids = [...socketIds(room)];
     const active = new Map<string, string>();
@@ -99,11 +122,11 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
     }
     return { raw, json, room, expired, storedSeen };
   };
-  const roomKeys = async () => {
+  const roomKeys = async (keyPrefix = roomPrefix) => {
     const keys = new Set<string>();
     let cursor = "0";
     do {
-      const [next, batch] = await redis.run((client) => client.scan(cursor, "MATCH", roomPrefix.replace(/[[\\*?]/g, "\\$&") + "*", "COUNT", 100));
+      const [next, batch] = await redis.run((client) => client.scan(cursor, "MATCH", keyPrefix.replace(/[[\\*?]/g, "\\$&") + "*", "COUNT", 100));
       batch.forEach((item) => keys.add(item));
       cursor = next;
     } while (cursor !== "0");
@@ -113,8 +136,9 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
     roomKey: string, ref: ProjectRef | null, change: (room: LinkRoom, expired: boolean) => T,
     { prune = false }: { prune?: boolean } = {},
   ): Promise<T | null> => {
-    for (let attempt = 0; attempt < 32; attempt++) {
-      const { raw, json, room: loaded, expired, storedSeen } = await load(roomKey);
+    const until = performance.now() + 2_000;
+    do {
+      const { raw, json, room: loaded, expired, storedSeen, corrupt } = await load(roomKey);
       const room = loaded ?? (ref && emptyRoom(ref));
       if (!room) return null;
       const before = socketIds(room);
@@ -128,15 +152,18 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
           ? { ...row, lastSeen: storedSeen?.get(id) ?? row.lastSeen } : row]),
         ...(expired && !prune && { notifyPresence: true }),
       });
-      if (encoded === json && !leases.length) return result;
-      const sequence = await redis.run((client) => client.eval(
-        writeRoom, 2 + leases.length, roomKey, prefix + "sequence", ...leases, raw, encoded, leaseMs,
+      if (!corrupt && encoded === json && !leases.length) return result;
+      const archive = corrupt ? prefix + "corrupt:" + roomKey + ":" + randomUUID() : roomKey;
+      const sequence = await redis.write((client) => client.eval(
+        writeRoom, 3 + leases.length, roomKey, prefix + "sequence", archive, ...leases, raw, encoded, leaseMs, corrupt ? "1" : "0",
       ));
       if (typeof sequence === "number" && sequence > 0) {
         room.sequence = sequence;
+        if (corrupt) malformed.delete(roomKey);
         return result;
       }
-    }
+      await new Promise((resolve) => setTimeout(resolve, 5 + Math.random() * 20));
+    } while (performance.now() < until);
     throw new Error("Redis link room is busy");
   };
   const edit = <T>(ref: ProjectRef, change: (room: LinkRoom) => T) => update(key(ref), ref, change) as Promise<T>;
@@ -152,22 +179,61 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
   });
   const renew: NonNullable<LinkRoomState["renew"]> = async (sockets, at) => {
     if (!sockets.length) return new Set();
-    const keys = sockets.flatMap(({ ref, socket }) => {
-      const lease = leaseKey(key(ref), socket);
-      return [lease, lease + ":seen"];
-    });
-    const indices = await redis.run((client) => client.eval(renewLeases, keys.length, ...keys, at, leaseMs, 24 * 60 * 60_000)) as number[];
+    const keys = sockets.map(({ ref, socket, page }) => page ? pageKey(ref) : leaseKey(key(ref), socket));
+    const indices = await redis.write((client) => client.eval(
+      renewLeases, keys.length, ...keys, at, leaseMs, 24 * 60 * 60_000,
+      ...sockets.map(({ page, socket }) => page ? socket : ""),
+    )) as number[];
     return new Set(indices.map((index) => sockets[index - 1].socket));
   };
   const sessionExpiry = async (id: string) => {
     const expiry = await redis.run((client) => client.get(prefix + "ended:" + id), false);
     return expiry === null ? null : Number(expiry);
   };
+  const pageCutoff = async () => {
+    const [seconds, micros] = await redis.run((client) => client.time());
+    return "(" + (Number(seconds) * 1000 + Math.floor(Number(micros) / 1000));
+  };
+  const withPages = async (ref: ProjectRef, room: LinkRoom | null, cutoff?: string) => {
+    const min = cutoff ?? await pageCutoff();
+    const pages = await redis.run((client) => client.zrangebyscore(pageKey(ref), min, "+inf"));
+    if (!room && !pages.length) return null;
+    const snapshot = room ?? { ...emptyRoom(ref), sequence: 0 };
+    for (const id of pages) snapshot.sockets.set(id, "page");
+    return snapshot;
+  };
   return {
-    async read(ref) { return (await load(key(ref))).room; },
+    async read(ref) { return withPages(ref, (await load(key(ref))).room); },
     async rooms() {
-      const rooms = await Promise.all((await roomKeys()).map(async (roomKey) => (await load(roomKey)).room));
-      return rooms.filter((room) => room !== null);
+      const [keys, pageKeys] = await Promise.all([roomKeys(), roomKeys(pagePrefix)]);
+      const rooms = new Map<string, LinkRoom>();
+      await Promise.all(keys.map(async (roomKey) => {
+        const { room } = await load(roomKey);
+        if (room) rooms.set(refKey(room.ref), room);
+      }));
+      const ids = new Set([...rooms.keys(), ...pageKeys.map((page) => page.slice(pagePrefix.length))]);
+      const cutoff = ids.size ? await pageCutoff() : undefined;
+      const snapshots = await Promise.all([...ids].map(async (id) => {
+        const room = rooms.get(id);
+        let ref: ProjectRef;
+        try {
+          const [workspace, project] = JSON.parse(id);
+          if (typeof workspace !== "string" || typeof project !== "string") return null;
+          ref = { workspace, id: project };
+        } catch { return null; }
+        return withPages(ref, room ?? null, cutoff);
+      }));
+      return snapshots.filter((room) => room !== null);
+    },
+    async openPage(ref, socket) {
+      await redis.write((client) => client.eval(openPage, 1, pageKey(ref), socket, leaseMs));
+      return (await load(key(ref))).room ?? { ...emptyRoom(ref), sequence: 0 };
+    },
+    async closePage(ref, socket) {
+      await redis.write((client) => client.zrem(pageKey(ref), socket));
+    },
+    async recoverWrites() {
+      if (redis.refusesWrites) await redis.checkWrites(true);
     },
     edit, append,
     renew,
@@ -192,9 +258,13 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
     },
     async prune(cutoff) {
       const changed: LinkRoom[] = [];
-      for (const roomKey of await roomKeys()) {
+      const keys = await roomKeys();
+      const min = keys.length ? await pageCutoff() : "+inf";
+      for (const roomKey of keys) {
+        const pageKey = pagePrefix + roomKey.slice(roomPrefix.length);
+        const pages = await redis.run((client) => client.zcount(pageKey, min, "+inf"));
         const result = await update(roomKey, null, (room, expired) => {
-          if (!pruneRoom(room, cutoff)) return false;
+          if (!pruneRoom(room, cutoff) && pages === 0) return false;
           return expired ? room : true;
         }, { prune: true });
         if (result && result !== true) changed.push(result);
@@ -202,7 +272,7 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
       return changed;
     },
     async endSession(id, expiresAt, now) {
-      if (expiresAt > now) await redis.run((client) => client.eval(endSession, 1, prefix + "ended:" + id, expiresAt, expiresAt - now), false);
+      if (expiresAt > now) await redis.write((client) => client.eval(endSession, 1, prefix + "ended:" + id, expiresAt, expiresAt - now), false);
     },
     sessionExpiry,
     async sessionEnded(id, now) { return (await sessionExpiry(id) ?? 0) > now; },

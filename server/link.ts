@@ -226,12 +226,12 @@ export class LinkHub {
     };
   }
 
-  private async renewDue(sockets: Socket[]) {
+  private async renewDue(sockets: Socket[], heartbeat = false) {
     const at = this.now();
-    const due = sockets.filter((socket) => at.getTime() - socket.renewedAt >= PING_MS);
+    const due = heartbeat ? sockets : sockets.filter((socket) => at.getTime() - socket.renewedAt >= PING_MS);
     for (const socket of due) socket.renewedAt = at.getTime();
     if (!due.length) return new Set<string>();
-    const renewed = await this.shared.renew!(due.map((socket) => ({ ref: socket.ref!, socket: socket.id })), at.toISOString());
+    const renewed = await this.shared.renew!(due.map((socket) => ({ ref: socket.ref!, socket: socket.id, page: socket.audience !== "coordinator" && !!this.shared.openPage })), at.toISOString());
     for (const socket of due) {
       if (!renewed.has(socket.id) && this.sockets.has(socket.id)) socket.peer.close(RESTART_CODE, "server restart");
     }
@@ -240,7 +240,7 @@ export class LinkHub {
 
   private async renewSockets() {
     const sockets = [...this.sockets.values()].filter((socket) => socket.ref !== null && socket.leaseReady);
-    const expired = await this.renewDue(sockets);
+    const expired = await this.renewDue(sockets, true);
     const coordinators = new Map<string, Socket[]>();
     for (const socket of sockets) {
       if (!this.sockets.has(socket.id)) continue;
@@ -283,6 +283,7 @@ export class LinkHub {
   async beat() {
     for (const socket of this.sockets.values()) socket.peer.ping?.();
     try {
+      if (this.shared.recoverWrites) await this.shared.recoverWrites();
       if (this.shared.renew) await this.renewSockets();
     } finally {
       const changed = await this.shared.prune(this.now().getTime() - GONE_MS);
@@ -502,13 +503,14 @@ export class LinkHub {
     if (this.closing) return this.refuse(peer);
     const socket = this.socket(peer, ref, allows ? "viewer" : "page", allows);
     const connection = this.track(socket, async () => {
-      if (ref) await this.shared.edit(ref, (room) => { room.sockets.delete(socket.id); });
+      if (ref && this.shared.closePage) await this.shared.closePage(ref, socket.id);
+      else if (ref) await this.shared.edit(ref, (room) => { room.sockets.delete(socket.id); });
     });
     try {
-      const rooms = ref ? await this.shared.edit(ref, (room) => {
+      const rooms = !ref ? await this.shared.rooms() : this.shared.openPage ? [await this.shared.openPage(ref, socket.id)] : await this.shared.edit(ref, (room) => {
         room.sockets.set(socket.id, "page");
         return [room];
-      }) : await this.shared.rooms();
+      });
       socket.leaseReady = true;
       const events: LinkEvent[] = [];
       for (const room of rooms) {

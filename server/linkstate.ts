@@ -41,7 +41,10 @@ export interface LinkRoomState {
   endSession(id: string, expiresAt: number, now: number): Promise<void>;
   sessionEnded(id: string, now: number): Promise<boolean>;
   flush(): Promise<boolean>;
-  renew?(sockets: { ref: ProjectRef; socket: string }[], at: string): Promise<Set<string>>;
+  renew?(sockets: { ref: ProjectRef; socket: string; page?: boolean }[], at: string): Promise<Set<string>>;
+  openPage?(ref: ProjectRef, socket: string): Promise<LinkRoom>;
+  closePage?(ref: ProjectRef, socket: string): Promise<void>;
+  recoverWrites?(): Promise<void>;
   sessionExpiry?(id: string): Promise<number | null>;
   refresh?(ref: ProjectRef, socket: string, at: string): Promise<boolean>;
 }

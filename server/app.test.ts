@@ -1,3 +1,4 @@
+import { api as browserApi } from "../src/api.ts";
 import { connectRedis } from "./redis.ts";
 import { localRedis, startLocalRedis } from "./testing/redis.ts";
 import { createHash } from "node:crypto";
@@ -1585,6 +1586,81 @@ describe("sign-in of the viewer", () => {
     } finally {
       first.link.stop(); second.link.stop(); await redis.close();
     }
+  });
+
+  it("queues a repeated browser request once using the ID of the action", async () => {
+    const page = createApp(rules, { team: "WG", dist, watchMs: 0 });
+    const fetch = vi.fn(async (path: string, init: RequestInit) => {
+      const headers = new Headers(init.headers);
+      expect(headers.get("Idempotency-Key")).toMatch(/^[a-f0-9]{32}$/);
+      for (const [key, value] of Object.entries(write)) headers.set(key, value);
+      const send = () => page.request(path, { ...init, headers });
+      expect((await send()).status).toBe(200);
+      return send();
+    });
+    vi.stubGlobal("fetch", fetch);
+    try {
+      await browserApi.command("p1", { name: "next" });
+      expect(fetch).toHaveBeenCalledOnce();
+      expect((await page.link.hub.state()).rooms[0].queue).toHaveLength(1);
+    } finally { page.link.stop(); }
+  });
+
+  it("rejects a malformed Redis URL at startup without exposing it", () => {
+    expect(() => createApp(rules, { team: "WG", dist, redisUrl: "https://private-value@example.com" }))
+      .toThrow(/^invalid Redis link configuration$/);
+  });
+
+  it.skipIf(!localRedis)("closes the link and refuses writes across instances when Redis declines writes", async () => {
+    const server = await startLocalRedis();
+    const admin = connectRedis(server.url, undefined, undefined, true);
+    const options = { team: "WG", dist, workspaces: [workWorkspace()], auth: rolesAuth, linkToken: rolesToken,
+      redisUrl: server.url, watchMs: 0, readOnly: false };
+    const first = createApp(hostedRoles, options), second = createApp(hostedRoles, options);
+    const ended = await rolesHeaders("ada@example.com", "refused-logout");
+    const active = await rolesHeaders("ada@example.com", "still-active");
+    const status = (page: typeof first, headers = active) => page.request("/api/status", { headers });
+    const write = (page: typeof first, headers = active) => page.request("/api/projects/p1/commands", {
+      method: "POST", headers: { ...headers, origin: "https://view.example.com", "content-type": "application/json" },
+      body: JSON.stringify({ name: "next" }),
+    });
+    const close = vi.fn();
+    try {
+      await vi.waitFor(async () => expect(await (await status(second)).json()).toMatchObject({ redisReady: true }));
+      await first.link.hub.joinPage({ send: () => {}, close }, null);
+      await admin.run((client) => client.config("SET", "maxmemory", "1"));
+      expect((await first.request("/auth/logout", { headers: ended })).status).toBe(302);
+      expect(close).toHaveBeenCalledWith(RESTART_CODE, "server restart");
+      expect((await write(second, ended)).status).toBe(503);
+      expect((await status(second)).status).toBe(200);
+      await admin.run((client) => client.config("SET", "maxmemory", "0"));
+      await first.link.hub.beat();
+      await second.link.hub.beat();
+      await vi.waitFor(async () => expect(await admin.run((client) => client.get("wg:link:ended:refused-logout"))).not.toBeNull());
+      expect((await status(second, ended)).status).toBe(401);
+      expect((await write(second)).status).toBe(200);
+      await admin.run((client) => client.del("wg:link:ended:refused-logout"));
+      expect((await status(second, ended)).status).toBe(401);
+    } finally { first.link.stop(); second.link.stop(); admin.close(); await server.close(); }
+  });
+
+  it.skipIf(!localRedis)("allows reads and rejects writes when Redis refuses the session lookup", async () => {
+    const server = await startLocalRedis();
+    const admin = connectRedis(server.url, undefined, undefined, true);
+    const page = createApp(hostedRoles, {
+      team: "WG", dist, workspaces: [workWorkspace()], auth: rolesAuth, linkToken: rolesToken,
+      redisUrl: server.url, watchMs: 0, readOnly: false,
+    });
+    const headers = await rolesHeaders("ada@example.com", "lookup");
+    try {
+      await vi.waitFor(async () => expect(await (await page.request("/api/status", { headers })).json()).toMatchObject({ redisReady: true }));
+      await admin.run((client) => client.acl("SETUSER", "default", "-get"));
+      expect(await (await page.request("/api/config", { headers })).json()).toMatchObject({ user: "ada@example.com" });
+      expect((await page.request("/api/projects/p1/commands", {
+        method: "POST", headers: { ...headers, origin: "https://view.example.com", "content-type": "application/json" },
+        body: JSON.stringify({ name: "next" }),
+      })).status).toBe(503);
+    } finally { page.link.stop(); admin.close(); await server.close(); }
   });
 
   it.skipIf(!localRedis)("opens only one lazy Redis connection for a read-only viewer", async () => {

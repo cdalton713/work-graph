@@ -186,10 +186,21 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     now ? () => new Date(now()) : undefined, (ref) => caches.get(ref.workspace)?.clear(ref.id || undefined), linkTimers,
     store, redisState ?? linkState, redis && !readOnly ? redisLinkBus(redis, redisPrefix) : linkBus, rememberEnded,
   );
-  let flushing = false;
-  async function flushLogouts() {
-    if (flushing || !redis?.ready || !pendingLogout.size) return;
-    flushing = true;
+  let logoutTimer: ReturnType<typeof setInterval> | undefined;
+  let flushing: Promise<void> | undefined;
+  function flushLogouts(): Promise<void> {
+    if (!redis?.ready || !pendingLogout.size) return Promise.resolve();
+    if (flushing) return flushing;
+    flushing = flush().finally(() => {
+      flushing = undefined;
+      if (!pendingLogout.size && logoutTimer) {
+        clearInterval(logoutTimer);
+        logoutTimer = undefined;
+      }
+    });
+    return flushing;
+  }
+  async function flush() {
     try {
       for (const [id, expiry] of pendingLogout) {
         if (expiry > clock()) await hub.endSession(id, expiry, clock());
@@ -197,15 +208,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       }
     } catch (error) {
       reportLinkError(error);
-    } finally {
-      flushing = false;
     }
   }
   const linkAvailable = () => !hub.closing && (redis?.ready ?? true);
   const linkRead = async <T>(read: () => Promise<T>, fallback: T): Promise<T> => {
     try { return await read(); }
     catch (error) {
-      if (error instanceof RedisUnavailable) return fallback;
+      if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) return fallback;
       throw error;
     }
   };
@@ -214,10 +223,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const expiry = await redisState.sessionExpiry!(session.id);
     if (expiry !== null) rememberEnded(session.id, expiry);
     void flushLogouts();
-    return (expiry ?? 0) > clock() || (pendingLogout.get(session.id) ?? 0) > clock();
+    return (ended.get(session.id) ?? 0) > clock();
   };
   const sessionActive = async (session: Session, allowOffline = false) => {
-    if (clock() >= session.expiresAt) return false;
+    if (clock() >= session.expiresAt || (ended.get(session.id) ?? 0) > clock()) return false;
     if (!redis || !allowOffline) return !await lookupSession(session);
     const unavailable = Symbol();
     const started = Date.now();
@@ -226,11 +235,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const check = async () => {
       try { return await lookupSession(session); }
       catch (error) {
+        if (error instanceof RedisCommandFailed) return unavailable;
         if (!(error instanceof RedisUnavailable)) throw error;
         // Reconnect can run as soon as a paused instance resumes. Give it the rest of the read budget.
         await redis.waitForCommands(500 - (Date.now() - started));
         return lookupSession(session).catch((error) => {
-          if (error instanceof RedisUnavailable) return unavailable;
+          if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) return unavailable;
           throw error;
         });
       }
@@ -249,6 +259,17 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     } catch (error) {
       if (redis) {
         pendingLogout.set(session.id, session.expiresAt);
+        logoutTimer ??= setInterval(() => {
+          for (const [id, expiry] of pendingLogout) if (expiry <= clock()) pendingLogout.delete(id);
+          if (!pendingLogout.size && logoutTimer) {
+            clearInterval(logoutTimer);
+            logoutTimer = undefined;
+            return;
+          }
+          const recover = redis.refusesWrites ? redis.checkWrites(true) : Promise.resolve();
+          void recover.then(flushLogouts).catch(reportLinkError);
+        }, 20_000);
+        logoutTimer.unref();
         void flushLogouts();
       }
       reportLinkError(error);
@@ -368,6 +389,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (redis && !read && !readOnly) {
       await redis.initialized;
       if (!redis.ready) throw new RedisUnavailable();
+      await redis.checkWrites();
+      await flushLogouts();
     }
     const role = roleOf(session?.email);
     const viewer = readOnly || role === "viewer";
@@ -683,6 +706,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     };
     if (redis) await redis.initialized;
     if (!linkAvailable()) return restarting();
+    if (redis) { await redis.checkWrites(); await flushLogouts(); }
     const session = auth && role === "page" ? await sessionOf(c, auth, clock) : null;
     if (auth && role === "page" && (!session || !await sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     const viewer = role === "page" && roleOf(session?.email) === "viewer";
@@ -834,8 +858,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     injectWebSocket: (server: Server) => injectWebSocket(server),
     link: {
       hub, check,
-      stop: () => { if (timer) clearInterval(timer); hub.stop(); redis?.close(); },
-      shutdown: () => { if (timer) clearInterval(timer); return hub.shutdown().finally(() => redis?.close()); },
+      stop: () => { if (logoutTimer) clearInterval(logoutTimer); if (timer) clearInterval(timer); hub.stop(); redis?.close(); },
+      shutdown: () => { if (logoutTimer) clearInterval(logoutTimer); if (timer) clearInterval(timer); return hub.shutdown().finally(() => redis?.close()); },
     },
   });
 }

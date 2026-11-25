@@ -82,6 +82,13 @@ describe.skipIf(!testRedis)("Redis link state", () => {
       expect((await state.rooms()).map(({ ref }) => ref.id)).toEqual(["good"]);
       expect(warn.mock.calls.flat().join(" ")).toContain(key);
       expect(warn.mock.calls.flat().join(" ")).not.toContain("private malformed value");
+      await state.edit({ workspace: "work", id: "broken" }, () => {});
+      const archives = await first.run((client) => client.keys(prefix + "corrupt:*"));
+      expect(archives).toHaveLength(1);
+      expect(await first.run((client) => client.get(archives[0]))).toBe("private malformed value");
+      expect(await first.run((client) => client.pttl(archives[0]))).toBeGreaterThan(0);
+      expect((await state.read({ workspace: "work", id: "broken" }))?.queue).toEqual([]);
+      expect(warn).toHaveBeenCalledOnce();
     } finally { warn.mockRestore(); }
   });
 

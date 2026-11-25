@@ -5479,6 +5479,11 @@ class LinkTests(unittest.TestCase):
         wg.save_keymap(self.d, {"project": {"id": "proj"}, "milestones": {}, "nodes": {"a": {"id": "ia", "identifier": "CD-1"}}})
         self.got, self.requests, self.to_send, self.conns = [], [], [], []
         self.event = threading.Event()
+        self.reject_token = False
+
+        def process_request(conn, request):
+            if self.reject_token:
+                return conn.respond(401, "coordinator token required")
 
         def handler(conn):
             self.requests.append(conn.request)
@@ -5490,7 +5495,7 @@ class LinkTests(unittest.TestCase):
                 if m["type"] == "state" and m["payload"]["mode"] == "waiting":
                     while self.to_send:
                         conn.send(json.dumps(self.to_send.pop(0)))
-        self.server = ws_server.serve(handler, "127.0.0.1", 0)
+        self.server = ws_server.serve(handler, "127.0.0.1", 0, process_request=process_request)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.shutdown)
         port = self.server.socket.getsockname()[1]
@@ -5523,6 +5528,31 @@ class LinkTests(unittest.TestCase):
         query = dict(urllib.parse.parse_qsl(self.requests[0].path.split("?", 1)[1]))
         self.assertEqual(query, {"role": "coordinator", "workspace": "work", "project": "proj"})
         self.assertIsNone(self.requests[0].headers.get("Origin"))
+
+    def test_next_wrote_and_agents_send_the_bearer_header(self):
+        token = "test-token-with-at-least-32-characters"
+        with patch.dict(os.environ, {"WG_LINK_TOKEN": token}):
+            out, err, _ = self.run_next([("phase 1", [("do", "dispatch a CD-1")])])
+            self.assertTrue(self.wait_for("state"))
+            wg.LINEAR_WRITES.update(any=True, ids={"ia"})
+            self.assertTrue(wg.flush_writes(self.d, self.p))
+            self.assertTrue(self.wait_for("wrote"))
+            wg.send_agents(self.d, self.p, [])
+            self.assertTrue(self.wait_for("agents"))
+        self.assertEqual(len(self.requests), 3)
+        self.assertTrue(all(req.headers.get("Authorization") == f"Bearer {token}" for req in self.requests))
+        self.assertNotIn(token, out + err)
+
+    def test_next_polls_and_warns_once_when_the_server_rejects_the_token(self):
+        self.reject_token = True
+        token = "test-token-with-at-least-32-characters"
+        with patch.dict(os.environ, {"WG_LINK_TOKEN": token}):
+            out, err, _ = self.run_next([("phase 1", [("wait", "worker a")]), ("phase 1", [("do", "dispatch a CD-1")])],
+                                        wait=True, interval=0.1)
+        self.assertIn("do dispatch a CD-1", out)
+        self.assertEqual(err.count("warn link:"), 1)
+        self.assertIn("HTTP 401", err)
+        self.assertNotIn(token, out + err)
 
     def test_a_change_wakes_a_waiting_next_at_once_and_is_acknowledged(self):
         self.to_send.append({"v": 1, "type": "changed", "id": "m1", "project": {"workspace": "work", "id": "proj"},
@@ -7641,6 +7671,41 @@ class DoctorTests(DirTests):
         with patch.object(wg, "command", return_value=done_proc("1.0")):
             self.assertEqual(wg.doctor_tool("st", ("st", "--version"))(), ("ok", "st: st --version"))
 
+    def test_page_reads_use_the_private_token_file_and_environment_override(self):
+        token = "a-file-token-with-at-least-32-characters"
+        directory = self.d / ".config/work-graph"
+        directory.mkdir(parents=True)
+        path = directory / "link-token"
+        path.write_text(token + "\n")
+        response = io.StringIO("{\"waiting\": 2}")
+        with patch.object(Path, "home", return_value=self.d), patch.dict(os.environ, {"WG_LINK_TOKEN": ""}), \
+                patch.object(wg.urllib.request, "urlopen", return_value=response) as open_url:
+            path.chmod(0o600)
+            plan = {"effort": {"workspace": "work"}}
+            self.assertEqual(wg.page_waiting(plan, "p1"), 2)
+            req = open_url.call_args.args[0]
+            self.assertEqual(req.get_header("Authorization"), f"Bearer {token}")
+            self.assertEqual(req.get_header("X-workspace"), "work")
+            path.chmod(0o640)
+            with self.assertRaisesRegex(wg.ReadError, "mode 600"):
+                wg.page_get("/healthz")
+            open_url.return_value = io.StringIO("{}")
+            with patch.dict(os.environ, {"WG_LINK_TOKEN": "environment-token"}):
+                wg.page_get("/healthz")
+                self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer environment-token")
+
+    def test_doctor_reports_whether_the_page_accepted_the_token(self):
+        token = "test-token-with-at-least-32-characters"
+        with patch.dict(os.environ, {"WG_LINK_TOKEN": token}), patch.object(wg, "page_get") as get:
+            get.side_effect = [{"auth": True}, {}]
+            self.assertEqual(wg.doctor_link_token(), ("ok", "link token: set, accepted by the page"))
+            get.side_effect = [{"auth": True}, wg.urllib.error.HTTPError("", 401, "", {}, None)]
+            self.assertEqual(wg.doctor_link_token(), ("FAIL", "link token: set, rejected by the page (HTTP 401)"))
+            get.side_effect = [{}, *(wg.urllib.error.HTTPError("", code, "", {}, None) for code in (400, 401))]
+            self.assertEqual(wg.doctor_link_token(), ("ok", "link token: set, accepted by the page"))
+            get.side_effect = [{}, *(wg.urllib.error.HTTPError("", 400, "", {}, None) for _ in range(2))]
+            self.assertEqual(wg.doctor_link_token(), ("warn", "link token: set, the page did not confirm it"))
+
     def test_page_health_and_contract(self):
         def server(contract, ok=True):
             return lambda path, timeout=10: {"ok": ok} if path == "/healthz" else {"contract": contract}
@@ -7747,7 +7812,7 @@ class DoctorTests(DirTests):
     def test_doctor_prints_each_line_and_exits_1_on_a_fail(self):
         self.keymap()
         fakes = {name: Mock(return_value=("ok", name)) for name in
-                 ("doctor_python", "doctor_websockets", "doctor_checkout", "doctor_page", "doctor_tick")}
+                 ("doctor_python", "doctor_websockets", "doctor_checkout", "doctor_page", "doctor_link_token", "doctor_tick")}
         with contextlib.ExitStack() as stack:
             for name, fake in fakes.items():
                 stack.enter_context(patch.object(wg, name, fake))

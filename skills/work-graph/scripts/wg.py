@@ -4282,6 +4282,54 @@ LINK_COMMANDS = ("next", "dispatch", "pause", "resume", "autonomy")
 LINK_REPLAYED = ("state", "asks", "progress")
 
 
+def link_token():
+    """Read the environment or a private file. Never include the value in an error."""
+    if token := os.environ.get("WG_LINK_TOKEN", "").strip():
+        return token
+    path = Path.home() / ".config/work-graph/link-token"
+    try:
+        with path.open(encoding="utf-8") as file:
+            if stat.S_IMODE(os.fstat(file.fileno()).st_mode) != 0o600:
+                raise ReadError("link-token file must have mode 600")
+            return file.read().strip()
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeError):
+        raise ReadError("cannot read link-token file") from None
+
+
+class LinkUnauthorized(ReadError):
+    pass
+
+
+_LINK_AUTH_WARNED = set()
+
+
+def warn_link_unauthorized():
+    base = page_base()
+    if base not in _LINK_AUTH_WARNED:
+        _LINK_AUTH_WARNED.add(base)
+        print("warn link: HTTP 401. Check WG_LINK_TOKEN. Polling Linear instead.", file=sys.stderr, flush=True)
+
+
+@contextlib.contextmanager
+def link_socket(url, **options):
+    from websockets.sync.client import connect
+    token = link_token()
+    if token:
+        options["additional_headers"] = {"Authorization": f"Bearer {token}"}
+    try:
+        ws = connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1, **options)
+    except Exception as error:
+        if getattr(getattr(error, "response", None), "status_code", None) == 401:
+            raise LinkUnauthorized("HTTP 401") from None
+        if token:
+            raise ReadError(f"connection failed ({type(error).__name__})") from None
+        raise
+    with ws:
+        yield ws
+
+
 class Link:
     """The connection of this coordinator to the page server (`/api/link`). The server tells it at once
     about a change on the page or in Linear, and keeps the messages for it while it is busy. Linear stays the
@@ -4315,19 +4363,21 @@ class Link:
     def connect(self):
         if self.ws or time.monotonic() < self.retry_at:
             return self.ws is not None
-        from websockets.sync.client import connect
+        stack = contextlib.ExitStack()
         try:
-            # No Origin header: the server takes a socket with no Origin as a coordinator.
-            stack = contextlib.ExitStack()
-            self.ws = stack.enter_context(connect(self.url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1, max_size=2**22))
+            self.ws = stack.enter_context(link_socket(self.url, max_size=2**22))
             self.ws.stack = stack
             self.ws.send(self.envelope("hello", self.hello))
             for kind, payload in self.last.items():
                 self.ws.send(self.envelope(kind, payload))
         except Exception as e:  # any failure only means: poll as before
+            with contextlib.suppress(Exception):
+                stack.close()
             self.ws = None
             self.retry_at = time.monotonic() + 30
-            if not self.warned:
+            if isinstance(e, LinkUnauthorized):
+                warn_link_unauthorized()
+            elif not self.warned:
                 print(f"warn link: {self.url.split('?')[0]}: {e}. Polling Linear instead.", file=sys.stderr, flush=True)
                 self.warned = True
             return False
@@ -4408,7 +4458,7 @@ def link_target(plan_dir, plan):
     """The link URL of the plan's project, the project, this coordinator's session, and its `hello`."""
     km = load_keymap(plan_dir)
     project = (km.get("project") or {}).get("id") or plan["effort"]["name"]
-    base = (os.environ.get("WG_UI_URL") or PAGE_URL).rstrip("/")
+    base = page_base()
     scheme, rest = base.split("://", 1)
     query = urllib.parse.urlencode({"role": "coordinator", "workspace": plan_workspace(plan), "project": project})
     url = f"{'wss' if scheme == 'https' else 'ws'}://{rest}/api/link?{query}"
@@ -4427,8 +4477,7 @@ def link_envelope(session, project, kind, payload):
 def flush_writes(plan_dir, plan, link=None):
     """Tell the page server that this process changed Linear (`wrote`), so it forgets its cached graph and the
     open pages load it again at once. It goes on the open link, or on a short connection with no `hello`, which
-    the server does not count as a coordinator. Any failure is silent: the server's own check still sees the
-    change later."""
+    the server does not count as a coordinator. The server's own check sees the change later if the link fails."""
     if not LINEAR_WRITES["any"]:
         return False
     ids = {}
@@ -4441,11 +4490,13 @@ def flush_writes(plan_dir, plan, link=None):
     if os.environ.get("WG_LINK", "").lower() in ("off", "0", "no"):
         return False
     try:
-        from websockets.sync.client import connect
         url, project, session, _ = link_target(plan_dir, plan)
-        with connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1) as ws:
+        with link_socket(url) as ws:
             ws.send(link_envelope(session, project, "wrote", payload))
         return True
+    except LinkUnauthorized:
+        warn_link_unauthorized()
+        return False
     except Exception:  # no package, no server, or an old server: the server's check sees the change later
         return False
 
@@ -4840,13 +4891,16 @@ def live_agents():
 
 def page_waiting(plan, project_id):
     """How many page messages wait for a coordinator (answer, reply, command). 0 when the server cannot be read."""
-    base = (os.environ.get("WG_UI_URL") or PAGE_URL).rstrip("/")
-    req = urllib.request.Request(f"{base}/api/projects/{urllib.parse.quote(project_id)}/presence",
-                                 headers={"x-workspace": plan_workspace(plan)})
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return int(json.load(response).get("waiting") or 0)
-    except (OSError, ValueError, TypeError, http.client.HTTPException):
+        presence = page_get(f"/api/projects/{urllib.parse.quote(project_id)}/presence",
+                            headers={"x-workspace": plan_workspace(plan)})
+        return int(presence.get("waiting") or 0)
+    except urllib.error.HTTPError as error:
+        with error:
+            if error.code == 401:
+                warn_link_unauthorized()
+        return 0
+    except (ReadError, OSError, ValueError, TypeError, http.client.HTTPException):
         return 0
 
 
@@ -5796,9 +5850,8 @@ def agent_rows(plan_dir, km, agents, now=None):
 
 def send_agents(plan_dir, plan, rows):
     """Send the rows to the page server on a short connection with no `hello`, as `wrote` goes."""
-    from websockets.sync.client import connect
     url, project, session, _ = link_target(plan_dir, plan)
-    with connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1) as ws:
+    with link_socket(url) as ws:
         ws.send(link_envelope(session, project, "agents", {"agents": rows}))
 
 
@@ -5877,6 +5930,8 @@ def watch_poll(memory, state, roots=None, clock=time.monotonic):
             try:
                 send_agents(path, plan, rows)
                 mine.update(digest=digest, at=clock())
+            except LinkUnauthorized:
+                warn_link_unauthorized()
             except Exception as e:  # no server, an old server, or a project that the server does not list: try again
                 print(f"warn link: {plan['effort']['name']}: {type(e).__name__}", file=sys.stderr, flush=True)
         key = f"{plan_workspace(plan)}/{project}"
@@ -6076,9 +6131,48 @@ def page_base():
     return (os.environ.get("WG_UI_URL") or PAGE_URL).rstrip("/")
 
 
-def page_get(path, timeout=10):
-    with urllib.request.urlopen(f"{page_base()}{path}", timeout=timeout) as response:
+def page_get(path, timeout=10, headers=None, *, use_token=True):
+    request = urllib.request.Request(f"{page_base()}{path}", headers=headers or {})
+    token = link_token() if use_token else ""
+    if token:
+        # Do not forward the credential on a redirect.
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except ValueError:
+        if token:
+            raise ReadError("could not send page request") from None
+        raise
+    with response:
         return json.load(response)
+
+
+def doctor_link_token():
+    if not link_token():
+        return "ok", "link token: not set"
+    config = page_get("/api/config")
+    if config.get("readOnly") and not config.get("auth"):
+        return "warn", "link token: set, this page has no sign-in or coordinator link"
+    # With no project, the link request reaches the project check without an upgrade or a Linear lookup.
+    path = "/api/status" if config.get("auth") else "/api/link?role=coordinator"
+    try:
+        page_get(path)
+    except urllib.error.HTTPError as error:
+        with error:
+            if error.code == 401:
+                return "FAIL", "link token: set, rejected by the page (HTTP 401)"
+            if path == "/api/status" or error.code != 400:
+                return "FAIL", f"link token: set, the page did not confirm it (HTTP {error.code})"
+    if path != "/api/status":
+        # A server with no token configured also lets the request reach the project check.
+        try:
+            page_get(path, use_token=False)
+        except urllib.error.HTTPError as error:
+            with error:
+                if error.code == 401:
+                    return "ok", "link token: set, accepted by the page"
+        return "warn", "link token: set, the page did not confirm it"
+    return "ok", "link token: set, accepted by the page"
 
 
 def doctor_page():
@@ -6295,11 +6389,11 @@ def doctor_link(plan_dir, plan):
         if os.environ.get("WG_LINK", "").lower() in ("off", "0", "no"):
             return "warn", "link: WG_LINK is off"
         try:
-            from websockets.sync.client import connect
+            import websockets.sync.client  # noqa: F401
         except ImportError:
             return "warn", "link: no websockets in this Python; run wg through uv"
         url = link_target(plan_dir, plan)[0]
-        with connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1):
+        with link_socket(url):
             pass  # the WebSocket handshake passed
         return "ok", f"link: {url.split('?')[0]} accepts a connection (the connection only; no hello sent)"
     return check
@@ -6313,7 +6407,8 @@ def doctor_lines(plan_dir=None, fix=False):
     checks = [("python", doctor_python), ("websockets", doctor_websockets), ("checkout", doctor_checkout)]
     checks += [(f"key {w}", doctor_key(w)) for w in WORKSPACES]
     checks += [(name, doctor_tool(name, args)) for name, args in TOOL_CHECKS.items()]
-    checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", doctor_page), ("tick", doctor_tick),
+    checks += [("orca", doctor_tool("orca", (orca_cli(), "--version"))), ("page", doctor_page),
+               ("link token", doctor_link_token), ("tick", doctor_tick),
                ("agents", doctor_watch)]
     if plan_dir:
         plans.add(Path(plan_dir).resolve())

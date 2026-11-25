@@ -782,6 +782,30 @@ describe("graph cache of the server", () => {
 });
 
 
+describe("coordinator link token", () => {
+  const linkToken = "a-test-token-with-32-characters-or-more";
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("rejects coordinator requests before looking up the project", async () => {
+    vi.stubEnv("WG_LINK_TOKEN", linkToken);
+    const path = "/api/link?role=coordinator";
+    const server = app();
+    for (const authorization of ["", "Bearer wrong", `Bearer ${linkToken.slice(0, -1)}x`]) {
+      const response = await server.request(path, { headers: { ...local, authorization } });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "coordinator token required" });
+    }
+    const accepted = await server.request(path, { headers: { ...local, authorization: `Bearer ${linkToken}` } });
+    expect(accepted.status).toBe(400);
+    expect(await accepted.json()).toEqual({ error: "a coordinator names its project" });
+  });
+
+  it("refuses a short server token", () => {
+    vi.stubEnv("WG_LINK_TOKEN", "too-short");
+    expect(app).toThrow("WG_LINK_TOKEN must have at least 32 characters");
+  });
+});
+
 describe("link sockets of the server", () => {
   const closers: (() => void)[] = [];
   afterEach(() => { closers.splice(0).forEach((close) => close()); });
@@ -828,6 +852,33 @@ describe("link sockets of the server", () => {
     closers.push(() => ws.terminate());
     return { ws, closed, pings: () => pings };
   }
+
+  it("requires a token on the coordinator upgrade and accepts a page socket without one", async () => {
+    const token = "a-test-token-with-32-characters-or-more";
+    vi.stubEnv("WG_LINK_TOKEN", token);
+    linear({ teams: { nodes: [{ projects: {
+      nodes: [{ id: "p1", name: "Example", url: "u", status: null }],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    } }] } });
+    try {
+      const { port } = await start();
+      await page(port);
+      const upgrade = (headers: Record<string, string>) => new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/api/link?role=coordinator&project=p1`, { headers });
+        closers.push(() => ws.terminate());
+        ws.on("error", reject);
+        ws.on("unexpected-response", (_request, response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        });
+        ws.on("open", () => resolve(101));
+      });
+      expect(await upgrade({})).toBe(401);
+      expect(await upgrade({ authorization: `Bearer ${token}` })).toBe(101);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it("terminates a socket 45 s after its last pong, also one that sends messages, and keeps one that sends pongs", async () => {
     const { port, advance } = await start();
@@ -1268,6 +1319,19 @@ describe("sign-in of the viewer", () => {
     expect((await page.request("/healthz")).status).toBe(200);
     // A page with no sign-in says so, and takes each caller that the host check lets through.
     expect(await (await app().request("/api/config", { headers: local })).json()).toMatchObject({ auth: false, user: null });
+  });
+
+  it("accepts only the correct bearer token for a read without a session", async () => {
+    vi.stubEnv("WG_LINK_TOKEN", "a-test-token-with-32-characters-or-more");
+    try {
+      const page = signedIn();
+      const headers = { ...host, authorization: "Bearer a-test-token-with-32-characters-or-more" };
+      expect((await page.request("/api/status", { headers })).status).toBe(200);
+      expect((await page.request("/api/status", { headers: { ...headers, authorization: "Bearer wrong" } })).status).toBe(401);
+      expect((await page.request("/api/issues/i1/comments", { method: "POST", headers })).status).toBe(405);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   /** An ID token as Google's token endpoint gives it: the claims are the middle part. */

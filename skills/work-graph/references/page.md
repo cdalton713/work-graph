@@ -40,6 +40,14 @@ The `work-graph status` document gives the status, wave, and result lines. Its `
 
 `wg next` connects to the page server over a WebSocket (`/api/link`, protocol `wg-link/1`, `contract.json` `link`). The server is `WG_UI_URL`, or the hosted page.
 
+Set `WG_LINK_TOKEN` on the hosted server to require a bearer token on coordinator sockets. Use a secret
+with at least 32 characters. Set the same value in the coordinator's environment or put it in
+`~/.config/work-graph/link-token` with mode 600. The environment takes precedence.
+`wg` sends the token on the link, on the short connections for writes and agent state, and on HTTP requests
+to the page. On a page with sign-in, the token permits API reads. The viewer's write limit still applies.
+`wg doctor` reports if the token is set and if the page accepts it. A 401 on the link gives one
+`warn link:` line, and `wg next` polls Linear.
+
 - `wg next` sends its status and lines, the open Orca questions of the effort's workers, and the job and test evidence of each node. The page shows the coordinator as `coordinator listening`, `coordinator working · <age>`, or `coordinator not listening · <age>`.
 - The server sends `wg next` each change that the page makes, and each change in Linear for a project with a connected coordinator (about every 30 seconds). It also sends the human's answers, their replies to worker questions, and their commands: **Run wg next now**, **Dispatch**, **Pause**, **Resume**, and an **Autonomy** change (`command` `autonomy`, with `level`). The server sets the project label first; `wg next` reads it and prints `do autonomy`. A **Review** change sets the review label, then sends the command `next`: `wg next` reads the label and prints `do review`. "Lines from the page" below lists the lines.
 - The server keeps the messages of each project until a `wg next` acknowledges them. Any number of coordinators of different projects can connect at the same time.

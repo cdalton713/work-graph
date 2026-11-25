@@ -1,5 +1,5 @@
 // The Hono app of the work-graph UI: static files from dist/ and a small JSON API over Linear.
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
@@ -132,6 +132,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   // A sign-in gives each account of the domain the same rights, so it is only for a page that changes nothing.
   // Google sends the browser back to the HTTPS name of the page, which only a hosted page has.
+  const linkToken = process.env.WG_LINK_TOKEN;
+  if (linkToken !== undefined && [...linkToken].length < 32) {
+    throw new Error("WG_LINK_TOKEN must have at least 32 characters");
+  }
+  const digest = (value: string) => createHash("sha256").update(value).digest();
+  const linkCredential = linkToken === undefined ? null : digest(`Bearer ${linkToken}`);
+  const hasLinkToken = (authorization: string | undefined) =>
+    linkCredential !== null && authorization !== undefined && timingSafeEqual(digest(authorization), linkCredential);
   if (auth && !rules.hosted) throw new Error("the sign-in needs a hosted page (WG_HOSTED)");
   if (auth && !readOnly) throw new Error("the sign-in needs the read-only mode (WG_READ_ONLY): a signed-in account would get each write of the page");
   // The overview and the graph rules on the server use the same names as the page.
@@ -255,7 +263,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // Each route from here needs a session, on a page with a sign-in. The config above is open: the page needs it to
   // show the sign-in screen.
   api.use(async (c, next) => {
-    if (auth && !(await sessionOf(c, auth, clock))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    const tokenRead = c.req.method === "GET" && hasLinkToken(c.req.header("authorization"));
+    if (auth && !tokenRead && !(await sessionOf(c, auth, clock))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     await next();
   });
   // The state of the server for a check: counts and the Linear budget only, never a key, issue text, or message body.
@@ -515,6 +524,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const role = c.req.query("role") ?? "";
     const reason = linkRefusal(role, (name) => c.req.header(name), rules);
     if (reason) return c.json({ error: reason }, 403);
+    if (role === "coordinator" && linkCredential !== null && !hasLinkToken(c.req.header("authorization"))) {
+      return c.json({ error: "coordinator token required" }, 401);
+    }
     // The server stops: it takes no new link socket (also below, for an upgrade that waited for the project).
     const restarting = () => c.json({ error: "the server restarts" }, 503);
     if (hub.closing) return restarting();

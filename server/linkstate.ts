@@ -1,8 +1,20 @@
-import { type Agents, type Ask, type CoordinatorState, type Envelope, type Hello, type Progress, type ProjectRef, projectKey } from "../src/lib/link.ts";
+import { type Agents, type Ask, type CoordinatorState, type Envelope, type Hello, type Progress, type ProjectRef } from "../src/lib/link.ts";
 import { ASKS_MAX, type LinkState as SavedState, type Store } from "./store.ts";
 
 /** The longest queue of a project. The oldest changed notice goes first. */
 export const QUEUE_MAX = 100;
+
+/** Server-only address. An absent tenant is the config installation. */
+export interface RoomRef extends ProjectRef { tenant?: string }
+
+export function checkLinkTenant(tenant?: string) {
+  if (tenant !== undefined && (!tenant || /[^a-zA-Z0-9_.-]/.test(tenant))) throw new Error("invalid link tenant");
+}
+
+export function roomKey({ workspace, id, tenant }: RoomRef): string {
+  checkLinkTenant(tenant);
+  return JSON.stringify(tenant === undefined ? [workspace, id] : [workspace, id, tenant]);
+}
 
 export interface Coordinator {
   socket: string | null;
@@ -15,7 +27,7 @@ export interface Coordinator {
 }
 
 export interface LinkRoom {
-  ref: ProjectRef;
+  ref: RoomRef;
   sequence?: number;
   queue: Envelope[];
   asks: Ask[];
@@ -27,30 +39,32 @@ export interface LinkRoom {
 }
 
 export interface LinkRoomState {
-  read(ref: ProjectRef): Promise<LinkRoom | null>;
+  read(ref: RoomRef): Promise<LinkRoom | null>;
   rooms(): Promise<LinkRoom[]>;
+  drop(ref: RoomRef): Promise<void>;
   /**
    * Atomically edit a room, creating it if needed. The callback can be retried and must have no external effects.
    * An edit does not schedule a save of the queue or asks. Use the methods below to change those fields.
    */
-  edit<T>(ref: ProjectRef, change: (room: LinkRoom) => T): Promise<T>;
-  append(ref: ProjectRef, message: Envelope, answeredAsk?: string): Promise<LinkRoom>;
-  ack(ref: ProjectRef, ids: string[]): Promise<LinkRoom>;
-  setAsks(ref: ProjectRef, asks: Ask[]): Promise<LinkRoom>;
-  removeAsk(ref: ProjectRef, id: string): Promise<LinkRoom | null>;
+  edit<T>(ref: RoomRef, change: (room: LinkRoom) => T): Promise<T>;
+  editExisting<T>(ref: RoomRef, change: (room: LinkRoom) => T): Promise<T | null>;
+  append(ref: RoomRef, message: Envelope, answeredAsk?: string): Promise<LinkRoom>;
+  ack(ref: RoomRef, ids: string[]): Promise<LinkRoom>;
+  setAsks(ref: RoomRef, asks: Ask[]): Promise<LinkRoom>;
+  removeAsk(ref: RoomRef, id: string): Promise<LinkRoom | null>;
   prune(cutoff: number, now?: number): Promise<void | LinkRoom[]>;
   endSession(id: string, expiresAt: number, now: number): Promise<void>;
   sessionEnded(id: string, now: number): Promise<boolean>;
   flush(): Promise<boolean>;
-  renew?(sockets: { ref: ProjectRef; socket: string; page?: boolean }[], at: string): Promise<Set<string>>;
-  openPage?(ref: ProjectRef, socket: string): Promise<LinkRoom>;
-  closePage?(ref: ProjectRef, socket: string): Promise<void>;
+  renew?(sockets: { ref: RoomRef; socket: string; page?: boolean }[], at: string): Promise<Set<string>>;
+  openPage?(ref: RoomRef, socket: string): Promise<LinkRoom>;
+  closePage?(ref: RoomRef, socket: string): Promise<void>;
   recoverWrites?(): Promise<void>;
   sessionExpiry?(id: string): Promise<number | null>;
-  refresh?(ref: ProjectRef, socket: string, at: string): Promise<boolean>;
+  refresh?(ref: RoomRef, socket: string, at: string): Promise<boolean>;
 }
 
-export const emptyRoom = (ref: ProjectRef): LinkRoom => ({
+export const emptyRoom = (ref: RoomRef): LinkRoom => ({
   ref, queue: [], asks: [], coordinators: new Map(), sockets: new Map(), progress: [], agents: null,
 });
 
@@ -58,10 +72,10 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
   const rooms = new Map<string, LinkRoom>();
   const ended = new Map<string, number>();
   for (const { ref, queue, asks } of store?.load().rooms ?? []) {
-    rooms.set(projectKey(ref), { ...emptyRoom(ref), queue: queue.slice(-QUEUE_MAX), asks: asks.slice(0, ASKS_MAX) });
+    rooms.set(roomKey(ref), { ...emptyRoom(ref), queue: queue.slice(-QUEUE_MAX), asks: asks.slice(0, ASKS_MAX) });
   }
-  const roomOf = (ref: ProjectRef) => rooms.get(projectKey(ref));
-  const write = (room: LinkRoom) => rooms.set(projectKey(room.ref), room);
+  const roomOf = (ref: RoomRef) => rooms.get(roomKey(ref));
+  const write = (room: LinkRoom) => rooms.set(roomKey(room.ref), room);
   const saved = (): SavedState => ({ rooms: [...rooms.values()].map(({ ref, queue, asks }) => ({ ref, queue, asks })) });
   const save = () => store?.save(saved);
 
@@ -72,8 +86,17 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
     async rooms() {
       return structuredClone([...rooms.values()]);
     },
+    async drop(ref) { if (rooms.delete(roomKey(ref))) save(); },
     async edit(ref, change) {
       const draft = structuredClone(roomOf(ref) ?? emptyRoom(ref));
+      const result = change(draft);
+      write(structuredClone(draft));
+      return result;
+    },
+    async editExisting(ref, change) {
+      const room = roomOf(ref);
+      if (!room) return null;
+      const draft = structuredClone(room);
       const result = change(draft);
       write(structuredClone(draft));
       return result;

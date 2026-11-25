@@ -1207,6 +1207,160 @@ const rolesPage = (now?: () => number) => createApp(hostedRoles, {
   team: "CD", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth, linkToken: rolesToken, watchMs: 0, now,
 });
 
+it("keeps queued commands and status in the request tenant", async () => {
+  const directory = testTenants(TEAM);
+  const page = createApp(hostedRoles, { team: TEAM, dist, auth: rolesAuth, tenants: directory.tenants, watchMs: 0 });
+  const headers = { ...await rolesHeaders("ada@example.com"), origin: "https://view.example.com", "content-type": "application/json" };
+  const status = async (token: string) =>
+    (await page.request("/api/status", { headers: { ...rolesHost, authorization: "Bearer " + token } })).json();
+  try {
+    const response = await page.request("/api/projects/p1/commands", {
+      method: "POST", headers, body: JSON.stringify({ name: "next" }),
+    });
+    expect(await response.json()).toEqual({ ok: true, queued: 1 });
+    expect((await status("ada")).rooms).toEqual([{ workspace: "default", project: "p1", queued: 1, pages: 0, coordinators: 0, asks: 0 }]);
+    expect((await status("grace")).rooms).toEqual([]);
+    const wrongWorkspace = await page.request("/api/link?role=coordinator&workspace=extra&project=p1", {
+      headers: { ...rolesHost, authorization: "Bearer ada" },
+    });
+    expect(await wrongWorkspace.json()).toEqual({ error: "workspace extra is not configured" });
+  } finally {
+    page.link.stop();
+  }
+});
+
+it.each(localRedis ? ["memory", "redis"] : ["memory"])("isolates socket rooms with the %s link store", async (storage) => {
+  const { state } = graphLinear();
+  const respond = vi.mocked(fetch).getMockImplementation()!;
+  const graphKeys: string[] = [];
+  let editAda = false;
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    const key = new Headers(init?.headers).get("authorization")!;
+    const { query } = JSON.parse(init!.body as string);
+    if (query.includes("viewer{")) graphKeys.push(key);
+    const response = await respond(url, init);
+    const body = await response.json();
+    if (query.includes("projects(first:50")) {
+      body.data.teams.nodes[0].projects.nodes[0].labels = { nodes: [{ name: "shared", parent: null }] };
+    }
+    if (query.includes("issues(first:25")) {
+      const changed = key === "ada-key" && editAda;
+      body.data.project.issues.nodes = [{
+        ...rawIssue("i1", `${TEAM}-1`, "p1"),
+        updatedAt: changed ? "2026-11-21T00:00:00Z" : "2026-11-20T00:00:00Z",
+      }];
+    }
+    return Response.json(body);
+  });
+  const redis = storage === "redis" ? await startLocalRedis() : null;
+  const directory = testTenants(TEAM);
+  let now = Date.now();
+  const options = { team: TEAM, dist, auth: rolesAuth, tenants: directory.tenants, watchMs: 0, redisUrl: redis?.url, now: () => now };
+  const first = createApp(hostedRoles, options);
+  const second = redis ? createApp(hostedRoles, options) : first;
+  const http = [...new Set([first, second])].map((page) => {
+    const server = serve({ fetch: page.fetch, port: 0, hostname: "127.0.0.1" });
+    page.injectWebSocket(server as never);
+    return server;
+  });
+  const sockets: WebSocket[] = [];
+  const origin = "https://view.example.com";
+  const ada = { ...await rolesHeaders("ada@example.com"), origin, "content-type": "application/json" };
+  const grace = { ...await rolesHeaders("grace@example.com"), origin, "content-type": "application/json" };
+  const viewer = { ...await rolesHeaders("ada-viewer@example.com"), origin };
+  const connect = async (server: typeof http[number], role: string, headers: Record<string, string>) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/link?role=${role}&project=p1`, { headers });
+    sockets.push(ws);
+    const messages: { type: string; project: unknown; payload: unknown }[] = [];
+    ws.on("message", (data) => messages.push(JSON.parse(data.toString())));
+    const closed = new Promise<number>((resolve) => ws.once("close", resolve));
+    await new Promise<void>((resolve, reject) => { ws.once("error", reject); ws.once("open", resolve); });
+    const send = (type: string, payload: unknown) => ws.send(JSON.stringify({ v: 1, type, payload }));
+    return { ws, closed, send, messages, of: (type: string) => messages.filter((message) => message.type === type) };
+  };
+  const token = (id: string) => ({ ...rolesHost, authorization: "Bearer " + id });
+  const post = async (path: string, headers: Record<string, string>, body: object) =>
+    second.request("/api/projects/p1/" + path, { method: "POST", headers, body: JSON.stringify(body) });
+  try {
+    for (const server of http) if (!server.listening) await new Promise<void>((resolve) => server.once("listening", resolve));
+    const other = http.at(-1)!;
+    const a = await connect(http[0], "coordinator", token("ada"));
+    a.send("hello", { session: "same-session" });
+    const own = await connect(other, "page", ada);
+    const view = await connect(other, "page", viewer);
+    const foreign = await connect(other, "page", grace);
+    await vi.waitFor(() => {
+      expect(own.of("presence").at(-1)?.payload).toMatchObject({ coordinators: [{ connected: true }] });
+      expect(foreign.of("presence").at(-1)?.payload).toEqual({ coordinators: [], queued: 0 });
+    });
+    a.send("asks", { asks: [{ id: "q", body: "Ada question" }] });
+    a.send("progress", { nodes: [{ key: "ada-node" }] });
+    a.send("agents", { agents: [{ id: "ada-agent" }] });
+    await vi.waitFor(() => {
+      expect(own.of("asks").at(-1)?.payload).toMatchObject({ asks: [{ id: "q" }] });
+      expect(own.of("agents")).toHaveLength(1);
+      expect(view.of("progress").at(-1)?.payload).toMatchObject({ nodes: [{ key: "ada-node" }] });
+    });
+    expect(view.of("asks")).toEqual([]);
+    expect(view.of("agents")).toEqual([]);
+    expect(JSON.stringify(foreign.messages)).not.toMatch(/Ada question|ada-node|ada-agent/);
+    expect((await post("asks/q/reply", grace, { body: "Wrong room" })).status).toBe(404);
+    expect((await post("asks/q/reply", ada, { body: "Own room" })).status).toBe(200);
+    expect(await (await post("commands", grace, { name: "next" })).json()).toEqual({ ok: true, queued: 1 });
+
+    const b = await connect(other, "coordinator", token("grace"));
+    b.send("hello", { session: "same-session" });
+    await vi.waitFor(() => expect(b.of("command")).toHaveLength(1));
+    await vi.waitFor(() => expect(a.of("reply")).toHaveLength(1));
+    expect(a.of("command")).toEqual([]);
+    expect(b.of("reply")).toEqual([]);
+    expect(a.ws.readyState).toBe(WebSocket.OPEN);
+
+    b.send("wrote", { issues: [`${TEAM}-2`] });
+    await vi.waitFor(() => expect(foreign.of("changed")).toHaveLength(1));
+    expect(own.of("changed")).toEqual([]);
+    expect(a.of("changed")).toEqual([]);
+
+    await first.link.check();
+    if (redis) await second.link.check();
+    expect(new Set(graphKeys)).toEqual(new Set(["ada-key", "grace-key"]));
+    editAda = true;
+    state.changed = ["p1"];
+    now += 60_000;
+    await first.link.check();
+    if (redis) await second.link.check();
+    await vi.waitFor(() => expect(a.of("changed")).toHaveLength(1));
+    expect(b.of("changed")).toEqual([]);
+
+    const tenant = (await directory.tenants.byId("ada"))!;
+    directory.change(tenant);
+    expect(await a.closed).toBe(RESTART_CODE);
+    expect(await own.closed).toBe(RESTART_CODE);
+    expect(await view.closed).toBe(RESTART_CODE);
+    expect(b.ws.readyState).toBe(WebSocket.OPEN);
+    expect(foreign.ws.readyState).toBe(WebSocket.OPEN);
+    const again = await connect(other, "coordinator", token("ada"));
+    again.send("hello", { session: "same-session" });
+    await vi.waitFor(() => expect(again.of("reply")).toHaveLength(1));
+    expect(again.of("command")).toEqual([]);
+    for (const { project } of [...a.messages, ...b.messages, ...own.messages, ...view.messages, ...foreign.messages, ...again.messages]) {
+      expect(project).toEqual({ workspace: "default", id: "p1" });
+    }
+    directory.change({ ...tenant, workspaces: [] });
+    expect(await again.closed).toBe(RESTART_CODE);
+    await first.link.check();
+    const status = await (await second.request("/api/status", { headers: token("ada") })).json();
+    expect(status.rooms).toEqual([]);
+    expect(b.ws.readyState).toBe(WebSocket.OPEN);
+  } finally {
+    for (const socket of sockets) socket.terminate();
+    for (const server of http) await new Promise<void>((resolve) => server.close(() => resolve()));
+    first.link.stop();
+    if (redis) second.link.stop();
+    await redis?.close();
+  }
+});
+
 it("isolates site, projects, graphs and budgets for tenants with the same workspace id", async () => {
   const { state } = graphLinear();
   const issue = rawIssue("i1", `${TEAM}-1`, "p1");

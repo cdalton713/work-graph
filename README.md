@@ -21,6 +21,10 @@ for worker agents and worktrees, and [uv](https://docs.astral.sh/uv/) to run `wg
 Each user who runs an effort needs access to Linear and these tools on their own machine,
 including an agent CLI (Claude Code or Codex). A hosted deployment serves only the page and its API.
 
+Each tenant has its own link rooms, even when tenants use the same workspace and project IDs.
+A page uses the tenant of its session. A coordinator uses the tenant of its token.
+Only a config installation can use `WG_STATE_DIR`. Other tenants keep the queue and open questions in memory or in Redis.
+
 ## Install the skill
 
 ```sh

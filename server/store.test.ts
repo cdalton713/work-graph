@@ -29,6 +29,16 @@ const hello = (session: string) => msg("hello", { plan: "/plans/a", session, hos
 const ask = { id: "ask-1", key: "a", issue: "CD-1", from: "worker", body: "Which base?", at: "2026-11-20T00:00:00Z" };
 
 describe("fileStore", () => {
+  it("loads a config link-state file from main", async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, STATE_FILE), '{"version":1,"rooms":[{"ref":{"workspace":"work","id":"p1"},"queue":[{"v":1,"type":"command","id":"next","project":{"workspace":"work","id":"p1"},"at":"","payload":{"name":"next","key":null,"issue":null}}],"asks":[{"id":"ask-1","key":"a","issue":"CD-1","from":"worker","body":"Which base?","at":"2026-11-20T00:00:00Z"}]}]}', { mode: 0o600 });
+    const hub = new LinkHub(undefined, undefined, undefined, fileStore(dir, { queueMax: QUEUE_MAX, after: fakeAfter().after, log: () => {} }));
+    const coordinator = peer();
+    await (await hub.joinCoordinator(coordinator, A)).receive(hello("legacy"));
+    expect(coordinator.of("command").map(({ id }) => id)).toEqual(["next"]);
+    expect(await hub.ask(A, "ask-1")).toEqual(ask);
+  });
+
   it("restarts a hub over the same directory with the queued reply and command, and the asks", async () => {
     const dir = tempDir(), timer = fakeAfter(), logs: string[] = [];
     const store = () => fileStore(dir, { queueMax: QUEUE_MAX, after: timer.after, log: (l) => logs.push(l) });

@@ -4,6 +4,8 @@ import { serve } from "@hono/node-server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { Envelope } from "../src/lib/link.ts";
+import { createSite } from "../src/lib/site.ts";
+import { serverSite } from "./site.ts";
 import { linkRefusal, type Rules } from "./access.ts";
 import { createApp, type AppOptions } from "./app.ts";
 import { memoryLinkState } from "./linkstate.ts";
@@ -55,6 +57,35 @@ const msg = (type: string, payload: unknown = {}) => JSON.stringify({ v: 1, type
 const hello = (session: string) => msg("hello", { plan: "/plans/a", session, host: "mac", wg: "1" });
 
 describe("LinkHub", () => {
+  it("runs socket delivery, heartbeat and timeout in the socket site", async () => {
+    const time = fakeTime();
+    const sites = new Map([["a", createSite("Ada", "work")], ["b", createSite("Grace", "work")]]);
+    const hub = new LinkHub(time.now, undefined, time.timers, null, undefined, undefined, { tenantSite: (id) => sites.get(id) });
+    const events: string[] = [];
+    const observe = (kind: string) => { events.push(kind + ":" + serverSite().human); };
+    const a = { ...A, tenant: "a" }, b = { ...A, tenant: "b" };
+    hub.start();
+    try {
+      await hub.joinPage({ send: () => observe("send"), close: () => observe("close"), ping: () => observe("ping") }, a);
+      const second = await hub.joinPage({ send: () => observe("send"), close: () => observe("close"), ping: () => observe("ping") }, b);
+      expect(events).toEqual(["send:Ada", "send:Ada", "send:Ada", "send:Grace", "send:Grace", "send:Grace"]);
+      events.length = 0;
+      await hub.beat();
+      expect(events).toEqual(["ping:Ada", "ping:Grace"]);
+      events.length = 0;
+      time.advance(DEAD_MS - 1);
+      second.pong();
+      time.advance(1);
+      expect(events.filter((event) => event.startsWith("close"))).toEqual(["close:Ada"]);
+      hub.restartSockets("b");
+      expect(events.at(-1)).toBe("close:Grace");
+      await expect(hub.joinCoordinator(peer(), { ...A, tenant: "a:b" })).rejects.toThrow("invalid link tenant");
+      await expect(hub.joinCoordinator(peer(), { ...A, tenant: "a\n" })).rejects.toThrow("invalid link tenant");
+    } finally {
+      hub.stop();
+    }
+  });
+
   it("recycles every short-lived page with real timers", async () => {
     const hub = new LinkHub(undefined, undefined, undefined, null, undefined, undefined, { maxAgeMs: 40 });
     const pages = Array.from({ length: 300 }, () => peer());

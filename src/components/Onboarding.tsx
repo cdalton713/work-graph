@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { usageEnabled } from "../lib/telemetry";
 import { accountApi } from "../api";
 import { configBlock, doneSteps, firstStep, pollWhileVisible, setupCommands, steps, workspaceKeyLocation, type NewTeam, type NewTeams, type Step } from "../lib/onboarding";
 import type { Account } from "../lib/types";
@@ -64,6 +65,16 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
     await refresh();
     overview();
   });
+  const continueTo = (next: Step) => {
+    if (usageEnabled() && (step === "workspaces" || step === "teams" || step === "setup") && done[step]) {
+      void accountApi.onboarding({ step }).catch(() => {});
+    }
+    setStep(next);
+  };
+  const finish = () => {
+    if (usageEnabled()) void accountApi.onboarding({ complete: true }).catch(() => {});
+    overview();
+  };
   return <main className="account-page">
     <div className="account-content">
       <div className="account-heading"><h1>Setup guide</h1><button onClick={skip} disabled={busy}>Skip for now</button></div>
@@ -123,9 +134,9 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
               {hasPendingTeam &&
                 <p>Waiting for <code>wg setup</code> to create your new team in Linear.</p>}
               <AccountError error={connectError} />
-              {canOpenOverview && <div><button className="primary" onClick={overview}>Go to overview</button></div>}
+              {canOpenOverview && <div><button className="primary" onClick={finish}>Go to overview</button></div>}
             </>}
-            {next && step !== "name" && <div><button onClick={() => setStep(next)}>Continue</button></div>}
+            {next && step !== "name" && <div><button onClick={() => continueTo(next)}>Continue</button></div>}
           </div>
         </section>
       </div>

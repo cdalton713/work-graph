@@ -2563,3 +2563,84 @@ describe("share a project with the viewer", () => {
     expect([failed.status, await failed.json()]).toEqual([502, { error: "Linear did not add the project label shared" }]);
   });
 });
+
+describe("usage events", () => {
+  const environment = {
+    DD_API_KEY: "test-intake-key", WG_TELEMETRY_WORKSPACES: "work",
+    WG_SESSION_SECRET: rolesAuth.secret,
+  };
+  const make = (telemetryEnv: NodeJS.ProcessEnv, workspaces = [workWorkspace()]) => createApp(hostedRoles, {
+    team: "WG", dist, workspaces, auth: rolesAuth, linkToken: rolesToken, watchMs: 0, telemetryEnv,
+  });
+
+  it.each([{}, { ...environment, WG_TELEMETRY_WORKSPACES: "" }])("disables telemetry without a key and a workspace list", async (env) => {
+    const response = await make(env).request("/api/config", { headers: rolesHost });
+    expect(await response.json()).toMatchObject({ telemetry: false });
+  });
+
+  it("sends only the selected config workspace and returns while the intake is still pending", async () => {
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const events: unknown[][] = [];
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const intakeStarted: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/graphql")) {
+        const work = new Headers(init.headers).get("authorization") === "work-key";
+        return Response.json({ data: {
+          viewer: { name: "Ada" }, organization: { id: work ? "org-id" : "other-id", name: "Workspace", urlKey: work ? "org" : "other" },
+          teams: { nodes: [{ key: "WG", name: "WG" }], pageInfo: { hasNextPage: false } },
+        } });
+      }
+      intakeStarted.push(url);
+      if (url.endsWith("/logs")) events.push(JSON.parse(String(init.body)));
+      await pending;
+      return new Response(environment.DD_API_KEY, { status: 403 });
+    }));
+    const tasks: Promise<void>[] = [];
+    const page = createApp(hostedRoles, {
+      team: "WG", dist, auth: rolesAuth, linkToken: rolesToken, watchMs: 0, telemetryEnv: environment,
+      waitUntil: (task) => tasks.push(task),
+      workspaces: [
+        { ...workWorkspace(), key: "work-key" },
+        { ...workWorkspace(), id: "other", key: "other-key" },
+      ],
+    });
+    try {
+      const headers = { ...(await rolesHeaders("ada@example.com", "usage-session")), origin: "https://view.example.com",
+        "content-type": "application/json" };
+      const post = (workspace: string) => page.request("/api/events", {
+        method: "POST", headers, body: JSON.stringify({ event: "node_opened", workspace }),
+      });
+      expect(await (await page.request("/api/config", { headers })).json()).toMatchObject({ telemetry: true });
+      expect((await post("work")).status).toBe(204);
+      expect((await post("other")).status).toBe(204);
+      await vi.waitFor(() => expect(intakeStarted).toHaveLength(2));
+      expect(events.flat()).toHaveLength(1);
+      // The refusal echoes the key in its body. Only a fixed warning reaches the server log.
+      release();
+      await Promise.all(tasks);
+      expect(warnings.mock.calls).toEqual([["Usage data could not be sent"]]);
+    } finally {
+      release();
+      await Promise.all(tasks);
+      page.link.stop();
+      warnings.mockRestore();
+    }
+  });
+
+  it("requires the page origin and a session, checks event names and limits a session to 60 events", async () => {
+    const page = make(environment);
+    const signed = await rolesHeaders("ada@example.com", "usage-session");
+    const post = (event: string, headers: Record<string, string>) => page.request("/api/events", {
+      method: "POST", headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ event, workspace: "other" }),
+    });
+    const origin = "https://view.example.com";
+    expect((await post("node_opened", signed)).status).toBe(403);
+    expect((await post("node_opened", { ...rolesHost, origin })).status).toBe(401);
+    expect((await post("unknown", { ...signed, origin })).status).toBe(400);
+    for (let i = 0; i < 60; i++) expect((await post("node_opened", { ...signed, origin })).status).toBe(204);
+    expect((await post("node_opened", { ...signed, origin })).status).toBe(429);
+  });
+});

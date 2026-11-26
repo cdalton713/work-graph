@@ -66,6 +66,13 @@ const migrations = [
     `ALTER TABLE tenants ADD COLUMN name_confirmed boolean NOT NULL DEFAULT false,
       ADD COLUMN onboarding_skipped boolean NOT NULL DEFAULT false`,
   ],
+  [
+    `ALTER TABLE tenants ADD COLUMN send_usage_data boolean NOT NULL DEFAULT true,
+      ADD COLUMN first_usage_connection boolean NOT NULL DEFAULT false,
+      ADD COLUMN usage_onboarding_complete boolean NOT NULL DEFAULT false`,
+    `UPDATE tenants t SET first_usage_connection = true WHERE EXISTS
+      (SELECT 1 FROM coordinator_tokens c WHERE c.tenant_id = t.id AND c.last_used_at IS NOT NULL)`,
+  ],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

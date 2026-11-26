@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { pageEvent, setUsageConsent } from "./lib/telemetry";
 import { accountApi, api, setOpenProject } from "./api";
 import { Onboarding } from "./components/Onboarding";
 import { AccountError, Settings, useAccountAction } from "./components/Settings";
@@ -63,6 +64,7 @@ export function ServiceApp() {
     const account = await accountApi.read();
     if (request === sequence.current) {
       configureSite({ human: account.human, defaultWorkspace: account.connections[0]?.workspace_id });
+      setUsageConsent(account.sendUsageData !== false);
       setAccount(account);
     }
     return account;
@@ -76,7 +78,15 @@ export function ServiceApp() {
   useEffect(() => {
     if (account && firstStep(account.onboarding)) setGuide(true);
   }, [account]);
-  if (account && page !== "settings" && !showGuide) return <App openSettings={() => route("settings")} />;
+  const signInWorkspace = account?.connections.find(({ kind }) => kind === "oauth")?.workspace_id;
+  const accountView = page === "settings" ? "settings_viewed" : showGuide ? "onboarding_viewed" : null;
+  const lastAccountView = useRef<typeof accountView>(null);
+  useEffect(() => {
+    if (!signInWorkspace || lastAccountView.current === accountView) return;
+    lastAccountView.current = accountView;
+    if (accountView) pageEvent(accountView, signInWorkspace);
+  }, [accountView, signInWorkspace]);
+  if (account && page !== "settings" && !showGuide) return <App openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
   return <div className="app">
     <header className="bar account-bar">
       <span className="brand">work-graph</span><span className="station-fill" />
@@ -94,7 +104,7 @@ export function ServiceApp() {
   </div>;
 }
 
-export function App({ openSettings }: { openSettings?: () => void } = {}) {
+export function App({ openSettings, overviewWorkspace = site.defaultWorkspace }: { openSettings?: () => void; overviewWorkspace?: string } = {}) {
   const [query, setQuery] = useQuery();
   const [directory, setDirectory] = useState<ProjectList | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
@@ -176,6 +186,16 @@ export function App({ openSettings }: { openSettings?: () => void } = {}) {
   // Each overview poll gives the directory new objects, so `project` gets a new identity with the same project.
   // The graph resets only when the open project is a different project: else each poll blanks the page.
   const openKey = project ? `${project.workspace}:${project.id}` : null;
+  const lastView = useRef<string | null>(null);
+  const workspace = project?.workspace ?? overviewWorkspace;
+  const wantedProject = query.get("project");
+  useEffect(() => {
+    if (wantedProject && !openKey) return;
+    const view = openKey ?? `overview:${workspace}`;
+    if (lastView.current === view) return;
+    lastView.current = view;
+    pageEvent(openKey ? "project_viewed" : "overview_viewed", workspace);
+  }, [openKey, workspace, wantedProject]);
   const currentProject = useRef(project);
   currentProject.current = project;
   useEffect(() => {
@@ -343,6 +363,13 @@ export function App({ openSettings }: { openSettings?: () => void } = {}) {
     const wanted = query.get("issue");
     return full?.nodes.find((n) => n.issue.identifier === wanted) ?? null;
   }, [full, query]);
+  const lastNode = useRef<string | null>(null);
+  const selectedId = selected && openKey ? `${openKey}:${selected.id}` : null;
+  useEffect(() => {
+    if (lastNode.current === selectedId) return;
+    lastNode.current = selectedId;
+    if (selectedId) pageEvent("node_opened", workspace);
+  }, [selectedId, workspace]);
   const select = useCallback((id: string | null) => {
     // A click pins the node. The canvas then shows the pinned state, not the trace of the pointer,
     // until the pointer goes onto a node again.

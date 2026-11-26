@@ -15,13 +15,13 @@ import { parseCard, statusName } from "../src/lib/graph.ts";
 import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from "../src/lib/link.ts";
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal } from "./access.ts";
-import { accountRoutes } from "./account.ts";
+import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
 import { type Auth, type Session, LOGIN_PATH, authRoutes, clearSessionCookie, sessionOf } from "./auth.ts";
 import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { LinearError, LinearKeyRequired, addComment, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
+import { LinearError, LinearKeyRequired, addComment, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, LinkHub, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
@@ -32,6 +32,8 @@ import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
 import { createSite, DEFAULT_HUMAN } from "../src/lib/site.ts";
 import { requestSite, serverSite } from "./site.ts";
+import { createTelemetry, type UsageScope, type UsageWorkspace } from "./telemetry.ts";
+import { pageEvents, type PageEvent } from "../src/lib/telemetry.ts";
 import { CONFIG_TENANT_ID, configTenants, TENANT_IDLE_MS, type Tenant, type Tenants } from "./tenants.ts";
 
 /** How many project graphs the overview loads at the same time. */
@@ -67,6 +69,8 @@ async function json<T>(body: Promise<T>): Promise<T> {
 export interface AppOptions {
   tenants?: Tenants;
   linearAuth?: LinearAuth;
+  telemetryEnv?: NodeJS.ProcessEnv;
+  waitUntil?: (job: Promise<void>) => void;
   serviceReady?: () => Promise<boolean | string>;
   /** The configured workspaces; the first is the default. */
   workspaces?: Workspace[];
@@ -150,7 +154,7 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
 export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, linkMaxAgeMs, linkPongMs, human, stateDir = process.env.WG_STATE_DIR || undefined,
-  version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linearAuth, serviceReady, linkToken, linkState, linkBus, redisUrl, redisPrefix, tenants, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
+  version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linearAuth, serviceReady, telemetryEnv = process.env, waitUntil, linkToken, linkState, linkBus, redisUrl, redisPrefix, tenants, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   if (linkToken && [...linkToken].length < 32) {
     throw new Error("WG_LINK_TOKEN must have at least 32 characters");
   }
@@ -170,6 +174,33 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const siteOf = (tenant: Tenant) => createSite(tenant.human, tenant.workspaces[0]?.id ?? "default");
   const installationSite = createSite(human ?? DEFAULT_HUMAN, workspaces[0]?.id ?? "default");
   const clock = now ?? Date.now;
+  const telemetry = createTelemetry(telemetryEnv, tenants ? "service" : "config", waitUntil, undefined, clock);
+  const configIdentities = new WeakMap<Workspace, Promise<UsageWorkspace | null>>();
+  async function usageScope(tenant: Tenant, workspace?: Workspace): Promise<UsageScope | null> {
+    if (tenants) {
+      const account = await (await accountStore?.())?.readTenant(tenant.id);
+      const selected = workspace && account?.connections.find((entry) => entry.workspaceId === workspace.id);
+      return account ? accountUsage(account, workspace ? selected ?? null : undefined) : null;
+    }
+    if (!workspace?.key) return null;
+    let pending = configIdentities.get(workspace);
+    if (!pending) {
+      pending = readLinearTeams(workspace.key, "api_key", true)
+        .then(({ identity }) => ({ id: identity.workspaceId, organization: identity.organization }))
+        .catch(() => { configIdentities.delete(workspace); return null; });
+      configIdentities.set(workspace, pending);
+    }
+    const identity = await pending;
+    return identity ? {
+      tenant: tenant.id, enabled: true, workspace: { ...identity, configId: workspace.id },
+    } : null;
+  }
+
+  function firstConnection(tenant: Tenant) {
+    if (!accountStore || !telemetry) return;
+    telemetry.emit("first_connection", {}, () => usageScope(tenant), tenant.id,
+      async () => (await accountStore())?.claimFirstConnection(tenant.id) ?? false);
+  }
   const readSession = (c: Parameters<typeof sessionOf>[0]) =>
     linearAuth ? linearSessionOf(c, linearAuth, clock) : auth ? sessionOf(c, auth, clock) : null;
   const started = clock();
@@ -243,6 +274,20 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       void requestSite.run(installationSite, flushLogouts);
     } else if (hub.hasSockets) hub.restartSockets();
   }, readOnly, undefined, () => hub.hasSockets) : null;
+  const eventLimit = attemptLimit({ redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX, now: clock }, "usage-events:", 60_000, 60);
+  const projectDays = new Set<string>();
+  let lastProjectDay = -1;
+  async function firstToday(organization: string, project: string) {
+    const day = Math.floor(clock() / 86_400_000);
+    const key = digest(JSON.stringify([day, organization, project])).toString("hex");
+    if (redis) {
+      return (await redis.run((client) => client.set((linkPrefix ?? LINK_PREFIX) + "usage-project:" + key, "1", "EX", 86_400, "NX"))) === "OK";
+    }
+    if (lastProjectDay !== day) { projectDays.clear(); lastProjectDay = day; }
+    if (projectDays.has(key)) return false;
+    projectDays.add(key);
+    return true;
+  }
   const redisState = redis ? redisLinkState(redis, linkPrefix, undefined, linkMaxAgeMs ? RECONNECT_GRACE_MS : 0) : null;
   if (redis && stateDir) console.log("Redis link store ignores WG_STATE_DIR");
   const store = tenants || redis || linkState ? null : linkStore(stateDir, dist, workspaces, (linkTimers ?? realLinkTimers).after);
@@ -485,7 +530,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         if (state) state.lastUsed = clock();
       }
       return c.json<SiteConfig & { linkStore?: ServerStatus["linkStore"] }>({
-        human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version,
+        human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version, telemetry: !!telemetry,
         readOnly: viewer, auth: !!(auth || linearAuth), user: membership && !disconnected ? session?.email ?? null : null,
         role: disconnected ? null : role, ...(linearAuth ? { signIn: "linear" as const } : {}),
         linkStore: readOnly ? undefined : redis ? "redis" : "memory",
@@ -496,7 +541,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       ? await directory.fromToken(header("authorization")) : null;
     const tenant = tokenTenant ?? membership?.tenant;
     if (!tenant) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
-    if (tenants && tokenTenant) checkLinkTenant(tokenTenant.id);
+    if (tenants && tokenTenant) { checkLinkTenant(tokenTenant.id); firstConnection(tokenTenant); }
     const listsWorkspaces = /^\/api\/(status|projects|overview)$/.test(c.req.path);
     const selected = listsWorkspaces ? undefined : header("x-workspace");
     const id = selected || tenant.workspaces[0]?.id;
@@ -905,6 +950,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
                 (p) => p.workspace === project.workspace && p.id === project.id);
             }, resume, tenantId)
             : await hub.joinPage(peer, ref, resume, tenantId);
+          if (role === "coordinator" && current() && telemetry) {
+            const selected = tenant.workspaces.find((workspace) => workspace.id === ref!.workspace);
+            if (selected) telemetry.emit("coordinator_connected", {}, () => usageScope(tenant, selected), tenant.id,
+              ({ workspace }) => firstToday(workspace.organization, ref!.id));
+            firstConnection(tenant);
+          }
           if (!current()) {
             ws.close(RESTART_CODE, "server restart");
             await connection.closed();
@@ -921,6 +972,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   if (accountStore) {
     app.route("/api/account", accountRoutes({
       now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX,
+      telemetry,
       pageUrl: rules.hosted ? `https://${rules.hosted.host}` : `http://localhost:${rules.port}`,
       async endSession(c, session) {
         await signOut(session);
@@ -942,6 +994,31 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }));
   }
   app.all("/api/account/*", (c) => c.json({ error: "Account route not found" }, 404));
+  app.post("/api/events", bodyLimit({ maxSize: 1024 }), async (c) => {
+    const reason = refusal(c.req.method, (name) => c.req.header(name), rules);
+    if (reason) return c.json({ error: reason }, 403);
+    const session = await readSession(c);
+    const membership = session && await sessionActive(session) ? await directory.fromSession(session) : null;
+    if (!session || !membership) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    const body = await c.req.json<{ event?: unknown; workspace?: unknown }>().catch(() => null);
+    if (typeof body?.event !== "string" || !Object.hasOwn(pageEvents, body.event) || typeof body.workspace !== "string") {
+      return c.json({ error: "Invalid usage event" }, 400);
+    }
+    if (!telemetry) return c.body(null, 204);
+    const retry = await eventLimit(session.id);
+    if (retry > 0) {
+      c.header("Retry-After", String(Math.ceil(retry / 1000)));
+      return c.json({ error: "Too many usage events" }, 429);
+    }
+    const { tenant } = membership;
+    const workspace = tenant.workspaces.find(({ id }) => id === body.workspace);
+    if (workspace && !(membership.role === "viewer" && workspace.rejectApiKey)) {
+      const role = readOnly ? "viewer" : membership.role;
+      const event = pageEvents[body.event as PageEvent];
+      telemetry.emit(event.event, { ...event.fields, role }, () => usageScope(tenant, workspace), tenant.id);
+    }
+    return c.body(null, 204);
+  });
   app.route("/api", api);
   if (auth || linearAuth) {
     // The sign-in answers only under the name of the page, as the API does.
@@ -951,7 +1028,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       await next();
     });
     const origin = () => `https://${rules.hosted!.host}`;
-    app.route("/auth", linearAuth ? linearAuthRoutes(linearAuth, origin, clock, tenants!.signIn!, signOut) : authRoutes(auth!, origin, clock, signOut));
+    app.route("/auth", linearAuth ? linearAuthRoutes(linearAuth, origin, clock, tenants!.signIn!, signOut, telemetry ? (id, workspace, created, enabled) => {
+      const resolve = async () => enabled && await (await accountStore?.())?.usageConsent(id)
+        ? { tenant: id, workspace, enabled: true } : null;
+      if (created) telemetry.emit("sign_up", {}, resolve, id);
+      telemetry.emit("sign_in", {}, resolve, id);
+    } : undefined) : authRoutes(auth!, origin, clock, signOut));
   }
 
   app.get("*", async (c) => {

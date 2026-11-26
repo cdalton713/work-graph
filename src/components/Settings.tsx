@@ -1,3 +1,4 @@
+import { setUsageConsent } from "../lib/telemetry";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { accountApi } from "../api";
 import { validateNewTeam, type NewTeam } from "../lib/onboarding";
@@ -258,6 +259,18 @@ function WorkspaceSettings({ workspace, count, refresh }: { workspace: AccountCo
 export function Settings({ account, refresh, openGuide }: { account: Account; refresh: RefreshAccount; openGuide: () => void }) {
   const [dialog, setDialog] = useState<"attach" | "token" | "delete" | null>(null);
   const [revoke, setRevoke] = useState<Account["tokens"][number] | null>(null);
+  const usage = useAccountAction();
+  const updateConsent = (consent: boolean) => void usage.run(async () => {
+    if (!consent) setUsageConsent(false);
+    try {
+      await accountApi.saveUsageConsent(consent);
+    } catch (error) {
+      setUsageConsent(account.sendUsageData !== false);
+      throw error;
+    }
+    setUsageConsent(consent);
+    await refresh();
+  });
   const date = (value: string) => new Date(value).toLocaleString();
   return <main className="account-page">
     <div className="account-content">
@@ -265,6 +278,12 @@ export function Settings({ account, refresh, openGuide }: { account: Account; re
       <section className="account-card">
         <h2>Name</h2>
         <NameForm human={account.human} refresh={refresh} />
+      </section>
+      <section className="account-card">
+        <h2>Usage data</h2>
+        <label className="account-check"><input type="checkbox" checked={account.sendUsageData !== false}
+          disabled={usage.busy} onChange={(event) => updateConsent(event.currentTarget.checked)} /> Send usage data</label>
+        <AccountError error={usage.error} />
       </section>
       <section className="account-card">
         <h2>Linear workspaces</h2>

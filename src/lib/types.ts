@@ -91,6 +91,7 @@ export interface Card {
 
 /** `GET /api/config`: what the page needs before its first render, and what a deploy check compares. */
 export interface SiteConfig {
+  telemetry?: boolean;
   human: string; defaultWorkspace: string;
   /** The first 12 hex characters of the SHA-256 of `skills/work-graph/contract.json`, as `wg` computes it. Null: the file is missing. */
   contract: string | null;
@@ -154,6 +155,7 @@ export interface CoordinatorToken {
 }
 
 export interface Account {
+  sendUsageData: boolean;
   human: string;
   pageUrl: string;
   connections: AccountConnection[];

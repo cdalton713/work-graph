@@ -396,6 +396,19 @@ Use Linear organization IDs in `WG_ALLOWED_ORGS` for a stable sign-up list. Work
 
 The setup guide leads you through your name, Linear workspaces and teams, local `wg` setup, and the first connection. Use Settings to change these details, manage tokens, reopen the guide, or delete your account. To try the guide with a temporary database and stub Linear, run `pnpm build` and `pnpm service:dev`. Open the loopback address shown in the terminal. Use `lin_api_example00000000000000000000` to attach the second workspace. Stop the preview with Ctrl-C.
 
+## Usage data
+
+Usage data is off by default. To enable it, set these values in the server environment.
+
+- `DD_API_KEY` is the Datadog intake key. Keep it secret.
+- `WG_TELEMETRY_WORKSPACES` lists the Linear workspaces to include. Use a comma or space between entries. An entry can be a Linear organization ID or URL key. A config installation also accepts the workspace ID from the config.
+- `DD_SITE` selects the Datadog site. The default is `datadoghq.com`.
+- `WG_SESSION_SECRET` must have at least 32 characters. The server derives a separate key from this secret to hash account and workspace IDs.
+
+The server sends count metrics and logs for sign-ups, sign-ins, account changes, setup progress, coordinator connections, page views, node opens, and types of page writes. Account events use the Linear workspace for sign-in. Other events use the workspace where the action occurred. Logs contain hashed account and workspace IDs. The data contains no names, email addresses, project or issue IDs, issue text, or tokens. The page sends its events through the server. The `wg` CLI sends no usage data.
+
+To turn off usage data for the installation, remove `DD_API_KEY` or clear `WG_TELEMETRY_WORKSPACES`. In service mode, turn off **Send usage data** in Settings to stop sending events for your account.
+
 ## Host a read-only viewer
 
 A viewer is a second deployment of the page for other people: they sign in and read the projects that you

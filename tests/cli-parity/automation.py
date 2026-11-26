@@ -157,6 +157,13 @@ print("fixture")
             assert "installed and current" in cli("agents", "--install")
             assert [args[1] for args in events()[count:]] == ["list", "inspect"]
 
+        registration["source"]["reference"] = str(generation / "orca-plugin")
+        (home / "registration").write_text(json.dumps(registration))
+        assert "--approve one" in cli("agents", "--install", code=3)
+        assert events()[-1][1:3] == ["install", str(current / "orca-plugin")]
+        cli("agents", "--install", "--approve", "one")
+        assert json.loads((home / "registration").read_text())["source"]["reference"] == str(current / "orca-plugin")
+
 
 if __name__ == "__main__":
     run()

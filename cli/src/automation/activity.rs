@@ -290,7 +290,12 @@ pub fn plugin(
     let inspected = plugin_result("inspect", &plugin_reply(&["plugin", "inspect", folder])?)?;
     let mut args = vec!["plugin", "install", folder];
     if let Some(p) = installed {
-        if p["source"]["contentHash"] == inspected["contentHash"] && p["needsReconsent"] != true {
+        let source_matches = p["source"]["reference"] == folder;
+        let managed = install_dir == home()?.join(".local/share/work-graph/current/orca-plugin");
+        if (!managed || source_matches)
+            && p["source"]["contentHash"] == inspected["contentHash"]
+            && p["needsReconsent"] != true
+        {
             writeln!(
                 out,
                 "the Orca plugin {} is installed and current ({})",
@@ -299,7 +304,7 @@ pub fn plugin(
             )?;
             return Ok(0);
         }
-        if p["source"]["reference"] == folder {
+        if source_matches {
             args = vec!["plugin", "update", text(&p["pluginKey"])];
         }
     }

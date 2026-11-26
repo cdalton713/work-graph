@@ -25,6 +25,19 @@ A dispatch spec (`wg dispatch`) starts with one line that gives the time when `w
 9. New work you find: create an issue in the plan's team in status `Triage`, in project `{project}`, related to `{identifier}`. Do not do it now.
 10. Send one `worker_done` for each job: this dispatch and each follow-up job. `--outcome succeeded` only if the PR is open, `wg evidence` exited 0 on the pushed head (or failed only on the known failures on the base), and `{wg} owns diff {plan_dir} {key} {lower}` exits 0. Body: PR URL and head SHA; the check commands and results; what is left. Add `--files-modified` with the PR diff files. Otherwise `--outcome failed` with the failing command and its first error, also when no PR exists.
 
+Use this form for an Orca ask, or for a waiting comment that asks the human to choose.
+
+For a choice, put the question and any context first. Leave a blank line, then end the message with an `Options:` block. Give two to four options. Use one line per option in the form `- Label: Effect`. Add ` (Recommended: Reason)` to exactly one line. Use distinct labels without colons.
+
+```text
+When should we start?
+
+Options:
+- Start today: Open the new workflow now. (Recommended: The checks passed.)
+- Wait: Keep the current schedule.
+```
+
+
 ## submit lane
 
 Immediately before each `st branch submit`, run `{wg} base {plan_dir}`. It fast-forwards the frozen target branch to `origin` (never a reset or a merge), so stax does not refuse the submit with `Parent branch … is not in sync`. A `FAIL base` line: send an `escalation` with that line and stop; never fast-forward, reset, or sync the base yourself.

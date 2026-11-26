@@ -583,7 +583,7 @@ fn coordinator_replays_state_after_planned_close_and_bounds_idle_wait() {
 }
 
 #[test]
-fn preview_refuses_missing_providers_and_invite_links_before_writes() {
+fn preview_refuses_unshared_pull_and_invite_links_before_writes() {
     let dir = tempfile::tempdir().unwrap();
     for args in [
         &["pull", "."][..],
@@ -602,7 +602,7 @@ fn preview_refuses_missing_providers_and_invite_links_before_writes() {
         assert!(message.contains(if args[0] == "join" {
             "browser"
         } else {
-            "providers"
+            "not shared"
         }));
     }
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);

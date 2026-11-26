@@ -254,6 +254,10 @@ fn validate(config: &Value) -> io::Result<()> {
 }
 
 impl Config {
+    pub fn settings(&self) -> &Value {
+        &self.values
+    }
+
     pub fn discover() -> io::Result<Self> {
         let path = env::var_os("WG_CONFIG")
             .filter(|s| !s.is_empty())
@@ -283,7 +287,7 @@ impl Config {
         overlay(&mut config, &data)?;
         let list = config["workspaces"]
             .as_array_mut()
-            .ok_or_else(|| problem("workspaces must be a list"))?;
+            .ok_or_else(|| problem("workspaces must be an array"))?;
         if list.is_empty() {
             list.push(default.clone());
         }
@@ -296,6 +300,15 @@ impl Config {
                 return Err(problem(
                     "each workspace needs a unique id of a-z, 0-9 and -",
                 ));
+            }
+            if !w["team"].is_null() && !w["team"].is_string() {
+                return Err(problem("workspace team must be a string or null"));
+            }
+            if !w["key_env"]
+                .as_array()
+                .is_some_and(|names| names.iter().all(Value::is_string))
+            {
+                return Err(problem("workspace key_env must be an array of names"));
             }
             *value = w;
         }
@@ -315,6 +328,11 @@ impl Config {
             }
         })?;
         let keymap = load_keymap(dir)?;
+        self.normalize(&mut plan, &keymap)?;
+        Ok(plan)
+    }
+
+    pub fn normalize(&self, plan: &mut Value, keymap: &Value) -> io::Result<()> {
         let effort = plan
             .get_mut("effort")
             .filter(|e| e.is_object())
@@ -381,7 +399,7 @@ impl Config {
             .unwrap()
             .entry("edges")
             .or_insert_with(|| json!([]));
-        Ok(plan)
+        Ok(())
     }
 
     pub fn report(&self, dir: Option<&Path>) -> io::Result<Value> {
@@ -422,7 +440,18 @@ impl crate::ConfigProvider for Config {
             .unwrap()
             .iter()
             .find(|w| w["id"] == workspace)
-            .ok_or_else(|| invalid("unknown workspace"))?;
+            .ok_or_else(|| {
+                invalid(format!(
+                    "unknown workspace {workspace}: choose one of {}",
+                    self.values["workspaces"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|row| row["id"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
         let page_url = env::var("WG_UI_URL")
             .ok()
             .filter(|s| !s.is_empty())

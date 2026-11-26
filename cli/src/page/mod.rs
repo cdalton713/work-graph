@@ -242,16 +242,24 @@ where
         Command::Logout { page_url } => {
             auth::logout(&settings, page_url.as_deref()).map(Output::success)
         }
-        command => collaboration::run(
-            command,
-            config,
-            credentials,
-            stores.ok_or("the collaboration providers are unavailable")?,
-        ),
+        command => {
+            let installation;
+            let stores = match stores {
+                Some(stores) => stores,
+                None => {
+                    installation = crate::linear::Installation::load()?;
+                    &installation
+                }
+            };
+            collaboration::run(command, config, credentials, stores)
+        }
     }
 }
 
 pub fn preview(args: &[String]) -> Result<Output> {
-    let config = auth::Installation::load()?;
-    run(args, &config, &config, None)
+    let config = crate::linear::Installation::load()?;
+    let settings = crate::providers::PageSettings(&config);
+    run(args, &settings, &config, Some(&config))
 }
+
+pub(crate) use collaboration::save_run_keymap;

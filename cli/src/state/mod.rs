@@ -48,12 +48,12 @@ pub fn load_keymap(dir: &Path) -> io::Result<Value> {
 
 /// Hold this guard across the complete read-modify-write operation. Pass it to
 /// nested operations so they share the same directory lock.
-pub struct PlanLock<'a> {
-    dir: &'a Path,
+pub struct PlanLock {
+    dir: std::path::PathBuf,
     directory: File,
 }
-impl<'a> PlanLock<'a> {
-    pub fn acquire(dir: &'a Path, wait: Option<Duration>) -> io::Result<Self> {
+impl PlanLock {
+    pub fn acquire(dir: &Path, wait: Option<Duration>) -> io::Result<Self> {
         let directory = File::open(dir)?;
         if let Some(wait) = wait {
             let start = Instant::now();
@@ -77,7 +77,10 @@ impl<'a> PlanLock<'a> {
         } else {
             directory.lock()?;
         }
-        Ok(Self { dir, directory })
+        Ok(Self {
+            dir: dir.to_owned(),
+            directory,
+        })
     }
 
     /// Replace the local keymap file. The caller handles journal and collaboration updates.
@@ -94,7 +97,7 @@ impl<'a> PlanLock<'a> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => 0o644,
             Err(e) => return Err(e),
         };
-        let mut temp = NamedTempFile::new_in(self.dir)?;
+        let mut temp = NamedTempFile::new_in(&self.dir)?;
         write_pretty_json(&mut temp, data)?;
         temp.as_file()
             .set_permissions(Permissions::from_mode(mode))?;

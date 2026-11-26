@@ -1001,3 +1001,55 @@ fn pull(
     lines.push(format!("note plan v{version} by {writer}"));
     Ok(lines.join("\n"))
 }
+
+/// Save the run row and record unpublished changes before contacting the page.
+pub(crate) fn save_run_keymap(
+    dir: &Path,
+    guard: &crate::state::PlanLock,
+    plan: &Value,
+    km: &mut Value,
+) -> Result<()> {
+    let effort = crate::providers::Effort::borrowed(dir, guard);
+    if !km["collab"].is_object() {
+        return effort.save_keymap(km);
+    }
+    let before = effort.keymap()?;
+    if let Some(rows) = km["run"]["nodes"].as_object() {
+        let mut changes = Vec::new();
+        for (key, row) in rows {
+            if km["nodes"].get(key).is_none() {
+                continue;
+            }
+            for field in ["branch", "pr"] {
+                if truthy(&row[field]) && before["run"]["nodes"][key][field] != row[field] {
+                    changes.push((key.clone(), field, row[field].clone()));
+                }
+            }
+        }
+        for (key, field, value) in changes {
+            km["nodes"][key][field] = value
+        }
+    }
+    let old = shared(&before)?;
+    let changed = shared(km)? != old;
+    if changed && km["collab"].get("pending").is_none() {
+        km["collab"]["pending"] = old
+    }
+    effort.save_keymap(km)?;
+    if changed {
+        let publish = || -> Result<()> {
+            let config = crate::linear::Installation::load()?;
+            let scope = plan["effort"]["workspace"]
+                .as_str()
+                .unwrap_or(field(&config.workspaces()[0], "id")?);
+            let settings = crate::providers::PageSettings(&config).resolve(scope)?;
+            let page = connect(&settings, &config, &km["collab"], scope)?;
+            publish_pending(&page, &effort, &effort.read()?, &config, scope)
+        };
+        if let Err(e) = publish() {
+            eprintln!("warn: shared keymap changes are pending ({e})")
+        }
+        *km = effort.keymap()?;
+    }
+    Ok(())
+}

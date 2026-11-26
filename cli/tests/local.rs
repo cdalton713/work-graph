@@ -34,29 +34,30 @@ fn recorded_local_commands() {
     )
 }
 #[test]
-fn mapped_changes_require_a_provider_before_any_write() {
+fn mapped_changes_persist_after_credential_failure() {
     let root = fixture();
     let dir = root.path();
-    let keymap = fs::read(dir.join("keymap.json")).unwrap();
-    let journal = fs::read(dir.join("journal.jsonl")).unwrap();
     for (mode, args) in [
         ("set", vec!["a", "branch=wg/example"]),
         ("reset", vec!["a"]),
     ] {
         let o = Command::new(BIN)
+            .env_clear()
+            .env("HOME", dir)
             .env("WG_CONFIG", dir.join("config"))
             .args(["run", mode])
             .arg(dir)
             .args(args)
             .output()
             .unwrap();
-        assert_eq!(o.status.code(), Some(1));
+        assert!(o.status.success());
+        assert!(String::from_utf8_lossy(&o.stderr).contains("node card not updated"));
+        let data = km(dir);
+        assert!(data["nodes"]["a"]["card"].is_null());
         assert_eq!(
-            o.stderr,
-            b"mapped run writes require the Linear card provider\n"
+            data["run"]["nodes"]["a"]["branch"].as_str(),
+            (mode == "set").then_some("wg/example")
         );
-        assert_eq!(fs::read(dir.join("keymap.json")).unwrap(), keymap);
-        assert_eq!(fs::read(dir.join("journal.jsonl")).unwrap(), journal);
     }
 }
 #[test]

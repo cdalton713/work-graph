@@ -235,6 +235,16 @@ fn execute(args: &[String], cards: Option<&mut dyn CardWriter>) -> Result<u8> {
         None
     };
     let cfg = Config::discover().map_err(|e| (Failure::Io(1, e.kind()), e.to_string()))?;
+    if let Some(guard) = &lock {
+        use crate::page::LockedEffort;
+        let effort = crate::providers::Effort::borrowed(dir, guard);
+        if effort.keymap().map_err(failed)?["collab"]
+            .get("pull_pending")
+            .is_some()
+        {
+            effort.read().map_err(failed)?;
+        }
+    }
     let p = cfg.load_plan(dir).map_err(ioerr)?;
     let config = cfg.report(None).map_err(ioerr)?;
     match verb.as_str() {
@@ -244,4 +254,8 @@ fn execute(args: &[String], cards: Option<&mut dyn CardWriter>) -> Result<u8> {
         "run" => rows::run(mode, dir, &p, args, lock.as_ref(), cards, &config),
         _ => Err(invalid("invalid command arguments")),
     }
+}
+
+pub(crate) fn check_plan(plan: &Value, report: &Value) -> bool {
+    graph::check(plan, report) == 0
 }

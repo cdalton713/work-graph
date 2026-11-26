@@ -1,6 +1,7 @@
-import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useCoarse, useHover } from "../lib/screen";
 import type { Signal } from "../lib/graph";
 import type { PullRequest } from "../lib/types";
 
@@ -156,4 +157,128 @@ export function Rich({ text }: { text: string }) {
   }
   if (at < text.length) parts.push(<Markdown key={at} remarkPlugins={[remarkGfm]} components={markdownComponents}>{text.slice(at)}</Markdown>);
   return <div className="rich">{parts}</div>;
+}
+
+/** Use infoLabel when the child has its own action. It names the separate hint button. */
+export function Hint({ text, children, className, infoLabel }: {
+  text: string;
+  children: ReactNode;
+  className?: string;
+  infoLabel?: string;
+}) {
+  const hover = useHover();
+  const coarse = useCoarse();
+  const id = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const popover = useRef<HTMLSpanElement>(null);
+  const nativeTitle = hover && !coarse;
+
+  function position() {
+    const anchor = trigger.current;
+    const tip = popover.current;
+    if (!anchor || !tip?.matches(":popover-open")) return;
+
+    const gap = 8;
+    const viewport = window.visualViewport;
+    const left = viewport?.offsetLeft ?? 0;
+    const top = viewport?.offsetTop ?? 0;
+    const width = viewport?.width ?? document.documentElement.clientWidth;
+    const height = viewport?.height ?? document.documentElement.clientHeight;
+    const anchorRect = anchor.getBoundingClientRect();
+    tip.style.maxWidth = `min(28ch, ${Math.max(0, width - gap * 2)}px)`;
+    tip.style.maxHeight = `${Math.max(0, height - gap * 2)}px`;
+    const tipRect = tip.getBoundingClientRect();
+    const below = anchorRect.bottom + gap;
+    const above = anchorRect.top - tipRect.height - gap;
+    const y = below + tipRect.height <= top + height - gap ? below : above;
+    tip.style.left = `${Math.max(left + gap, Math.min(anchorRect.left, left + width - tipRect.width - gap))}px`;
+    tip.style.top = `${Math.max(top + gap, Math.min(y, top + height - tipRect.height - gap))}px`;
+  }
+
+  useEffect(() => {
+    if (nativeTitle) return;
+    const viewport = window.visualViewport;
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    viewport?.addEventListener("resize", position);
+    viewport?.addEventListener("scroll", position);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+      viewport?.removeEventListener("resize", position);
+      viewport?.removeEventListener("scroll", position);
+    };
+  }, [nativeTitle]);
+
+  if (nativeTitle) return <span className={className} title={text}>{children}</span>;
+
+  return <span className={className ? `hint ${className}` : "hint"}>
+    {infoLabel && children}
+    <button type="button" className="hint-trigger"
+      aria-label={infoLabel} aria-describedby={id} popoverTarget={id} ref={trigger}>
+      {infoLabel ? <span className="hint-mark" aria-hidden>i</span> : children}
+    </button>
+    <span id={id} className="hint-popover" role="tooltip" popover="auto" ref={popover} onToggle={position}>
+      {text}
+    </span>
+  </span>;
+}
+
+/** A modal panel anchored to the bottom of the window. */
+export function Sheet({ open, title, onClose, children }: {
+  open: boolean;
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const backdropPress = useRef(false);
+  const heading = useId();
+
+  useLayoutEffect(() => {
+    const panel = dialog.current;
+    if (!open || !panel) return;
+    panel.showModal();
+    return () => panel.close();
+  }, [open]);
+
+  function keepTabInside(event: KeyboardEvent<HTMLDialogElement>) {
+    if (event.key !== "Tab" || event.defaultPrevented) return;
+    const controls = [...event.currentTarget.querySelectorAll<HTMLElement>(
+      "a[href], button, input, select, textarea, [tabindex], [contenteditable]",
+    )].filter((control) => control.tabIndex >= 0 && !control.matches(":disabled")
+      && control.getClientRects().length && getComputedStyle(control).visibility === "visible");
+    const first = controls.at(0);
+    const last = controls.at(-1);
+    const active = document.activeElement;
+    if (event.shiftKey ? active === first : active === last) {
+      event.preventDefault();
+      (event.shiftKey ? last : first)?.focus();
+    }
+  }
+
+  function outside(panel: HTMLDialogElement, x: number, y: number) {
+    const rect = panel.getBoundingClientRect();
+    return x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom;
+  }
+
+  return <dialog ref={dialog} className="sheet" aria-labelledby={heading} onKeyDown={keepTabInside}
+    onCancel={(event) => { event.preventDefault(); onClose(); }}
+    onPointerDown={(event) => {
+      backdropPress.current = event.target === event.currentTarget
+        && outside(event.currentTarget, event.clientX, event.clientY);
+    }}
+    onClick={(event) => {
+      if (backdropPress.current && event.target === event.currentTarget
+        && outside(event.currentTarget, event.clientX, event.clientY)) onClose();
+      backdropPress.current = false;
+    }}>
+    <div className="sheet-layout">
+      <header className="sheet-header">
+        <h2 id={heading}>{title}</h2>
+        <button type="button" className="sheet-close" aria-label="Close" onClick={onClose} autoFocus>×</button>
+      </header>
+      <div className="sheet-body">{children}</div>
+    </div>
+  </dialog>;
 }

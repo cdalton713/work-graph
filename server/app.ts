@@ -652,6 +652,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     return selected ? Promise.resolve([selected]) : directory.sharedWorkspaces?.(tenant.id) ?? Promise.resolve([]);
   };
   const unknownWorkspace = (id: string) => ({ error: `workspace ${id} is not configured` });
+  const isAgentReply = (path: string) => /^\/api\/projects\/[^/]+\/agents\/[^/]+\/reply\/?$/.test(path);
   app.use(async (c, next) => {
     const id = c.req.header("x-workspace");
     if (!directory.sharedWorkspaces || !id?.startsWith("shared:")) return next();
@@ -669,6 +670,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const entry = account && (await directory.sharedWorkspaces(account.id)).find((workspace) => workspace.id === id);
     if (!account || !entry || lookupRevision !== revision) return c.json(unknownWorkspace(id), 400);
     if (coordinator && entry.role !== "collaborator") return c.json({ error: "Only collaborators can connect a coordinator." }, 403);
+    if (c.req.method === "POST" && isAgentReply(c.req.path)) return c.json({ error: "Only the project owner can reply to agents" }, 403);
     if (!read && (readOnly || entry.role === "viewer")) return c.json({ error: "this page is read-only" }, 405);
     const reason = refusal(c.req.method, header, rules);
     if (reason) return c.json({ error: reason }, 403);
@@ -720,6 +722,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (tenants && membership) checkLinkTenant(membership.tenant.id);
     const role = membership?.role ?? null;
     const viewer = readOnly || role === "viewer";
+    if (viewer && method === "POST" && isAgentReply(c.req.path)) return c.json({ error: "Only the project owner can reply to agents" }, 403);
     if (viewer && method !== "GET" && method !== "HEAD") return c.json({ error: "this page is read-only" }, 405);
     const reason = refusal(method, header, rules);
     if (reason) return c.json({ error: reason }, 403);
@@ -922,6 +925,16 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const version = waitNames ? `${graphVersion}:${createHash("sha256").update(JSON.stringify(waitNames)).digest("hex")}` : graphVersion;
     if (!stale && c.req.query("have") === version) return c.body(null, 204);
     return c.json({ ...shown(data, viewer || !!shared), ...(waitNames && { waitNames }), version, workspace: shared?.id ?? linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
+  });
+  api.post("/projects/:id/agents/:agent/reply", async (c) => {
+    const input = await json(c.req.json<{ body?: unknown } | null>());
+    const body = input?.body;
+    if (typeof body !== "string" || !body.trim() || [...body].length > 4000) {
+      return c.json({ error: "Reply text must contain 1 to 4000 characters" }, 400);
+    }
+    const ref = currentRoom({ workspace: linearWorkspace.getStore()!.id, id: c.req.param("id") });
+    const reply = await hub.queueAgentReply(ref, c.req.param("agent"), body);
+    return reply.status === 202 ? c.json({ id: reply.id }, 202) : c.json({ error: reply.error }, reply.status);
   });
   api.post("/projects/:id/close", async (c) => {
     const { confirm } = await json(c.req.json<{ confirm?: unknown }>());

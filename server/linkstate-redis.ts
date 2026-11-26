@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Envelope } from "../src/lib/link.ts";
-import { emptyRoom, expireReconnectGrace, pruneRoom, roomAccounts, QUEUE_MAX, roomKey as refKey, type RoomRef, type Coordinator, type MemberAccount, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
+import { emptyRoom, expireRoomAgentReplies, expireReconnectGrace, pruneRoom, roomAccounts, QUEUE_MAX, roomKey as refKey, type RoomRef, type Coordinator, type MemberAccount, type LinkRoom, type LinkRoomState, type PrunedRoom } from "./linkstate.ts";
 import { LINK_PREFIX, type RedisLink } from "./redis.ts";
 import { ASKS_MAX } from "./store.ts";
 
@@ -277,7 +277,7 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
       });
     },
     async prune(cutoff, now) {
-      const changed: LinkRoom[] = [];
+      const changed: PrunedRoom[] = [];
       const keys = await roomKeys();
       const min = keys.length ? await pageCutoff() : "+inf";
       for (const roomKey of keys) {
@@ -286,9 +286,11 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
         const result = await update(roomKey, null, (room, expired) => {
           if (!pruneRoom(room, cutoff) && pages === 0) return false;
           const graceExpired = now !== undefined && expireReconnectGrace(room, now);
-          return expired || graceExpired ? room : true;
+          const agentReplyExpirations = now === undefined ? [] : expireRoomAgentReplies(room, now);
+          if (expired || graceExpired || agentReplyExpirations.length) return { room, agentReplyExpirations };
+          return true;
         }, { prune: true });
-        if (result && result !== true) changed.push(result);
+        if (result && result !== true) changed.push({ ...result.room, agentReplyExpirations: result.agentReplyExpirations });
       }
       return changed;
     },

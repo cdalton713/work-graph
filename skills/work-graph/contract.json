@@ -402,7 +402,8 @@
       "changed",
       "answer",
       "reply",
-      "command"
+      "command",
+      "agent-reply"
     ],
     "from_coordinator": [
       "hello",
@@ -411,7 +412,8 @@
       "progress",
       "ack",
       "wrote",
-      "agents"
+      "agents",
+      "agent-reply-result"
     ],
     "commands": [
       "next",
@@ -419,6 +421,11 @@
       "pause",
       "resume",
       "autonomy"
+    ],
+    "agent_reply_statuses": [
+      "delivered",
+      "refused",
+      "unconfirmed"
     ],
     "close_codes": {
       "restart": 1012,

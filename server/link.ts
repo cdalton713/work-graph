@@ -3,14 +3,14 @@
 // app.ts feeds it the changes it sees.
 import { createHash, randomUUID } from "node:crypto";
 import {
-  type AgentRow, type CoordinatorPresence, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
+  agentsFresh, type AgentReply, type AgentReplyOutcome, type AgentReplyResult, type AgentRow, type CoordinatorPresence, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
   type Presence, type ProjectRef, type ToCoordinator, type ToPage, projectKey, RECYCLE_CODE, RECONNECT_GRACE_MS, RESTART_CODE,
 } from "../src/lib/link.ts";
 import type { Site } from "../src/lib/site.ts";
 import type { RoomCounts } from "../src/lib/types.ts";
 import { memoryLinkBus, type LinkBus, type LinkEvent } from "./linkbus.ts";
 import {
-  addRoomAccount, appendMessage, checkLinkTenant, expireReconnectGrace, memoryLinkState, roomAccount, roomAccounts,
+  addRoomAccount, appendMessage, expireAgentReplies, replyDeadline, checkLinkTenant, expireReconnectGrace, memoryLinkState, roomAccount, roomAccounts,
   roomKey, type LinkRoom, type LinkRoomState, type RoomRef,
 } from "./linkstate.ts";
 import { RedisCommandFailed, RedisUnavailable } from "./redis.ts";
@@ -100,7 +100,7 @@ interface Socket {
 }
 
 /** The message types that a coordinator sends. The record makes the compiler check that it names each one. */
-const KNOWN_TYPES: Record<keyof FromCoordinator, true> = { hello: true, wrote: true, state: true, ack: true, asks: true, progress: true, agents: true };
+const KNOWN_TYPES: Record<keyof FromCoordinator, true> = { hello: true, wrote: true, state: true, ack: true, asks: true, progress: true, agents: true, "agent-reply-result": true };
 /** The most agent rows of a project, and the longest last message of a row. */
 export const AGENTS_MAX = 50;
 export const SAID_MAX = 500;
@@ -257,7 +257,8 @@ export class LinkHub {
         const key = roomKey({ ...event.message.project, tenant: event.tenant });
         for (const socket of this.sockets.values()) {
           if (socket.revoked || socket.tenant !== event.tenant) continue;
-          const ownAgents = event.message.type !== "agents" || socket.member?.account === event.account;
+          const accountOnly = event.message.type === "agents" || event.message.type === "agent-reply-result";
+          const ownAgents = !accountOnly || socket.member?.account === event.account;
           if (socket.audience === "page" && ownAgents && (socket.room === key || (!socket.room && event.overview))) {
             const message = event.message.type === "presence" && socket.member ? {
               ...event.message,
@@ -388,10 +389,10 @@ export class LinkHub {
       // If the instance that armed the grace timer stops, another instance can announce expiry
       // at its next heartbeat, up to one heartbeat later.
       const changed = await this.shared.prune(now - GONE_MS, now);
-      if (changed?.length) await this.send(changed.map((room) => ({
-        ...this.inSite(room.ref.tenant, () => this.announce(room)),
-        ...(room.ref.tenant !== undefined && { tenant: room.ref.tenant }),
-      })));
+      if (changed?.length) await this.send(changed.flatMap((room) => this.inSite(room.ref.tenant, () =>
+        [this.announce(room), ...(room.agentReplyExpirations ?? []).map(({ account, result }) =>
+          this.pages(room, "agent-reply-result", result, false, account))]
+          .map((event) => ({ ...event, tenant: room.ref.tenant })))));
     }
   }
 
@@ -572,7 +573,7 @@ export class LinkHub {
     const reduced = type === "presence" ? this.redactPresence(payload as Presence)
       : type === "changed" ? { ...(payload as ToPage["changed"]), issues: [] } : null;
     return {
-      kind: "pages", message, overview, sequence: room.sequence,
+      kind: "pages", message, overview, sequence: type === "agent-reply-result" ? undefined : room.sequence,
       ...(account !== undefined && { account }),
       ...(reduced && { viewer: this.envelope(room.ref, type, reduced) }),
     };
@@ -787,6 +788,25 @@ export class LinkHub {
     await this.send([{ kind: "wrote", ref }], ref.tenant).catch(reportLinkError);
   }
 
+  async queueAgentReply(ref: RoomRef, agent: string, body: string) {
+    const id = randomUUID();
+    const now = this.now().getTime();
+    return await this.editWhilePresent(ref, (room) => {
+      if (!agentsFresh(room.agents ?? undefined, now) || !room.agents?.replies || !room.agentSender) return null;
+      const row = room.agents.agents.find((row) => row.id === agent);
+      if (!row) return { status: 404, error: "Agent not found" } as const;
+      if (row.state !== "done") return { status: 409, error: "answer this agent in Orca" } as const;
+      const queue = room.agentReplies ??= [];
+      if (queue.length >= 100) {
+        const completed = queue.findIndex((reply) => reply.result);
+        if (completed < 0) return { status: 409, error: "The agent reply queue is full" } as const;
+        queue.splice(completed, 1);
+      }
+      queue.push({ id, agent, body, sender: room.agentSender, expiresAt: replyDeadline(now) });
+      return { status: 202, id } as const;
+    }) ?? { status: 409, error: "Agent replies are disabled or the agent watcher is offline" } as const;
+  }
+
   /** A page of one project, or the overview (no project). It gets the current state at once. */
   joinPage(peer: Peer, ref: RoomRef | null, resume = false, tenant = ref?.tenant, member?: LinkMember): Promise<Connection> {
     // A page only listens. It changes things through the HTTP API, which checks the origin and writes Linear.
@@ -821,8 +841,13 @@ export class LinkHub {
           const asks = this.roomAsks(room);
           if (ref || asks.length) messages.push(this.envelope(room.ref, "asks", { asks }));
           if (ref) messages.push(this.envelope(room.ref, "progress", { nodes: this.roomProgress(room) }));
-          const agents = roomAccount(room, member?.account)?.agents;
-          if (agents) messages.push(this.envelope(room.ref, "agents", agents));
+          const account = roomAccount(room, member?.account);
+          if (account?.agents) messages.push(this.envelope(room.ref, "agents", account.agents));
+          if (ref) {
+            const results = (account?.agentReplies ?? []).flatMap(({ result }) => result
+              ? [this.envelope(room.ref, "agent-reply-result", result)] : []);
+            if (results.length) events.push({ kind: "sockets", sockets: [socket.id], messages: results });
+          }
         }
         if (ref && resume) messages.push(this.envelope(room.ref, "changed", { by: "page", what: "issue", issues: [] }));
         events.push({ kind: "sockets", sockets: [socket.id], messages, sequence: room.sequence });
@@ -926,9 +951,48 @@ export class LinkHub {
           issue: text(a.issue, 50) || null, agent: text(a.agent, 50), state: text(a.state, 50), title: text(a.title, 200),
           said: text(a.said, SAID_MAX), at: text(a.at, 50) || null,
         })).filter((a) => a.id);
-        const agents = { at, agents: rows };
-        const room = await edit((room) => { stateOf(room)!.agents = agents; return room; });
-        if (room) return this.send([this.pages(room, "agents", agents, true, member?.account)], ref.tenant);
+        const sender = payload.replies === true ? text(payload.sender, 200) : "";
+        const now = Date.parse(at);
+        const agents = { at, agents: rows, ...(sender && { replies: true as const }) };
+        const updated = await edit((room) => {
+          const state = stateOf(room)!;
+          state.agents = agents;
+          state.agentSender = sender;
+          const expired = expireAgentReplies(state, now);
+          const entry = sender ? state.agentReplies?.find((reply) => reply.sender === sender && reply.body !== undefined) : undefined;
+          let reply: AgentReply | null = null;
+          if (entry?.body !== undefined) {
+            reply = { id: entry.id, agent: entry.agent, body: entry.body };
+            delete entry.body;
+            entry.socket = socket.id;
+            entry.expiresAt = replyDeadline(now);
+          }
+          return { room, reply, expired };
+        });
+        if (!updated) return;
+        const { room, reply, expired } = updated;
+        if (sender) this.sendTo(socket, this.envelope(ref, "agent-reply", reply));
+        const events = expired.map((result) => this.pages(room, "agent-reply-result", result, false, member?.account));
+        events.push(this.pages(room, "agents", agents, true, member?.account));
+        if (events.length) await this.send(events, ref.tenant);
+        return;
+      }
+      if (message.type === "agent-reply-result") {
+        const outcome: AgentReplyOutcome | null = payload.status === "delivered" && typeof payload.messageId === "string" && payload.messageId
+          ? { status: "delivered", messageId: payload.messageId.slice(0, 200) }
+          : (payload.status === "refused" || payload.status === "unconfirmed") && typeof payload.reason === "string" && payload.reason
+            ? { status: payload.status, reason: payload.reason.slice(0, 500) } : null;
+        if (!outcome) return fail("invalid agent reply result");
+        const updated = await edit((room) => {
+          const entry = stateOf(room)?.agentReplies?.find((reply) => reply.id === payload.id && reply.socket === socket.id);
+          if (!entry) return null;
+          const result: AgentReplyResult = { id: entry.id, agent: entry.agent, ...outcome };
+          entry.result = result;
+          delete entry.socket;
+          return { room, result };
+        });
+        if (updated) await this.send([this.pages(updated.room, "agent-reply-result", updated.result, false, member?.account)], ref.tenant);
+        return;
       }
       if (message.type === "hello") {
         const hello: Hello = { plan: text(payload.plan, 200), session: text(payload.session, 200) || randomUUID(), host: text(payload.host, 200), wg: text(payload.wg, 50) };

@@ -96,7 +96,7 @@ DEFAULT_WORKSPACE = {"id": "default", "name": "Linear", "team": None, "teams": N
 DEFAULT_CONFIG = {"human": "Human", "page_url": None, "github_user": None, "tick_roots": ["~/Projects"],
                   "tick_label": "dev.work-graph.tick", "test_runner": None, "branch_prefix": "wg/",
                   "release_branch": "release", "rules": "~/.config/work-graph/rules.md",
-                  "notify": [], "agent_merge": [], "health_interval": 6, "health_agent": "codex",
+                  "notify": [], "agent_replies": False, "agent_merge": [], "health_interval": 6, "health_agent": "codex",
                   "worker_settings": {}, "coordinator_settings": {}, "context_limit": 250000, "workspaces": [DEFAULT_WORKSPACE]}
 # The session settings file of each agent in a worker worktree (config worker_settings). wg dispatch merges the
 # values of the worker's agent into this file before the worker starts.
@@ -186,6 +186,8 @@ def read_config(path=CONFIG_PATH):
         raise SystemExit(f"{path}: the config must be a JSON object")
     if errors := agent_setting_errors(data.get("agents", {}), "agents", {}):
         raise SystemExit(f"{path}: " + "; ".join(errors))
+    if "agent_replies" in data and type(data["agent_replies"]) is not bool:
+        raise SystemExit(f"{path}: agent_replies must be true or false")
     config = DEFAULT_CONFIG | data
     workspaces = [DEFAULT_WORKSPACE | w for w in config["workspaces"]] or [DEFAULT_WORKSPACE]
     ids = [w["id"] for w in workspaces]
@@ -2965,6 +2967,7 @@ def contract():
         "satisfied": edges,
         "link": {"version": LINK_VERSION, "path": "/api/link", "to_coordinator": list(LINK_TO_COORDINATOR),
                  "from_coordinator": list(LINK_FROM_COORDINATOR), "commands": list(LINK_COMMANDS),
+                 "agent_reply_statuses": list(AGENT_REPLY_STATUSES),
                  "close_codes": LINK_CLOSE_CODES},
     }
 
@@ -4773,8 +4776,9 @@ LINK_VERSION = 1  # the protocol `wg-link/1` (src/lib/link.ts of the page)
 LINK_CLOSE_CODES = {"restart": 1012, "recycle": 4001}
 LINK_RECONNECT_GRACE = 15
 LINK_OPEN_TIMEOUT = 3
-LINK_TO_COORDINATOR = ("changed", "answer", "reply", "command")
-LINK_FROM_COORDINATOR = ("hello", "state", "asks", "progress", "ack", "wrote", "agents")
+LINK_TO_COORDINATOR = ("changed", "answer", "reply", "command", "agent-reply")
+LINK_FROM_COORDINATOR = ("hello", "state", "asks", "progress", "ack", "wrote", "agents", "agent-reply-result")
+AGENT_REPLY_STATUSES = ("delivered", "refused", "unconfirmed")
 LINK_COMMANDS = ("next", "dispatch", "pause", "resume", "autonomy")
 
 
@@ -6606,9 +6610,10 @@ def wake_state_path():
     return Path.home() / ".local/state/work-graph/wake.json"
 
 
-def orca_agents():
+def orca_agents(*, local=False):
     """Each agent that Orca knows, with the path of its workspace."""
-    result = command(orca_cli(), "agent", "list", "--json")
+    args = ("--environment", "local") if local else ()
+    result = command(orca_cli(), "agent", "list", *args, "--json")
     if result.returncode != 0:
         raise ReadError(f"orca agent list: {command_error(result)}")
     agents = json.loads(result.stdout)["result"]["agents"]
@@ -7608,12 +7613,145 @@ def agent_rows(plan_dir, km, agents, now=None):
     return rows[:WATCH_ROWS]
 
 
+def agent_replies_enabled():
+    return CONFIG.get("agent_replies") is True and orca_caller()
+
+
+def terminal_reply_ready(agent):
+    """Require a rendered screen for the exact live terminal and reject visible choices."""
+    terminals = orca_result("terminal", "list", "--include-visual-layouts", "--environment", "local")
+    if terminals.get("truncated"):
+        return False
+    matches = [t for t in terminals["terminals"]
+               if t.get("worktreeId") == agent.get("worktreeId") and t.get("connected") and t.get("writable")
+               and t.get("tabId") and t.get("leafId")
+               and f"{t['tabId']}:{t['leafId']}" == agent.get("paneKey")]
+    if len(matches) != 1 or not matches[0].get("handle"):
+        return False
+    screen = orca_result("terminal", "read", "--terminal", matches[0]["handle"], "--screen",
+                         "--environment", "local")["terminal"]
+    if screen.get("source") != "screen" or not screen.get("tail"):
+        return False
+    choices = re.compile(r"^\s*[❯›>]\s*(?:\d+[.)]|[○●◯□■])\s|^\s*[○●◯□■]\s")
+    return not any(choices.match(line) for line in screen["tail"])
+
+
+def idle_reply_agent(plan_dir, km, ident):
+    agents = orca_agents(local=True)
+    matches = [a for a in agents if a.get("orcaSessionId") == ident]
+    rows = [r for r in agent_rows(plan_dir, km, matches) if r["id"] == ident]
+    if len(matches) == len(rows) == 1 and rows[0]["state"] == "done":
+        return matches[0], rows[0]
+    return None, None
+
+
+def deliver_agent_reply(plan_dir, plan, reply):
+    """Verify the target with local Orca, then submit mail once, with a replay only on Orca's request id."""
+    ident, body, reply_id = reply.get("agent"), reply.get("body"), reply["id"]
+
+    def refused(reason):
+        return {"id": reply_id, "status": "refused", "reason": reason}
+
+    unconfirmed = {"id": reply_id, "status": "unconfirmed",
+                   "reason": "Orca did not confirm the mail. Check Orca before you reply again"}
+
+    if not agent_replies_enabled():
+        return refused("Agent replies require the watcher to run in your Orca terminal")
+    if not isinstance(ident, str) or not re.fullmatch(r"(?:orca_session_id:)?[A-Za-z0-9_-]{1,180}", ident):
+        return refused("Invalid Orca session id")
+    if not isinstance(body, str) or len(body) > 4000:
+        return refused("Invalid reply text")
+    body = re.sub(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]", "", body.replace("\r\n", "\n"))
+    if not body.strip():
+        return refused("Invalid reply text")
+
+    token = COMMAND_TIMEOUT.set(3)
+    try:
+        km = load_keymap(plan_dir)
+        agent, row = idle_reply_agent(plan_dir, km, ident)
+        if not agent:
+            return refused("The agent is no longer idle in this effort")
+        if agent.get("kind") == "terminal":
+            if not terminal_reply_ready(agent):
+                return refused("Answer this agent in Orca")
+            km = load_keymap(plan_dir)
+            current, row = idle_reply_agent(plan_dir, km, ident)
+            if not current or any(current.get(k) != agent.get(k) for k in ("paneKey", "worktreeId", "kind")):
+                return refused("The agent is no longer idle in this effort")
+        elif agent.get("kind") != "chat":
+            return refused("Answer this agent in Orca")
+    except (ReadError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return refused("Could not check the agent in Orca. Answer this agent in Orca")
+    finally:
+        COMMAND_TIMEOUT.reset(token)
+
+    target = "orca_session_id:" + ident.removeprefix("orca_session_id:")
+    token = COMMAND_TIMEOUT.set(3)
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as text_file:
+            text_file.write(body)
+            text_file.flush()
+            args = ("orchestration", "send", "--to", target, "--subject", "Reply from the project page",
+                    "--body-file", text_file.name, "--environment", "local")
+            try:
+                receipt = orca_mutation(*args)
+            except OrcaLost as error:
+                receipt = orca_mutation(*args, retry=error.request)
+        message = receipt.get("message")
+        mail_id = message.get("id") if isinstance(message, dict) else None
+        if not isinstance(mail_id, str) or not mail_id:
+            return unconfirmed
+    except OrcaRefused:
+        return refused("Orca refused the mail. Answer this agent in Orca")
+    except (OrcaLost, ReadError, OSError, ValueError, subprocess.SubprocessError):
+        return unconfirmed
+    finally:
+        COMMAND_TIMEOUT.reset(token)
+
+    issue = (km.get("nodes", {}).get(row["key"]) or {}).get("id") if row["role"] == "worker" else None
+    if issue:
+        workspace = LINEAR_WORKSPACE.set(plan_workspace(plan))
+        try:
+            comment(issue, "Reply to the agent: " + body)
+        except (ReadError, OSError, ValueError, http.client.HTTPException):
+            print("warn agents: Linear did not record the agent reply", file=sys.stderr, flush=True)
+        finally:
+            LINEAR_WORKSPACE.reset(workspace)
+    return {"id": reply_id, "status": "delivered", "messageId": mail_id}
+
+
+# Old servers accept rows but give no poll response. Remember this per endpoint until restart.
+_NO_AGENT_REPLY_POLL = set()
+
+
 def send_agents(plan_dir, plan, rows):
-    """Send the rows to the page server on a short connection with no `hello`, as `wrote` goes."""
+    """Publish the agent rows without becoming a coordinator. When enabled, take one queued reply."""
     url, project, session, _ = link_target(plan_dir, plan)
+    endpoint = url.partition("?")[0]
+    enabled = endpoint not in _NO_AGENT_REPLY_POLL and agent_replies_enabled()
     deadline = time.monotonic() + WATCH_INTERVAL - 1  # leave one second for the close
     with link_socket(url, workspace=plan_workspace(plan), open_timeout=WATCH_OPEN_TIMEOUT, deadline=deadline) as ws:
-        ws.send(link_envelope(session, project, "agents", {"agents": rows}))
+        payload = {"agents": rows}
+        if CONFIG.get("agent_replies") is True:
+            payload["replies"] = enabled
+        if enabled:
+            payload["sender"] = session
+        ws.send(link_envelope(session, project, "agents", payload))
+        if not enabled:
+            return
+        try:
+            raw = ws.recv(timeout=2)
+        except TimeoutError:
+            _NO_AGENT_REPLY_POLL.add(endpoint)
+            return
+        message = json.loads(raw)
+        if (not isinstance(message, dict) or message.get("v") != LINK_VERSION
+                or message.get("type") != "agent-reply" or (message.get("project") or {}).get("id") != project):
+            return
+        reply = message.get("payload")
+        if isinstance(reply, dict) and isinstance(reply.get("id"), str) and 0 < len(reply["id"]) <= 200:
+            result = deliver_agent_reply(plan_dir, plan, reply)
+            ws.send(link_envelope(session, project, "agent-reply-result", result))
 
 
 def agent_entries(rows, seen):
@@ -7766,7 +7904,7 @@ def watch_poll(memory, state, roots=None, clock=time.monotonic, *, record_send=N
     from concurrent.futures import wait
 
     deadline = time.monotonic() + WATCH_INTERVAL
-    agents = orca_agents()
+    agents = orca_agents(local=True) if agent_replies_enabled() else orca_agents()
     found, changed = [], False
     for path in tick_plans(roots):
         try:
@@ -7785,7 +7923,7 @@ def watch_poll(memory, state, roots=None, clock=time.monotonic, *, record_send=N
         due = mine.get("resend") or digest != mine["digest"] or (rows and clock() - mine["at"] >= WATCH_HEARTBEAT)
         workspace = plan_workspace(plan)
         # Send an empty message after the last agent leaves.
-        if not mine.get("pending") and due and (rows or mine["digest"] not in (None, "[]")):
+        if not mine.get("pending") and (due or agent_replies_enabled()) and (rows or mine["digest"] not in (None, "[]")):
             mine.pop("resend", None)
             mine["pending"] = (start_agents_send(path, plan, rows), digest, clock(),
                                plan["effort"]["name"], workspace)
@@ -8134,6 +8272,14 @@ def doctor_agents(plan_dir):
     return level, status
 
 
+def doctor_agent_replies():
+    if CONFIG.get("agent_replies") is not True:
+        return "ok", "agent replies: off"
+    if not orca_caller():
+        return "warn", "agent replies: on in config; run wg agents in your Orca terminal to take replies"
+    return "ok", "agent replies: on; this Orca terminal can run the watcher"
+
+
 def wake_trigger(automation, cron=WAKE_SCHEDULE, forms=None):
     """True when the Orca automation runs at the times of `cron` (default: each 5 minutes, WAKE_SCHEDULE), False
     when it runs at other times, None when its trigger is not readable. Orca keeps the trigger as `rrule`; a
@@ -8385,6 +8531,7 @@ def doctor_lines(plan_dir=None, fix=False):
         pages.setdefault(PAGE_URL.rstrip("/"), None)
     checks += [(f"link token for {url}", lambda w=w: doctor_link_token(w)) for url, w in pages.items()]
     checks += [("tick", doctor_tick), ("agents", (lambda: doctor_agents(plan_dir)) if plan_dir else doctor_watch)]
+    checks.append(("agent_replies", doctor_agent_replies))
     if plan_dir:
         plans.add(Path(plan_dir).resolve())
     checks += [("autostart", doctor_autostart(sorted(plans))), ("health", doctor_health(sorted(plans)))]

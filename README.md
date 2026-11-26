@@ -68,6 +68,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
   "health_interval": 6,
   "health_agent": "codex",
   "context_limit": 250000,
+  "agent_replies": false,
   "notify": [
     {"type": "webhook", "url_env": "WG_NOTIFY_URL", "url_file": "~/.config/work-graph/notify-url"},
     {"type": "command", "argv": ["/usr/local/bin/my-notifier", "--title", "work-graph"]}
@@ -102,6 +103,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | `context_limit` | The context size in tokens at which Claude Code compacts a coordinator session. `wg load --apply` and `wg doctor --fix` write it as `autoCompactWindow` into `.claude/settings.local.json` of the core worktree. They write it as `worker_settings` does: the other keys of the file stay, the file stays out of git, and `wg` writes through no symlink. `wg doctor --fix` writes only into the plan directory of a loaded effort. Claude Code reads the file when a session starts, and takes no value below 100000. `wg next` prints a `note context` line when its session is over the limit. `0` turns this off. Default: 250000. |
 | `coordinator_settings` | The session settings of the coordinator, per agent, in the shape of `worker_settings` and with its merge rules. `wg load --apply` and `wg doctor --fix` merge them into the core worktree's `.claude/settings.local.json` and `.codex/config.toml`, in the same step as `context_limit`, and `wg doctor` reports a core worktree whose files do not have the values. A `context_limit` that is not 0 wins over an `autoCompactWindow` in `coordinator_settings.claude`. A coordinator needs more than a worker (`skills/work-graph/references/setup.md` "Worker sessions"). Default: none, and `wg` writes no file for it. |
 | `tick_label`, `tick_roots` | The launchd label of `wg tick --install`, and the folders where `wg tick` looks for `*-core/plan.json`. |
+| `agent_replies` | Let project owners reply to idle agents when `wg agents` runs in your Orca terminal. Default is `false`. |
 | `notify` | The channels that tell `human` that a move is theirs (see "Notices" below). Default: none. |
 | `health_interval`, `health_agent` | The status check (`wg health`, `skills/work-graph/references/health.md`): the hours from one check to the next (1 to 168, default 6), and the Orca agent that does the check (default `codex`). |
 | `test_runner` | The default test command of `wg evidence`. A node runs the moon test tasks that its diff affects; `@full-<phase>` runs `suite`. `commit_marker` is a regular expression for the line where the runner prints the commit it tests; without it, the exit code is the proof. `lint` is the lint command of the worker spec's push checks, as a list of arguments; each `{lower}` is the node's diff base. Without it, the spec has no lint step. A plan's `effort.lint` replaces it, and a plan with `effort.test` does not use it (`skills/work-graph/references/graph.md`). |
@@ -164,6 +166,17 @@ The sender checks for config and token changes each cycle. If `wg.py` changes, t
 can start the new code.
 
 When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the agent.
+
+To let a project owner reply to a chat or terminal agent whose turn ended, set `agent_replies` to `true`.
+The default is `false`. Stop the launchd watcher with `wg agents --uninstall` if it runs.
+Then run `wg agents` in your own Orca terminal and keep it open. The launchd watcher can show
+agents on the page, but it cannot send replies. Use Orca directly for a prompt with choices.
+
+The watcher checks that the agent is still idle in this effort before it sends Orca mail. This
+check is best effort because Orca can change the agent state before it accepts the mail.
+Mail waits for a running turn to end. A delivered result means that Orca stored the mail.
+It does not confirm that the agent read it. If delivery is unconfirmed, check Orca before you reply again. A reply to a worker is also a comment on its
+issue. A reply to the coordinator has no issue comment.
 
 The Overview inbox also shows stalls, with the time since each one started.
 

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import contract from "../../skills/work-graph/contract.json";
 import { ANSWERED_LABEL, AUTONOMY_DEFAULT, AUTONOMY_GROUP, AUTONOMY_LEVELS, autonomyOf, PAUSED_LABEL, pausedOf } from "./autonomy";
 import { REVIEW_DEFAULT, REVIEW_GROUP, REVIEW_LEVELS, REVIEW_PREFIX, reviewOf } from "./review";
-import { type Agents, type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, RECYCLE_CODE, RESTART_CODE, agentState, agentsShown, liveJob, presenceText, canCommandCoordinator, pageLinkPath, plannedReconnect, plannedRetryAfterFailure, reconnectImmediately } from "./link";
+import { type Agents, type CoordinatorPresence, AGENT_REPLY_STATUSES, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, RECYCLE_CODE, RESTART_CODE, agentState, agentsShown, liveJob, presenceText, canCommandCoordinator, pageLinkPath, plannedReconnect, plannedRetryAfterFailure, reconnectImmediately } from "./link";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
 it("keeps short retries during the planned reconnect window", () => {
@@ -103,6 +103,7 @@ describe("the link agrees with wg (contract.json)", () => {
     expect(contract.link).toEqual({
       version: LINK_VERSION, path: "/api/link", to_coordinator: [...LINK_TO_COORDINATOR],
       from_coordinator: [...LINK_FROM_COORDINATOR], commands: [...LINK_COMMANDS],
+      agent_reply_statuses: [...AGENT_REPLY_STATUSES],
       close_codes: { restart: RESTART_CODE, recycle: RECYCLE_CODE },
     });
   });

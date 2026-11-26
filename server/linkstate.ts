@@ -1,4 +1,4 @@
-import { type Agents, type Ask, type CoordinatorState, type Envelope, type Hello, type Progress, type ProjectRef } from "../src/lib/link.ts";
+import { type AgentReply, type AgentReplyResult, type Agents, type Ask, type CoordinatorState, type Envelope, type Hello, type Progress, type ProjectRef } from "../src/lib/link.ts";
 import { ASKS_MAX, type LinkState as SavedState, type Store } from "./store.ts";
 
 /** The longest queue of a project. The oldest changed notice goes first. */
@@ -25,12 +25,53 @@ export interface Coordinator {
   reconnectUntil?: number;
 }
 
+const REPLY_TTL_MS = 120_000;
+export interface QueuedAgentReply extends Omit<AgentReply, "body"> {
+  body?: string;
+  sender: string;
+  expiresAt: number;
+  socket?: string;
+  result?: AgentReplyResult;
+}
+
+export function expireAgentReplies(account: RoomAccount, now: number): AgentReplyResult[] {
+  const expired: AgentReplyResult[] = [];
+  for (const reply of account.agentReplies ?? []) {
+    if (reply.result || reply.expiresAt > now) continue;
+    const { id, agent, socket } = reply;
+    delete reply.body;
+    delete reply.socket;
+    reply.result = { id, agent, status: "refused", reason: socket
+      ? "Orca mail delivery was not confirmed" : "No agent watcher took the reply within two minutes" };
+    expired.push(reply.result);
+  }
+  return expired;
+}
+
+type AgentReplyExpiration = { account?: string; result: AgentReplyResult };
+
+export function expireRoomAgentReplies(room: LinkRoom, now: number): AgentReplyExpiration[] {
+  const expirations: AgentReplyExpiration[] = [];
+  for (const [id, account] of roomAccounts(room)) {
+    for (const result of expireAgentReplies(account, now)) expirations.push({ account: id, result });
+    if (account.agentReplies) {
+      account.agentReplies = account.agentReplies.filter((reply) => !reply.result || reply.expiresAt > now - 86_400_000);
+      if (!account.agentReplies.length) delete account.agentReplies;
+    }
+  }
+  return expirations;
+}
+
+export const replyDeadline = (now: number) => now + REPLY_TTL_MS;
+
 export interface RoomAccount {
   queue: Envelope[];
   asks: Ask[];
   coordinators: Map<string, Coordinator>;
   progress: Progress[];
   agents: Agents | null;
+  agentSender?: string;
+  agentReplies?: QueuedAgentReply[];
 }
 
 export interface MemberAccount extends RoomAccount {
@@ -73,6 +114,8 @@ export function appendMessage(account: RoomAccount, message: Envelope, answeredA
   }
 }
 
+export type PrunedRoom = LinkRoom & { agentReplyExpirations?: AgentReplyExpiration[] };
+
 export interface LinkRoomState {
   read(ref: RoomRef): Promise<LinkRoom | null>;
   rooms(): Promise<LinkRoom[]>;
@@ -87,7 +130,7 @@ export interface LinkRoomState {
   ack(ref: RoomRef, ids: string[]): Promise<LinkRoom>;
   setAsks(ref: RoomRef, asks: Ask[]): Promise<LinkRoom>;
   removeAsk(ref: RoomRef, id: string): Promise<LinkRoom | null>;
-  prune(cutoff: number, now?: number): Promise<void | LinkRoom[]>;
+  prune(cutoff: number, now?: number): Promise<void | PrunedRoom[]>;
   endSession(id: string, expiresAt: number, now: number): Promise<void>;
   sessionEnded(id: string, now: number): Promise<boolean>;
   flush(): Promise<boolean>;
@@ -175,10 +218,15 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
       return structuredClone(room);
     },
     async prune(cutoff, now) {
-      const changed: LinkRoom[] = [];
+      const changed: PrunedRoom[] = [];
       for (const [key, room] of rooms) {
         if (!pruneRoom(room, cutoff)) rooms.delete(key);
-        else if (now !== undefined && expireReconnectGrace(room, now)) changed.push(structuredClone(room));
+        else if (now !== undefined) {
+          const agentReplyExpirations = expireRoomAgentReplies(room, now);
+          if (expireReconnectGrace(room, now) || agentReplyExpirations.length) {
+            changed.push({ ...structuredClone(room), agentReplyExpirations });
+          }
+        }
       }
       return changed;
     },
@@ -214,11 +262,11 @@ export function pruneRoom(room: LinkRoom, cutoff: number): boolean {
       if (!coordinator.socket && Date.parse(coordinator.lastSeen) < cutoff) account.coordinators.delete(session);
     }
     if (account.agents && Date.parse(account.agents.at) < cutoff) account.agents = null;
-    if (id !== undefined && !membersWithSockets.has(id) && !account.coordinators.size && !account.queue.length && !account.agents) {
+    if (id !== undefined && !membersWithSockets.has(id) && !account.coordinators.size && !account.queue.length && !account.agents && !account.agentReplies?.length) {
       room.accounts!.delete(id);
       continue;
     }
-    used ||= !!(account.coordinators.size || account.queue.length || account.asks.length || account.agents);
+    used ||= !!(account.coordinators.size || account.queue.length || account.asks.length || account.agents || account.agentReplies?.length);
   }
   if (!room.accounts?.size) { delete room.accounts; delete room.ownerName; }
   return used;

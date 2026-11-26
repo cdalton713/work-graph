@@ -125,3 +125,21 @@ message `agents` for each loaded effort: the state and the last message of the c
 worker agent (README "The agents on the page"). The page shows them on the Overview and counts an agent that
 stopped at a prompt (`blocked` or `waiting` in Orca) as a move of the human's. A coordinator does not run
 `wg agents` and does not read its rows. `wg doctor` reports when the launchd agent of `wg agents` is not loaded.
+
+Set `agent_replies: true` in the `wg` config to let a project owner send replies to an idle
+chat or terminal agent (Orca state `done`). The default is off. If the launchd watcher runs, stop it with
+`wg agents --uninstall`. Run `wg agents` in your own Orca terminal. Keep that terminal open.
+The launchd watcher shows the agent rows and does not take replies. `wg doctor` reports
+the switch and warns if the current session lacks an Orca identity.
+
+The page sends at most 4,000 characters to `POST /api/projects/:id/agents/:agent/reply`.
+The server queues the reply for the watcher that published the rows. A queued reply expires
+after two minutes if the watcher did not take it. Use Orca directly to answer an agent at a prompt (Orca states
+`waiting` or `blocked`).
+
+Before it sends, the watcher checks the agent and its state in Orca again. This check is
+best effort. Orca can change the state between the check and the send. Mail waits for a
+running turn to end. A delivered result gives the Orca mail id and confirms that Orca
+stored the mail. It does not confirm that the agent read it. If delivery is unconfirmed, check Orca before you reply again. The watcher adds
+`Reply to the agent: …` to a worker's issue when Orca accepts the mail. A coordinator
+reply has no issue comment.

@@ -270,9 +270,14 @@ describe("initiatives", () => {
   });
   it("filters by initiative name, by no initiative, and finds a project by its initiative", () => {
     const ids = (filter: object) => overviewRows(list, { ...all, ...filter }).map((r) => r.project.id);
-    expect(ids({ initiative: "tooling" })).toEqual(["d", "a"]);
-    expect(ids({ initiative: NO_INITIATIVE })).toEqual(["c"]);
+    expect(ids({ initiatives: ["tooling"] })).toEqual(["d", "a"]);
+    expect(ids({ initiatives: [NO_INITIATIVE] })).toEqual(["c"]);
     expect(ids({ text: "billing" })).toEqual(["b"]);
+  });
+  it("shows the union of the selected initiatives, including projects with no initiative", () => {
+    const ids = (initiatives: string[]) => overviewRows(list, { ...all, initiatives }).map((r) => r.project.id).sort();
+    expect(ids(["tooling", "Billing", NO_INITIATIVE])).toEqual(["a", "b", "c", "d"]);
+    expect(ids([])).toEqual(["a", "b", "c", "d", "e"]);
   });
   it("lists each initiative name once", () => {
     expect(initiativeNames(list.projects)).toEqual(["Billing", "Home", "Tooling"]);

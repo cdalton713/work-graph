@@ -98,13 +98,17 @@ test("phone overview shows the scoped project before secondary filters", async (
   await moving.click();
   await expect(title).toBeVisible();
 
-  const initiative = page.getByTitle("Show one initiative");
+  const initiative = page.getByTitle("Filter by initiative");
   await expect(initiative).toHaveText(/Example initiative/);
   await initiative.click();
-  await page.getByRole("option", { name: "No initiative", exact: true }).click();
+  const noInitiative = page.getByRole("option", { name: "No initiative", exact: true });
+  const example = page.getByRole("option", { name: "Example initiative", exact: true });
+  await noInitiative.click();
+  await example.click();
   await expect(title).toBeHidden();
-  await initiative.click();
-  await page.getByRole("option", { name: "Example initiative", exact: true }).click();
+  await example.click();
+  await noInitiative.click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
   await expect(title).toBeVisible();
   await workspace.getByRole("button", { name: "Build workspace" }).click();
   await page.getByRole("button", { name: "Closed 1" }).click();
@@ -143,7 +147,7 @@ test("phone filters show stale workspace and initiative selections while expande
   await expect(scope).toBeVisible();
   await filters.click();
   await expect(filters).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByTitle("Show one initiative")).toHaveCount(0);
+  await expect(page.getByTitle("Filter by initiative")).toHaveCount(0);
   await expect(page.getByRole("group", { name: "Workspace", exact: true })).toHaveCount(0);
   await expect(scope).toBeVisible();
 
@@ -219,7 +223,7 @@ test("overview controls fit the screen and show their details", async ({ page },
     await expect(reason).toHaveAttribute("title", await reason.textContent() ?? "");
     await expect(row.locator(".ov-track i").first()).toHaveAttribute("title", "Triage · 1");
     await expect(overview.locator(".inbox-open")).toHaveAttribute("title", `Build workspace · Example project: ${issueTitle}`);
-    await expect(overview.getByRole("button", { name: "All initiatives" })).toHaveAttribute("title", "Show one initiative");
+    await expect(overview.getByRole("button", { name: "All initiatives" })).toHaveAttribute("title", "Filter by initiative");
     await expect(overview.getByTitle("Also show the completed and canceled projects.")).toBeVisible();
     await expect(overview.getByRole("region", { name: "Example initiative" }).getByTitle("Show only this initiative")).toBeVisible();
     await page.setViewportSize({ width: 860, height: page.viewportSize()!.height });
@@ -264,7 +268,7 @@ test("a picker sheet keeps arrow keys out of the overview", async ({ page }, tes
   const active = overview.locator(".ov-row.is-active");
   const initial = await active.locator(".ov-title").textContent();
   await overview.getByRole("button", { name: "All initiatives" }).tap();
-  await expect(page.getByRole("dialog").getByText("Show one initiative")).toBeVisible();
+  await expect(page.getByRole("dialog").getByText("Filter by initiative")).toBeVisible();
   await page.keyboard.press("ArrowDown");
   await expect(active.locator(".ov-title")).toHaveText(initial!);
   await page.getByRole("dialog").getByRole("button", { name: "Close" }).tap();
@@ -604,4 +608,93 @@ test("long inbox text fits on a landscape touch screen", async ({ page }, testIn
 
   await row.tap();
   await expect(page.locator(".panel")).toContainText("Example issue 1");
+});
+
+test("the overview and inbox keep multiple initiatives through a reload", async ({ page }, testInfo) => {
+  const desktop = testInfo.project.name.startsWith("desktop");
+  const phone = testInfo.project.name.startsWith("phone");
+  const activate = (locator: Locator) => desktop ? locator.click() : locator.tap();
+
+  await page.route("**/api/overview*", async (route) => {
+    const response = await route.fetch();
+    const data: OverviewData = await response.json();
+    const project = data.projects.find(({ id }) => id === "fixture")!;
+    const summary = data.summaries.find(({ id }) => id === project.id)!;
+    const cases = [
+      { id: "fixture", name: "Build project", initiative: "Build, tools", issue: "WG-51" },
+      { id: "release", name: "Release project", initiative: "Release", issue: "WG-52" },
+      { id: "ungrouped", name: "Ungrouped project", initiative: null, issue: "WG-53" },
+      { id: "support", name: "Support project", initiative: "Support", issue: "WG-54" },
+    ];
+    data.projects = cases.map(({ id, name, initiative }) => ({ ...project, id, name, initiative }));
+    data.summaries = cases.map(({ id, name, issue }) => ({
+      ...summary, id, you: [{ identifier: issue, title: `Review ${name}`, why: "Review the changes", updatedAt: "", pullRequests: [] }],
+    }));
+    await route.fulfill({ response, json: data });
+  });
+
+  const trigger = (name: string) => page.locator(".ov-filters").getByRole("button", { name: new RegExp(`^${name}`) });
+  const option = (name: string) => page.getByRole("option", { name, exact: true });
+  const section = (name: string) => page.locator(".ov-section").and(page.getByRole("region", { name, exact: true }));
+  const inbox = page.getByRole("region", { name: "Inbox" });
+  const projects = page.locator(".ov-row .ov-title");
+
+  await page.goto("/?initiative=Build%2C+tools");
+  await expect(projects).toHaveText(["Build project"]);
+  await expect(inbox.locator(".inbox-note")).toHaveText("All workspaces · Build, tools");
+  if (phone) await activate(page.getByRole("button", { name: "Filters", exact: true }));
+  await activate(trigger("Build, tools"));
+  await expect(option("Build, tools")).toHaveAttribute("aria-selected", "true");
+  await activate(option("Release"));
+  await activate(option("No initiative"));
+  await activate(option("Release"));
+  await expect(trigger("2 initiatives")).toBeVisible();
+  await activate(option("Release"));
+  if (phone) await activate(page.getByRole("button", { name: "Done", exact: true }));
+  else await page.keyboard.press("Escape");
+  await expect(trigger("3 initiatives")).toBeVisible();
+  expect(new URL(page.url()).searchParams.getAll("initiative")).toEqual(["Build, tools", "", "Release"]);
+
+  await page.reload();
+  await expect(projects).toHaveCount(3);
+  for (const [name, project, issue] of [
+    ["Build, tools", "Build project", "WG-51"],
+    ["Release", "Release project", "WG-52"],
+    ["No initiative", "Ungrouped project", "WG-53"],
+  ]) {
+    await expect(section(name).locator(".ov-title")).toHaveText(project);
+    await expect(inbox.getByRole("button", { name: new RegExp(issue) })).toBeVisible();
+  }
+  await expect(section("Support")).toHaveCount(0);
+  await expect(inbox.getByRole("button", { name: /WG-54/ })).toHaveCount(0);
+  await expect(inbox.locator(".inbox-note")).toHaveText("All workspaces · 3 initiatives");
+  await expect(inbox.getByRole("button", { name: "All 3" })).toBeVisible();
+  const viewport = page.viewportSize()!;
+  for (const width of phone || desktop ? [viewport.width] : [viewport.width, 768, 1024]) {
+    await page.setViewportSize({ ...viewport, width });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    expect(await page.locator(".stage").evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0);
+  }
+  await page.setViewportSize(viewport);
+
+  await activate(section("Release").getByRole("button", { name: "Release", exact: true }));
+  await expect(projects).toHaveText(["Release project"]);
+  await expect(inbox.getByRole("button", { name: "All 1" })).toBeVisible();
+  if (phone) await activate(page.getByRole("button", { name: "Filters", exact: true }));
+  await activate(trigger("Release"));
+  await activate(option("All initiatives"));
+  if (phone) await activate(page.getByRole("button", { name: "Done", exact: true }));
+  else await page.keyboard.press("Escape");
+  await expect(projects).toHaveCount(4);
+  expect(new URL(page.url()).searchParams.has("initiative")).toBe(false);
+
+  await activate(trigger("All initiatives"));
+  await activate(option("Build, tools"));
+  await activate(option("Release"));
+  if (phone) await activate(page.getByRole("button", { name: "Done", exact: true }));
+  else await page.keyboard.press("Escape");
+  await page.getByRole("searchbox").fill("Missing project");
+  await activate(page.getByRole("button", { name: phone ? "Clear filters" : "Clear the filters", exact: true }));
+  await expect(projects).toHaveCount(4);
+  await expect(inbox.getByRole("button", { name: "All 4" })).toBeVisible();
 });

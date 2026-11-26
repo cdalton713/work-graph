@@ -17,6 +17,7 @@ import { CopyButton, Hint, Lamp, Picker, PrLinks, Rich } from "./ui";
 const STORE = "wg-overview";
 /** The inbox items that show before "Show all". */
 const INBOX = 8;
+const ALL_INITIATIVES: readonly string[] = [];
 const START: OverviewFilter = { text: "", workspace: null, closed: false };
 const COORDINATOR_DISPLAY = {
   listening: { label: "Listening", signal: "done" },
@@ -140,9 +141,9 @@ export interface OverviewProps {
   asks?: Map<string, Ask[]>;
   /** The agents of each project, by `workspace:id`, from the link (`wg agents`). One that waits at a prompt is a move of the human's. */
   agents?: Map<string, Agents>;
-  /** The initiative filter from the link (`?initiative=`): null shows all; NO_INITIATIVE the projects with none. */
-  initiative?: string | null;
-  onInitiative?: (name: string | null) => void;
+  /** The initiative selection from the link. An empty selection shows all projects. */
+  initiatives?: readonly string[];
+  onInitiatives?: (names: string[]) => void;
   states?: ProjectStateName[];
   onStates?: (states: ProjectStateName[]) => void;
   /** The workspaces with a low Linear budget (`budgetWarnings`). */
@@ -153,7 +154,7 @@ export interface OverviewProps {
  * All projects on one page: which ones wait on the human, how far each is, and what wg next last said.
  * `/` finds a project, the arrow keys move, Enter opens.
  */
-export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, readOnly = false, initiative = null, onInitiative, states = NO_STATES, onStates, budget = [] }: OverviewProps) {
+export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, readOnly = false, initiatives = ALL_INITIATIVES, onInitiatives, states = NO_STATES, onStates, budget = [] }: OverviewProps) {
   const narrow = useNarrow();
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filterButton = useRef<HTMLButtonElement>(null);
@@ -193,16 +194,20 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   }, [filter]);
   const set = (change: Partial<OverviewFilter>) => setFilter((f) => ({ ...f, ...change }));
   const names = useMemo(() => initiativeNames(list.projects), [list]);
+  const selectedInitiatives = [...new Set(initiatives.map((value) =>
+    names.find((name) => name.toLowerCase() === value.toLowerCase()) ?? value))];
+  const initiativeLabel = selectedInitiatives.length > 1 ? `${selectedInitiatives.length} initiatives`
+    : selectedInitiatives.length === 1 ? selectedInitiatives[0] || "No initiative" : "All initiatives";
   // Sections only when some project has an initiative; then the rows go in the order of the sections.
   const grouped = names.length > 0;
   const activity = useMemo(() => ({ now, presence, agents }), [now, presence, agents]);
-  const inboxProjects = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, initiative }, activity),
-    [list, filter.workspace, initiative, activity]);
+  const inboxProjects = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, initiatives }, activity),
+    [list, filter.workspace, initiatives, activity]);
   const matching = useMemo(() => {
-    const projects = filter.closed ? overviewRows(list, { ...filter, text: "", initiative }, activity) : inboxProjects;
+    const projects = filter.closed ? overviewRows(list, { ...filter, text: "", initiatives }, activity) : inboxProjects;
     const words = filter.text.trim().toLowerCase().split(/\s+/);
     return projects.filter(({ project }) => words.every((word) => project.name.toLowerCase().includes(word)));
-  }, [list, filter, initiative, activity, inboxProjects]);
+  }, [list, filter, initiatives, activity, inboxProjects]);
   const counts = countProjectStates(matching);
   const visible = useMemo(() => filterProjectStates(matching, states), [matching, states]);
   const sections = useMemo(() => grouped ? initiativeSections(visible, list.workspaces) : [], [visible, list.workspaces, grouped]);
@@ -243,7 +248,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const categoryRows = category === "all" ? inboxRows : inboxRows.filter((row) => inboxCategory(row) === category);
   const shownInbox = new Set((allMoves ? categoryRows : categoryRows.slice(0, INBOX)).map(inboxKey));
   const workspaceName = list.workspaces.find((w) => w.id === filter.workspace)?.name ?? filter.workspace;
-  const initiativeName = initiative === null ? null : initiative || "No initiative";
+  const initiativeName = selectedInitiatives.length ? initiativeLabel : null;
   const scope = [workspaceName ?? "All workspaces", initiativeName ?? "All initiatives"].join(" · ");
   const filterScope = [workspaceName, initiativeName, ...states.map(stateLabel), filter.closed && "Includes closed"]
     .filter(Boolean).join(" · ");
@@ -335,7 +340,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   useEffect(() => {
     if (expanded) inboxRoot.current?.querySelector<HTMLTextAreaElement>(".inbox-row:not([hidden]) .inbox-detail:not([hidden]) textarea")?.focus();
   }, [expanded]);
-  useEffect(() => setActive(0), [filter, initiative, states]);
+  useEffect(() => setActive(0), [filter, initiatives, states]);
   useEffect(() => { root.current?.querySelector(".ov-row.is-active")?.scrollIntoView({ block: "nearest" }); }, [active]);
 
   useEffect(() => {
@@ -380,12 +385,14 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   }, [rows, active, onOpen, expanded]);
 
   const multi = list.workspaces.length > 1;
-  const closedCount = list.projects.filter((p) => p.statusType === "completed" || p.statusType === "canceled").length;
-  const hasFilters = !!(filter.workspace || initiative !== null || states.length || filter.closed || filter.text);
+  const closedCount = list.projects.filter((p) =>
+    (p.statusType === "completed" || p.statusType === "canceled")
+    && (!selectedInitiatives.length || selectedInitiatives.some((name) => name.toLowerCase() === (p.initiative ?? NO_INITIATIVE).toLowerCase()))).length;
+  const hasFilters = !!(filter.workspace || selectedInitiatives.length || states.length || filter.closed || filter.text);
   const clearFilters = () => {
     (filterButton.current ?? find.current)?.focus();
     setFilter(START);
-    if (initiative !== null) onInitiative?.(null);
+    if (selectedInitiatives.length) onInitiatives?.([]);
     if (states.length) onStates?.([]);
   };
 
@@ -645,14 +652,16 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
               ))}
             </div>
           )}
-          {grouped && onInitiative && (
-            <Picker value={initiative === null ? ["*"] : [`=${initiative}`]} onChange={([id]) => onInitiative(id === "*" ? null : id.slice(1))}
-              title="Show one initiative" options={[
+          {grouped && onInitiatives && (
+            <Picker multi value={selectedInitiatives.length ? selectedInitiatives.map((name) => `=${name}`) : ["*"]}
+              onChange={(ids) => onInitiatives(selectedInitiatives.length && ids.includes("*")
+                ? [] : ids.filter((id) => id !== "*").map((id) => id.slice(1)))}
+              title="Filter by initiative" options={[
                 { id: "*", label: "All initiatives" },
                 ...names.map((n) => ({ id: `=${n}`, label: n })),
                 { id: `=${NO_INITIATIVE}`, label: "No initiative" },
               ]}>
-              <span className={initiative === null ? "" : "ov-init-on"}>{initiative === null ? "All initiatives" : initiative || "No initiative"}</span><span className="caret">▾</span>
+              <span className={selectedInitiatives.length ? "ov-init-on" : ""}>{initiativeLabel}</span><span className="caret">▾</span>
             </Picker>
           )}
           {onStates && <div className="ov-state-filters" role="group" aria-label="Project state">
@@ -685,9 +694,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
         return (
           <section key={section.key} className="ov-section" aria-label={section.name ?? "No initiative"}>
             <h2 className="ov-section-head">
-              {onInitiative && initiative === null
+              {onInitiatives && selectedInitiatives.length !== 1
                 ? <Hint text="Show only this initiative" infoLabel="About this initiative filter">
-                  <button type="button" className="ov-section-name" onClick={() => onInitiative(section.name ?? NO_INITIATIVE)}>{section.name ?? "No initiative"}</button>
+                  <button type="button" className="ov-section-name" onClick={() => onInitiatives([section.name ?? NO_INITIATIVE])}>{section.name ?? "No initiative"}</button>
                 </Hint>
                 : <span className="ov-section-name">{section.name ?? "No initiative"}</span>}
               {multi && <span className="ov-ws">{section.workspaceName}</span>}

@@ -317,7 +317,7 @@ fn project_request(
         .header("Authorization", token)
         .header("x-workspace", field(collab, "workspace")?))
 }
-fn fetch(page: &Page, collab: &Value, force: bool) -> Result<Option<Value>> {
+fn fetch(page: &Page, collab: &Value, force: bool) -> PageResult<Option<Value>> {
     let mut req = project_request(page, collab, Method::GET, &["plan"])?;
     if !force && let Some(version) = collab["version"].as_u64() {
         req = req.header("If-None-Match", format!("\"{version}\""));
@@ -352,7 +352,7 @@ fn connect<K: CredentialProvider<Error = String>>(
     credentials: &K,
     collab: &Value,
     scope: &str,
-) -> Result<Page> {
+) -> PageResult<Page> {
     let raw = collab["page"].as_str().unwrap_or_default();
     let mut page = Page::new(settings, Some(raw))?;
     let credential = page_credential(
@@ -362,7 +362,7 @@ fn connect<K: CredentialProvider<Error = String>>(
         field(collab, "workspace")?.starts_with("shared:"),
         credentials,
     )?
-    .ok_or("no page token; run wg login for the page")?;
+    .ok_or_else(|| PageError::Unavailable("no page token; run wg login for the page".into()))?;
     page.token = Some(credential.into_header());
     Ok(page)
 }
@@ -472,6 +472,7 @@ pub(super) fn run<
                 },
             )
             .map(Output::success)
+            .map_err(Into::into)
         }
         _ => unreachable!(),
     }
@@ -817,7 +818,7 @@ fn publish_pending(
         extend(&mut wire["effort"], settings)?;
     }
     let new = shared(&local.keymap)?;
-    let put = |version: u64, mapping: &Value| -> Result<(u16, Vec<u8>)> {
+    let put = |version: u64, mapping: &Value| -> PageResult<(u16, Vec<u8>)> {
         response(
             project_request(page, c, Method::PUT, &["plan"])?
                 .header("If-Match", format!("\"{version}\""))
@@ -882,7 +883,7 @@ fn pull(
     local: LocalEffort,
     scope: &str,
     options: PullOptions,
-) -> Result<String> {
+) -> PageResult<String> {
     let PullOptions {
         force,
         accept,
@@ -948,12 +949,12 @@ fn pull(
         return Err(format!(
             "the server has plan v{version} by {writer}; save your change, run wg pull {} --force, and make your change again",
             shell_quote(dir)
-        ));
+        ).into());
     }
     if implicit == Some(true) && !recovered {
         return Err(format!(
             "the server has plan v{version} by {writer}; run wg pull, then run wg load --apply again"
-        ));
+        ).into());
     }
     let remote_settings = settings(&wire["effort"])?;
     let mut lines = vec![];
@@ -1111,7 +1112,7 @@ pub(crate) fn update_claim(
     if job.is_none() && status == 404 {
         return Ok(());
     }
-    check(status)
+    check(status).map_err(Into::into)
 }
 
 pub(crate) fn publish_load(
@@ -1190,16 +1191,10 @@ pub(crate) fn refresh_workflow(
             }
             Ok(())
         }
-        Err(e)
-            if !applying
-                && (e == "the page did not answer"
-                    || e.starts_with("the page answered HTTP 5")
-                    || e == "the page answered HTTP 429"
-                    || e.starts_with("no page token;")) =>
-        {
+        Err(PageError::Unavailable(e)) if !applying => {
             eprintln!("warn plan: {e}; using the local copy");
             Ok(())
         }
-        Err(e) => Err(e),
+        Err(e) => Err(e.into()),
     }
 }

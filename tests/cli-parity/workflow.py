@@ -65,11 +65,12 @@ else:
     tool.chmod(0o755)
     config = work / "config"
     config.write_text(json.dumps({"context_limit": 142000, "coordinator_settings": {"codex": {"features": {"example": True}}}, "workspaces": [{"id": "default", "team": "EX"}]}))
+    plan_response = 304
     def get(h):
         if h.headers["Authorization"] != "Bearer page-key" or h.headers["x-workspace"] != "shared:test":
             return h.send_error(403)
         if h.path.endswith("/plan"):
-            h.send_response(304)
+            h.send_response(plan_response)
             h.end_headers()
         elif h.path.endswith("/claims"):
             claim_reads.append(h.path)
@@ -221,6 +222,17 @@ else:
         env["WG_DEFAULT_LINK_TOKEN"] = "page-key"
         run("move", "a", "Ready to Merge", code=2)
         assert outcomes[-1][2] == "a: Another holds this node now\n" and claim_reads
+        if len(binary) == 1:
+            for plan_response in (429, 502):
+                assert "EX-3" in run("status")
+                assert "using the local copy" in outcomes.pop()[2]
+                run("load", "--apply", code=2)
+                assert "using the local copy" not in outcomes.pop()[2]
+            for plan_response in (401, 403, 412, 404, 200):
+                run("status", code=2)
+                _, stdout, stderr = outcomes.pop()
+                assert not stdout and stderr and "using the local copy" not in stderr
+            plan_response = 304
         del km["collab"]
         (work / "keymap.json").write_text(json.dumps(km))
         for verb, default, levels in [

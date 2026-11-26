@@ -130,8 +130,37 @@ impl Page {
     }
 }
 
-fn response(req: reqwest::blocking::RequestBuilder) -> Result<(u16, Vec<u8>)> {
-    let res = req.send().map_err(|_| "the page did not answer")?;
+enum PageError {
+    Unavailable(String),
+    Failed(String),
+}
+
+impl From<String> for PageError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<&str> for PageError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.into())
+    }
+}
+
+impl From<PageError> for String {
+    fn from(error: PageError) -> Self {
+        match error {
+            PageError::Unavailable(message) | PageError::Failed(message) => message,
+        }
+    }
+}
+
+type PageResult<T> = std::result::Result<T, PageError>;
+
+fn response(req: reqwest::blocking::RequestBuilder) -> PageResult<(u16, Vec<u8>)> {
+    let res = req
+        .send()
+        .map_err(|_| PageError::Unavailable("the page did not answer".into()))?;
     let status = res.status().as_u16();
     let bytes = res.bytes().map_err(|_| "cannot read the page response")?;
     Ok((status, bytes.to_vec()))
@@ -176,12 +205,15 @@ fn token_json(page: &Page, path: &str) -> Result<Value> {
     check(status)?;
     serde_json::from_slice(&bytes).map_err(|_| "invalid token check response".into())
 }
-fn check(status: u16) -> Result<()> {
+fn check(status: u16) -> PageResult<()> {
     match status {
         200..=299 => Ok(()),
-        401 | 403 => Err(format!("the page refused the token (HTTP {status})")),
+        401 | 403 => Err(format!("the page refused the token (HTTP {status})").into()),
         412 => Err("plan version conflict (HTTP 412)".into()),
-        _ => Err(format!("the page answered HTTP {status}")),
+        429 | 500..=599 => Err(PageError::Unavailable(format!(
+            "the page answered HTTP {status}"
+        ))),
+        _ => Err(format!("the page answered HTTP {status}").into()),
     }
 }
 fn json_response(req: reqwest::blocking::RequestBuilder) -> Result<Value> {

@@ -118,6 +118,8 @@ async function openShare(page: Page) {
   await page.addInitScript(() => localStorage.setItem("wg-board", "off"));
   await page.goto(serviceUrl() + "/auth/login?as=ada&next=/?project=project");
   await expect(page.locator(".react-flow__node").first()).toBeVisible();
+  const more = page.locator(".bar").getByRole("button", { name: "More", exact: true });
+  if (await more.isVisible()) await more.press("Enter");
   await page.getByRole("button", { name: "Share", exact: true }).press("Enter");
   const dialog = page.getByRole("dialog", { name: "Share project" });
   await expect(dialog.getByText("grace@example.com", { exact: false })).toBeVisible();

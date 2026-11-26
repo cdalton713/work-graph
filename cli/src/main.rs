@@ -2,7 +2,13 @@ use std::process::ExitCode;
 
 const USAGE: &str = "Usage: wg-preview --version";
 
+mod telemetry;
+
 fn main() -> ExitCode {
+    telemetry::run(dispatch)
+}
+
+fn dispatch() -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|v| v == "usage") {
         return wg_preview::usage::command(std::env::args().skip(2));
     }

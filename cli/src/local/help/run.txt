@@ -1,0 +1,7 @@
+usage: wg.py run [-h] {set,show,reset,rebuild} ...
+
+positional arguments:
+  {set,show,reset,rebuild}
+
+options:
+  -h, --help            show this help message and exit

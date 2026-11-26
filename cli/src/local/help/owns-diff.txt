@@ -1,0 +1,9 @@
+usage: wg.py owns diff [-h] dir key base
+
+positional arguments:
+  dir
+  key
+  base
+
+options:
+  -h, --help  show this help message and exit

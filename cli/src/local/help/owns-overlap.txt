@@ -1,0 +1,8 @@
+usage: wg.py owns overlap [-h] dir keys [keys ...]
+
+positional arguments:
+  dir
+  keys
+
+options:
+  -h, --help  show this help message and exit

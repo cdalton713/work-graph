@@ -1,0 +1,9 @@
+usage: wg.py run set [-h] dir key fields [fields ...]
+
+positional arguments:
+  dir
+  key
+  fields
+
+options:
+  -h, --help  show this help message and exit

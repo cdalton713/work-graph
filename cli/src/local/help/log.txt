@@ -1,0 +1,11 @@
+usage: wg.py log [-h] [--since SINCE] [-n N] [--times] dir [key]
+
+positional arguments:
+  dir
+  key
+
+options:
+  -h, --help     show this help message and exit
+  --since SINCE  a duration back from now (2h, 3d) or an ISO time
+  -n N           the number of entries, newest last (default 30)
+  --times        per task: dispatch to code done, code done to merged, wait

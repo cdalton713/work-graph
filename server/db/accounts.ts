@@ -281,7 +281,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
         return {
           ...account,
           workspaces: connections.flatMap<Workspace>((row) => {
-            const workspace = { id: row.workspaceId, name: row.name, team: row.team, teamLabels: row.teamLabels };
+            const workspace = { connectionId: row.id, organizationId: row.linearOrgId, id: row.workspaceId, name: row.name, team: row.team, teamLabels: row.teamLabels };
             if (row.status === "needs_key") return [{ ...workspace, kind: row.kind, key: "", needsKey: true }];
             let credential: ConnectionCredential;
             try {

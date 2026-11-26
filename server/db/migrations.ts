@@ -100,6 +100,9 @@ const migrations = [
     )`,
     `CREATE INDEX project_members_user ON project_members (user_id, project_id)`,
   ],
+  [
+    `ALTER TABLE project_members ADD COLUMN id uuid NOT NULL DEFAULT gen_random_uuid() UNIQUE`,
+  ],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

@@ -10,6 +10,8 @@ export interface Workspace {
   name: string;
   team: string;
   key: string;
+  connectionId?: string;
+  organizationId?: string;
   kind?: "api_key" | "oauth";
   oauthKey?: (rejected?: string) => Promise<string>;
   needsKey?: boolean;

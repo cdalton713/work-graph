@@ -37,6 +37,17 @@ export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>
   }
 
   return {
+    memberships(account: string) {
+      return sql.query<{ id: string; ownerId: string; connectionId: string; projectId: string; name: string; role: MemberRole }>(`
+        SELECT m.id, m.tenant_id AS "ownerId", m.connection_id AS "connectionId",
+          m.project_id AS "projectId", s.project_name AS name, m.role
+        FROM project_members m
+        JOIN tenants t ON t.owner_user_id = m.user_id
+        JOIN shares s ON s.id = m.share_id
+        WHERE t.id = $1
+        ORDER BY s.project_name, m.id`, [account]);
+    },
+
     async list(project: ProjectScope) {
       const links = await liveLinks(sql.query, project);
       const members = await sql.query<Member>(`SELECT u.id, u.name, u.email, m.role, m.joined_at AS "joinedAt"
@@ -124,7 +135,9 @@ export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>
           DO UPDATE SET role = EXCLUDED.role, share_id = EXCLUDED.share_id`, [...params, member.id, role, share.id]);
         return { share, project, role, changed: true } as const;
       });
-      if (result && result !== "full" && result.changed) await notify(result.share.tenant);
+      if (result && result !== "full" && result.changed) {
+        await Promise.all([notify(result.share.tenant), notify(account)]);
+      }
       return result;
     },
   };

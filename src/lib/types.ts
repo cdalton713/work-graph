@@ -107,7 +107,7 @@ export type ShareMember = {
   accessRequestedAt: string | null;
 };
 export type ProjectShare = Record<ShareKind, ShareLink> & { members: ShareMember[] };
-export type LinearAccess = { status: "ok" | "no_connection" | "no_team" | "not_member"; workspace: string; team: string };
+export type LinearAccess = { status: "ok" | "no_connection" | "no_team" | "not_member"; workspace: string; team: string; accessRequestedAt?: string | null };
 export type AccessGrant = { status: "added" | "invited" | "already_member" | "invite_pending"; team: string };
 export type ProjectJoin = { project: string; role: "viewer" | "collaborator" };
 export type ProjectJoinPreview = ProjectJoin & { owner: string };

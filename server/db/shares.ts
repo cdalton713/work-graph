@@ -107,6 +107,12 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
       return row ? "limited" : "missing";
     },
 
+    async accessRequestedAt(project: ProjectScope, membership: string) {
+      const [row] = await sql.query<{ at: string | null }>(`SELECT access_requested_at AS at FROM project_members
+        WHERE ${scope} AND id = $4 AND role = 'collaborator'`, [...project, membership]);
+      return row?.at ?? null;
+    },
+
     async clearAccessRequest(project: ProjectScope, membership: string) {
       await sql.query(`UPDATE project_members SET access_requested_at = NULL
         WHERE ${scope} AND id = $4 AND access_requested_at IS NOT NULL`, [...project, membership]);

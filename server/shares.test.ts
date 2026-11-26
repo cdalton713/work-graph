@@ -109,6 +109,7 @@ databaseSuites((open) => {
       const personal = await owner.request(share, "POST", undefined, { "x-workspace": "personal" });
       expect(personal.status).toBe(400);
       expect(await personal.text()).toContain("API key workspace");
+      expect((await owner.request(share + "/edit", "POST")).status).toBe(404);
       const kindPath = (kind: string) => share + "/" + kind;
       expect((await other.request(kindPath("view"), "POST")).status).toBe(404);
       const concurrent = await Promise.all([

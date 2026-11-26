@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { linearAccessRequired, shareApi } from "../api";
 import { accessNotice, linkRow, orderMembers } from "../lib/share";
 import type { LinearAccess, ProjectShare, ShareKind, ShareMember } from "../lib/types";
@@ -14,11 +14,12 @@ const time = (at: string) => new Date(at).toLocaleString();
 
 type Confirmation =
   | { action: "rotate" | "revoke"; kind: ShareKind }
-  | { action: "remove" | "invite"; member: ShareMember };
+  | { action: "remove" | "invite" | "demote"; member: ShareMember };
 
 export function Share({ id, workspace, team, close }: { id: string; workspace: string; team?: string; close: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const confirmation = useRef<HTMLElement>(null);
+  const confirmationTrigger = useRef<HTMLElement | null>(null);
   const [data, setData] = useState<ProjectShare | null>(null);
   const [urls, setUrls] = useState<Partial<Record<ShareKind, string>>>({});
   const [pending, setPending] = useState<Confirmation | null>(null);
@@ -44,9 +45,23 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
     return () => controller.abort();
   }, [id, workspace]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (pending) confirmation.current?.focus();
-  }, [pending]);
+    else if (!busy && confirmationTrigger.current) {
+      confirmationTrigger.current.focus();
+      confirmationTrigger.current = null;
+    }
+  }, [pending, busy]);
+
+  function ask(choice: Confirmation, trigger: HTMLElement) {
+    confirmationTrigger.current = trigger;
+    setPending(choice);
+  }
+
+  async function changeRole(member: ShareMember, role: ShareMember["role"]) {
+    await shareApi.changeRole(id, workspace, member.id, role);
+    setData(await shareApi.read(id, workspace));
+  }
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -62,12 +77,12 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
     setData(await shareApi.read(id, workspace));
   }
 
-  async function grant(member: ShareMember, invite = false) {
+  async function grant(member: ShareMember, invite: boolean, trigger?: HTMLButtonElement) {
     setAccessFeedback(null);
     const result = await shareApi.addAccess(id, workspace, member.id, invite);
     switch (result.status) {
       case "invite_required":
-        setPending({ action: "invite", member });
+        if (trigger) ask({ action: "invite", member }, trigger);
         break;
       case "refused":
         setAccessFeedback({ member: member.id, message: result.reason, settingsUrl: result.settingsUrl });
@@ -99,6 +114,7 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
           await shareApi.remove(id, workspace, choice.member.id);
           setData(await shareApi.read(id, workspace));
           break;
+        case "demote": await changeRole(choice.member, "viewer"); break;
         case "invite": await grant(choice.member, true); break;
       }
     });
@@ -108,10 +124,16 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
     ? { text: `Invite ${pending.member.name} to the Linear workspace?`, detail: "An invite can add a seat to the Linear plan.", button: "Send invite" }
     : pending.action === "remove"
       ? { text: `Remove ${pending.member.name} from this project?`, detail: "This releases their claims.", button: "Remove member" }
-      : { text: pending.action === "rotate" ? "Make a new link?" : "Turn off this link?", detail: "The current link will stop working.", button: pending.action === "rotate" ? "New link" : "Turn off" });
+      : pending.action === "demote"
+        ? { text: `Change ${pending.member.name} to a viewer?`, detail: "This releases their claims. They can only read the project after this change.", button: "Change to viewer" }
+        : { text: pending.action === "rotate" ? "Make a new link?" : "Turn off this link?", detail: "The current link will stop working.", button: pending.action === "rotate" ? "New link" : "Turn off" });
 
   return <dialog ref={dialog} className="account-dialog share-dialog" aria-label="Share project"
-    onCancel={(event) => { event.preventDefault(); close(); }}>
+    onCancel={(event) => {
+      event.preventDefault();
+      if (pending) setPending(null);
+      else close();
+    }}>
     <header className="account-heading share-heading">
       <h2>Share project</h2>
       <button type="button" className="ghost" autoFocus onClick={close}>Close</button>
@@ -130,14 +152,14 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
               <p role="status">Copy this address now. It will not appear again after you close this dialog.</p>
             </>}
             {row.state === "live" && <p>Made {date(row.made)}</p>}
-            {prompt && pending && "kind" in pending && pending.kind === kind ? renderPrompt() :
-              <div className="account-actions">{row.state === "missing" ?
+            <div className="account-actions">{row.state === "missing" ?
                 <button type="button" disabled={busy || !!pending} onClick={() => void run(() => make(kind))}>Make link</button> :
                 <>
-                  <button type="button" disabled={busy || !!pending} onClick={() => setPending({ action: "rotate", kind })}>New link</button>
-                  <button type="button" className="ghost" disabled={busy || !!pending} onClick={() => setPending({ action: "revoke", kind })}>Turn off</button>
+                  <button type="button" disabled={busy || !!pending} onClick={(event) => ask({ action: "rotate", kind }, event.currentTarget)}>New link</button>
+                  <button type="button" className="ghost" disabled={busy || !!pending} onClick={(event) => ask({ action: "revoke", kind }, event.currentTarget)}>Turn off</button>
                 </>}
-              </div>}
+              </div>
+            {pending && "kind" in pending && pending.kind === kind && renderPrompt()}
           </div>;
         })}
       </section>
@@ -151,11 +173,11 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
             <div><strong>{name}</strong><p>{email} · Joined {date(joinedAt)}</p></div>
             <div className="account-form"><label>Role for {name}
               <select value={role} disabled={busy || !!pending} onChange={(event) => {
-                const role = event.target.value as ShareMember["role"];
-                void run(async () => {
-                  await shareApi.changeRole(id, workspace, memberId, role);
-                  setData(await shareApi.read(id, workspace));
-                });
+                if (event.currentTarget.value === "viewer") {
+                  ask({ action: "demote", member }, event.currentTarget);
+                } else {
+                  void run(() => changeRole(member, "collaborator"));
+                }
               }}>
                 <option value="viewer">Viewer</option>
                 <option value="collaborator">Collaborator</option>
@@ -164,16 +186,20 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
             {role === "collaborator" && accessRequestedAt && <>
               <p>Asked for access to {team ? `team ${team}` : "the Linear team"} on {time(accessRequestedAt)}.</p>
               <div className="account-actions">
-                <button type="button" disabled={busy || !!pending} onClick={() => void run(() => grant(member))}>Add access</button>
+                <button type="button" disabled={busy || !!pending} onClick={(event) => {
+                  const trigger = event.currentTarget;
+                  void run(() => grant(member, false, trigger));
+                }}>Add access</button>
               </div>
             </>}
             {feedback && <p role="status">{feedback.message}{feedback.settingsUrl &&
               <> <a href={feedback.settingsUrl} target="_blank" rel="noreferrer">Team member settings</a>.</>}
             </p>}
-            {prompt && pending && "member" in pending && pending.member.id === memberId ? renderPrompt() :
-              <div className="account-actions">
-                <button type="button" className="ghost" disabled={busy || !!pending} onClick={() => setPending({ action: "remove", member })}>Remove</button>
-              </div>}
+            <div className="account-actions">
+              <button type="button" className="ghost" disabled={busy || !!pending}
+                onClick={(event) => ask({ action: "remove", member }, event.currentTarget)}>Remove</button>
+            </div>
+            {pending && "member" in pending && pending.member.id === memberId && renderPrompt()}
           </div>;
         })}
       </section>
@@ -196,51 +222,69 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
 
 export function MemberAccess({ id, workspace, openSettings }: { id: string; workspace: string; openSettings: () => void }) {
   const [access, setAccess] = useState<LinearAccess | null>(null);
-  const [blocked, setBlocked] = useState(false);
-  const [asked, setAsked] = useState("");
+  const [checkFailed, setCheckFailed] = useState(false);
+  const [canRetryWrite, setCanRetryWrite] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    let check: AbortController | undefined;
-    function read() {
-      check?.abort();
-      const controller = new AbortController();
-      check = controller;
-      void shareApi.access(id, workspace, controller.signal).then((result) => {
-        if (controller.signal.aborted) return;
-        setAccess(result);
-      }, () => {});
+  const failedWrite = useRef(false);
+  const check = useRef<AbortController | null>(null);
+
+  const read = useCallback(async () => {
+    check.current?.abort();
+    const controller = new AbortController();
+    check.current = controller;
+    setCheckFailed(false);
+    try {
+      const result = await shareApi.access(id, workspace, controller.signal);
+      if (controller.signal.aborted) return;
+      setAccess(result);
+      if (result.status === "ok" && failedWrite.current) {
+        failedWrite.current = false;
+        setCanRetryWrite(true);
+      }
+    } catch {
+      if (!controller.signal.aborted) setCheckFailed(true);
     }
-    function refused(event: Event) {
-      if ((event as CustomEvent<string>).detail !== workspace) return;
-      setBlocked(true);
-      read();
-    }
-    read();
-    window.addEventListener(linearAccessRequired, refused);
-    return () => {
-      check?.abort();
-      window.removeEventListener(linearAccessRequired, refused);
-    };
   }, [id, workspace]);
 
-  const notice = access && accessNotice(access);
-  if (!notice && !blocked) return null;
+  useEffect(() => {
+    function refused(event: Event) {
+      if ((event as CustomEvent<string>).detail !== workspace) return;
+      failedWrite.current = true;
+      setCanRetryWrite(false);
+      void read();
+    }
+    void read();
+    window.addEventListener(linearAccessRequired, refused);
+    return () => {
+      check.current?.abort();
+      window.removeEventListener(linearAccessRequired, refused);
+    };
+  }, [read, workspace]);
+
   async function request() {
     setBusy(true);
     setError("");
     try {
       await shareApi.requestAccess(id, workspace);
-      setAsked(new Date().toISOString());
+      await read();
     } catch (reason) { setError((reason as Error).message); }
     finally { setBusy(false); }
   }
 
+  if (checkFailed) return <aside className="effort effort-warning member-access" aria-label="Linear access">
+    <span role="status">Could not check your Linear access.</span>
+    <button type="button" onClick={() => void read()}>Retry</button>
+  </aside>;
+
+  const notice = access && accessNotice(access);
+  if (!notice) return canRetryWrite ? <div className="effort" role="status">Linear access is available. You can send the write again.</div> : null;
+
   return <aside className="effort effort-warning member-access" aria-label="Linear access">
-    <span role="status">{notice?.message ?? "You need Linear access to change this project."}</span>
-    {notice?.action === "settings" ?
+    <span role="status">{notice.message}</span>
+    {notice.action === "settings" ?
       <button type="button" onClick={openSettings}>Open Settings to attach a key</button> :
-      asked ? <span role="status">Asked {time(asked)}</span> :
+      access?.accessRequestedAt ? <span role="status">Asked {time(access.accessRequestedAt)}</span> :
       <button type="button" disabled={busy} onClick={() => void request()}>Request access</button>}
     {error && <span role="alert">{error}</span>}
   </aside>;

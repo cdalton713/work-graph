@@ -1,0 +1,29 @@
+name: Managed CLI installer
+on:
+  pull_request:
+    paths: ['packaging/install/**', 'packaging/releases/**', '.github/workflows/cli-install.yml']
+  push:
+    branches: [main]
+    paths: ['packaging/install/**', 'packaging/releases/**', '.github/workflows/cli-install.yml']
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+        go: ['1.20.x', stable]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - run: go test -count=1 ./...
+        working-directory: packaging/install
+        env:
+          GO111MODULE: 'off'

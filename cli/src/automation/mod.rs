@@ -98,6 +98,7 @@ pub mod manage;
 pub mod precheck;
 mod production;
 pub mod scheduled;
+mod sender;
 
 /// Run machine operations that do not need a live effort connection.
 pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
@@ -162,6 +163,7 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
                     return Ok(Some(code));
                 }
             }
+            Operation::Agents(args) => return Ok(Some(sender::run(&args)?)),
             Operation::Autostart(auto) => {
                 println!(
                     "{}",

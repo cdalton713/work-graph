@@ -45,13 +45,14 @@ export function overviewMoveReason(reason: string): string {
     .replaceAll(summaryWords.step, () => words.step);
 }
 
-export function summarize(data: GraphData, workspace: string, now = Date.now()): ProjectSummary {
-  const graph = buildGraph(data);
+export function summarize(data: GraphData, workspace: string, now = Date.now(), settings = currentSite()): ProjectSummary {
+  const graph = buildGraph(data, { site: settings });
   const groups = new Map(boardGroups(graph).map((g) => [g.id, g.nodes]));
   const tally = new Map<string, { n: number; signal: Signal }>();
   for (const n of graph.nodes) tally.set(n.status, { n: (tally.get(n.status)?.n ?? 0) + 1, signal: n.signal });
+  const order = statusOrder({ ...settings, waitNames: data.waitNames ?? settings.waitNames });
   const counts = [...tally].map(([status, c]) => ({ status, ...c }))
-    .sort((a, b) => statusOrder().indexOf(a.status) - statusOrder().indexOf(b.status));
+    .sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status));
   const effort = parseStatus(data.status?.content);
   const hasCards = graph.nodes.some((n) => n.card && !n.issue.external);
   const timing = hasCards ? statusTiming(effort, true, data.status?.updatedAt ?? null, now) : null;
@@ -107,6 +108,7 @@ export function overviewRows(list: OverviewData | ProjectList, filter: OverviewF
 const askVerb = (a: Ask) => (a.kind === "escalation" ? "Worker escalates" : "Worker asks");
 
 export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined): YourMove[] {
+  asks = asks?.filter((ask) => !ask.accountName || ask.accountName === currentSite().human);
   if (!asks?.length) return you;
   const asked = new Set(asks.map((a) => a.issue ?? "worker"));
   const extra: YourMove[] = [];

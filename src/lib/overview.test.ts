@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { NO_INITIATIVE, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, overviewMoveReason, summarize, type OverviewData, type ProjectSummary } from "./overview";
-import { DEFAULT_HUMAN, configureSite } from "./site";
+import { DEFAULT_HUMAN, configureSite, createSite } from "./site";
 import type { GraphData, Issue, State } from "./types";
 
 const state = (name: string, type: State["type"] = "unstarted"): State => ({ id: name, name, type, color: "#000" });
@@ -16,6 +16,20 @@ const graph = (issues: Issue[], status: GraphData["status"] = null): GraphData =
   ({ project: { id: "p", name: "P", url: "" }, milestones: [], issues, teams: {}, labels: [], viewerId: "me", status });
 
 describe("summarize", () => {
+  it("counts both wait statuses but gives the viewer only their own moves", () => {
+    const data = graph([
+      issue("1", { state: state("Needs Ada", "started") }),
+      issue("2", { state: state("Needs Grace", "started"), card: nextCard("wait human: answer") }),
+    ]);
+    const summary = summarize({ ...data, waitNames: ["Ada", "Grace"] }, "work", 0, createSite("Ada", "work"));
+    expect(summary.you.map(({ identifier }) => identifier)).toEqual(["CD-1"]);
+    expect(summary.counts).toEqual([
+      { status: "Needs Ada", n: 1, signal: "stop" },
+      { status: "Needs Grace", n: 1, signal: "stop" },
+    ]);
+    expect(summarize(data, "work", 0, createSite("Ada", "work")).you).toHaveLength(2);
+  });
+
   it("reports the freshness of a published work-graph project", () => {
     const ran = "2026-11-20T10:00:00Z";
     const status = { content: '```json\n{"wg":1,"status":"wave 2","ran":"2026-11-20T10:00:00Z","wait_interval":30}\n```', updatedAt: ran };

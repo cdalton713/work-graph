@@ -1,5 +1,5 @@
 import { ownerWords } from "./words.ts";
-import { currentSite } from "./site.ts";
+import { currentSite, waitStatuses, type Site } from "./site.ts";
 import type { Card, GraphData, Issue, Kind, Label, Project, State } from "./types";
 
 export const CARD_PREFIX = "**work-graph node card**";
@@ -52,9 +52,11 @@ export function kindOf(issue: Issue, card: Card | null): Kind {
 
 /** One name for each status across teams, the same table as wg.py `norm`. */
 const ALIAS: Record<string, string> = { "Ready for Deploy": "Merged", "External QA": "In Review", "In Dev": "In Progress", "Ready for Eng": "Todo" };
-export function statusName(state: State, labels: Label[] = []): string {
-  const { waitLabel, waitStatus } = currentSite();
-  if (labels.some((l) => l.name === waitLabel)) return waitStatus;
+export function statusName(state: State, labels: Label[] = [], settings = currentSite()): string {
+  const waits = waitStatuses(settings);
+  const explicit = settings.waitNames && waits.find(({ status }) => status === state.name);
+  const wait = explicit || waits.find(({ label }) => labels.some((l) => l.name === label));
+  if (wait) return wait.status;
   if (state.type === "completed") return "Done";
   if (state.type === "canceled" || state.type === "duplicate") return "Canceled";
   const name = ALIAS[state.name] ?? state.name;
@@ -92,14 +94,14 @@ export function toggleReviewed(labels: Label[], reviewed: Label): Label[] {
 }
 
 export type Signal = "idle" | "ready" | "running" | "review" | "merged" | "done" | "stop" | "off";
-export function signalOf(status: string, type: State["type"]): Signal {
+export function signalOf(status: string, type: State["type"], settings = currentSite()): Signal {
+  if (waitStatuses(settings).some((wait) => wait.status === status)) return "stop";
   switch (status) {
     case "Ready": return "ready";
     case "In Progress": return "running";
     case "In Review": case "Ready to Merge": return "review";
     case "Merged": case "Verifying": return "merged";
     case "Done": return "done";
-    case currentSite().waitStatus: return "stop";
     case "Canceled": return "off";
   }
   return type === "started" ? "running" : "idle";
@@ -107,6 +109,7 @@ export function signalOf(status: string, type: State["type"]): Signal {
 
 export interface GNode {
   id: string; issue: Issue; card: Card | null; kind: Kind; status: string; signal: Signal;
+  waitsOnOther?: string;
   claim: string | null; phaseId: string | null; lane: string | null;
 }
 export interface GEdge { id: string; from: string; to: string }
@@ -118,12 +121,16 @@ export interface Graph {
 export const isClosed = (n: GNode) => n.status === "Done" || n.status === "Canceled";
 
 /** `from` blocks `to`: the edge points the way the work flows. */
-export function buildGraph(data: GraphData, opts: { openOnly?: boolean } = {}): Graph {
+export function buildGraph(data: GraphData, opts: { openOnly?: boolean; include?: (node: GNode) => boolean; site?: Site } = {}): Graph {
+  const base = opts.site ?? currentSite();
+  const settings = { ...base, waitNames: data.waitNames ?? base.waitNames };
+  const waits = waitStatuses(settings);
   let nodes: GNode[] = data.issues.map((issue) => {
     const card = parseCard(issue.card?.body);
-    const status = statusName(issue.state, issue.labels);
+    const status = statusName(issue.state, issue.labels, settings);
+    const waitsOnOther = waits.find((wait) => wait.status === status && wait.name !== settings.human)?.name;
     return {
-      id: issue.id, issue, card, kind: kindOf(issue, card), status, signal: signalOf(status, issue.state.type),
+      id: issue.id, issue, card, kind: kindOf(issue, card), status, signal: signalOf(status, issue.state.type, settings), waitsOnOther,
       claim: issue.labels.find(isClaim)?.name ?? null, phaseId: issue.milestoneId, lane: card?.lane ?? null,
     };
   });
@@ -133,6 +140,7 @@ export function buildGraph(data: GraphData, opts: { openOnly?: boolean } = {}): 
   for (const n of nodes) if (n.phaseId && n.card?.phase) phaseOfKey.set(n.card.phase, n.phaseId);
   for (const n of nodes) if (!n.phaseId && n.card?.phase) n.phaseId = phaseOfKey.get(n.card.phase) ?? null;
 
+  if (opts.include) nodes = nodes.filter(opts.include);
   if (opts.openOnly) nodes = nodes.filter((n) => !isClosed(n));
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const edges = new Map<string, GEdge>();
@@ -386,12 +394,14 @@ const BOARD: [BoardGroupId, string, string][] = [
 export function boardGroups(graph: Graph, asked?: Set<string>): BoardGroup[] {
   const groupOf = (n: GNode): BoardGroupId => {
     if (isClosed(n)) return "closed";
+    if (n.waitsOnOther) return "waiting";
+    if (n.signal === "stop") return "you";
     // A worker that asks a question waits on the human's reply (from the link).
     if (asked?.has(n.issue.identifier)) return "you";
     if (n.status === "Triage") return "you";
     if (n.status === "Backlog") return "waiting";
     // wg next can flag a PR that waits on the human while its status is still In Review.
-    if (yourMove(n.card?.next) || n.status === currentSite().waitStatus) return "you";
+    if (yourMove(n.card?.next)) return "you";
     // wg next asks for a merge only for the PR that can merge now (`do ask-merge`). A Ready to Merge PR
     // for which it names another step (`do verify`) waits on the coordinator, not on the human.
     if (n.status === "Ready to Merge" && !agentStep(n.card?.next)) return "you";

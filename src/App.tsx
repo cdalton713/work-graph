@@ -10,7 +10,7 @@ import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { Panel } from "./components/Panel";
 import { CopyButton, Lamp, Picker } from "./components/ui";
-import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type Signal, toggleReviewed } from "./lib/graph";
+import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type GNode, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
 import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
 import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./lib/health";
@@ -21,6 +21,7 @@ import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
 import type { Account, AccountConnection, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
 import { useLink } from "./useLink";
+import { claimMarks, matchesClaim, parseClaimFilter, type ClaimFilter, type ProjectClaims } from "./lib/claims";
 
 const POLL_MS = 15_000;
 /** The overview loads a graph for each open project, so it polls less often than one graph. */
@@ -225,12 +226,71 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const linkRef = useMemo(() => (project ? { workspace: project.workspace ?? site.defaultWorkspace, id: project.id } : null), [openKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const entry = directory?.workspaces.find(({ id }) => id === project?.workspace);
   const sharedRole = entry?.role;
-  const link = useLink(sharedRole ? null : linkRef, () => { if (project && !document.hidden) void load(project); });
+  const sharedProject = service && data?.workspace === linkRef?.workspace && data?.project.id === linkRef?.id && !!data?.waitNames;
+  const refreshClaims = useRef<() => void>(() => {});
+  const [claimData, setClaimData] = useState<{ key: string; result: ProjectClaims } | null>(null);
+  useEffect(() => {
+    if (!sharedProject || !linkRef || !openKey) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let nextRequest = 0, running = false, queued = false;
+    const refresh = () => {
+      if (controller.signal.aborted) return;
+      queued = true;
+      if (running || timer !== undefined) return;
+      const delay = nextRequest - performance.now();
+      if (delay > 0) {
+        timer = setTimeout(() => { timer = undefined; refresh(); }, Math.ceil(delay));
+        return;
+      }
+      queued = false;
+      running = true;
+      nextRequest = performance.now() + 2000;
+      void api.claims(linkRef.id, linkRef.workspace, controller.signal)
+        .then((result) => {
+          if (!controller.signal.aborted) setClaimData({ key: openKey, result });
+        })
+        .catch(() => {})
+        .finally(() => { running = false; if (queued) refresh(); });
+    };
+    refreshClaims.current = refresh;
+    refresh();
+    // Renewals can extend a lease without a changed message. Poll while the page is visible.
+    const poll = () => { if (!document.hidden) refresh(); };
+    const interval = setInterval(poll, POLL_MS);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", poll);
+      refreshClaims.current = () => {};
+      setClaimData(null);
+    };
+  }, [sharedProject, linkRef, openKey]);
+  const link = useLink(sharedRole === "viewer" ? null : linkRef, () => {
+    refreshClaims.current();
+    if (project && !document.hidden) void load(project);
+  });
+  const claims = sharedProject && claimData?.key === openKey ? claimData?.result : undefined;
+  const [filterChoice, setFilterChoice] = useState<{ key: string; value: ClaimFilter } | null>(null);
+  const storedFilter = useMemo(() => {
+    try { return openKey ? parseClaimFilter(localStorage.getItem(`wg:claims:${openKey}`)) : "all"; }
+    catch { return "all"; }
+  }, [openKey]);
+  const marks = useMemo(() => claimMarks(claims?.claims ?? [], now), [claims, now]);
+  const canFilterClaims = !!claims && (claims.claims.length ? claims.claims.some((claim) => claim.mine !== undefined) : claims.role !== undefined);
+  const claimFilter = canFilterClaims ? (filterChoice?.key === openKey ? filterChoice!.value : storedFilter) : "all";
+  const chooseClaimFilter = (value: ClaimFilter) => {
+    if (!openKey) return;
+    try { localStorage.setItem(`wg:claims:${openKey}`, value); } catch { /* The filter still works on this page. */ }
+    setFilterChoice({ key: openKey, value });
+  };
   // A worker's question is a move of the human's: it counts in "Your move", the picker, and the badge.
   const yours = useMemo(() => new Map((overview?.summaries ?? []).map((s) => [summaryKey(s), movesWithAgents(movesWithAsks(s.you, link.asksBy.get(summaryKey(s))), link.agentsBy.get(summaryKey(s)), now).length])), [overview, link.asksBy, link.agentsBy, now]);
   const [sharedPresence, setSharedPresence] = useState<{ key: string; data: Awaited<ReturnType<typeof api.sharedPresence>> } | null>(null);
   useEffect(() => {
-    if (sharedRole !== "collaborator" || !linkRef || !openKey) return;
+    if (sharedRole !== "collaborator" || link.connected || !linkRef || !openKey) return;
     let active = true;
     const poll = () => {
       if (document.hidden) return;
@@ -241,10 +301,10 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     poll();
     const timer = window.setInterval(poll, POLL_MS);
     return () => { active = false; window.clearInterval(timer); };
-  }, [sharedRole, linkRef, openKey]);
-  const projectPresence = sharedPresence?.key === openKey && sharedRole === "collaborator" ? sharedPresence.data : undefined;
-  const asks = sharedRole ? projectPresence?.asks ?? [] : link.asks;
-  const asked = useMemo(() => new Set(asks.flatMap((a) => (a.issue ? [a.issue] : []))), [asks]);
+  }, [sharedRole, link.connected, linkRef, openKey]);
+  const projectPresence = !link.connected && sharedPresence?.key === openKey && sharedRole === "collaborator" ? sharedPresence.data : undefined;
+  const asks = sharedRole === "viewer" ? [] : projectPresence?.asks ?? link.asks;
+  const asked = useMemo(() => new Set(asks.flatMap((a) => (a.issue && (!a.accountName || a.accountName === site.human) ? [a.issue] : []))), [asks]);
   const presence = projectPresence ?? (linkRef ? link.presence.get(summaryKey(linkRef)) : undefined);
   const agents = linkRef ? link.agentsBy.get(summaryKey(linkRef)) : undefined;
   const viewer = site.readOnly || sharedRole === "viewer";
@@ -372,7 +432,9 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     }
   };
 
-  const graph = useMemo(() => (data ? buildGraph(data, { openOnly }) : null), [data, openOnly]);
+  const includeClaim = useCallback(({ card }: GNode) =>
+    matchesClaim(card?.key ? marks.get(card.key) : undefined, claimFilter), [marks, claimFilter]);
+  const graph = useMemo(() => (data ? buildGraph(data, { openOnly, include: includeClaim }) : null), [data, openOnly, includeClaim]);
   const full = useMemo(() => (data ? buildGraph(data) : null), [data]);
   const edges = useMemo(() => (graph ? (allEdges ? graph.edges : reduceEdges(graph)) : []), [graph, allEdges]);
   const key = graph ? shapeKey(graph, edges) : "";
@@ -439,7 +501,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
 
   // The keys of a project page. `j` and `k` step through the issues in board order (Your move first).
   const [keys, setKeys] = useState(false);
-  const order = useMemo(() => (full ? boardOrder(full, asked) : []), [full, asked]);
+  const order = useMemo(() => (full ? boardOrder(full, asked).filter(includeClaim) : []), [full, asked, includeClaim]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLElement && e.target.closest("input, textarea, select, [contenteditable]");
@@ -473,8 +535,9 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const counts = useMemo(() => {
     const tally = new Map<string, { n: number; signal: Signal }>();
     for (const n of full?.nodes ?? []) tally.set(n.status, { n: (tally.get(n.status)?.n ?? 0) + 1, signal: n.signal });
-    return [...tally].sort((a, b) => statusOrder().indexOf(a[0]) - statusOrder().indexOf(b[0]));
-  }, [full]);
+    const statuses = statusOrder({ ...site, waitNames: data?.waitNames });
+    return [...tally].sort((a, b) => statuses.indexOf(a[0]) - statuses.indexOf(b[0]));
+  }, [full, data?.waitNames]);
   const toggleStatus = useCallback((status: string) => setStatusFilter((now) => {
     const next = new Set(now);
     if (!next.delete(status)) next.add(status);
@@ -606,6 +669,11 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             ))}
             {statusFilter.size > 0 && <button type="button" className="ghost" onClick={() => setStatusFilter(new Set())}>Show all</button>}
           </div>
+          {canFilterClaims && <label className="claim-filter">
+            Runner <select value={claimFilter} onChange={(event) => chooseClaimFilter(parseClaimFilter(event.target.value))}>
+              <option value="all">All</option><option value="mine">Mine</option><option value="theirs">Theirs</option>
+            </select>
+          </label>}
           <div className="tally">
             <div className="tally-track">
               {counts.map(([status, c]) => (
@@ -626,6 +694,13 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         <div className="effort effort-warning" role="status">
           wg next wrote this record with contract <span className="mono">{effort?.contract}</span>; this page has <span className="mono">{import.meta.env.WG_CONTRACT_HASH}</span>.
           Run wg next with the wg of this repository.
+        </div>
+      )}
+      {sharedProject && presence?.coordinators.some((row) => row.connected) && (
+        <div className="effort" aria-label="Connected coordinators">
+          <span className="effort-mark">Coordinators</span>
+          {presence.coordinators.filter((row) => row.connected).map((row) =>
+            <span key={row.session} className="effort-age">{row.accountName ?? (!sharedRole ? site.human : entry?.owner)}</span>)}
         </div>
       )}
       {!timing && (coordinator || commands) && (
@@ -675,16 +750,20 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             initiative={query.get("initiative")} onInitiative={(name) => setQuery({ initiative: name }, true)} />
         )}
         {project && !data && !error && <div className="blank">Loading {project.name}…</div>}
-        {board && full && full.nodes.length > 0 && <Board graph={full} now={now} selectedId={selected?.id ?? null} onPick={pick} onHover={setHoverId} onReview={canReview && !viewer ? onReview : undefined}
+        {board && full && full.nodes.length > 0 && <Board graph={full} marks={marks} filter={claimFilter} now={now} selectedId={selected?.id ?? null} onPick={pick} onHover={setHoverId} onReview={canReview && !viewer ? onReview : undefined}
           asked={asked}
           live={new Map(link.progress.flatMap((p) => { const job = liveJob(p); return job && p.issue ? [[p.issue, job] as [string, string]] : []; }))} />}
-        {graph && data && !graph.nodes.length && <div className="blank">{openOnly ? "No open issues. Turn off “Open issues only” under View to see all." : "This project has no issues."}</div>}
+        {graph && data && !graph.nodes.length && <div className="blank">{claimFilter !== "all" ? "No issues match this runner filter." : openOnly ? "No open issues. Turn off “Open issues only” under View to see all." : "This project has no issues."}</div>}
         {graph && placed && graph.nodes.length > 0 && (
-          <Canvas graph={graph} now={now} edges={edges} layout={placed.layout} selectedId={selected?.id ?? null} hoverId={hoverId} statusFilter={statusFilter}
+          <Canvas graph={graph} marks={marks} now={now} edges={edges} layout={placed.layout} selectedId={selected?.id ?? null} hoverId={hoverId} statusFilter={statusFilter}
             focus={focus} showMap={map} onSelect={select} onHover={setHoverId} />
         )}
         {selected && full && data && (
-          <Panel node={selected} now={now} graph={full} data={data} asks={asks.filter((a) => a.issue === selected.issue.identifier)}
+          <Panel node={selected} claim={selected.card?.key ? marks.get(selected.card.key) : undefined}
+            onRelease={claims?.role === "owner" && !viewer && linkRef ? async (node) => {
+              await api.releaseClaim(linkRef.id, linkRef.workspace, node);
+              refreshClaims.current();
+            } : undefined} now={now} graph={full} data={data} asks={asks.filter((a) => a.issue === selected.issue.identifier)}
             progress={link.progress.find((p) => p.issue === selected.issue.identifier)}
             agent={agentsFresh(agents, now) ? agents.agents.find((a) => a.issue === selected.issue.identifier) : undefined}
             onDispatch={canCommand ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer} limitedEdits={collaborator}

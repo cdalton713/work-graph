@@ -4,6 +4,8 @@ import { CARD_PREFIX, ageText, cardText, type GNode, type Graph, isProtectedLabe
 import type { Comment, GraphData, IssuePatch, Issue, State } from "../lib/types";
 import { Lamp, Picker, PrLinks, Rich } from "./ui";
 import { type AgentRow, type Ask, type Progress, agentNeeds, agentState, liveJob } from "../lib/link";
+import type { ClaimMark } from "../lib/claims";
+import { site } from "../lib/site";
 import { Asks } from "./Asks";
 
 const COMMENTS_MS = 60_000;
@@ -11,6 +13,8 @@ const PRIORITY = ["No priority", "Urgent", "High", "Medium", "Low"];
 const WG_FIELDS: [string, string][] = [["key", "Key"], ["phase", "Phase"], ["lane", "Lane"], ["role", "Role"], ["branch", "Branch"], ["pr", "PR"], ["review", "Wave review"], ["merge_review", "Merge review"], ["code_done", "Code done"], ["state", "Worker"], ["job", "Job"], ["soak_until", "Soak until"]];
 
 export interface PanelProps {
+  claim?: ClaimMark;
+  onRelease?: (node: string) => Promise<void>;
   node: GNode; now: number; graph: Graph; data: GraphData;
   /** Resolves to false when the server refused the change. */
   onPatch: (id: string, patch: IssuePatch, optimistic: Partial<Issue>) => Promise<boolean>;
@@ -46,8 +50,21 @@ function Links({ title, ids, graph, onGo, note, clear }: { title: string; ids: s
   );
 }
 
-export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress, agent, readOnly = false, limitedEdits = false }: PanelProps) {
+export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress, agent, readOnly = false, limitedEdits = false }: PanelProps) {
   const { issue, card } = node;
+  const settings = { ...site, waitNames: data.waitNames };
+  const [releasing, setReleasing] = useState(false);
+  async function release() {
+    if (!onRelease || !claim || !window.confirm(`Release the stale claim held by ${claim.holder}?`)) return;
+    setReleasing(true);
+    try {
+      await onRelease(claim.node);
+    } catch (error) {
+      onError(`Claim not released: ${(error as Error).message}`);
+    } finally {
+      setReleasing(false);
+    }
+  }
   const elapsed = runTime(card, now);
   const team = data.teams[issue.teamId];
   // The issue of another team, and each issue on the viewer, has no control that writes.
@@ -141,6 +158,14 @@ export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError,
       </header>
 
       <div className="panel-body" key={issue.id}>
+        {claim && <div className={`notice${claim.stale ? " is-warning" : ""}`}>
+          <div>{claim.holder} · {claim.job} · since <time dateTime={claim.claimedAt}>{new Date(claim.claimedAt).toLocaleString()}</time></div>
+          {claim.stale && <div>⚠ No sign of {claim.holder}'s coordinator since <time dateTime={claim.renewedAt}>{new Date(claim.renewedAt).toLocaleString()}</time></div>}
+          {claim.stale && claim.mine === false && onRelease && <button type="button" className="ghost" disabled={releasing} onClick={() => void release()}>
+            {releasing ? "Releasing…" : "Release"}
+          </button>}
+        </div>}
+        {node.waitsOnOther && <p className="notice">This issue waits on {node.waitsOnOther}.</p>}
         {foreign && !readOnly && (
           <p className="notice">
             {issue.external
@@ -163,7 +188,7 @@ export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError,
 
         {/* What wg next says about this node comes first: it is the action. */}
         {card?.next && (
-          <div className={`next-action${yourMove(card.next) ? " is-you" : ""}`}>
+          <div className={`next-action${!node.waitsOnOther && yourMove(card.next) ? " is-you" : ""}`}>
             <span className="next-mark">wg next</span>
             <div className="next-lines mono">{card.next.split("\n").map((line) => <div key={line}>{line}</div>)}</div>
             {onDispatch && card.key && /(^|\n)do dispatch\b/.test(card.next) && (
@@ -177,7 +202,7 @@ export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError,
           <dt>Status</dt>
           <dd>
             <Picker disabled={locked} value={[issue.state.id]} onChange={([id]) => requestMove(states.find((s) => s.id === id)!)}
-              options={states.map((s) => ({ id: s.id, label: s.name, lead: <Lamp signal={signalOf(statusName(s), s.type)} /> }))}>
+              options={states.map((s) => ({ id: s.id, label: s.name, lead: <Lamp signal={signalOf(statusName(s, [], settings), s.type, settings)} /> }))}>
               <Lamp signal={node.signal} />{issue.state.name}
             </Picker>
           </dd>

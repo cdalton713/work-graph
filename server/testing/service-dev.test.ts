@@ -70,7 +70,7 @@ test("the local service starts on loopback, serves service config, and stops", a
     const access = await fetch(url + "/api/projects/project/access", { headers: sharedHeaders });
     expect(await access.json()).toMatchObject({ status: "not_member", team: "WG", accessRequestedAt: member.accessRequestedAt });
     const graph = await fetch(url + "/api/projects/project/graph", { headers: sharedHeaders });
-    expect(await graph.json()).toMatchObject({ issues: [{ identifier: "WG-1" }] });
+    expect(await graph.json()).toMatchObject({ issues: [{ identifier: "WG-1" }, { identifier: "WG-2" }] });
     const write = await fetch(url + "/api/issues/issue/comments", {
       method: "POST", headers: { ...sharedHeaders, origin: url, "content-type": "application/json" },
       body: JSON.stringify({ body: "Example comment" }),

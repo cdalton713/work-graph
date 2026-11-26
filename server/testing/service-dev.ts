@@ -1,10 +1,11 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
-import { serializeSigned } from "hono/utils/cookie";
+import { parseSigned, serializeSigned } from "hono/utils/cookie";
 import { createApp } from "../app.ts";
-import { localUrl, pack, SESSION_COOKIE, SESSION_S } from "../auth.ts";
+import { localUrl, pack, unpack, SESSION_COOKIE, SESSION_S } from "../auth.ts";
 import { credentialCrypto } from "../db/crypto.ts";
 import { migrate } from "../db/migrations.ts";
 import { dbTenants } from "../db/tenants.ts";
@@ -43,10 +44,16 @@ const started = { id: "started", name: "In progress", type: "started", color: "#
 const issue = {
   id: "issue", identifier: "WG-1", title: "Example issue", description: "", priority: 0,
   url: "https://example.com/issue", sortOrder: 0, updatedAt: new Date().toISOString(),
-  project, team: exampleTeam, state: started, assignee: null, labels: empty,
+  project, team: exampleTeam, state: { ...started, id: "needs-ada", name: "Needs Ada" }, assignee: null, labels: empty,
   relations: empty, inverseRelations: empty, attachments: empty,
   comments: { nodes: [{ id: "card", body: '**work-graph node card**\n\n```json\n{"wg":1,"key":"example","kind":"task"}\n```' }], pageInfo },
 };
+const graceIssue = {
+  ...issue, id: "grace-issue", identifier: "WG-2", title: "Check the shared project",
+  sortOrder: 1, state: { ...started, id: "needs-grace", name: "Needs Grace" },
+  comments: { nodes: [{ id: "grace-card", body: issue.comments.nodes[0].body.replace('"example"', '"check"') }], pageInfo },
+};
+const issues = [issue, graceIssue];
 const accounts = tenants.accounts;
 const people = await Promise.all([
   { id: "ada", name: "Ada", org: workspace },
@@ -76,6 +83,34 @@ await sql.query(`UPDATE project_members SET access_requested_at = now() - interv
   access_request_limit_until = NULL WHERE id = $1`, [membership.id]);
 // Leave the read-only link off so the preview covers both initial link states.
 await accounts.shares.revoke([...scope], "view");
+for (const [person, node, job] of [[owner, "example", "dispatch"], [collaborator, "check", "review"]] as const) {
+  await accounts.claims({ project: [...scope], account: person.accountId,
+    ...(person === collaborator && { membership: membership.id }) }, { kind: "post", node, job, lease: 3600 });
+}
+await sql.query(`UPDATE node_claims SET claimed_at = now() - interval '1 hour',
+  renewed_at = now() - interval '30 minutes', lease_until = now() - interval '1 minute'
+  WHERE tenant_id = $1 AND connection_id = $2 AND project_id = $3 AND node_key = 'check'`, [...scope]);
+const ref = { tenant: owner.accountId, workspace: "example", id: project.id };
+async function previewCoordinators() {
+  const { coordinators } = await app.link.hub.presence(ref);
+  if (coordinators.filter(({ connected }) => connected).length === 2) return;
+  async function connect(session: string, member?: Parameters<typeof app.link.hub.joinCoordinator>[2]) {
+    const connection = await app.link.hub.joinCoordinator({
+      close() { void connection.closed(); }, send() {},
+    }, ref, member);
+    await connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session, plan: "example" } }));
+    await connection.receive(JSON.stringify({ v: 1, type: "state", payload: { mode: "waiting" } }));
+    return connection;
+  }
+  await connect("owner");
+  const second = await connect("collaborator", {
+    account: collaborator.accountId, name: collaborator.name, workspace: `shared:${membership.id}`, ownerName: owner.name,
+  });
+  await second.receive(JSON.stringify({ v: 1, type: "asks", payload: { asks: [
+    { id: "question", key: "check", issue: "WG-2", from: "worker", body: "Can you check the result?", at: new Date().toISOString() },
+  ] } }));
+}
+
 const teamMembers = new Set([owner.id]);
 let invitationPending = false;
 
@@ -121,11 +156,14 @@ globalThis.fetch = async (input, init) => {
     invitationPending = true;
     return data({ organizationInviteCreate: { success: true } });
   }
-  if (query.includes("issue(id:")) return data({ issue: visible && variables.id === issue.id ? { ...issue, comments: empty } : null });
-  if (query.includes("teams(first:10")) return data({ teams: { nodes: [{ ...exampleTeam, states: { nodes: [started] }, members: empty }] } });
+  if (query.includes("issue(id:")) {
+    const found = issues.find(({ id }) => id === variables.id);
+    return data({ issue: visible && found ? { ...found, comments: empty } : null });
+  }
+  if (query.includes("teams(first:10")) return data({ teams: { nodes: [{ ...exampleTeam, states: { nodes: [started, ...issues.map((item) => item.state)] }, members: empty }] } });
   if (query.includes("issueLabels(")) return data({ issueLabels: empty });
   if (query.includes("project(id:")) {
-    return data({ viewer: linearViewer, project: visible && variables.id === project.id ? { ...graphProject, issues: { nodes: [issue], pageInfo } } : null });
+    return data({ viewer: linearViewer, project: visible && variables.id === project.id ? { ...graphProject, issues: { nodes: issues, pageInfo } } : null });
   }
   return data({
     viewer: linearViewer,
@@ -145,6 +183,7 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
     const identity = url.searchParams.get("as");
     const person = people.find(({ id }) => id === identity) ?? owner;
     if (identity) await accounts.setOnboarding(person.accountId, undefined, true);
+    await previewCoordinators();
     const value = pack({ accountId: person.accountId, email: person.email, id: randomUUID(), exp: Math.floor(Date.now() / 1000) + SESSION_S });
     const cookie = await serializeSigned("wg_preview_session", value, auth.secret, { path: "/", httpOnly: true, sameSite: "Strict" });
     return new Response(null, { status: 302, headers: {
@@ -155,7 +194,8 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
   const headers = new Headers(request.headers);
   const accountRead = url.pathname === "/api/account" && request.method === "GET";
   const shareWrite = request.method === "POST" && /^\/api\/projects\/[^/]+\/share(?:\/[^/]+(?:\/rotate)?)?$/.test(url.pathname);
-  if (accountRead || shareWrite) headers.delete("accept-encoding");
+  const claimsRead = request.method === "GET" && url.pathname === "/api/projects/project/claims";
+  if (accountRead || shareWrite || claimsRead) headers.delete("accept-encoding");
   headers.set("host", host);
   if (headers.get("origin") === url.origin) headers.set("origin", origin);
   const cookie = /(?:^|;\s*)wg_preview_session=([^;]+)/.exec(headers.get("cookie") ?? "")?.[1];
@@ -170,6 +210,15 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
     const local = body.view && body.collab ? { view: useLoopback(body.view), collab: useLoopback(body.collab) } : useLoopback(body);
     return Response.json(local, { headers: response.headers });
   }
+  if (claimsRead && response.ok) {
+    const body = await response.json();
+    // The preview can run against either version of the claims endpoint.
+    const session = unpack((await parseSigned(request.headers.get("cookie") ?? "", auth.secret)).wg_preview_session);
+    const role = session?.accountId === owner.accountId ? "owner" : session?.accountId === collaborator.accountId ? "collaborator" : "viewer";
+    const name = role === "owner" ? owner.name : role === "collaborator" ? collaborator.name : null;
+    return Response.json({ role, claims: body.claims.map((claim: { holder: string; mine?: boolean }) =>
+      ({ ...claim, mine: claim.mine ?? claim.holder === name })) });
+  }
   if (response.headers.get("location") === origin + "/") response.headers.set("location", "/");
   if (response.headers.get("set-cookie")?.includes(`__Host-${SESSION_COOKIE}=`)) {
     response.headers.set("set-cookie", "wg_preview_session=; Path=/; Max-Age=0");
@@ -177,9 +226,21 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
   return response;
 } }, ({ port }) => console.log(`Service preview at http://127.0.0.1:${port}/`));
 
+server.on("upgrade", (request) => {
+  const address = server.address();
+  if (!address || typeof address === "string") return;
+  const localHost = `127.0.0.1:${address.port}`;
+  if (request.headers.host !== localHost || request.headers.origin !== `http://${localHost}`) return;
+  request.headers.host = host;
+  request.headers.origin = origin;
+  const cookie = /(?:^|;\s*)wg_preview_session=([^;]+)/.exec(request.headers.cookie ?? "")?.[1];
+  if (cookie) request.headers.cookie = `__Host-${SESSION_COOKIE}=${cookie}`;
+});
+if (server instanceof Server) app.injectWebSocket(server);
+
 stopOnSignals(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
   await app.link.shutdown();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   tenants.close();
   await sql.close();
 }, (signal, handle) => process.on(signal, handle), (code) => process.exit(code));

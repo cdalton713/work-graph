@@ -138,6 +138,16 @@ const migrations = [
     "ALTER TABLE project_members ADD COLUMN access_requested_at timestamptz, ADD COLUMN access_request_limit_until timestamptz",
   ],
   ["ALTER TABLE project_members ADD COLUMN access_invited_at timestamptz"],
+  [
+    `CREATE TABLE push_devices (
+      tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      id text NOT NULL, subscription text NOT NULL, PRIMARY KEY (tenant_id, id)
+    )`,
+    `CREATE TABLE push_settings (
+      tenant_id uuid PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+      settings jsonb NOT NULL
+    )`,
+  ],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

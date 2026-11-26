@@ -18,6 +18,8 @@ import { parseCard, statusName } from "../src/lib/graph.ts";
 import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from "../src/lib/link.ts";
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal, sharedRoutes } from "./access.ts";
+import { readVapid, pushRoutes } from "./push.ts";
+import { filePushStore, type PushStore } from "./pushstore.ts";
 import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
 import { isLinearIdentifier, planRoutes } from "./plans.ts";
 import { createStarter, creationInput, starterTeam } from "./create-project.ts";
@@ -109,6 +111,9 @@ export interface AppOptions {
    * The directory where the link keeps its queue and the open asks over a restart. Default: `WG_STATE_DIR`.
    * None: the link keeps them in memory only.
    */
+  pushEnv?: NodeJS.ProcessEnv;
+  pushSharedWorkspaces?: Tenants["sharedWorkspaces"];
+  hostedPushStore?: () => PushStore | Promise<PushStore>;
   stateDir?: string;
   /** The commit of the build. Default: `WG_VERSION`, else `dev`. */
   version?: string;
@@ -167,6 +172,7 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
 export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, linkMaxAgeMs, linkPongMs, human, stateDir = process.env.WG_STATE_DIR || undefined,
+  pushEnv = process.env, hostedPushStore, pushSharedWorkspaces,
   appName,
   flushSentry,
   version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linearAuth, serviceReady, telemetryEnv = process.env, waitUntil, linkToken, linkState, linkBus, redisUrl, redisPrefix, tenants, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
@@ -182,6 +188,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   if (!tenants && auth && !readOnly && !linkToken) throw new Error("the sign-in needs WG_LINK_TOKEN on a full page");
   const configured = configTenants({ human: human ?? DEFAULT_HUMAN, workspaces, auth, linkToken, readOnly });
   const directory: Tenants = tenants ?? configured;
+  const vapid = readVapid(pushEnv);
+  const filePush = vapid && !tenants && stateDir && !isInside(stateDir, dist) ? filePushStore(stateDir) : undefined;
+  const pushStore = tenants ? hostedPushStore : filePush ? () => filePush : undefined;
   const accountStore = tenants?.accountStore;
   const requiresLinkToken = !!tenants || !!linkToken;
   const linkEnabled = !readOnly;
@@ -673,6 +682,22 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const selected = sharedScope.getStore();
     return selected ? Promise.resolve([selected]) : directory.sharedWorkspaces?.(tenant.id) ?? Promise.resolve([]);
   };
+  app.route("/api/push", pushRoutes(vapid?.publicKey, pushStore, async c => {
+    const reason = refusal(c.req.method, name => c.req.header(name), rules);
+    if (reason) return c.json({ error: reason }, 403);
+    const signed = await readSession(c);
+    if (!signed || !await sessionActive(signed)) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    const member = await directory.fromSession(signed);
+    if (!member || readOnly || member.role === "viewer") return c.json({ error: "Push requires account access" }, 403);
+    const selected = c.req.header("x-workspace");
+    if (selected?.startsWith("shared:")) {
+      const shared = await (pushSharedWorkspaces ?? directory.sharedWorkspaces)?.(member.tenant.id);
+      if (!shared?.some(entry => entry.id === selected && entry.role === "collaborator")) {
+        return c.json({ error: "Push requires account access" }, 403);
+      }
+    }
+    return tenants ? member.tenant.id : signed.email;
+  }, clock));
   const unknownWorkspace = (id: string) => ({ error: `workspace ${id} is not configured` });
   const isAgentReply = (path: string) => /^\/api\/projects\/[^/]+\/agents\/[^/]+\/reply\/?$/.test(path);
   app.use(async (c, next) => {
@@ -769,6 +794,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           environment: telemetryEnv.WG_SENTRY_ENVIRONMENT || "production",
           release: telemetryEnv.WG_VERSION || "dev",
         } } : {}),
+        push: !!(vapid && pushStore && session && membership && !viewer && !disconnected),
         human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version, telemetry: !!telemetry,
         readOnly: viewer, auth: !!(auth || linearAuth), user: membership && !disconnected ? session?.email ?? null : null,
         role: disconnected ? null : role, ...(linearAuth ? { signIn: "linear" as const } : {}),

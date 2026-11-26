@@ -9,6 +9,31 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(on_io_failure: &dyn Fn(std::io::ErrorKind)) -> ExitCode {
+    if let Some(version) = option_env!("WG_RELEASE_VERSION") {
+        let mut args = std::env::args_os().skip(1);
+        match (args.next().as_deref(), args.next()) {
+            (Some(flag), None) if flag == "--release-key" => {
+                return match wg_preview::release::embedded_key() {
+                    Ok(key) => {
+                        for byte in key.as_bytes() {
+                            print!("{byte:02x}");
+                        }
+                        println!();
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            (Some(flag), None) if flag == "--version" => {
+                println!("wg {version} {}", env!("WG_BUILD_TARGET"));
+                return ExitCode::SUCCESS;
+            }
+            _ => {}
+        }
+    }
     if std::env::args_os().nth(1).is_some_and(|v| v == "usage") {
         return wg_preview::usage::command(std::env::args().skip(2));
     }

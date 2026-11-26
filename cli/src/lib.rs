@@ -76,6 +76,7 @@ pub mod local;
 pub mod page;
 pub mod state;
 
+pub mod release;
 pub mod usage;
 
 pub mod providers;

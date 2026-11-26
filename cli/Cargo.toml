@@ -30,3 +30,5 @@ percent-encoding = "2"
 glob = "0.3"
 regex = "1"
 sentry-types = "0.48"
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+serde_derive = "1"

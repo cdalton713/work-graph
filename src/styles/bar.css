@@ -174,10 +174,12 @@
 
 @media (pointer: coarse) {
   .claim-filter select { font-size: 16px; }
+  .tally-track { display: none; }
 }
 
 @media (max-width: 720px) {
   .effort-row { flex-wrap: nowrap; }
+  .effort-coordinator-lamp { display: flex; }
   .effort-row:not(.effort-warning) > .effort-timing, .effort-row > .effort-coordinator { display: none; }
   .effort-row > .effort-trigger > .effort-status { min-width: 0; }
   .effort-row.effort-warning .effort-status { white-space: normal; }

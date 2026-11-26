@@ -32,6 +32,8 @@ test("the status filters scroll with a fixed done count and explain each filter"
   const filters = rail.getByRole("group", { name: "Show only these statuses" });
   const filter = filters.getByRole("button", { name: /^Triage/ });
   const tally = rail.getByText(/done$/);
+  if (desktop) await expect(rail.locator(".tally-track")).toBeVisible();
+  else await expect(rail.locator(".tally-track")).toBeHidden();
   const row = page.locator(".effort").filter({ hasText: summary });
   const details = row.getByRole("button", { name: /wg next/i });
   for (const width of info.project.name.startsWith("tablet-820") ? [768, 820, 1024, 1180] : [info.project.use.viewport!.width]) {
@@ -114,6 +116,35 @@ test("the sheet shows the coordinator state and sends full-size commands", async
     expect(box.width).toBeGreaterThanOrEqual(44);
     expect(box.height).toBeGreaterThanOrEqual(44);
     await button.click();
+    if (name === "Pause") {
+      await expect(sheet.getByText("Coordinator paused", { exact: true })).toBeVisible();
+      if (info.project.name.startsWith("phone-")) {
+        await sheet.getByRole("button", { name: "Close", exact: true }).click();
+        const lamp = row.getByRole("img", { name: "Coordinator paused" });
+        await expect(lamp).toBeVisible();
+        expect((await page.locator(".rail-bar").boundingBox())!.height + (await row.boundingBox())!.height).toBeLessThanOrEqual(72);
+        await row.getByRole("button", { name: /wg next/i }).click();
+      }
+    }
   }
   expect(sent).toEqual(["next", "pause", "resume"]);
+});
+
+test("the phone shows a coordinator that needs attention before opening the sheet", async ({ page }, info) => {
+  test.skip(!info.project.name.startsWith("phone-"));
+  await publish(page);
+  await page.routeWebSocket(/\/api\/link\?.*project=fixture/, (socket) => {
+    const at = new Date().toISOString();
+    socket.send(JSON.stringify({
+      v: 1, type: "agents", project: { workspace: "default", id: "fixture" },
+      payload: { at, agents: [{ role: "coordinator", state: "waiting", at, agent: "Example" }] },
+    }));
+  });
+  await screens.project(page);
+  const row = page.locator(".effort-row");
+  const attention = "Coordinator needs attention";
+  await expect(row.getByRole("img", { name: attention })).toBeVisible();
+  expect((await page.locator(".rail-bar").boundingBox())!.height + (await row.boundingBox())!.height).toBeLessThanOrEqual(72);
+  await row.getByRole("button", { name: /wg next/i }).tap();
+  await expect(page.getByRole("dialog", { name: "wg next" }).getByText(attention, { exact: true })).toBeVisible();
 });

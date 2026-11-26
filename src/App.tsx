@@ -564,7 +564,11 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const ageLabel = timing?.state === "unknown" ? "changed" : timing?.state === "stale" ? "last ran" : "ran";
   const [effortOpen, setEffortOpen] = useState(false);
   useEffect(() => setEffortOpen(false), [openKey]);
-  const showEffort = !!(timing || coordinator || canCommand);
+  const coordinatorNeedsAttention = coordinator?.state === "needs";
+  const coordinatorNotice = coordinatorNeedsAttention
+    ? (paused ? "Coordinator paused and needs attention" : "Coordinator needs attention")
+    : (paused ? "Coordinator paused" : null);
+  const showEffort = !!(timing || coordinator || canCommand || paused);
   const effortWarning = timing?.state === "stale" || timing?.state === "never";
   const effortSummary = timing?.state === "never" ? "wg next has not published this effort" : effort?.status;
   const contractMismatch = effort?.contract != null && effort.contract !== import.meta.env.WG_CONTRACT_HASH;
@@ -810,6 +814,9 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             onClick={() => setEffortOpen(true)}>
             <span className="effort-mark">wg next</span>
             <span className="effort-status">{effortSummary}</span>
+            {narrow && coordinatorNotice && <span className="effort-coordinator-lamp" role="img" aria-label={coordinatorNotice}>
+              <Lamp signal={coordinatorNeedsAttention ? "stop" : "idle"} />
+            </span>}
           </button>
           {coordinator
             ? <span className={`effort-age effort-coordinator coord-${coordinator.state}`}>{coordinator.text}</span>
@@ -826,7 +833,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         summary={effortSummary} lines={effort?.lines} age={timing?.age}
         changed={timing?.state === "unknown"}
         coordinator={coordinator?.text ?? (timing?.state === "listening" ? "coordinator listening" : undefined)}
-        coordinatorDetail={coordinator?.title} paused={paused} staleDetail={stale?.title}>
+        coordinatorDetail={coordinator?.title} coordinatorNotice={coordinatorNotice} staleDetail={stale?.title}>
         {commands(true)}
       </EffortSheet>}
       {(closeError || error) && <div className="error" role="alert"><span>{closeError || error}</span><button type="button" className="ghost" onClick={() => { setError(null); setCloseError(null); }}>Dismiss</button></div>}

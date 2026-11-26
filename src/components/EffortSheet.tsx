@@ -3,7 +3,7 @@ import type { EffortStatus } from "../lib/graph";
 import { Sheet } from "./ui";
 
 export function EffortSheet({ open, onClose, summary, lines, age, changed, coordinator, coordinatorDetail,
-  paused, staleDetail, children }: {
+  coordinatorNotice, staleDetail, children }: {
   open: boolean;
   onClose: () => void;
   summary?: string;
@@ -12,7 +12,7 @@ export function EffortSheet({ open, onClose, summary, lines, age, changed, coord
   changed: boolean;
   coordinator?: string;
   coordinatorDetail?: string;
-  paused: boolean;
+  coordinatorNotice: string | null;
   staleDetail?: string;
   children: ReactNode;
 }) {
@@ -20,7 +20,8 @@ export function EffortSheet({ open, onClose, summary, lines, age, changed, coord
     <div className="effort-details">
       {summary && <p>{summary}</p>}
       {age && <p>{changed ? "Result changed" : "Published"} {age}</p>}
-      <p>{coordinator ?? "Coordinator state is unavailable."}{paused && " · paused"}</p>
+      <p>{coordinator ?? "Coordinator state is unavailable."}</p>
+      {coordinatorNotice && <p>{coordinatorNotice}</p>}
       {coordinatorDetail && <p>{coordinatorDetail}</p>}
       {staleDetail && <p>{staleDetail}</p>}
       {!!lines?.length && <ul>

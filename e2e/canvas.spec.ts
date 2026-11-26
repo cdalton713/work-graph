@@ -1,9 +1,12 @@
 import { expect, type Page } from "@playwright/test";
 import { test } from "./support/screens.ts";
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page }, info) => {
   await page.addInitScript(() => localStorage.setItem("wg-board", "off"));
   await page.goto("/?project=canvas");
+  if (info.project.name.startsWith("phone-")) {
+    await page.getByRole("group", { name: "Project view" }).getByRole("button", { name: "Graph" }).tap();
+  }
   await expect(page.locator(".react-flow__controls")).toBeVisible();
 });
 
@@ -60,7 +63,7 @@ test("drag and pinch work from a station without moving the page", async ({ page
   await expect(page.locator(".react-flow__renderer")).toHaveCSS("touch-action", "none");
 });
 
-test("a station at the right edge stays visible when its panel opens", async ({ page }, info) => {
+test("a station at the right edge opens the tablet panel for the current orientation", async ({ page }, info) => {
   test.skip(!info.project.name.startsWith("tablet-"));
   const node = station(page, 35);
   const panel = page.locator(".panel");
@@ -81,6 +84,16 @@ test("a station at the right edge stays visible when its panel opens", async ({ 
   }).toBeCloseTo(10, 0);
   await node.tap();
   await expect(panel).toContainText("Graph issue 35");
+  const { width, height } = page.viewportSize()!;
+  if (height > width) {
+    await expect(graph).toBeHidden();
+    const aside = (await panel.boundingBox())!;
+    expect(aside).toEqual(pane);
+    await panel.getByRole("button", { name: "Close panel" }).tap();
+    await expect(graph).toBeVisible();
+    await expect(node).toBeInViewport({ ratio: 0.99 });
+    return;
+  }
   await expect(node).toBeInViewport({ ratio: 0.99 });
   await expect.poll(async () => {
     const current = (await node.boundingBox())!;

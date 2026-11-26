@@ -5,7 +5,6 @@ import { projectPath, test } from "./support/screens.ts";
 test.use({ reducedMotion: "reduce" });
 
 async function openPanel(page: Page, issue: string, path = "/?project=panel") {
-  await page.addInitScript(() => localStorage.setItem("wg-board", "off"));
   await page.goto(`${path}&issue=WG-${issue}`);
   const panel = page.locator(".panel");
   await expect(panel.getByRole("link", { name: `Open WG-${issue} in Linear` })).toBeVisible();
@@ -52,8 +51,9 @@ test("the panel keeps issue actions within reach", async ({ page }, testInfo) =>
   if (phone) {
     await expect(actions.getByRole("button")).toHaveText(["Dispatch", "Mark reviewed", "More"]);
     const beforeScroll = await actions.boundingBox();
-    const stage = await page.locator("main.stage").boundingBox();
-    expect(beforeScroll!.y + beforeScroll!.height).toBeCloseTo(stage!.y + stage!.height, 0);
+    const viewSwitch = page.getByRole("group", { name: "Project view" });
+    await expect(viewSwitch).toBeVisible();
+    expect(beforeScroll!.y + beforeScroll!.height).toBeCloseTo((await viewSwitch.boundingBox())!.y, 0);
     await panel.locator(".panel-body").evaluate((element) => { element.scrollTop = element.scrollHeight; });
     expect(await actions.boundingBox()).toEqual(beforeScroll);
     for (const button of await actions.getByRole("button").all()) {

@@ -206,3 +206,25 @@ pub fn quote(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\u{22}'\u{22}'"))
     }
 }
+
+/// Preserve the installed symlink in scheduled commands so replacement releases remain reachable.
+pub fn scheduled_program() -> Result<PathBuf> {
+    let running = env::current_exe()?;
+    let Some(arg) = env::args_os().next() else {
+        return Ok(running);
+    };
+    let arg = Path::new(&arg);
+    let invoked = if arg.components().count() == 1 {
+        arg.to_str().and_then(executable)
+    } else {
+        Some(arg.into())
+    };
+    if let Some(invoked) = invoked
+        && invoked
+            .canonicalize()
+            .is_ok_and(|path| running.canonicalize().is_ok_and(|r| r == path))
+    {
+        return Ok(std::path::absolute(invoked)?);
+    }
+    Ok(running)
+}

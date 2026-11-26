@@ -70,8 +70,11 @@ print("fixture")
                "CALLS": str(calls), "ORCA_CLI_COMMAND": str(stub), "PLAN": str(effort),
                "CHECK": str(check_tree), "GH_TOKEN": "fixture", "GH_CONFIG_DIR": "fixture"}
 
+        launcher = tools / "wg"
+        launcher.symlink_to(BIN)
+
         def cli(*args, code=0):
-            result = subprocess.run([BIN, *args], capture_output=True, text=True, env=env,
+            result = subprocess.run([launcher, *args], capture_output=True, text=True, env=env,
                                     cwd=root, timeout=10)
             assert result.returncode == code, (args, result)
             return result.stdout
@@ -85,7 +88,7 @@ print("fixture")
         cli("tick", "--install", "--root", effort, "--channel", "none")
         plist = next((home / "Library/LaunchAgents").glob("*.plist"))
         data = plistlib.loads(plist.read_bytes())
-        assert data["ProgramArguments"] == [str(BIN), "tick", "--channel", "none", "--root", str(effort)]
+        assert data["ProgramArguments"] == [str(launcher), "tick", "--channel", "none", "--root", str(effort)]
         assert data["StartCalendarInterval"] == [{"Minute": i} for i in [0, 15, 30, 45]]
         assert Path(data["StandardOutPath"]).parent.is_dir()
         cli("tick", "--uninstall")
@@ -93,7 +96,7 @@ print("fixture")
         cli("autostart", effort, "--install", "--agent", "codex", "--model", "x", "--effort", "high")
         args = events()[-1]
         precheck = shlex.split(args[args.index("--precheck") + 1])
-        assert precheck[-3:] == [str(BIN), "wake", str(effort)]
+        assert precheck[-3:] == [str(launcher), "wake", str(effort)]
         assert args[args.index("--trigger") + 1] == "*/5 * * * *"
         assert "--extra-agent-args=--model x -c model_reasoning_effort=high" in args
         assert row()["autostart"] == "schedule"
@@ -106,7 +109,7 @@ print("fixture")
         assert cli("health", effort) == "health off; no check yet\n"
         cli("health", effort, "--install")
         args = events()[-1]
-        assert shlex.split(args[args.index("--precheck") + 1])[-4:] == [str(BIN), "health", str(effort), "--due"]
+        assert shlex.split(args[args.index("--precheck") + 1])[-4:] == [str(launcher), "health", str(effort), "--due"]
         assert args[args.index("--trigger") + 1] == "0 * * * *"
         assert row()["health_worktree"] == str(check_tree)
         cli("health", effort, "--uninstall")

@@ -123,7 +123,7 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
                 let config = crate::state::Config::discover()?.report(None)?;
                 scheduled::tick_schedule(
                     &config["config"],
-                    &std::env::current_exe()?,
+                    &machine::scheduled_program()?,
                     &tick.root,
                     tick.channel.as_deref(),
                     tick.uninstall,
@@ -136,7 +136,7 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
                     manage::health_schedule(
                         &health,
                         &crate::state::Config::discover()?,
-                        &std::env::current_exe()?
+                        &machine::scheduled_program()?
                     )?
                 );
             }
@@ -146,7 +146,7 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
                     manage::autostart(
                         &auto,
                         &crate::state::Config::discover()?,
-                        &std::env::current_exe()?
+                        &machine::scheduled_program()?
                     )?
                 );
             }

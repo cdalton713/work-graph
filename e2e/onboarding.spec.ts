@@ -25,13 +25,19 @@ test("a new account completes the verified setup steps", async ({ page, context 
   await expect(page.getByRole("button", { name: "Nothing to add" })).toBeDisabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await next.click();
+  await expect(page.locator(".account-step h3")).toHaveText([
+    "1. Add these settings to ~/.config/work-graph/config.json", "2. Set up your Linear key",
+    "3. Coordinator token", "4. Then run these commands",
+  ]);
+  await page.getByRole("button", { name: "Copy wg config" }).click();
+  const config = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
+  expect(config.workspaces[0].team).toBe("WG");
   await page.getByRole("button", { name: "Copy all", exact: true }).click();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
-  expect(copied.split("\n").slice(-2)).toEqual([
+  expect(copied.split("\n")).toEqual([
     expect.stringMatching(/^wg setup .* --apply$/), "wg login " + origin + " && wg doctor",
   ]);
   await expect(page.getByText("Paste the coordinator token when wg login asks for it.")).toBeVisible();
-  expect(copied).toContain('"team": "WG"');
   await page.getByRole("button", { name: "Make a token" }).click();
   const token = await page.getByLabel("Coordinator token", { exact: true }).inputValue();
   expect((await page.request.get(origin + "/api/status", { headers: { authorization: "Bearer " + token, cookie: "" } })).ok()).toBe(true);

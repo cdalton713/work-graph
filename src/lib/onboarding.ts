@@ -108,12 +108,9 @@ export const statusMeanings: Record<string, [string, string]> = {
   Duplicate: ["Another issue tracks the same work.", "Linear"],
 };
 
-export function installBlock(config: string, commands: ReturnType<typeof setupCommands>): string {
+export function installBlock(commands: ReturnType<typeof setupCommands>): string {
   const setup = commands.slice(1, -1);
-  const loginAndDoctor = commands[0] + " && " + commands.at(-1);
   // Login reads the token from the terminal. Leave no pasted command after its line.
-  return [
-    "# Add these settings to ~/.config/work-graph/config.json.",
-    ": <<'WG_CONFIG'", config, "WG_CONFIG", "", ...setup, loginAndDoctor,
-  ].join("\n");
+  const loginAndDoctor = commands[0] + " && " + commands.at(-1);
+  return [...setup, loginAndDoctor].join("\n");
 }

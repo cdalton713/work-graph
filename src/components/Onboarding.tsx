@@ -15,7 +15,7 @@ function CopyAll({ text }: { text: string }) {
   return <div className="account-actions">
     <button onClick={async event => {
       const copied = await copySecret(text, event.currentTarget);
-      setMessage(copied ? "Commands and config copied." : "Select and copy the commands and config.");
+      setMessage(copied ? "Commands copied." : "Select and copy the commands.");
     }}>Copy all</button>
     <span role="status">{message}</span>
   </div>;
@@ -119,8 +119,12 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
             </>}
             {step === "setup" && <>
               <section>
-                <h3>Install the skill and tools on your computer</h3>
-                <p><a href={readme + "#install-the-skill"} target="_blank" rel="noreferrer">Read the installation instructions</a>.</p>
+                <h3>1. Add these settings to <code>~/.config/work-graph/config.json</code></h3>
+                {account.connections.some(({ team }) => !team) && <p>Choose a team for each workspace before you run the setup commands.</p>}
+                <Command text={config} label="Copy wg config" />
+              </section>
+              <section>
+                <h3>2. Set up your Linear key</h3>
                 <p><a href={readme + "#config"} target="_blank" rel="noreferrer">Set up a local Linear key</a> for each workspace on your computer so <code>wg</code> can work with its team. Set the environment variable or save the key in the file with permissions 600.</p>
                 <ul className="account-key-locations">
                   {account.connections.map(({ id, name, workspace_id }) => {
@@ -129,16 +133,11 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
                   })}
                 </ul>
               </section>
-              <section>
-                <h3>Set up the config on your computer</h3>
-                <p>Add these settings to <code>~/.config/work-graph/config.json</code>.</p>
-                {account.connections.some(({ team }) => !team) && <p>Choose a team for each workspace before you run the setup commands.</p>}
-                <Command text={config} label="Copy wg config" />
-              </section>
-              <section><h3>Coordinator token</h3><TokenForm refresh={refresh} /></section>
+              <section><h3>3. Coordinator token</h3><TokenForm refresh={refresh} /></section>
               <section className="account-form">
-                <h3>Run these commands on your computer</h3>
-                <CopyAll text={installBlock(config, commands)} />
+                <h3>4. Then run these commands</h3>
+                <p><a href={readme + "#install-the-skill"} target="_blank" rel="noreferrer">Read the installation instructions</a>.</p>
+                <CopyAll text={installBlock(commands)} />
                 <p>Paste the coordinator token when <code>wg login</code> asks for it.</p>
                 {commands.map((command) => <Command key={command} text={command} label={`Copy ${command}`} />)}
               </section>

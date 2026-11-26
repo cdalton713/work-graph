@@ -104,8 +104,7 @@ describe("onboarding", () => {
 
   it("ends the copied block at the token prompt and runs doctor after login", () => {
     const commands = setupCommands({ ...account, connections: [home, second] }, {});
-    expect(installBlock("{}", commands).split("\n")).toEqual([
-      "# Add these settings to ~/.config/work-graph/config.json.", ": <<'WG_CONFIG'", "{}", "WG_CONFIG", "",
+    expect(installBlock(commands).split("\n")).toEqual([
       "wg setup --workspace example --apply", "wg setup --workspace extra --apply",
       "wg login https://example.com && wg doctor",
     ]);

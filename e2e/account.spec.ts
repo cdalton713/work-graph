@@ -105,10 +105,10 @@ test("setup marks steps that need a computer", async ({ page }) => {
   await screens.setup(page);
   await checkLayout(page.getByRole("main"));
   await page.getByRole("button", { name: /Install wg/ }).click();
-  await expect(page.getByRole("heading", { name: "Install the skill and tools on your computer" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "2. Set up your Linear key" })).toBeVisible();
   await expect(page.getByText(/set up a local Linear key for each workspace on your computer/i)).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Set up the config on your computer" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Run these commands on your computer" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "1. Add these settings to ~/.config/work-graph/config.json" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "4. Then run these commands" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Copy wg login/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Copy wg setup/ })).toBeVisible();
   await checkLayout(page.getByRole("main"));
@@ -249,7 +249,7 @@ test("account screens keep their desktop layout at 1440 pixels", async ({ page }
   await screens.setup(page);
   await page.getByRole("button", { name: /Install wg/ }).click();
   await expectBox(page.getByRole("heading", { name: "Install wg" }), { x: 507, y: 151, width: 632 }, { height: 26 });
-  await expectBox(page.locator(".account-command").first(), { x: 507, width: 632 }, { y: 399, height: 252 });
+  await expectBox(page.locator(".account-command").first(), { x: 507, width: 632 }, { y: 221, height: 252 });
 
   await expectBox(await openShare(page), { x: 450, width: 540, centerY: 450 }, { height: 776 });
 });

@@ -46,7 +46,8 @@ Use `--parent KEY` to create a sub-team under the team with that key. Setup stop
 Setup creates a public team by default. Use `--private` for a private team on a paid Linear plan. Setup first creates an empty team, then sets and checks its privacy before it adds workflow items. If Linear refuses the privacy change, make the team private in Linear and run setup again, or run again with `--no-private`. For a team with issues or projects, change its privacy in Linear.
 
 - **Statuses** use the names in the table below. `Needs <human>` uses the configured `human`, for example `Needs Ada`. Linear supplies Duplicate and adds Triage when triage is enabled.
-- **Team issue labels** are `merge-point`, `ship-point`, `ops`, `decision`, `spike`, `reviewed`, and `answered`.
+- **Team issue labels** are `merge-point`, `ship-point`, `ops`, `decision`, `spike`, and `reviewed`.
+- The **workspace issue label** `answered` marks an issue when the human answers on the page.
 - **Claim labels** belong to the workspace group `agent`. The single-select group holds `agent:codex`, `agent:claude`, and `agent:coordinator`. An issue holds at most one claim. The claim comment names the Orca dispatch.
 - **Project labels** include single-select groups `initiative`, `autonomy`, and `review`, and plain labels `paused` and `shared`. Setup creates the fixed choices for autonomy and review. `wg load --apply` creates initiative choices when an effort first uses them. Set `team_labels: true` for team project labels or `false` for workspace project labels.
 

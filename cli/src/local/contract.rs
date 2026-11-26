@@ -165,7 +165,8 @@ fn setup() -> Value {
         .collect();
     json!({
         "statuses":statuses,
-        "team_issue_labels":["merge-point","ship-point","ops","decision","spike","reviewed","answered"],
+        "team_issue_labels":["merge-point","ship-point","ops","decision","spike","reviewed"],
+        "workspace_issue_labels":["answered"],
         "workspace_label_groups":{"agent":["agent:codex","agent:claude","agent:coordinator"]},
         "project_label_groups":{
             "initiative":[], "autonomy":AUTONOMY, "review":REVIEW.map(|s|format!("review:{s}"))

@@ -76,7 +76,9 @@
       "ops",
       "decision",
       "spike",
-      "reviewed",
+      "reviewed"
+    ],
+    "workspace_issue_labels": [
       "answered"
     ],
     "workspace_label_groups": {

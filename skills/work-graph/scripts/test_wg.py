@@ -178,6 +178,9 @@ class SetupTests(unittest.TestCase):
         issue = {label["name"]: label for label in self.labels["issueLabels"]}
         self.assertEqual(set(issue), {"merge-point", "ship-point", "ops", "decision", "spike", "reviewed", "answered",
                                       "agent", "agent:codex", "agent:claude", "agent:coordinator"})
+        self.assertNotIn("teamId", issue["answered"])
+        self.assertNotIn("parentId", issue["answered"])
+        self.assertIn("exists issue label answered", self.run_setup("--team", "WG"))
         self.assertEqual(issue["agent"]["groupType"], "singleSelect")
         for name in ("agent:codex", "agent:claude", "agent:coordinator"):
             self.assertEqual(issue[name]["parentId"], issue["agent"]["id"])

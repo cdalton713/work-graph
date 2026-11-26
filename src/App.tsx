@@ -9,7 +9,7 @@ import { Board } from "./components/Board";
 import { Canvas } from "./components/Canvas";
 import { EffortSheet } from "./components/EffortSheet";
 import { CreateProject, StarterSetup } from "./components/CreateProject";
-import type { StarterResult } from "./lib/types";
+import { clearStarterHandoffs, readStarter, saveStarter, starterKey } from "./lib/starterHandoff";
 import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
@@ -112,7 +112,7 @@ export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}
     if (accountView) pageEvent(accountView, signInWorkspace);
   }, [accountView, signInWorkspace]);
   if (account && page !== "settings" && !showGuide) return <App service createProjects={createProjects} connections={account.connections} openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
-  const signOut = <a className="bar-user" href="/auth/logout">Sign out</a>;
+  const signOut = <a className="bar-user" href="/auth/logout" onClick={() => clearStarterHandoffs(site.user)}>Sign out</a>;
   return <div className="app">
     <header className="bar account-bar">
       <span className="brand">work-graph</span><span className="station-fill" />
@@ -133,8 +133,12 @@ export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}
   </div>;
 }
 
-// Keep setup available across in-page account settings. A new page session starts empty.
-const sessionStarters = new Map<string, StarterResult[]>();
+type DirectoryProject = ProjectList["projects"][number];
+
+function includePending<T extends ProjectList>(list: T | null, pending: DirectoryProject | null) {
+  if (!list || !pending || list.projects.some(p => p.workspace === pending.workspace && p.id === pending.id)) return list;
+  return { ...list, projects: [...list.projects, pending] };
+}
 
 export function App({ createProjects, openSettings, overviewWorkspace = site.defaultWorkspace, service = false, connections }: {
   createProjects?: boolean; openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
@@ -171,25 +175,46 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const version = useRef<HeldGraph | null>(null);
   const generation = useRef(0);
 
-  const [starters, setStarters] = useState<StarterResult[]>(() => (createProjects && site.user && sessionStarters.get(site.user)) || []);
+  const [newProject, setNewProject] = useState<DirectoryProject | null>(null);
   const [setup, setSetup] = useState(false);
-  const directory = useMemo(() => {
-    if (!directoryResponse || !starters.length) return directoryResponse;
-    const projects = [...directoryResponse.projects];
-    for (const { workspace, project, handoff } of starters) {
-      if (projects.some(p => p.workspace === workspace && p.id === project.id)) continue;
-      projects.push({ ...project, workspace, name: handoff.plan.effort.name, status: "", statusType: "planned",
-        workspaceName: directoryResponse.workspaces.find(w => w.id === workspace)?.name ?? workspace });
+  const directory = useMemo(() => includePending(directoryResponse, newProject), [directoryResponse, newProject]);
+  const selection = useMemo(() => projectFromQuery(directory, query), [directory, query]);
+  const selectedWorkspace = query.get("workspace") ?? site.defaultWorkspace;
+  const selectedProjectId = selection.project?.id ?? query.get("project");
+  const selectedConnection = connections?.find(c => c.workspace_id === selectedWorkspace);
+  const ownedWorkspace = directory?.workspaces.find(w => w.id === selectedWorkspace && !w.role);
+  const keyForSetup = createProjects && !site.readOnly && site.user && ownedWorkspace && selectedProjectId &&
+    (!connections || selectedConnection) ? starterKey(site.user, selectedConnection?.id ?? null, selectedWorkspace, selectedProjectId) : null;
+  const starter = useMemo(() => keyForSetup && selectedProjectId ? readStarter(keyForSetup, selectedWorkspace, selectedProjectId) : null,
+    [keyForSetup, selectedProjectId, selectedWorkspace, newProject]);
+
+  // A saved handoff can locate a new project before the directory catches up.
+  // Only the server can confirm that an unlisted project still exists for this owner.
+  const [confirmed, setConfirmed] = useState<DirectoryProject | null>(null);
+  useEffect(() => {
+    if (!starter || selection.project || !ownedWorkspace) {
+      setConfirmed(null);
+      return;
     }
-    return { ...directoryResponse, projects };
-  }, [directoryResponse, starters]);
-  const { project, missing } = useMemo(() => projectFromQuery(directory, query), [directory, query]);
+    let live = true;
+    api.graph(starter.project.id, undefined, starter.workspace).then(graph => {
+      if (!live) return;
+      const matches = graph && !graph.stale && graph.workspace === starter.workspace && graph.project.id === starter.project.id;
+      setConfirmed(matches ? { ...graph.project, workspace: starter.workspace, workspaceName: ownedWorkspace.name,
+        status: "", statusType: "planned" } : null);
+    }).catch(() => { if (live) setConfirmed(null); });
+    return () => { live = false; };
+  }, [starter, selection.project, ownedWorkspace]);
+  const project = selection.project ?? (starter && confirmed?.workspace === starter.workspace &&
+    confirmed.id === starter.project.id ? confirmed : null);
+  const missing = project ? null : selection.missing;
 
   useEffect(() => { api.projects().then((list) => setDirectory((now) => now ?? list)).catch((e) => setError(e.message)); }, []);
 
   // The overview also gives the project picker the count of issues that wait on the human.
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [overviewSyncedAt, setOverviewSyncedAt] = useState<Date | null>(null);
+  const overviewList = useMemo(() => includePending(overview, newProject), [overview, newProject]);
   const [overviewBusy, setOverviewBusy] = useState(false);
   const [overviewTick, setOverviewTick] = useState(0);
   const [now, setNow] = useState(Date.now);
@@ -216,6 +241,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         const time = Date.now();
         if (installed) setOverviewSyncedAt(new Date(time));
         setOverview(o);
+        setNewProject(null);
         setDirectory((old) => mergeDirectory(old, o));
         setNow(time);
       })
@@ -685,8 +711,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
     })), [directory, listed, yours, initiatives]);
   const openProject = useCallback((p: Project, issue?: string) =>
     setQuery({ workspace: p.workspace ?? site.defaultWorkspace, project: p.id, issue: issue ?? null }, true), [setQuery]);
-  const starter = starters.find(s => s.workspace === project?.workspace && s.project.id === project.id);
-  const setupButton = (dismiss?: () => void) => starter && <button onClick={() => { dismiss?.(); setSetup(true); }}>Coordinator setup</button>;
+  const setupButton = (dismiss?: () => void) => project && starter && <button onClick={() => { dismiss?.(); setSetup(true); }}>Coordinator setup</button>;
   const home = () => setQuery({ workspace: null, project: null, issue: null }, true);
   const waitingTotal = [...yours.values()].reduce((a, b) => a + b, 0);
   const total = full?.nodes.length ?? 0;
@@ -759,7 +784,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
     <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} aria-label="Keyboard keys" title={nativeBarTitles ? keysHelp : undefined}>?</button>
   );
   const settings = openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>;
-  const signOut = site.user && <a className="bar-user" href="/auth/logout" title={nativeBarTitles ? signOutHelp : undefined}>Sign out</a>;
+  const signOut = site.user && <a className="bar-user" href="/auth/logout" onClick={() => clearStarterHandoffs(site.user)} title={nativeBarTitles ? signOutHelp : undefined}>Sign out</a>;
   const refreshScreen = useCallback(() => {
     const current = currentProject.current;
     if (current) void load(current);
@@ -952,19 +977,23 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         <div className="installed-sync-age">{syncAge(project ? syncedAt : overviewSyncedAt, now)}</div>
         <PullRefresh stage={stage} onRefresh={refreshScreen} busy={project ? busy : overviewBusy} />
       </div>}
-      {starter && setup && <StarterSetup handoff={starter.handoff} onClose={() => setSetup(false)} />}
+      {project && starter && setup && <StarterSetup handoff={starter.handoff} onClose={() => setSetup(false)} />}
       <main ref={stage} className={`stage${narrow ? ` project-view-${view}` : ""}`}>
         {!project && directory && (
           <Overview createAction={createProjects && !viewer && <CreateProject
             workspaces={directory.workspaces.filter(w => !w.role && (!connections ||
               connections.some(c => c.workspace_id === w.id && c.status === "ok" && c.team)))}
             onCreated={result => {
-              const next = [...starters.filter(s => s.workspace !== result.workspace || s.project.id !== result.project.id), result];
-              if (site.user) sessionStarters.set(site.user, next);
-              setStarters(next);
+              const connection = connections?.find(c => c.workspace_id === result.workspace);
+              if (site.user && (!connections || connection)) {
+                saveStarter(starterKey(site.user, connection?.id ?? null, result.workspace, result.project.id), result);
+              }
+              setNewProject({ ...result.project, workspace: result.workspace, name: result.handoff.plan.effort.name,
+                workspaceName: directory.workspaces.find(w => w.id === result.workspace)?.name ?? result.workspace,
+                status: "", statusType: "planned" });
               setSetup(true);
               setQuery({ workspace: result.workspace, project: result.project.id, issue: null }, true);
-            }} />} list={overview ? { ...overview, projects: directory.projects } : directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
+            }} />} list={overviewList ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
             managedPullRefresh={installed}
             budget={budget} states={overviewStates} onStates={(states) => setQuery({ state: states.join(",") || null }, true)}
             initiatives={overviewInitiatives} onInitiatives={(names) => setQuery({ initiative: names }, true)} />

@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
+import { watchStarterSession } from "./lib/starterHandoff";
 import { App, ServiceApp } from "./App";
 import { SignIn } from "./components/SignIn";
 import { Join } from "./components/Join";
@@ -26,6 +27,7 @@ if (joinPath) {
     .catch(() => ({}))
     .then((config: Partial<SiteConfig>) => {
       configureSite(config);
+      if (config.auth) watchStarterSession(config.user ?? null, config.createProjects === true);
       configureTelemetry(config.telemetry === true && !!config.user);
       signInSettings.provider = config.signIn;
       pageLink.path = pageLinkPath(config);

@@ -82,12 +82,24 @@ export function shareRoutes({ access, project, limit, pageUrl, telemetry, runLin
     return c.json(response);
   }));
 
+  routes.post(base + "/:kind", (c) => owner(c, async ({ account, workspace, projectId, key, resolve }) => {
+    const kind = shareKind(c.req.param("kind"));
+    const name = await project(account.tenant, workspace, projectId);
+    if (!name) throw unavailable();
+    const result = await account.accounts.shares.make(key, name, { kind });
+    if (!result) throw unavailable();
+    const token = result.created[kind];
+    if (!token) return c.json({ exists: true });
+    telemetry?.emit("share_made", {}, resolve, key[0]);
+    return c.json(url(token));
+  }));
+
   routes.post(base + "/:kind/rotate", (c) => owner(c, async ({ account, workspace, projectId, key, resolve }) => {
     const kind = shareKind(c.req.param("kind"));
     if (!await account.accounts.shares.list(key)) throw unavailable();
     const name = await project(account.tenant, workspace, projectId);
     if (!name) throw unavailable();
-    const result = await account.accounts.shares.make(key, name, kind);
+    const result = await account.accounts.shares.make(key, name, { kind, rotate: true });
     const token = result?.created[kind];
     if (!token) throw unavailable();
     if (result.revoked) telemetry?.emit("share_revoked", {}, resolve, key[0]);

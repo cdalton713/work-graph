@@ -543,6 +543,10 @@ For local testing, run `pnpm build` and `pnpm service:dev` to start a preview wi
 Use the loopback address from the terminal. To attach the second workspace, use the stub key
 `lin_api_example00000000000000000000`. Stop the preview with Ctrl-C.
 
+To open the shared project, go to `/auth/login?as=ada` on the loopback address. Open **Example project** and select **Share**.
+To see the project as a collaborator, go to `/auth/login?as=grace` and open the shared **Example project**.
+Use `/auth/login?as=pat` for the viewer. To see a Linear access refusal, start the preview with `pnpm service:dev --refuse-access`.
+
 ## Usage data
 
 Usage data is off by default. To enable it, set these values in the server environment.

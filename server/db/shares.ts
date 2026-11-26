@@ -112,7 +112,7 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
         WHERE ${scope} AND id = $4 AND access_requested_at IS NOT NULL`, [...project, membership]);
     },
 
-    async make(project: ProjectScope, name: string, rotate?: ShareKind) {
+    async make(project: ProjectScope, name: string, selection?: { kind: ShareKind; rotate?: true }) {
       const [tenant, connection] = project;
       const result = await sql.transaction(async ({ query }) => {
         const owner = await lock(query, tenant);
@@ -120,9 +120,9 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
           [tenant, connection])).length) return null;
         const links = await liveLinks(query, project);
         const created: Partial<Record<ShareKind, string>> = {};
-        const revoked = rotate ? await revoke(query, project, rotate) : false;
-        for (const kind of rotate ? [rotate] : SHARE_KINDS) {
-          if (!rotate && links.some((link) => link.kind === kind)) continue;
+        const revoked = selection?.rotate ? await revoke(query, project, selection.kind) : false;
+        for (const kind of selection ? [selection.kind] : SHARE_KINDS) {
+          if (!selection?.rotate && links.some((link) => link.kind === kind)) continue;
           const token = randomBytes(32).toString("base64url");
           await query(`INSERT INTO shares (id, tenant_id, connection_id, project_id, project_name, kind, token_hash)
             VALUES ($1, $2, $3, $4, $5, $6, $7)`, [randomUUID(), ...project, name, kind, tokenHash(token)]);

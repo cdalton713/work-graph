@@ -39,19 +39,21 @@ export function Join({ path, returnedFromSignIn }: { path: string; returnedFromS
   }
 
   return <main className="account-page">
-    <div className="account-content">
-      <h1>{joined?.project ?? preview?.project ?? "Join project"}</h1>
-      {signInRequired ? <p>Sign-in did not complete. <a href={login}>Try signing in again</a>.</p> :
-        error ? <p role="alert">{error}</p> :
-        joined ? <p role="status">You joined as a {joined.role}.</p> :
-        preview ? <>
-          <p>{preview.owner} invited you to join as a {preview.role}.</p>
-          <div className="account-actions">
-            <button type="button" disabled={busy} onClick={() => void confirm()}>{busy ? "Joining…" : "Join"}</button>
-            <button type="button" disabled={busy} onClick={() => location.replace("/")}>Not now</button>
-          </div>
-        </> : <p role="status">Loading invitation…</p>}
-      {(error || joined || signInRequired) && <p><a href="/">Go to overview</a></p>}
+    <div className="account-content share-join">
+      <section className="account-card">
+        <h1>{joined?.project ?? preview?.project ?? "Join project"}</h1>
+        {signInRequired ? <p>Sign-in did not complete. <a href={login}>Try signing in again</a>.</p> :
+          error ? <p role="alert">{error}</p> :
+          joined ? <p role="status">You joined as a {joined.role}.</p> :
+          preview ? <>
+            <p>{preview.owner} invited you to join as a {preview.role}.</p>
+            <div className="account-actions">
+              <button type="button" disabled={busy} onClick={() => void confirm()}>{busy ? "Joining…" : "Join"}</button>
+              <button type="button" disabled={busy} onClick={() => location.replace("/")}>Not now</button>
+            </div>
+          </> : <p role="status">Loading invitation…</p>}
+        {(error || joined || signInRequired) && <p><a href="/">Go to overview</a></p>}
+      </section>
     </div>
   </main>;
 }

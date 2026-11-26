@@ -25,6 +25,7 @@ const fields = {
   token_created: {},
   token_revoked: {},
   coordinator_connected: {},
+  share_dialog_opened: { role: ["owner"] },
   share_made: {},
   share_revoked: {},
   member_joined: { role: ["viewer", "collaborator"] },

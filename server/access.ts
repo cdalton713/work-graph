@@ -83,6 +83,7 @@ export const sharedRoutes: Readonly<Record<string, "list" | "project" | "issue" 
   "POST /api/projects/:id/members/:member/access": "owner",
   "GET /api/projects/:id/share": "owner",
   "POST /api/projects/:id/share": "owner",
+  "POST /api/projects/:id/share/:kind": "owner",
   "POST /api/projects/:id/share/:kind/rotate": "owner",
   "DELETE /api/projects/:id/share/:kind": "owner",
   "PATCH /api/projects/:id/members/:member": "owner",

@@ -7,6 +7,7 @@ import { firstStep } from "./lib/onboarding";
 import { Board } from "./components/Board";
 import { Canvas } from "./components/Canvas";
 import { Overview } from "./components/Overview";
+import { MemberAccess, Share } from "./components/Share";
 import { Panel } from "./components/Panel";
 import { CopyButton, Lamp, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type Signal, toggleReviewed } from "./lib/graph";
@@ -18,7 +19,7 @@ import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, summar
 import { ownerWords } from "./lib/words";
 import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
-import type { Account, GraphData, Issue, IssuePatch, Project, ProjectList, ProjectShareLinks, ServerStatus } from "./lib/types";
+import type { Account, AccountConnection, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
 import { useLink } from "./useLink";
 
 const POLL_MS = 15_000;
@@ -86,7 +87,7 @@ export function ServiceApp() {
     lastAccountView.current = accountView;
     if (accountView) pageEvent(accountView, signInWorkspace);
   }, [accountView, signInWorkspace]);
-  if (account && page !== "settings" && !showGuide) return <App service openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
+  if (account && page !== "settings" && !showGuide) return <App service connections={account.connections} openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
   return <div className="app">
     <header className="bar account-bar">
       <span className="brand">work-graph</span><span className="station-fill" />
@@ -104,8 +105,8 @@ export function ServiceApp() {
   </div>;
 }
 
-export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, service = false }: {
-  openSettings?: () => void; overviewWorkspace?: string; service?: boolean;
+export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, service = false, connections }: {
+  openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
 } = {}) {
   const [query, setQuery] = useQuery();
   const [directory, setDirectory] = useState<ProjectList | null>(null);
@@ -325,22 +326,8 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const shareLink = project && shareUrl
     ? `${shareUrl}/?${new URLSearchParams({ workspace: project.workspace ?? site.defaultWorkspace, project: project.id })}` : null;
   const [shareBusy, setShareBusy] = useState(false);
-  const [shareLinks, setShareLinks] = useState<ProjectShareLinks | null>(null);
-  const shareDialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    if (shareLinks && !shareDialog.current?.open) shareDialog.current?.showModal();
-  }, [shareLinks]);
-  const makeShareLinks = async () => {
-    if (!project || shareBusy) return;
-    setShareBusy(true);
-    try {
-      setShareLinks(await api.makeShareLinks(project.id, project.workspace));
-    } catch (error) {
-      setError((error as Error).message);
-    } finally {
-      setShareBusy(false);
-    }
-  };
+  const [sharing, setSharing] = useState<string | null>(null);
+  useEffect(() => { setSharing(null); }, [openKey]);
   const setShared = async (shared: boolean) => {
     if (!project || shareBusy) return;
     const target = project;
@@ -456,8 +443,8 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLElement && e.target.closest("input, textarea, select, [contenteditable]");
-      // A picker that is open takes its keys for itself.
-      if (typing || document.querySelector(".picker-list") || e.metaKey || e.ctrlKey || e.altKey) return;
+      // An open picker or dialog takes its keys for itself.
+      if (typing || document.querySelector(".picker-list, dialog[open]") || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === "Escape") {
         if (keys) setKeys(false);
         else if (query.get("issue")) select(null);
@@ -526,7 +513,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const planned = total - (full?.nodes.filter((n) => n.status === "Canceled").length ?? 0);
 
   return (
-    <div className="app">
+    <div className={service ? "app service-app" : "app"}>
       <header className="bar">
         <span className="brand">work-graph</span>
         {(project || missing) && (
@@ -555,7 +542,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             <span className={`bar-review review-${review}`}>{reviewBusy ? "Review…" : <>Review <b>{review}</b></>}</span><span className="caret">▾</span>
           </Picker>
         )}
-        {!viewer && !sharedRole && project && shareLink && (project.shared ? (
+        {!service && !viewer && !sharedRole && project && shareLink && (project.shared ? (
           <span className="bar-share" title="Each account that may sign in to the viewer can read this project there. It cannot change it.">
             <b>Shared</b><CopyButton text={shareLink} label="Copy the viewer link" />
             <button type="button" className="ghost" disabled={shareBusy} onClick={() => void setShared(false)} title="Remove this project from the viewer.">Stop</button>
@@ -564,24 +551,12 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
           <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void setShared(true)}
             title="Show this project on the read-only viewer, for each account that may sign in there. The link to copy shows here then.">{shareBusy ? "Sharing…" : "Share"}</button>
         ))}
-        {!viewer && !sharedRole && service && project && (
-          <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void makeShareLinks()}>
-            {shareBusy ? "Sharing…" : "Share"}
-          </button>
+        {!viewer && !sharedRole && service && project && openKey && (
+          <button type="button" className="ghost bar-share" onClick={() => {
+            setSharing(openKey);
+            pageEvent("share_dialog_opened", project.workspace);
+          }}>Share</button>
         )}
-        <dialog ref={shareDialog} className="account-dialog" aria-label="Share links" onClose={() => setShareLinks(null)}>
-          <h2>Share links</h2>
-          {shareLinks && (["view", "collab"] as const).map((kind) => {
-            const link = shareLinks[kind];
-            const label = kind === "view" ? "Read-only link" : "Collaboration link";
-            return <div className="account-item" key={kind}>
-              <b>{label}</b>
-              {"url" in link ? <><code>{link.url}</code><CopyButton text={link.url} label={`Copy ${label.toLowerCase()}`} /></> :
-                <p>Link already exists.</p>}
-            </div>;
-          })}
-          <button type="button" onClick={() => shareDialog.current?.close()}>Close</button>
-        </dialog>
         <span className="station-fill" />
         {viewer && <span className="bar-viewer" title="This page changes nothing. The owner of the project changes it on their own page.">view only</span>}
         {full && (
@@ -613,6 +588,12 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             title="Mark every issue in this project Done and complete the project.">{closing ? "Closing…" : "Close project"}</button>
         )}
       </header>
+
+      {sharing && sharing === openKey && project && <Share id={project.id}
+        workspace={project.workspace} team={connections?.find(({ workspace_id }) => workspace_id === project.workspace)?.team}
+        close={() => setSharing(null)} />}
+      {service && collaborator && openKey && project && openSettings && <MemberAccess key={openKey}
+        id={project.id} workspace={project.workspace} openSettings={openSettings} />}
 
       {full && (
         <div className="rail-bar">

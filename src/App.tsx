@@ -8,6 +8,8 @@ import { BarMenu, useCompactBar } from "./components/BarMenu";
 import { Board } from "./components/Board";
 import { Canvas } from "./components/Canvas";
 import { EffortSheet } from "./components/EffortSheet";
+import { CreateProject, StarterSetup } from "./components/CreateProject";
+import { clearStarterHandoffs, readStarter, saveStarter, starterKey } from "./lib/starterHandoff";
 import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
@@ -69,7 +71,7 @@ export function projectFromQuery(directory: ProjectList | null, query: URLSearch
   return { project, missing };
 }
 
-export function ServiceApp() {
+export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}) {
   const installed = isStandalone();
   const compactBar = useCompactBar();
   const [query, navigate] = useQuery();
@@ -109,8 +111,8 @@ export function ServiceApp() {
     lastAccountView.current = accountView;
     if (accountView) pageEvent(accountView, signInWorkspace);
   }, [accountView, signInWorkspace]);
-  if (account && page !== "settings" && !showGuide) return <App service connections={account.connections} openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
-  const signOut = <a className="bar-user" href="/auth/logout">Sign out</a>;
+  if (account && page !== "settings" && !showGuide) return <App service createProjects={createProjects} connections={account.connections} openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
+  const signOut = <a className="bar-user" href="/auth/logout" onClick={() => clearStarterHandoffs(site.user)}>Sign out</a>;
   return <div className="app">
     <header className="bar account-bar">
       <span className="brand">work-graph</span><span className="station-fill" />
@@ -131,15 +133,22 @@ export function ServiceApp() {
   </div>;
 }
 
-export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, service = false, connections }: {
-  openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
+type DirectoryProject = ProjectList["projects"][number];
+
+function includePending<T extends ProjectList>(list: T | null, pending: DirectoryProject | null) {
+  if (!list || !pending || list.projects.some(p => p.workspace === pending.workspace && p.id === pending.id)) return list;
+  return { ...list, projects: [...list.projects, pending] };
+}
+
+export function App({ createProjects, openSettings, overviewWorkspace = site.defaultWorkspace, service = false, connections }: {
+  createProjects?: boolean; openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
 } = {}) {
   const installed = isStandalone();
   const stage = useRef<HTMLElement>(null);
   const [query, setQuery] = useQuery();
   const overviewInitiatives = useMemo(() => query.getAll("initiative"), [query]);
   const overviewStates = useMemo(() => readProjectStates(query), [query]);
-  const [directory, setDirectory] = useState<ProjectList | null>(null);
+  const [directoryResponse, setDirectory] = useState<ProjectList | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncedAt, setSyncedAt] = useState<Date | null>(null);
@@ -166,13 +175,46 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const version = useRef<HeldGraph | null>(null);
   const generation = useRef(0);
 
-  const { project, missing } = useMemo(() => projectFromQuery(directory, query), [directory, query]);
+  const [newProject, setNewProject] = useState<DirectoryProject | null>(null);
+  const [setup, setSetup] = useState(false);
+  const directory = useMemo(() => includePending(directoryResponse, newProject), [directoryResponse, newProject]);
+  const selection = useMemo(() => projectFromQuery(directory, query), [directory, query]);
+  const selectedWorkspace = query.get("workspace") ?? site.defaultWorkspace;
+  const selectedProjectId = selection.project?.id ?? query.get("project");
+  const selectedConnection = connections?.find(c => c.workspace_id === selectedWorkspace);
+  const ownedWorkspace = directory?.workspaces.find(w => w.id === selectedWorkspace && !w.role);
+  const keyForSetup = createProjects && !site.readOnly && site.user && ownedWorkspace && selectedProjectId &&
+    (!connections || selectedConnection) ? starterKey(site.user, selectedConnection?.id ?? null, selectedWorkspace, selectedProjectId) : null;
+  const starter = useMemo(() => keyForSetup && selectedProjectId ? readStarter(keyForSetup, selectedWorkspace, selectedProjectId) : null,
+    [keyForSetup, selectedProjectId, selectedWorkspace, newProject]);
+
+  // A saved handoff can locate a new project before the directory catches up.
+  // Only the server can confirm that an unlisted project still exists for this owner.
+  const [confirmed, setConfirmed] = useState<DirectoryProject | null>(null);
+  useEffect(() => {
+    if (!starter || selection.project || !ownedWorkspace) {
+      setConfirmed(null);
+      return;
+    }
+    let live = true;
+    api.graph(starter.project.id, undefined, starter.workspace).then(graph => {
+      if (!live) return;
+      const matches = graph && !graph.stale && graph.workspace === starter.workspace && graph.project.id === starter.project.id;
+      setConfirmed(matches ? { ...graph.project, workspace: starter.workspace, workspaceName: ownedWorkspace.name,
+        status: "", statusType: "planned" } : null);
+    }).catch(() => { if (live) setConfirmed(null); });
+    return () => { live = false; };
+  }, [starter, selection.project, ownedWorkspace]);
+  const project = selection.project ?? (starter && confirmed?.workspace === starter.workspace &&
+    confirmed.id === starter.project.id ? confirmed : null);
+  const missing = project ? null : selection.missing;
 
   useEffect(() => { api.projects().then((list) => setDirectory((now) => now ?? list)).catch((e) => setError(e.message)); }, []);
 
   // The overview also gives the project picker the count of issues that wait on the human.
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [overviewSyncedAt, setOverviewSyncedAt] = useState<Date | null>(null);
+  const overviewList = useMemo(() => includePending(overview, newProject), [overview, newProject]);
   const [overviewBusy, setOverviewBusy] = useState(false);
   const [overviewTick, setOverviewTick] = useState(0);
   const [now, setNow] = useState(Date.now);
@@ -199,6 +241,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         const time = Date.now();
         if (installed) setOverviewSyncedAt(new Date(time));
         setOverview(o);
+        setNewProject(null);
         setDirectory((old) => mergeDirectory(old, o));
         setNow(time);
       })
@@ -668,6 +711,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     })), [directory, listed, yours, initiatives]);
   const openProject = useCallback((p: Project, issue?: string) =>
     setQuery({ workspace: p.workspace ?? site.defaultWorkspace, project: p.id, issue: issue ?? null }, true), [setQuery]);
+  const setupButton = (dismiss?: () => void) => project && starter && <button onClick={() => { dismiss?.(); setSetup(true); }}>Coordinator setup</button>;
   const home = () => setQuery({ workspace: null, project: null, issue: null }, true);
   const waitingTotal = [...yours.values()].reduce((a, b) => a + b, 0);
   const total = full?.nodes.length ?? 0;
@@ -740,7 +784,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} aria-label="Keyboard keys" title={nativeBarTitles ? keysHelp : undefined}>?</button>
   );
   const settings = openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>;
-  const signOut = site.user && <a className="bar-user" href="/auth/logout" title={nativeBarTitles ? signOutHelp : undefined}>Sign out</a>;
+  const signOut = site.user && <a className="bar-user" href="/auth/logout" onClick={() => clearStarterHandoffs(site.user)} title={nativeBarTitles ? signOutHelp : undefined}>Sign out</a>;
   const refreshScreen = useCallback(() => {
     const current = currentProject.current;
     if (current) void load(current);
@@ -777,6 +821,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
           {autonomyPicker}
           {reviewPicker}
           {shareControl()}
+          {setupButton()}
         </>}
         <span className="station-fill" />
         {!narrow && viewer && <span className="bar-viewer" title={nativeBarTitles ? viewerHelp : undefined}>view only</span>}
@@ -792,6 +837,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         )}
         {compactBar ? (
           <BarMenu key={openKey} title={project ? "Project controls" : "More controls"}>{(dismiss) => <>
+            {setupButton(dismiss)}
             {viewer && <p>{viewerHelp}</p>}
             {projectLink && <div className="bar-menu-row"><span>Project link</span><CopyButton text={projectLink} label="Copy the project link" secret /></div>}
             {project && <div className="bar-menu-row"><span>Copy the project name: {project.name}</span><CopyButton text={project.name} label="Copy the project name" /></div>}
@@ -931,9 +977,23 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         <div className="installed-sync-age">{syncAge(project ? syncedAt : overviewSyncedAt, now)}</div>
         <PullRefresh stage={stage} onRefresh={refreshScreen} busy={project ? busy : overviewBusy} />
       </div>}
+      {project && starter && setup && <StarterSetup handoff={starter.handoff} onClose={() => setSetup(false)} />}
       <main ref={stage} className={`stage${narrow ? ` project-view-${view}` : ""}`}>
         {!project && directory && (
-          <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
+          <Overview createAction={createProjects && !viewer && <CreateProject
+            workspaces={directory.workspaces.filter(w => !w.role && (!connections ||
+              connections.some(c => c.workspace_id === w.id && c.status === "ok" && c.team)))}
+            onCreated={result => {
+              const connection = connections?.find(c => c.workspace_id === result.workspace);
+              if (site.user && (!connections || connection)) {
+                saveStarter(starterKey(site.user, connection?.id ?? null, result.workspace, result.project.id), result);
+              }
+              setNewProject({ ...result.project, workspace: result.workspace, name: result.handoff.plan.effort.name,
+                workspaceName: directory.workspaces.find(w => w.id === result.workspace)?.name ?? result.workspace,
+                status: "", statusType: "planned" });
+              setSetup(true);
+              setQuery({ workspace: result.workspace, project: result.project.id, issue: null }, true);
+            }} />} list={overviewList ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
             managedPullRefresh={installed}
             budget={budget} states={overviewStates} onStates={(states) => setQuery({ state: states.join(",") || null }, true)}
             initiatives={overviewInitiatives} onInitiatives={(names) => setQuery({ initiative: names }, true)} />

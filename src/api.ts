@@ -5,7 +5,7 @@ import type { ReviewEffort } from "./lib/review";
 import { pageEvent, type PageEvent } from "./lib/telemetry";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
-import type { Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShare, NewShareLink, ShareKind, ShareMember, LinearAccess, AccessGrant, ServerStatus } from "./lib/types";
+import type { StarterResult, Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShare, NewShareLink, ShareKind, ShareMember, LinearAccess, AccessGrant, ServerStatus } from "./lib/types";
 
 /** The open project. A write names it (`x-project`), so the server can tell its coordinator at once. */
 let openProject: string | null = null;
@@ -76,13 +76,13 @@ export const shareApi = {
     shareWrite<null>(`${projectPath(id)}/access/request`, workspace, "POST"),
 };
 
-async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace, event?: PageEvent, project = openProject): Promise<T> {
+async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace, event?: PageEvent, project = openProject, idempotencyKey?: string): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "x-workspace": workspace };
   if (project && !(site.user && workspace.startsWith("shared:"))) headers["x-project"] = project;
   const method = init?.method?.toUpperCase() ?? "GET";
   if (method !== "GET" && method !== "HEAD") {
     // Keep the same headers if this request is retried.
-    headers["Idempotency-Key"] = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+    headers["Idempotency-Key"] = idempotencyKey ?? Array.from(crypto.getRandomValues(new Uint8Array(16)),
       (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
   const response = await fetch(`/api/${path}`, { ...init, headers });
@@ -138,6 +138,15 @@ export const accountApi = {
 };
 
 export const api = {
+  starterTeams: (workspace: string, signal: AbortSignal) =>
+    call<{ teams: { key: string; name: string }[] }>("project-creation/teams", { signal }, workspace, undefined, null),
+  async createProject(workspace: string, team: string, name: string, firstTask: string) {
+    const bytes = new TextEncoder().encode(JSON.stringify([workspace, team, name, firstTask]));
+    const hash = await crypto.subtle.digest("SHA-256", bytes);
+    const key = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
+    return call<StarterResult>("projects", { method: "POST", body: JSON.stringify({ team, name, firstTask }) },
+      workspace, undefined, null, key);
+  },
   agentReply: (project: string, workspace: string, agent: string, body: string) =>
     call<{ id: string }>(`${projectPath(project)}/agents/${encodeURIComponent(agent)}/reply`,
       { method: "POST", body: JSON.stringify({ body }) }, workspace, undefined, project),

@@ -133,6 +133,7 @@ function messageCut(said: string): boolean {
 export interface OverviewProps {
   managedPullRefresh?: boolean;
   /** The project list alone, until the first overview answer comes. */
+  createAction?: React.ReactNode;
   list: OverviewData | ProjectList;
   loading: boolean; missing: string | null; now: number; readOnly?: boolean;
   onOpen: (project: Project, issue?: string) => void;
@@ -155,7 +156,7 @@ export interface OverviewProps {
  * All projects on one page: which ones wait on the human, how far each is, and what wg next last said.
  * `/` finds a project, the arrow keys move, Enter opens.
  */
-export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, readOnly = false, initiatives = ALL_INITIATIVES, onInitiatives, states = NO_STATES, onStates, budget = [], managedPullRefresh }: OverviewProps) {
+export function Overview({ createAction, list: given, loading, missing, now, onOpen, presence, asks, agents, readOnly = false, initiatives = ALL_INITIATIVES, onInitiatives, states = NO_STATES, onStates, budget = [], managedPullRefresh }: OverviewProps) {
   const narrow = useNarrow();
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filterButton = useRef<HTMLButtonElement>(null);
@@ -526,6 +527,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
         <AgentReplyUpdates key={key} project={project} onResult={(result) => receiveResult(key, result)} />)}
       <div className="ov-head">
         <h1>Overview</h1>
+        {createAction}
         <p className="ov-sum" role="status">
           {inboxCounts.stalls > 0 && <span className="sig-fg-stop"><Lamp signal="stop" /> {inboxCounts.stalls} {inboxCounts.stalls === 1 ? "possible stall" : "possible stalls"}</span>}
           {incomplete && !(loading && !("summaries" in list)) && <span className="sig-fg-stop">Project data incomplete</span>}
@@ -692,7 +694,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       </div>
 
       {list.workspaces.filter((w) => w.error).map((w) => <p key={w.id} className="empty" role="status">{w.error}</p>)}
-      {!list.projects.length && !list.workspaces.some((w) => w.error) && <p className="empty">No projects. `wg load` makes one from plan.json.</p>}
+      {!list.projects.length && !list.workspaces.some((w) => w.error) && <p className="empty">No projects.{!createAction && " `wg load` makes one from plan.json."}</p>}
       {list.projects.length > 0 && !rows.length && (
         <p className="empty">No project matches. {!narrow && <button type="button" className="ghost" onClick={clearFilters}>Clear the filters</button>}</p>
       )}

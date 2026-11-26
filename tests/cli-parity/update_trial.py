@@ -1,4 +1,5 @@
 """Exercise two real release builds through the managed launcher, entirely offline."""
+import base64
 import concurrent.futures
 import http.server
 import json
@@ -43,23 +44,33 @@ class Service(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def make_release(directory, key, port, version):
+def disposable_key(signer):
+    der = bytes.fromhex("302e020100300506032b657004220420") + os.urandom(32)
+    pem = b"-----BEGIN PRIVATE KEY-----\n" + base64.b64encode(der) + b"\n-----END PRIVATE KEY-----\n"
+    public = subprocess.check_output([signer, "--public-key"], input=pem).decode().strip()
+    return pem, public
+
+
+def make_release(directory, key, port, version, signer, signing_key):
     env = dict(os.environ, WG_RELEASE_REPOSITORY="fixture/release", WG_RELEASE_PUBLIC_KEY=key,
                WG_RELEASE_VERSION=version, WG_FIXTURE_PORT=str(port))
     lines = subprocess.check_output(
-        [CARGO, "build", "--locked", "--offline", "--bin", "wg-preview", "--target", TARGET,
-         "--features", "update-fixture", "--message-format=json"],
+        [CARGO, "rustc", "--locked", "--offline", "--bin", "wg-preview", "--target", TARGET,
+         "--features", "update-fixture", "--message-format=json", "--", "-C", "strip=debuginfo"],
         cwd=REPO / "cli", env=env, text=True).splitlines()
     binary = next(Path(msg["executable"]) for msg in map(json.loads, lines) if msg.get("executable"))
+    print(f"{TARGET} {version} fixture binary {binary.stat().st_size} bytes", flush=True)
     directory.mkdir()
     archive, manifest = directory / "bundle.tar.gz", directory / "manifest.json"
     resources = {name: (0o644, f"{name} {version}\n".encode()) for name in [SKILL, PLUGIN]}
     pack = runpy.run_path(str(REPO / "packaging/releases/package.py"))["build"]
     pack(archive, manifest, resources, dict(schema=1, version=version, target=TARGET,
          commit="a"*40, public_key=key), binary)
-    subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", directory.parent / "key.pem",
-                    "-in", manifest, "-out", directory / "manifest.sig"], check=True)
-    (directory / "signer").write_text(key)
+    private, pin = signing_key
+    sig = subprocess.check_output([signer, manifest], input=private, env=dict(os.environ, WG_CURRENT_PUBLIC_KEY=pin))
+    (directory / "manifest.sig").write_bytes(sig)
+    (directory / "signer").write_text(pin)
+
 
 
 def install_generation(release, destination):
@@ -83,11 +94,12 @@ def wait_for(condition):
 
 
 def trial(temp, server):
-    keyfile = temp / "key.pem"
-    subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", keyfile], check=True)
-    key = subprocess.check_output(["openssl", "pkey", "-in", keyfile, "-pubout", "-outform", "DER"])[-32:].hex()
+    build = subprocess.check_output([CARGO, "build", "--locked", "--manifest-path",
+        REPO / "packaging/releases/signer/Cargo.toml", "--target-dir", REPO / "cli/target/signer-review-fixture", "--message-format=json"], text=True)
+    signer, = [msg["executable"] for msg in map(json.loads, build.splitlines()) if msg.get("executable")]
+    key = disposable_key(signer)
     for version in [OLD, NEW]:
-        make_release(temp / version, key, server.server_port, version)
+        make_release(temp / version, key[1], server.server_port, version, signer, key)
     server.responses[DISCOVERY] = json.dumps(dict(tag_name=f"wg-v{NEW}", draft=False, prerelease=False)).encode()
     for suffix, name in [(".json", "manifest.json"), (".sig", "manifest.sig"), (".tar.gz", "bundle.tar.gz")]:
         server.responses[ASSETS + suffix] = (temp / NEW / name).read_bytes()

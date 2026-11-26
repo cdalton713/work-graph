@@ -1,0 +1,8 @@
+usage: wg.py tick [-h] [--root ROOT] [--channel {none,notify}] [--install | --uninstall]
+
+options:
+  -h, --help            show this help message and exit
+  --root ROOT
+  --channel {none,notify}
+  --install
+  --uninstall

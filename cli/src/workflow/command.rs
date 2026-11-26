@@ -176,7 +176,7 @@ fn execute(verb: Verb) -> Result<u8, String> {
     Ok(0)
 }
 
-pub(super) fn archive(linear: &mut Linear, apply: bool, explicit: bool) -> Result<(), String> {
+pub(crate) fn archive(linear: &mut Linear, apply: bool, explicit: bool) -> Result<(), String> {
     let org = linear.request("query{organization{subscription{type}}}", json!({}))?;
     if org["organization"].get("subscription") != Some(&Value::Null) {
         if explicit {
@@ -241,7 +241,7 @@ pub(super) fn display(v: &Value) -> String {
     }
 }
 
-pub(super) fn ordered(plan: &Value) -> Result<Vec<&Value>, String> {
+pub(crate) fn ordered(plan: &Value) -> Result<Vec<&Value>, String> {
     let nodes = array(plan, "nodes")?;
     let phases = array(plan, "phases")?;
     let edges = array(plan, "edges")?;

@@ -1094,25 +1094,68 @@ pub(crate) fn update_claim(
     key: &str,
     job: Option<&Value>,
 ) -> Result<()> {
-    let settings = crate::providers::PageSettings(installation).resolve(scope)?;
-    let page = connect(&settings, installation, c, scope)?;
-    let method = if job.is_some() {
-        Method::PUT
-    } else {
-        Method::DELETE
-    };
-    let req = project_request(&page, c, method, &["claims", key])?;
-    let req = if let Some(job) = job {
-        req.header("Content-Type", "application/json")
-            .body(json!({"job":job}).to_string())
-    } else {
-        req
-    };
-    let (status, _) = response(req)?;
-    if job.is_none() && status == 404 {
-        return Ok(());
+    ClaimSession::new(installation, scope, c)?
+        .update(key, job)?
+        .map_or(Ok(()), Err)
+}
+
+/// Keep the authenticated transport for all claim renewals in one refresh.
+pub(crate) struct ClaimSession<'a> {
+    page: Page,
+    collab: &'a Value,
+}
+impl<'a> ClaimSession<'a> {
+    pub(crate) fn new(
+        installation: &crate::linear::Installation,
+        scope: &str,
+        collab: &'a Value,
+    ) -> Result<Self> {
+        let settings = crate::providers::PageSettings(installation).resolve(scope)?;
+        Ok(Self {
+            page: connect(&settings, installation, collab, scope)?,
+            collab,
+        })
     }
-    check(status).map_err(Into::into)
+    /// A refused renewal gates only this node. All other failures affect the claim service.
+    pub(crate) fn update(&self, key: &str, job: Option<&Value>) -> Result<Option<String>> {
+        let method = if job.is_some() {
+            Method::PUT
+        } else {
+            Method::DELETE
+        };
+        let req = project_request(&self.page, self.collab, method, &["claims", key])?;
+        let req = if let Some(job) = job {
+            req.header("Content-Type", "application/json")
+                .body(json!({"job":job}).to_string())
+        } else {
+            req
+        };
+        let (status, body) = response(req)?;
+        if (200..300).contains(&status) || job.is_none() && status == 404 {
+            return Ok(None);
+        }
+        let fallback = format!("the claims page answered HTTP {status}");
+        if status == 429 || status >= 500 {
+            return Err(fallback);
+        }
+        let data: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let mut detail = data["error"].as_str().unwrap_or(&fallback).to_owned();
+        let claim = &data["claim"];
+        if status == 409
+            && let (Some(holder), Some(job), Some(end)) = (
+                claim["holder"].as_str(),
+                claim["job"].as_str(),
+                claim["leaseUntil"].as_str(),
+            )
+        {
+            detail.push_str(&format!(": {holder}, job={job}, lease ends {end}"));
+        }
+        if job.is_some() && matches!(status, 404 | 409) {
+            Ok(Some(detail))
+        } else {
+            Err(detail)
+        }
+    }
 }
 
 pub(crate) fn publish_load(

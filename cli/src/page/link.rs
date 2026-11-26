@@ -88,7 +88,7 @@ impl Link {
         Message::Text(json!({"v":1,"type":kind,"id":format!("{}-{ticks}",self.session),
             "project":{"workspace":"","id":self.project},"at":chrono::Utc::now().to_rfc3339(),"payload":payload}).to_string())
     }
-    async fn open(&self) -> Result<WebSocket> {
+    async fn handshake(&self) -> Result<WebSocket> {
         for attempt in 0..4 {
             let mut request = self.http.get(self.url.clone());
             if let Some(token) = &self.credential {
@@ -111,21 +111,85 @@ impl Link {
             if response.status().as_u16() != 101 {
                 return Err(format!("link answered HTTP {}", response.status().as_u16()));
             }
-            let mut ws = response
+            return response
                 .into_websocket()
                 .await
-                .map_err(|_| "link handshake failed")?;
-            ws.send(self.frame("hello", &self.hello))
-                .await
-                .map_err(|_| "cannot send hello")?;
-            for (kind, data) in &self.replay {
-                ws.send(self.frame(kind, data))
-                    .await
-                    .map_err(|_| "cannot replay link state")?;
-            }
-            return Ok(ws);
+                .map_err(|_| "link handshake failed".into());
         }
         unreachable!()
+    }
+    async fn open(&self) -> Result<WebSocket> {
+        let mut ws = self.handshake().await?;
+        ws.send(self.frame("hello", &self.hello))
+            .await
+            .map_err(|_| "cannot send hello")?;
+        for (kind, data) in &self.replay {
+            ws.send(self.frame(kind, data))
+                .await
+                .map_err(|_| "cannot replay link state")?;
+        }
+        Ok(ws)
+    }
+
+    /// A sender opens a separate short-lived connection. Only the coordinator sends hello.
+    /// A false return means the server did not answer a requested reply poll.
+    pub fn send_agents(
+        &self,
+        payload: Value,
+        deliver: impl FnOnce(&Value) -> Value,
+    ) -> Result<bool> {
+        let end = tokio::time::Instant::now() + Duration::from_secs(9);
+        let mut socket = self.runtime.block_on(async {
+            timeout(Duration::from_secs(5), self.handshake())
+                .await
+                .map_err(|_| "agents handshake timed out")?
+        })?;
+        let send = |ws: &mut WebSocket, msg: Message| {
+            self.runtime.block_on(async {
+                tokio::time::timeout_at(end, ws.send(msg))
+                    .await
+                    .map_err(|_| "agents send timed out")?
+                    .map_err(|_| "agents send failed")
+            })
+        };
+        send(&mut socket, self.frame("agents", &payload))?;
+        if payload["replies"] != true {
+            return Ok(true);
+        }
+        let received = self.runtime.block_on(async {
+            timeout(Duration::from_secs(2), async {
+                while let Some(frame) = socket.next().await {
+                    match frame.map_err(|_| "agents receive failed")? {
+                        Message::Text(text) => {
+                            return serde_json::from_str::<Value>(&text)
+                                .map_err(|_| "invalid agent-reply frame");
+                        }
+                        Message::Ping(_) => {
+                            socket.flush().await.map_err(|_| "agents pong failed")?
+                        }
+                        Message::Close { .. } => break,
+                        _ => (),
+                    }
+                }
+                Err("agents connection closed")
+            })
+            .await
+        });
+        let Ok(received) = received else {
+            return Ok(false);
+        };
+        let msg = received?;
+        if msg["v"] == 1
+            && msg["type"] == "agent-reply"
+            && msg["project"]["id"] == self.project
+            && msg["payload"]["id"]
+                .as_str()
+                .is_some_and(|id| (1..=200).contains(&id.chars().count()))
+        {
+            let outcome = deliver(&msg["payload"]);
+            send(&mut socket, self.frame("agent-reply-result", &outcome))?;
+        }
+        Ok(true)
     }
     fn connect(&mut self) -> Result<()> {
         if self.socket.is_some() {
@@ -202,6 +266,20 @@ impl Link {
             }
         }
         Ok(())
+    }
+    /// Read the backlog sent in response to hello before computing one-shot decisions.
+    pub(crate) fn initial_messages(&mut self) -> Result<Vec<Value>> {
+        let mut messages = Vec::new();
+        if self.connect().is_ok() {
+            let deadline = Instant::now() + Duration::from_millis(100);
+            while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                match self.wait(left.min(Duration::from_millis(50)))? {
+                    Some(m) => messages.push(m),
+                    None => break,
+                }
+            }
+        }
+        Ok(messages)
     }
     pub fn wait(&mut self, duration: Duration) -> Result<Option<Value>> {
         let end = Instant::now() + duration;

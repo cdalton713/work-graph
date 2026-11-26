@@ -81,6 +81,8 @@ pub mod usage;
 
 pub mod providers;
 
+pub mod automation;
+pub mod diagnostics;
 pub mod workflow;
 
 pub mod update;

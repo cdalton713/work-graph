@@ -1,0 +1,12 @@
+usage: wg.py autostart [-h] [--install | --uninstall] [--agent {codex,claude}] [--model MODEL] [--effort EFFORT] dir
+
+positional arguments:
+  dir
+
+options:
+  -h, --help            show this help message and exit
+  --install
+  --uninstall
+  --agent {codex,claude}
+  --model MODEL         the provider model id
+  --effort EFFORT       the effort level for the model

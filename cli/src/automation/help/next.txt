@@ -1,0 +1,11 @@
+usage: wg.py next [-h] [--wait] [--interval INTERVAL] [--no-publish] [--all] dir
+
+positional arguments:
+  dir
+
+options:
+  -h, --help           show this help message and exit
+  --wait
+  --interval INTERVAL
+  --no-publish         do not copy the result to Linear for the page
+  --all                print each wait and note line in full

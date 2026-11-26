@@ -1,6 +1,8 @@
 // One graph for each project, for all tabs. Without it, each open tab loads the full graph from
 // Linear at each poll, with the key that wg and the workers also use (5,000 requests each hour).
 import { createHash } from "node:crypto";
+import { LinearKeyRequired, LinearReadLimited } from "./linear.ts";
+import { LinearSignInRequired } from "./linearauth.ts";
 import type { GraphData } from "../src/lib/types.ts";
 
 /** How long an answer serves every caller with no question to Linear. */
@@ -35,6 +37,9 @@ export interface Versioned {
   stale?: boolean; error?: string;
   /** When the stale graph loaded (epoch ms). Set only with `stale`. */
   loadedAt?: number;
+  retryAfter?: number;
+  endpointOnly?: boolean;
+  globalRetryAfter?: number;
 }
 interface Entry extends Versioned {
   /**
@@ -54,6 +59,8 @@ interface Entry extends Versioned {
 export interface ReadOptions {
   /** A write depends on this graph (which issues are in the project): give the refresh error, never a stale graph. */
   fresh?: boolean;
+  /** A mutation may retry its prerequisite read while page reads wait. */
+  forWrite?: boolean;
 }
 
 export interface GraphCache {
@@ -113,9 +120,15 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
 
   /** The last graph with `stale` and the error, while the graph is at most `STALE_MS` old (from its load). */
   function fallback(projectId: string, error: unknown): Versioned {
+    if (error instanceof LinearKeyRequired || error instanceof LinearSignInRequired) throw error;
     const old = last.get(projectId);
     if (!old || now() - old.loadedAt > STALE_MS) throw error;
     const answer: Versioned = { data: old.data, version: old.version, stale: true, error: (error as Error).message, loadedAt: old.loadedAt };
+    if (error instanceof LinearReadLimited) {
+      answer.retryAfter = Number(error.remaining());
+      answer.endpointOnly = error.endpointOnly;
+      answer.globalRetryAfter = error.globalRetryAfter;
+    }
     causes.set(answer, error);
     return answer;
   }
@@ -163,12 +176,15 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
   }
 
   return {
-    get(projectId, { fresh = false } = {}) {
+    get(projectId, { fresh = false, forWrite = false } = {}) {
       const answer = read(projectId);
-      if (!fresh) return answer;
+      if (!fresh && !forWrite) return answer;
       return answer.then((value) => {
         if (value.stale) throw causes.get(value) ?? new Error(value.error);
         return value;
+      }).catch(error => {
+        if (forWrite && error instanceof LinearReadLimited) return refresh(projectId);
+        throw error;
       });
     },
     async check(projectIds) {
@@ -193,7 +209,7 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
   function read(projectId: string): Promise<Versioned> {
     const entry = entries.get(projectId);
     if (entry && !entry.changed && now() - entry.freshAt < FRESH_MS) return Promise.resolve({ data: entry.data, version: entry.version });
-    if (entry?.failure && now() - entry.failedAt! < FRESH_MS) {
+    if (entry?.failure && (entry.failure instanceof LinearReadLimited ? Number(entry.failure.remaining()) > 0 : now() - entry.failedAt! < FRESH_MS)) {
       const failure = entry.failure;
       return new Promise<Versioned>((resolve) => resolve(fallback(projectId, failure)));
     }

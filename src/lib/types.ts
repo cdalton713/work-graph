@@ -52,7 +52,7 @@ export interface SharedWorkspaceInfo {
   projectId: string;
 }
 export interface WorkspaceSummary extends Partial<SharedWorkspaceInfo> {
-  id: string; name: string; error?: string;
+  id: string; name: string; error?: string; retryAfter?: number;
   /** The address of the read-only viewer of this workspace (config `share_url`). None: the page has no Share button. */
   shareUrl?: string;
 }

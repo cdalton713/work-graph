@@ -1,7 +1,7 @@
 import { afterEach, aroundEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
-  CHANGED_PAGES, INITIATIVE_GROUP, LinearError, MAX_PARALLEL, addComment, addReviewUrls, changedProjects, changedSince, gql, initiativeOf, linearBudget, loadGraph,
+  CHANGED_PAGES, INITIATIVE_GROUP, LinearError, MAX_PARALLEL, boardRead, updateIssue, addComment, addReviewUrls, changedProjects, changedSince, gql, initiativeOf, linearBudget, listProjects, loadGraph,
   createLinearCache, delay, isMutation, linearCache, mapLimit, pullRequestsOf, setTransport,
 } from "./linear.ts";
 import { createSite } from "../src/lib/site.ts";
@@ -211,15 +211,75 @@ describe("gql retry and limit", () => {
   it.each([
     ["a network error", () => new TypeError("fetch failed")],
     ["a timeout", timeout],
-    ["HTTP 429", () => json({ errors: [{ message: "Too many requests" }] }, 429)],
     ["HTTP 503", () => json(null, 503)],
-    ["RATELIMITED", rateLimited],
   ] as const)("tries a query again after %s, with a longer delay each time", async (_name, failure) => {
     const make = (): Response | (() => Error) => { const f = failure(); return f instanceof Response ? f : () => f; };
     const fetch = answers(make(), make(), ok());
     expect(await gql("query{ viewer{id} }")).toEqual({ viewer: { id: "me" } });
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(sleeps).toEqual([500, 1000]); // random 0.5: the exponential delay itself
+  });
+
+  it.each([
+    [429, "90", 90], [400, new Date(91_000).toUTCString(), 90], [400, null, 30],
+  ] as const)("holds reads after status %i with Retry-After %s", async (status, header, seconds) => {
+    let now = 1000;
+    const fetch = vi.fn().mockResolvedValueOnce(json({ errors: [{ message: "Limited",
+      extensions: { code: "RATELIMITED" } }] }, status, header ? { "Retry-After": header } : {}))
+      .mockImplementation(async () => ok());
+    setTransport({ fetch, now: () => now, sleep: async () => {} });
+    const read = () => boardRead.run(true, gql, "query{ viewer{id} }");
+    await expect(read()).rejects.toMatchObject({ status: 429, retryAfter: String(seconds) });
+    now += seconds * 1000 - 1000;
+    await Promise.all([read(), read()].map(result => expect(result).rejects.toMatchObject({ retryAfter: "1" })));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await linearWorkspace.run({ ...linearWorkspace.getStore()!, key: "other" }, read);
+    now += 1000;
+    await read();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("can finish an issue edit while board reads wait", async () => {
+    const page = { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+    const issue = { id: "i", title: "new", team: { key: "WG" }, project: { id: "p" },
+      comments: page, labels: page, relations: { ...page, pageInfo: { hasNextPage: true, endCursor: "more" } }, inverseRelations: page };
+    const fetch = answers(json(null, 429, { "retry-after": "90" }), json({ data: { issue } }),
+      json({ data: { issueUpdate: { success: true, issue } } }), json({ data: { issue: { relations: page } } }));
+    const read = () => boardRead.run(true, listProjects, "WG");
+    await expect(read()).rejects.toMatchObject({ status: 429 });
+    expect(await updateIssue("i", { title: "new" }, "WG")).toMatchObject({ title: "new" });
+    await expect(read()).rejects.toMatchObject({ retryAfter: "90" });
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps an endpoint limit across OAuth rotation and permits a different operation", async () => {
+    const fetch = answers(json(null, 429, { "x-ratelimit-endpoint-requests-remaining": "0", "retry-after": "90" }), ok(), ok());
+    let token = "first";
+    const connection = { ...linearWorkspace.getStore()!, kind: "oauth" as const, connectionId: "c", oauthKey: async () => token };
+    const read = (query: string, workspace = connection) => linearWorkspace.run(workspace, () => boardRead.run(true, gql, query));
+    await expect(read("query{viewer{id}}")).rejects.toMatchObject({ endpointOnly: true });
+    token = "second";
+    await expect(read("query{viewer{id}}")).rejects.toMatchObject({ retryAfter: "90" });
+    await read("query{teams{nodes{id}}}");
+    token = "first";
+    await expect(read("query{viewer{id}}", { ...connection, connectionId: "other" })).rejects.toMatchObject({ retryAfter: "90" });
+    token = "independent";
+    await read("query{viewer{id}}", { ...connection, connectionId: "other" });
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([{}, { "retry-after": "20" }] as Record<string, string>[])("uses the latest exhausted budget reset", async extra => {
+    const response = json({ errors: [{ message: "Limit", extensions: { code: "RATELIMITED" } }] }, 400, {
+      "x-ratelimit-requests-remaining": "0", "x-ratelimit-requests-reset": "91000",
+      "x-ratelimit-endpoint-complexity-remaining": "0", "x-ratelimit-endpoint-complexity-reset": "181000",
+      "x-ratelimit-complexity-remaining": "5", "x-ratelimit-complexity-reset": "601000", ...extra,
+    });
+    answers(response);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(boardRead.run(true, gql, "query{ viewer{id} }")).rejects.toMatchObject({
+        status: 429, retryAfter: "180", globalDeadline: 91_000,
+      });
+    }
   });
 
   it("stops after three tries and gives the last error", async () => {

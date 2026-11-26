@@ -60,7 +60,7 @@ export async function pollGraph<T extends { version: string; stale?: boolean }>(
  * keeps the projects that it had for that workspace, so the open project, its graph, and its banner stay.
  */
 export function mergeDirectory<T extends ProjectList>(old: ProjectList | null, next: T): T {
-  const failed = new Set(next.workspaces.filter((w) => w.error).map((w) => w.id));
+  const failed = new Set(next.workspaces.filter((w) => w.error && !w.role).map((w) => w.id));
   const kept = (old?.projects ?? []).filter((p) => failed.has(p.workspace));
   return kept.length ? { ...next, projects: [...next.projects, ...kept] } : next;
 }

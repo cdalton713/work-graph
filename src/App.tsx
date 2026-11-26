@@ -155,6 +155,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const [query, setQuery] = useQuery();
   const overviewInitiatives = useMemo(() => query.getAll("initiative"), [query]);
   const overviewStates = useMemo(() => readProjectStates(query), [query]);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
   const [directoryResponse, setDirectory] = useState<ProjectList | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -218,10 +219,12 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
     confirmed.id === starter.project.id ? confirmed : null);
   const missing = project ? null : selection.missing;
 
-  useEffect(() => { api.projects().then((list) => setDirectory((now) => now ?? list)).catch((e) => setError(e.message)); }, []);
+  const viewingProject = !!query.get("project");
+
 
   // The overview also gives the project picker the count of issues that wait on the human.
   const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [waiting, setWaiting] = useState<Awaited<ReturnType<typeof api.waiting>>["summaries"] | null>(null);
   const [overviewSyncedAt, setOverviewSyncedAt] = useState<Date | null>(null);
   const overviewList = useMemo(() => includePending(overview, newProject), [overview, newProject]);
   const [overviewBusy, setOverviewBusy] = useState(false);
@@ -235,7 +238,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const [status, setStatus] = useState<ServerStatus | null>(null);
   useEffect(() => {
     let live = true, running = false, statusRunning = false;
-    const poll = () => {
+    const poll = async () => {
       if (running || document.hidden) return;
       if (installed) setNow(Date.now());
       running = true;
@@ -245,23 +248,43 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         statusRunning = true;
         api.status().then((s) => live && setStatus(s)).catch(() => {}).finally(() => { statusRunning = false; });
       }
-      api.overview().then((o) => {
-        if (!live) return;
-        const time = Date.now();
-        if (installed) setOverviewSyncedAt(new Date(time));
-        setOverview(o);
-        setNewProject(null);
-        setDirectory((old) => mergeDirectory(old, o));
-        setNow(time);
-      })
-        .catch((e) => live && setError(`overview: ${e.message}`))
-        .finally(() => { running = false; if (live) setOverviewBusy(false); });
+      let summaryReady = false;
+      const directory = api.projects().then(list => {
+        if (live && (viewingProject || !summaryReady)) {
+          setDirectory(old => mergeDirectory(site.readOnly ? null : old, list));
+          setDirectoryError(null);
+        }
+      }).catch(error => { if (live && viewingProject) setDirectoryError(error.message); });
+      try {
+        if (viewingProject) {
+          const list = await api.waiting();
+          if (!live) return;
+          setWaiting(list.summaries);
+        } else {
+          const list = await api.overview();
+          if (!live) return;
+          summaryReady = true;
+          setDirectory(old => mergeDirectory(site.readOnly ? null : old, { projects: list.projects, workspaces: list.workspaces }));
+          setDirectoryError(null);
+          setOverview(list);
+          setWaiting(list.summaries);
+          setNewProject(null);
+          if (installed) setOverviewSyncedAt(new Date());
+        }
+        setNow(Date.now());
+      } catch (error) {
+        if (live) setDirectoryError((error as Error).message);
+      } finally {
+        await directory;
+        running = false;
+        if (live) setOverviewBusy(false);
+      }
     };
     poll();
     const timer = setInterval(poll, OVERVIEW_MS);
     document.addEventListener("visibilitychange", poll);
     return () => { live = false; clearInterval(timer); document.removeEventListener("visibilitychange", poll); };
-  }, [overviewTick, installed]);
+  }, [overviewTick, installed, viewingProject]);
 
 
   const load = useCallback(async (project: Project) => {
@@ -278,7 +301,13 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
       setSyncedAt(new Date()); // also for an answer of "no change": the page is as new as this poll
       setError(null);
     } catch (e) {
-      if (mine === generation.current) setError((e as Error).message);
+      if (mine === generation.current) {
+        if (site.readOnly || project.workspace?.startsWith("shared:")) {
+          version.current = null;
+          setData(null);
+        }
+        setError((e as Error).message);
+      }
     } finally {
       if (mine === generation.current) setBusy(false);
     }
@@ -388,9 +417,20 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
     setFilterChoice({ key: openKey, value });
   };
   // A worker's question is a move of the human's: it counts in "Your move", the picker, and the badge.
-  const yours = useMemo(() => new Map((overview?.summaries ?? []).map((s) => [summaryKey(s), movesWithAgents(movesWithAsks(s.you, link.asksBy.get(summaryKey(s))), link.agentsBy.get(summaryKey(s)), now).length])), [overview, link.asksBy, link.agentsBy, now]);
-  const badgeCount = overview ? [...yours.values()].reduce((sum, count) => sum + count, 0) : null;
-  useEffect(() => { if (site.push && badgeCount !== null && !site.readOnly) updateBadge(badgeCount); }, [badgeCount]);
+  const yours = useMemo(() => {
+    const visible = new Set(directory?.projects.map(summaryKey));
+    return new Map((waiting ?? []).flatMap(summary => {
+      const key = summaryKey(summary);
+      if (!visible.has(key)) return [];
+      const moves = movesWithAsks(summary.you, link.asksBy.get(key));
+      return [[key, movesWithAgents(moves, link.agentsBy.get(key), now).length] as const];
+    }));
+  }, [waiting, directory, link.asksBy, link.agentsBy, now]);
+  const waitingTotal = [...yours.values()].reduce((a, b) => a + b, 0);
+  const badgeCount = waiting && directory ? waitingTotal : null;
+  useEffect(() => {
+    if (site.push && badgeCount !== null && !site.readOnly) updateBadge(badgeCount);
+  }, [badgeCount]);
   const [sharedPresence, setSharedPresence] = useState<{ key: string; data: Awaited<ReturnType<typeof api.sharedPresence>> } | null>(null);
   useEffect(() => {
     if (sharedRole !== "collaborator" || link.connected || !linkRef || !openKey) return;
@@ -727,7 +767,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
     setQuery({ workspace: p.workspace ?? site.defaultWorkspace, project: p.id, issue: issue ?? null }, true), [setQuery]);
   const setupButton = (dismiss?: () => void) => project && starter && <button onClick={() => { dismiss?.(); setSetup(true); }}>Coordinator setup</button>;
   const home = () => setQuery({ workspace: null, project: null, issue: null }, true);
-  const waitingTotal = [...yours.values()].reduce((a, b) => a + b, 0);
+
   const total = full?.nodes.length ?? 0;
   const done = full?.nodes.filter((n) => n.status === "Done").length ?? 0;
   // A canceled issue is not work that is left, so it is not in the total that "done" counts to.
@@ -804,7 +844,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const refreshScreen = useCallback(() => {
     const current = currentProject.current;
     if (current) void load(current);
-    else setOverviewTick((tick) => tick + 1);
+    setOverviewTick((tick) => tick + 1);
   }, [load]);
   const refreshLabel = project ? "Refresh project" : "Refresh overview";
   const closeControl = !viewer && !sharedRole && activeProject && (
@@ -851,7 +891,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         {installed && !full && <button type="button" className="installed-refresh" aria-label={refreshLabel}
           onClick={refreshScreen} disabled={project ? busy : overviewBusy}>Refresh</button>}
         {full && (
-          <button type="button" className="sync" onClick={() => project && void load(project)} aria-label="Refresh project"
+          <button type="button" className="sync" onClick={refreshScreen} aria-label="Refresh project"
             title={nativeBarTitles ? syncHelp : undefined} aria-description={syncHelp}>
             <span className={`sync-dot${busy ? " is-busy" : ""}`} /><span className="sync-time">{syncTime ?? "…"}</span>
           </button>
@@ -975,7 +1015,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         coordinatorDetail={coordinator?.title} coordinatorNotice={coordinatorNotice} staleDetail={stale?.title}>
         {commands(true)}
       </EffortSheet>}
-      {(closeError || error) && <div className="error" role="alert"><span>{closeError || error}</span><button type="button" className="ghost" onClick={() => { setError(null); setCloseError(null); }}>Dismiss</button></div>}
+      {(closeError || error || directoryError) && <div className="error" role="alert"><span>{closeError || error || directoryError}</span><button type="button" className="ghost" onClick={() => { setError(null); setCloseError(null); setDirectoryError(null); }}>Dismiss</button></div>}
 
       {hover && keys && (
         <div className="keys" role="dialog" aria-label="Keyboard keys">

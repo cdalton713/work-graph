@@ -1,4 +1,6 @@
 // Linear GraphQL access for the work-graph UI. The API key stays in this process.
+import { createHash } from "node:crypto";
+import { retryDeadline } from "../src/lib/retry-after.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Comment, GraphData, Issue, IssuePatch, IssueRef, Label, Milestone, Person, Project, PullRequest, State, Team } from "../src/lib/types.ts";
 import { serverSite } from "./site.ts";
@@ -22,6 +24,30 @@ export class LinearError extends Error {
   constructor(message: string, status = 502) {
     super(message);
     this.status = status;
+  }
+}
+
+export const boardRead = new AsyncLocalStorage<boolean>();
+
+export class LinearReadLimited extends LinearError {
+  readonly deadline: number;
+  readonly endpointOnly: boolean;
+  readonly globalDeadline: number;
+  constructor(global: number, endpoint: number, message = "Linear rate limit") {
+    super(message, 429);
+    this.globalDeadline = global;
+    this.endpointOnly = endpoint > global;
+    this.deadline = Math.max(global, endpoint);
+    this.retryAfter = this.remaining();
+  }
+
+  get globalRetryAfter(): number | undefined {
+    const seconds = Math.ceil((this.globalDeadline - transport.now()) / 1000);
+    return seconds > 0 ? seconds : undefined;
+  }
+
+  remaining(): string {
+    return String(Math.max(0, Math.ceil((this.deadline - transport.now()) / 1000)));
   }
 }
 
@@ -124,8 +150,8 @@ export interface LinearBudget {
 }
 type LinearMeta = { at: number; teams: Record<string, Team>; labels: Label[] };
 
-export function createLinearCache() {
-  return { budgets: new Map<string, LinearBudget>(), meta: new Map<string, LinearMeta>() };
+export function createLinearCache(readDeadlines = new Map<string, number>()) {
+  return { readDeadlines, budgets: new Map<string, LinearBudget>(), meta: new Map<string, LinearMeta>() };
 }
 
 export const linearCache = new AsyncLocalStorage<ReturnType<typeof createLinearCache>>();
@@ -146,13 +172,27 @@ export function linearBudget(workspace: string = workspaceOf().id): LinearBudget
   return currentCache().budgets.get(workspace) ?? null;
 }
 
+function budgetNumber(headers: Headers | undefined, name: string): number | null {
+  const text = headers?.get?.(`x-ratelimit-${name}`);
+  const value = text?.trim() ? Number(text) : NaN;
+  return Number.isFinite(value) ? value : null;
+}
+
+function exhaustedBudgets(headers: Headers) {
+  const exhausted = new Map<string, number>();
+  const cost = Number(headers?.get?.("x-complexity")) || 1;
+  for (const limit of ["requests", "complexity", "endpoint-requests", "endpoint-complexity"]) {
+    const remaining = budgetNumber(headers, `${limit}-remaining`);
+    if (remaining !== null && remaining < (limit.endsWith("complexity") ? Math.max(1, cost) : 1)) {
+      exhausted.set(limit, budgetNumber(headers, `${limit}-reset`) ?? 0);
+    }
+  }
+  return exhausted;
+}
+
 function keepBudget(headers: Headers | undefined): void {
   if (!headers || typeof headers.get !== "function") return;
-  const number = (name: string) => {
-    const text = headers.get(`x-ratelimit-${name}`);
-    const value = text === null ? NaN : Number(text);
-    return Number.isFinite(value) ? value : null;
-  };
+  const number = (name: string) => budgetNumber(headers, name);
   const budget: LinearBudget = {
     requestsRemaining: number("requests-remaining"), requestsLimit: number("requests-limit"),
     requestsReset: number("requests-reset"),
@@ -294,7 +334,7 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
   const workspace = memberWrite ? shared.writer : workspaceOf();
   if (!workspace || (memberWrite && workspace.needsKey)) throw new NeedsLinearAccess();
   const { key, kind, oauthKey, needsKey, rejectApiKey } = workspace;
-  currentCache();
+  const { readDeadlines } = currentCache();
   serverSite();
   if (needsKey) throw new LinearSignInRequired();
   if (!key) throw new LinearError("LINEAR_API_KEY is not set", 500);
@@ -320,7 +360,24 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         const result = transportFailure(error);
         return kind === "oauth" || rejectApiKey ? { ...result, error: new LinearError("Linear request failed") } : result;
       };
+      const credentialIds = (value: string) => {
+        const ids = [createHash("sha256").update(value).digest("hex")];
+        if (kind === "oauth" && workspace.connectionId) ids.push(`connection:${workspace.connectionId}`);
+        return ids;
+      };
+      const readLimit = (ids: string[], message?: string) => new LinearReadLimited(
+        Math.max(...ids.map(id => readDeadlines.get(id) ?? 0)),
+        Math.max(...ids.map(id => readDeadlines.get(id + query) ?? 0)),
+        message,
+      );
       const send = async (value: string) => {
+        if (!mutation && boardRead.getStore()) {
+          const ids = credentialIds(value);
+          if (ids.some(id => readDeadlines.has(id) || readDeadlines.has(id + query))) {
+            const limit = readLimit(ids);
+            if (limit.deadline > transport.now()) throw limit;
+          }
+        }
         try { return await transport.fetch(ENDPOINT, init(value)); } catch (error) { return failed(error); }
       };
       let sentCredential = credential;
@@ -396,6 +453,24 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       const failure: Failure = rated ? "rate" : response.status >= 500 ? "server" : "final";
       const retryAfter = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;
       const error = new LinearError(rated ? `Linear rate limit: ${detail}` : options?.manageAccess ? "Linear request failed" : `Linear: ${detail}`, rated ? 429 : 502);
+      if (rated) {
+        const now = transport.now();
+        for (const [id, deadline] of readDeadlines) {
+          if (deadline <= now) readDeadlines.delete(id);
+        }
+        const ids = credentialIds(sentCredential);
+        const budgets = exhaustedBudgets(response.headers);
+        for (const endpoint of [false, true]) {
+          const resets = [...budgets].filter(([name]) => name.startsWith("endpoint-") === endpoint).map(([, reset]) => reset);
+          if (!resets.length && (endpoint || budgets.size)) continue;
+          const reset = Math.max(0, ...resets);
+          const until = Math.max(reset, retryDeadline(retryAfter, now, reset > now ? 0 : 30_000));
+          const scopes = ids.map(id => endpoint ? id + query : id);
+          const held = Math.max(until, ...scopes.map(scope => readDeadlines.get(scope) ?? 0));
+          for (const scope of scopes) readDeadlines.set(scope, held);
+        }
+        if (!mutation && boardRead.getStore()) throw readLimit(ids, error.message);
+      }
       if (rated && retryAfter) error.retryAfter = retryAfter;
       return { failure, error, retryAfter };
     });
@@ -474,6 +549,7 @@ export async function addReviewUrls(issues: Pick<Issue, "url" | "pullRequests">[
       for (const p of data.pullRequests.nodes as { slugId: string; url: string }[]) slugs.set(p.url, p.slugId);
     }
   } catch (error) {
+    if (error instanceof LinearReadLimited) throw error;
     console.warn(`wg ui: no Linear review links: ${(error as Error).message}`);
   }
   for (const p of prs) if (slugs.has(p.url)) p.reviewUrl = `https://linear.app/${workspace}/review/${slugs.get(p.url)}`;
@@ -784,25 +860,28 @@ export async function changedProjects(ids: string[], since: string): Promise<Map
   }
 }
 
-/** The states, members, and labels of the teams change seldom: one load serves ten minutes. */
-const META_MS = 10 * 60_000;
+// Fields needed for the waiting group and for following linked project nodes.
+const WAITING_ISSUE = `id identifier title updatedAt sortOrder team{id key} ${STATE}
+  labels(first:20){nodes{id name parent{name}}}
+  comments(first:1, filter:{body:{startsWith:"${CARD_PREFIX}"}}){nodes{id body}}`;
+export async function waitingIssues(projectId: string, includeExternal: boolean) {
+  const relations = includeExternal ? `relations(first:${RELATION_PAGE},includeArchived:true){${RELATIONS}}
+    inverseRelations(first:${RELATION_PAGE},includeArchived:true){${INVERSE_RELATIONS}}` : "";
+  return projectIssues(projectId, WAITING_ISSUE + relations, includeExternal);
+}
 
-export async function loadGraph(projectId: string): Promise<GraphData> {
-  const head = await gql(
-    `query($id:String!){ viewer{id} project(id:$id){ id name url
-       projectMilestones(first:50){nodes{id name sortOrder description}}
-       documents(first:5, filter:{title:{eq:"${STATUS_DOC}"}}){nodes{content updatedAt}} } }`,
-    { id: projectId },
-  );
-  if (!head.project) throw new LinearError(`project ${projectId} not found`, 404);
+async function projectIssues(projectId: string, fields: string, includeExternal: boolean) {
   const raw = await pages<RawIssue>(
     `query($id:String!,$after:String){ project(id:$id){ issues(first:25,after:$after){
-       nodes{${ISSUE}} pageInfo{hasNextPage endCursor} } } }`,
+       nodes{${fields}} pageInfo{hasNextPage endCursor} } } }`,
     { id: projectId },
     (data) => data.project.issues,
   );
+  if (!includeExternal) {
+    const empty = { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+    return raw.map(issue => normalizeIssue({ ...issue, relations: empty, inverseRelations: empty }, projectId));
+  }
   const issues = await mapLimit(raw, MAX_PARALLEL, (i) => completeIssue(i, projectId));
-  const teamIds = [...new Set(issues.map((i) => i.teamId))];
   // Issues outside the project that are linked to it by blocks relations (for example, ENG
   // tickets that wg maps as nodes). They are read-only here. Their own relations give the edges
   // between them. A wg node can be several relations away (ENG lane -> ENG lane -> CD merge
@@ -815,13 +894,29 @@ export async function loadGraph(projectId: string): Promise<GraphData> {
     outside.forEach((id) => known.add(id));
     const found: Issue[] = [];
     for (let at = 0; at < outside.length; at += 25) {
-      const data = await gql(`query($ids:[ID!]){ issues(first:25,filter:{id:{in:$ids}}){ nodes{${ISSUE}} } }`, { ids: outside.slice(at, at + 25) });
+      const data = await gql(`query($ids:[ID!]){ issues(first:25,filter:{id:{in:$ids}}){ nodes{${fields}} } }`, { ids: outside.slice(at, at + 25) });
       const linked = await mapLimit(data.issues.nodes as RawIssue[], MAX_PARALLEL, (i) => completeIssue(i, projectId));
       found.push(...linked.map((i) => ({ ...i, external: true })));
     }
     issues.push(...found);
     frontier = found.filter((i) => i.card);
   }
+  return issues;
+}
+
+/** The states, members, and labels of the teams change seldom: one load serves ten minutes. */
+const META_MS = 10 * 60_000;
+
+export async function loadGraph(projectId: string): Promise<GraphData> {
+  const head = await gql(
+    `query($id:String!){ viewer{id} project(id:$id){ id name url
+       projectMilestones(first:50){nodes{id name sortOrder description}}
+       documents(first:5, filter:{title:{eq:"${STATUS_DOC}"}}){nodes{content updatedAt}} } }`,
+    { id: projectId },
+  );
+  if (!head.project) throw new LinearError(`project ${projectId} not found`, 404);
+  const issues = await projectIssues(projectId, ISSUE, true);
+  const teamIds = [...new Set(issues.filter(i => !i.external).map(i => i.teamId))];
   await addReviewUrls(issues);
   let teams: Record<string, Team> = {};
   let labels: Label[] = [];

@@ -4,6 +4,7 @@ import type { Ask, Presence } from "./lib/link";
 import type { AutonomyLevel } from "./lib/autonomy";
 import type { ReviewEffort } from "./lib/review";
 import { pageEvent, type PageEvent } from "./lib/telemetry";
+import { retryDeadline } from "./lib/retry-after";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
 import type { SetupTeam, SetupTeamInput, TeamSetupResult, TeamSetupState, StarterResult, Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShare, NewShareLink, ShareKind, ShareMember, LinearAccess, AccessGrant, ServerStatus } from "./lib/types";
@@ -77,6 +78,30 @@ export const shareApi = {
     shareWrite<null>(`${projectPath(id)}/access/request`, workspace, "POST"),
 };
 
+// Tabs on the same origin share read deadlines. A different account or workspace
+// can still read while one credential is limited. Storage can be unavailable.
+const deadlines = new Map<string, number>();
+function readKey(workspace: string | null) {
+  const scope = [site.user, site.readOnly, workspace];
+  if (site.readOnly && !site.user) {
+    const view = new URLSearchParams(location.search);
+    scope.push(view.get("workspace") ?? site.defaultWorkspace, view.get("project"));
+  }
+  return "wg:linear-retry:" + JSON.stringify(scope);
+}
+
+function deadlineFor(key: string): number {
+  let saved = 0;
+  try { saved = Number(localStorage.getItem(key)) || 0; } catch {}
+  return Math.max(saved, deadlines.get(key) ?? 0);
+}
+
+function holdReads(key: string, deadline: number) {
+  const until = Math.max(deadline, deadlineFor(key));
+  deadlines.set(key, until);
+  try { localStorage.setItem(key, String(until)); } catch {}
+}
+
 async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace, event?: PageEvent, project = openProject, idempotencyKey?: string): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "x-workspace": workspace };
   if (project && !(site.user && workspace.startsWith("shared:"))) headers["x-project"] = project;
@@ -86,7 +111,21 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
     headers["Idempotency-Key"] = idempotencyKey ?? Array.from(crypto.getRandomValues(new Uint8Array(16)),
       (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
+  const directory = path === "overview?view=waiting" || path === "overview" || path === "projects";
+  const graph = /^projects\/[^/]+\/graph(?:\?|$)/.test(path);
+  const read = method === "GET" && (directory || graph);
+  const key = readKey(directory ? null : workspace);
+  const operation = key + ":" + (graph ? path.split("?")[0] : path);
+  if (read && Math.max(deadlineFor(key), deadlineFor(operation)) > Date.now()) throw new ApiError(429, { error: "Linear rate limit" });
   const response = await fetch(`/api/${path}`, { ...init, headers });
+  const retry = response.headers?.get?.("Retry-After");
+  if (read && (response.status === 429 || (response.ok && retry != null))) {
+    const endpoint = response.headers?.get?.("X-RateLimit-Scope") === "endpoint";
+    const now = Date.now();
+    holdReads(endpoint ? operation : key, retryDeadline(retry ?? null, now));
+    const global = response.headers?.get?.("X-RateLimit-Global-Retry-After");
+    if (endpoint && global != null) holdReads(key, retryDeadline(global, now));
+  }
   if (response.status === 204) return null as T; // the graph did not change
   const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
   // The session ended: load the page again, which shows the sign-in screen. One time, so a server fault makes no loop.
@@ -99,6 +138,15 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
       window.dispatchEvent(new CustomEvent(linearAccessRequired, { detail: workspace }));
     }
     throw new ApiError(response.status, body);
+  }
+  if (read && directory && Array.isArray(body.workspaces)) {
+    const workspaces = (body as ProjectList).workspaces;
+    for (const entry of workspaces) {
+      if (entry.retryAfter !== undefined) holdReads(readKey(entry.id), Date.now() + entry.retryAfter * 1000);
+    }
+    if (workspaces.length && workspaces.every(w => w.retryAfter !== undefined)) {
+      holdReads(key, Date.now() + Math.min(...workspaces.map(w => w.retryAfter!)) * 1000);
+    }
   }
   if (event) pageEvent(event, workspace);
   return body as T;
@@ -163,6 +211,7 @@ export const api = {
   /** The state of the server: its build and the Linear budget of each workspace. */
   status: () => call<ServerStatus>("status"),
   /** The projects, with a summary of each open one. */
+  waiting: () => call<ProjectList & { summaries: Pick<OverviewData["summaries"][number], "id" | "workspace" | "you">[] }>("overview?view=waiting"),
   overview: () => call<OverviewData>("overview"),
   /** The graph with its version, or null when the page already has version `have`. */
   graph: (projectId: string, have?: string, workspace?: string) => call<(GraphData & { version: string }) | null>(`projects/${projectId}/graph${have ? `?have=${have}` : ""}`, undefined, workspace),

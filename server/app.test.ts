@@ -1,3 +1,4 @@
+import type { ProjectSummary } from "../src/lib/overview.ts";
 import { api as browserApi } from "../src/api.ts";
 import { configureSite, site } from "../src/lib/site.ts";
 import { connectRedis } from "./redis.ts";
@@ -865,6 +866,114 @@ describe("graph cache of the server", () => {
     expect(await saved.json()).toEqual({ ok: true, recorded: true });
     expect(asked.comments).toHaveLength(1);
   });
+  it.each([
+    { summaryFirst: false, account: false },
+    { summaryFirst: true, account: false },
+    { summaryFirst: true, account: true },
+  ])("projects waiting moves without loading the other boards ($summaryFirst summary first, account $account)", async ({ summaryFirst, account }) => {
+    const { asked, state } = graphLinear();
+    const server = account ? createApp(hostedRoles, {
+      team: TEAM, dist, workspaces: [workspace()], auth: rolesAuth, linkToken: rolesToken, watchMs: 0, now: () => clock.at,
+    }) : cached();
+    const headers = account ? await rolesHeaders("ada@example.com") : local;
+    // An account directory needs a fresh access check when the summary started first.
+    const extraDirectory = account && summaryFirst ? 1 : 0;
+    const issue = rawIssue("i", "TM-1", "p2");
+    state.issues.p2 = [{ ...issue, state: { ...issue.state, name: "Triage" } }];
+    const read = async (url: string) => (await server.request(url, { headers })).json();
+    const visit = async () => {
+      const paths = ["/api/projects", "/api/overview?view=waiting"];
+      if (summaryFirst) paths.reverse();
+      const results = await Promise.all([...paths.map(read), read("/api/status"), read("/api/projects/p1/graph")]);
+      return results[summaryFirst ? 0 : 1];
+    };
+    const waiting = await visit();
+    expect(fetch).toHaveBeenCalledTimes(5 + extraDirectory); // directory, two projections, selected graph head and issue page
+    expect(asked.loads).toEqual(["p1"]);
+    expect(waiting.summaries.find((p: { id: string }) => p.id === "p2").you).toMatchObject([{ identifier: "TM-1" }]);
+    vi.mocked(fetch).mockClear();
+    await visit(); // a second tab or immediate visibility change
+    expect(fetch).toHaveBeenCalledTimes(1 + extraDirectory);
+    vi.mocked(fetch).mockClear();
+    clock.at += 60_000;
+    await visit();
+    expect(fetch).toHaveBeenCalledTimes(3 + extraDirectory); // directory, one batch for both projects, selected graph check
+    const overview = await read("/api/overview");
+    expect(waiting.summaries).toEqual(expect.arrayContaining(overview.summaries.map(({ id, workspace, you }: ProjectSummary) => ({ id, workspace, you }))));
+    vi.mocked(fetch).mockClear();
+    state.changed = ["p2"];
+    clock.at += 60_000;
+    state.issues.p2 = [issue];
+    expect((await visit()).summaries.every((p: ProjectSummary) => p.you.length === 0)).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(4 + extraDirectory); // only the changed waiting projection costs another request
+  });
+
+  it("refreshes a dispatch prerequisite after a batch check was limited", async () => {
+    const { state, asked } = graphLinear();
+    state.issues.p1 = [rawIssue("i1", "TM-1", "p1")];
+    const server = cached();
+    await graph(server, "p1");
+    clock.at += 60_000;
+    const respond = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(init?.body).includes("project:{id:{in:$ids}}")) {
+        return new Response(null, { status: 429, headers: { "Retry-After": "90" } });
+      }
+      return respond(url, init);
+    });
+    await server.request("/api/overview", { headers: local });
+    expect((await graph(server, "p1")).headers.get("Retry-After")).toBe("90");
+    const dispatch = await server.request("/api/projects/p1/commands", { method: "POST", headers: write,
+      body: JSON.stringify({ name: "dispatch", key: "a", issue: "TM-1" }) });
+    expect(dispatch.status).toBe(200);
+    expect(asked.comments).toHaveLength(1);
+  });
+
+  it("shares the Linear cooldown across stale and cold graphs and the overview", async () => {
+    graphLinear();
+    setTransport({ now: () => clock.at, sleep: async () => {} });
+    try {
+      const server = cached();
+      await graph(server, "p1");
+      clock.at += 60_000;
+      vi.mocked(fetch).mockClear().mockResolvedValueOnce(new Response(null, { status: 429, headers: { "Retry-After": "90" } }));
+      const stale = await graph(server, "p1");
+      expect(stale.headers.get("retry-after")).toBe("90");
+      expect(await stale.json()).toMatchObject({ stale: true });
+      clock.at += 60_000;
+      const [cold, overview] = await Promise.all([graph(server, "p2"), server.request("/api/overview", { headers: local })]);
+      expect(cold.status).toBe(429);
+      expect(cold.headers.get("retry-after")).toBe("30");
+      expect((await overview.json()).workspaces[0].retryAfter).toBe(30);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      clock.at += 30_000;
+      expect((await graph(server, "p2")).status).toBe(200);
+    } finally {
+      setTransport({ sleep: async () => {} });
+    }
+  });
+
+  it.each([false, true])("sends both cooldowns on a limited graph (cached: %s)", async warm => {
+    graphLinear();
+    setTransport({ now: () => clock.at, sleep: async () => {} });
+    try {
+      const server = cached();
+      if (warm) await graph(server, "p1");
+      clock.at += 60_000;
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 429, headers: {
+        "x-ratelimit-requests-remaining": "0", "x-ratelimit-requests-reset": String(clock.at + 30_000),
+        "x-ratelimit-endpoint-requests-remaining": "0", "x-ratelimit-endpoint-requests-reset": String(clock.at + 90_000),
+      } }));
+      const reply = await graph(server, "p1");
+      expect(reply.status).toBe(warm ? 200 : 429);
+      expect(reply.headers.get("retry-after")).toBe("90");
+      expect(reply.headers.get("x-ratelimit-scope")).toBe("endpoint");
+      expect(reply.headers.get("x-ratelimit-global-retry-after")).toBe("30");
+    } finally {
+      setTransport({ sleep: async () => {} });
+    }
+  });
+
   it("sends the last graph with stale, the error, and its load time when Linear fails, also for the version the page has", async () => {
     const { state } = graphLinear();
     const server = cached();
@@ -1210,6 +1319,38 @@ const rolesHeaders = async (email: string, id?: string) => {
 };
 const rolesPage = (now?: () => number) => createApp(hostedRoles, {
   team: "CD", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth, linkToken: rolesToken, watchMs: 0, now,
+});
+
+it("recovers a shared deep link after the owner's credential cooldown", async () => {
+  const { tenants } = testTenants(TEAM);
+  const owner = (await tenants.byId("ada"))!;
+  const viewScope = "shared:example";
+  tenants.sharedWorkspaces = async () => [{ id: viewScope, role: "viewer", owner,
+    name: owner.human, workspace: owner.workspaces[0], projectId: "project" }];
+  const page = createApp(hostedRoles, { team: TEAM, dist, auth: rolesAuth, tenants, watchMs: 0 });
+  const headers = await rolesHeaders("grace@example.com");
+  try {
+    let now = 1000;
+    let sharedReads = 0;
+    setTransport({ now: () => now, fetch: async (_url, init) => {
+      const { query } = JSON.parse(String(init.body));
+      if (query.includes("projects(first:50")) return Response.json({ data: { teams: { nodes: [] } } });
+      if (++sharedReads === 1) return new Response(null, { status: 429, headers: { "Retry-After": "90" } });
+      return Response.json({ data: { project: { id: "project", name: "Current name" } } });
+    } });
+    const list = async () => (await page.request("/api/projects", { headers })).json();
+    const limited = await list();
+    expect(limited.workspaces).toContainEqual(expect.objectContaining({ id: viewScope, retryAfter: 90 }));
+    expect(limited.projects).toEqual([]);
+    now += 89_000;
+    expect((await list()).workspaces).toContainEqual(expect.objectContaining({ id: viewScope, retryAfter: 1 }));
+    expect(sharedReads).toBe(1);
+    now += 1000;
+    expect((await list()).projects).toContainEqual(expect.objectContaining({ workspace: viewScope, id: "project", name: "Current name" }));
+  } finally {
+    setTransport({ sleep: async () => {} });
+    page.link.stop();
+  }
 });
 
 it("allows each account to join only its shared projects and closes a removed member's link", async () => {
@@ -1921,6 +2062,10 @@ it("isolates site, projects, graphs and budgets for tenants with the same worksp
     expect(await (await get("/overview", grace)).json()).toMatchObject({ summaries: expect.arrayContaining([
       expect.objectContaining({ id: "p1", you: [expect.objectContaining({ why: "Needs Grace" })] }),
     ]) });
+    for (const [headers, name] of [[ada, "Ada"], [grace, "Grace"]] as const) {
+      const waiting = await (await get("/overview?view=waiting", headers)).json();
+      expect(waiting.summaries.find((p: ProjectSummary) => p.id === "p1").you).toMatchObject([{ why: "Needs " + name }]);
+    }
     release();
     expect(await (await overview).json()).toMatchObject({ summaries: expect.arrayContaining([
       expect.objectContaining({ id: "p1", you: [expect.objectContaining({ why: "Needs Ada" })] }),
@@ -2180,6 +2325,10 @@ describe("read-only viewer", () => {
     const overview = await (await get("/api/overview")).json();
     expect(overview.summaries).toMatchObject([{ id: "p1", planned: 1, you: [] }]);
     for (const secret of ["Private plan", "private-key"]) expect(JSON.stringify(overview)).not.toContain(secret);
+    const viewerWaiting = await (await get("/api/overview?view=waiting")).json();
+    expect(viewerWaiting.summaries).toEqual([{ id: "p1", workspace: overview.summaries[0].workspace, you: [] }]);
+    const ownerWaiting = await (await app().request("/api/overview?view=waiting", { headers: local })).json();
+    expect(ownerWaiting.summaries[0].you).toMatchObject([{ identifier: "CD-9" }]);
     expect(overview.summaries[0].effort.status).toBe("phase 1: 2 tasks; wave a");
     expect((await (await app().request("/api/overview", { headers: local })).json()).summaries[0]).toMatchObject({ planned: 2, you: [{ identifier: "CD-9" }] });
   });

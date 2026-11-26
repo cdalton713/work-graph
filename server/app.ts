@@ -36,7 +36,7 @@ import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAut
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { NeedsLinearAccess, sharedLinear, LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
+import { boardRead, NeedsLinearAccess, sharedLinear, LinearReadLimited, LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, waitingIssues, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, type LinkMember, LinkHub, LinkRoomFull, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
@@ -267,14 +267,18 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await next();
   });
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
-  type CachedList = { at: number; list: ProjectList | null };
+  type CachedList = { at: number; list: ProjectList | null; limits?: Map<string, LinearReadLimited> };
   const newList = (): CachedList => ({ at: 0, list: null });
+  // Tenant contexts on this host may use the same credential.
+  const readDeadlines = new Map<string, number>();
   const newState = (tenant: Tenant) => ({
     site: siteOf(tenant),
+    waiting: new Map<string, ReturnType<typeof createGraphCache>>(),
+    viewerWaiting: new Map<string, ReturnType<typeof createGraphCache>>(),
     graphs: new Map<string, ReturnType<typeof createGraphCache>>(),
-    linear: createLinearCache(),
+    linear: createLinearCache(readDeadlines),
     names: newList(), sharedNames: newList(),
-    lists: { started: 0, stored: 0 },
+    lists: { started: 0, stored: 0, pending: new Map<boolean, Promise<ProjectList>>() },
     sharedRefresh: undefined as Promise<ProjectList> | undefined,
     seen: new Map<string, Map<string, string>>(),
     lastUsed: clock(), active: 0,
@@ -304,11 +308,26 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       state.lastUsed = clock();
     }
   };
-  const graphCache = (id: string) => {
-    const { graphs } = scope().state;
-    let cache = graphs.get(id);
-    if (!cache) graphs.set(id, cache = createGraphCache({ load: loadGraph, changed: changedSince, changedMany: changedProjects, now }));
+  type Projection = "graphs" | "waiting" | "viewerWaiting";
+  const graphCache = (workspace: string, projection: Projection = "graphs") => {
+    const caches = scope().state[projection];
+    let cache = caches.get(workspace);
+    if (!cache) {
+      const load = projection === "graphs" ? loadGraph : async (id: string) => ({
+        project: { id, name: "", url: "" }, issues: await waitingIssues(id, projection === "waiting"),
+        viewerId: "", status: null, milestones: [], teams: {}, labels: [],
+      });
+      cache = createGraphCache({ load, changed: changedSince, changedMany: changedProjects, now });
+      caches.set(workspace, cache);
+    }
     return cache;
+  };
+  const clearGraphs = (state: ReturnType<typeof newState> | undefined, workspace?: string, id?: string) => {
+    if (!state) return;
+    for (const caches of [state.graphs, state.waiting, state.viewerWaiting]) {
+      if (workspace !== undefined) caches.get(workspace)?.clear(id);
+      else for (const cache of caches.values()) cache.clear();
+    }
   };
   // `wrote` from wg: forget the cached graph of that project, so the pages that load again see the change.
   const ended = new Map<string, number>();
@@ -322,7 +341,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const redis = redisUrl ? connectRedis(redisUrl, linkPrefix, (ready) => {
     if (ready) {
       for (const state of states.values()) requestSite.run(state.site, () => {
-        for (const cache of state.graphs.values()) cache.clear();
+        clearGraphs(state);
       });
       void requestSite.run(installationSite, flushLogouts);
     } else if (hub.hasSockets) hub.restartSockets();
@@ -347,7 +366,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const roomState = redisState ?? linkState ?? memoryLinkState(store);
   const hub = new LinkHub(
     now ? () => new Date(now()) : undefined, (ref) => {
-      states.get(ref.tenant ?? CONFIG_TENANT_ID)?.graphs.get(ref.workspace)?.clear(ref.id || undefined);
+      clearGraphs(states.get(ref.tenant ?? CONFIG_TENANT_ID), ref.workspace, ref.id || undefined);
     }, linkTimers,
     store, roomState, redis && !readOnly ? redisLinkBus(redis, linkPrefix) : linkBus,
     { maxAgeMs: linkMaxAgeMs, pongMs: linkPongMs, site: installationSite, tenantSite: (id) => states.get(id)?.site }, rememberEnded,
@@ -526,9 +545,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const wrote = async <T>(result: T, projectId: string | null | undefined): Promise<T> => {
     const workspace = linearWorkspace.getStore()!.id;
     const { tenant, state } = scope();
-    state.graphs.get(workspace)?.clear(projectId ?? undefined);
+    clearGraphs(state, workspace, projectId ?? undefined);
     const shared = states.get(tenant.id);
-    if (shared !== state) shared?.graphs.get(workspace)?.clear(projectId ?? undefined);
+    if (shared !== state) clearGraphs(shared, workspace, projectId ?? undefined);
     if (linkEnabled) await hub.invalidate(roomRef({ workspace, id: projectId ?? "" }, tenant));
     return result;
   };
@@ -538,9 +557,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     return seen;
   };
   /** One request for each workspace: which of these projects changed. Then each `get` of an unchanged project is free. */
-  const checkAll = (refs: { workspace?: string; id: string }[]) => Promise.all(scope().tenant.workspaces.map((workspace) => {
+  const checkAll = (refs: { workspace?: string; id: string }[], projection: Projection = "graphs") => Promise.all(scope().tenant.workspaces.map((workspace) => {
     const ids = refs.filter((r) => r.workspace === workspace.id).map((r) => r.id);
-    return ids.length ? linearWorkspace.run(workspace, () => graphCache(workspace.id).check(ids)) : null;
+    return ids.length ? linearWorkspace.run(workspace, () => graphCache(workspace.id, projection).check(ids)) : null;
   }));
   /** The project of a page request (`x-project`), for the link. A request with no project tells no coordinator. */
   const pageProject = (header: (name: string) => string | undefined): ProjectRef | null => {
@@ -549,7 +568,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   };
   /** The identifier, status, and wg node key of an issue, from the cached graph (never a stale one: the status decides a write). */
   const issueInfo = async (ref: ProjectRef, issueId: string) => {
-    const issue = (await graphs().get(ref.id, { fresh: true }).catch(() => null))?.data.issues.find((i) => i.id === issueId);
+    const issue = (await graphs().get(ref.id, { forWrite: true }).catch(() => null))?.data.issues.find((i) => i.id === issueId);
     return issue
       ? { identifier: issue.identifier, status: statusName(issue.state, issue.labels), key: parseCard(issue.card?.body)?.key ?? null }
       : { identifier: issueId, status: null, key: null };
@@ -792,6 +811,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   }
   const creationEnabled = process.env.WG_CREATE_PROJECTS === "1";
   const api = new Hono<{ Variables: { viewer: boolean; creationActor?: string } }>();
+  api.use((c, next) => boardRead.run(c.req.method === "GET" && /^\/api\/(?:projects|overview|projects\/[^/]+\/graph|issues\/[^/]+\/comments)$/.test(c.req.path), next));
   // The API can change Linear with the user's key. Accept only this page as the caller.
   api.use(async (c, next) => {
     const shared = sharedScope.getStore();
@@ -906,7 +926,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     });
   });
   api.use(bodyLimit({ maxSize: 2_000_000, onError: (c) => c.json({ error: "request body too large" }, 413) }));
-  const projectList = async (viewer = false): Promise<ProjectList> => {
+  const readProjectList = async (viewer = false): Promise<ProjectList> => {
     const { tenant, state: { lists, sharedNames } } = scope();
     const workspaces = viewer ? tenant.workspaces.filter((workspace) => !workspace.rejectApiKey) : tenant.workspaces;
     const order = ++lists.started;
@@ -922,6 +942,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const address = shareUrl ?? (auth && !readOnly ? `https://${rules.hosted!.host}` : undefined);
         return [{
           id, name, ...(address ? { shareUrl: address } : {}),
+          ...(result.status === "rejected" && result.reason instanceof LinearReadLimited && { retryAfter: result.reason.globalRetryAfter }),
           ...(result.status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
         }];
       }),
@@ -937,25 +958,52 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if ((tenants || auth || readOnly) && order > lists.stored) {
       lists.stored = order;
       sharedNames.list = shared;
+      sharedNames.limits = new Map(workspaces.flatMap(({ id }, at) => {
+        const result = results[at];
+        return result.status === "rejected" && result.reason instanceof LinearReadLimited ? [[id, result.reason]] : [];
+      }));
       sharedNames.at = Date.now();
     }
     return viewer ? shared : list;
   };
-  const listedProjects = async (viewer: boolean): Promise<ProjectList> => {
+  const projectList = (viewer = false, join = false) => {
+    const { pending } = scope().state.lists;
+    const existing = pending.get(viewer);
+    // On a local owner-only page either request can join. Where shares exist,
+    // a directory request checks for revoked access even if a summary is in flight.
+    if (existing && (join || !(tenants || auth || readOnly))) return existing;
+    const reading = readProjectList(viewer).finally(() => {
+      if (pending.get(viewer) === reading) pending.delete(viewer);
+    });
+    pending.set(viewer, reading);
+    return reading;
+  };
+  const listedProjects = async (viewer: boolean, join = false): Promise<ProjectList> => {
     const { tenant } = scope();
     const scoped = sharedScope.getStore();
-    const list = scoped ? { workspaces: [], projects: [] } : await projectList(viewer);
+    const list = scoped ? { workspaces: [], projects: [] } : await projectList(viewer, join);
     const shared = await sharedFor(tenant);
-    const projects = await Promise.all(shared.map(async (entry) => {
+    const sharedRows: ProjectList["workspaces"] = shared.map(sharedEntry);
+    const projects = await Promise.all(shared.map(async (entry, at) => {
       const read = () => gql("query($id:String!){project(id:$id){id name url status{name type}}}", { id: entry.projectId });
-      const data = scoped ? await read() : await runInTenant(entry.owner, () => linearWorkspace.run(entry.workspace, read)).catch(() => null);
+      let data;
+      try {
+        data = scoped ? await read() : await runInTenant(entry.owner, () => linearWorkspace.run(entry.workspace, read));
+      } catch (error) {
+        if (scoped) throw error;
+        if (error instanceof LinearReadLimited) {
+          sharedRows[at].error = "Linear rate limit";
+          sharedRows[at].retryAfter = error.globalRetryAfter;
+        }
+        return null;
+      }
       const project = data?.project;
       return project?.id === entry.projectId && typeof project.name === "string" ? {
         id: entry.projectId, name: project.name, url: project.url ?? "", status: project.status?.name ?? "",
         statusType: project.status?.type ?? "", workspace: entry.id, workspaceName: entry.name,
       } : null;
     }));
-    return { workspaces: [...list.workspaces, ...shared.map(sharedEntry)],
+    return { workspaces: [...list.workspaces, ...sharedRows],
       projects: [...list.projects, ...projects.filter((project) => project !== null)] };
   };
   api.get("/project-creation/teams", async (c) => {
@@ -1000,10 +1048,26 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   api.get("/overview", async (c) => {
     const { workspaces } = scope().tenant;
     const viewer = c.var.viewer;
-    const list = await listedProjects(viewer);
+    const list = await listedProjects(viewer, true);
     const shared = await sharedFor(scope().tenant);
     const open = list.projects.filter((p) => p.statusType !== "completed" && p.statusType !== "canceled");
-    await checkAll(open);
+    const waitingOnly = c.req.query("view") === "waiting";
+    const projection = (restricted: boolean): Projection => waitingOnly ? (restricted ? "viewerWaiting" : "waiting") : "graphs";
+    const sharedChecks = new Map<string, { entry: SharedWorkspace; ids: string[] }>();
+    for (const project of open) {
+      const entry = shared.find(row => row.id === project.workspace);
+      if (!entry) continue;
+      const key = JSON.stringify([entry.owner.id, entry.workspace.id]);
+      const batch = sharedChecks.get(key) ?? { entry, ids: [] };
+      batch.ids.push(project.id);
+      sharedChecks.set(key, batch);
+    }
+    await Promise.all([checkAll(open, projection(viewer)), ...[...sharedChecks.values()].map(({ entry, ids }) =>
+      runInTenant(entry.owner, () => linearWorkspace.run(entry.workspace, () => graphCache(entry.workspace.id, projection(true)).check(ids))))]);
+    const recordLimit = (id: string, seconds: number | undefined) => {
+      const workspace = list.workspaces.find(w => w.id === id);
+      if (workspace && seconds !== undefined) workspace.retryAfter = Math.max(workspace.retryAfter ?? 0, seconds);
+    };
     const summaries: ProjectSummary[] = [];
     const human = sharedScope.getStore()?.member.name ?? serverSite().human;
     let next = 0;
@@ -1014,18 +1078,22 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const workspace = entry?.workspace ?? workspaces.find((w) => w.id === p.workspace)!;
         try {
           // The viewer takes no older graph when Linear fails (see the graph route).
-          const read = () => linearWorkspace.run(workspace, () => graphs().get(p.id, { fresh: viewer || !!entry }));
-          const { data } = entry ? await runInTenant(entry.owner, read) : await read();
+          const restricted = viewer || !!entry;
+          const read = () => linearWorkspace.run(workspace, () => graphCache(workspace.id, projection(restricted)).get(p.id, { fresh: restricted }));
+          const { data, globalRetryAfter } = entry ? await runInTenant(entry.owner, read) : await read();
+          recordLimit(p.workspace, globalRetryAfter);
           const waitNames = await waitNamesFor(entry?.owner ?? scope().tenant, workspace, p.id);
           const summarizeProject = () => summarize(shown(data, viewer || !!entry), p.workspace);
           summaries.push(waitNames ? requestSite.run({ ...serverSite(), human, waitNames }, summarizeProject) : summarizeProject());
         } catch (error) {
+          if (error instanceof LinearReadLimited) recordLimit(p.workspace, error.globalRetryAfter);
           summaries.push({ workspace: p.workspace, id: p.id, planned: 0, done: 0, counts: [], you: [], running: 0, review: 0, ready: 0,
             effort: null, freshness: null, updatedAt: null, error: (error as Error).message });
         }
       }
     };
     await Promise.all(Array.from({ length: Math.min(OVERVIEW_LOADS, open.length) }, worker));
+    if (waitingOnly) return c.json({ ...list, summaries: summaries.map(({ workspace, id, you }) => ({ workspace, id, you })) });
     return c.json<OverviewData>({ ...list, summaries });
   });
   /**
@@ -1039,10 +1107,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const { state } = scope();
     const { sharedNames } = state;
     const find = () => sharedNames.list?.projects.find((p) => p.workspace === workspace && p.id === id);
-    if (id && Date.now() - sharedNames.at > (find() ? 60_000 : 5_000)) {
+    const limited = sharedNames.limits?.get(workspace);
+    if (id && (limited ? Number(limited.remaining()) === 0 : Date.now() - sharedNames.at > (find() ? 60_000 : 5_000))) {
       state.sharedRefresh ??= projectList().finally(() => { state.sharedRefresh = undefined; });
       await state.sharedRefresh;
     }
+    const failed = sharedNames.limits?.get(workspace);
+    if (failed) throw failed;
     if (sharedNames.list?.workspaces.find((w) => w.id === workspace)?.error) throw new LinearError("Linear did not confirm that this project is shared. Try again.", 503);
     if (!id || !find()) throw new LinearError("no shared project with this id", 404);
     return id;
@@ -1056,9 +1127,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // The viewer gets the error of the refresh in its place: an issue of the older graph can be in another project
     // now. A graph in memory can still have an issue that left the project, until its full reload (`FULL_MS`):
     // the check for changes does not see an issue that is in the project no more.
-    const { data, version: graphVersion, stale, error, loadedAt } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
+    const { data, version: graphVersion, stale, error, loadedAt, retryAfter, endpointOnly, globalRetryAfter } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
     const waitNames = await waitNamesFor(scope().tenant, linearWorkspace.getStore()!, c.req.param("id"));
     const version = waitNames ? `${graphVersion}:${createHash("sha256").update(JSON.stringify(waitNames)).digest("hex")}` : graphVersion;
+    if (endpointOnly) {
+      c.header("X-RateLimit-Scope", "endpoint");
+      if (globalRetryAfter !== undefined) c.header("X-RateLimit-Global-Retry-After", String(globalRetryAfter));
+    }
+    if (retryAfter !== undefined) c.header("Retry-After", String(retryAfter));
     if (!stale && c.req.query("have") === version) return c.body(null, 204);
     return c.json({ ...shown(data, viewer || !!shared), ...(waitNames && { waitNames }), version, workspace: shared?.id ?? linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
   });
@@ -1095,7 +1171,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (name === "dispatch") {
       if (typeof key !== "string" || typeof issue !== "string") throw new LinearError("dispatch names the node key and its issue", 400);
       // Which issues are in the project decides the write: a stale graph is not enough.
-      const found = (await graphs().get(ref.id, { fresh: true })).data.issues.find((i) => i.identifier === issue);
+      const found = (await graphs().get(ref.id, { forWrite: true })).data.issues.find((i) => i.identifier === issue);
       if (!found || (sharedScope.getStore() && (found.external || parseCard(found.card?.body)?.key !== key))) throw new LinearError(`no issue ${issue} in this project`, 404);
       const written = projectOfWrite();
       await addComment(found.id, "**Dispatch requested** on the page. The coordinator dispatches it at its next `wg next`.", linearWorkspace.getStore()!.team, written.hear);
@@ -1189,7 +1265,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       : "no open question with this id: it was answered, or the coordinator has not reported it", 404);
     // Which issues are in the project decides whether the reply is saved in Linear: a stale graph is not enough.
     // A failed refresh stops the route here, and the question stays open.
-    const issue = ask.issue ? (await graphs().get(ref.id, { fresh: true })).data.issues.find((i) => i.identifier === ask.issue) : undefined;
+    const issue = ask.issue ? (await graphs().get(ref.id, { forWrite: true })).data.issues.find((i) => i.identifier === ask.issue) : undefined;
     if (sharedScope.getStore() && ask.issue && (!issue || issue.external)) {
       throw new LinearError("no issue with this id in the shared project", 404);
     }
@@ -1590,6 +1666,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // An API request writes its one log line in the request log above. Another route writes the error here.
     if (status === 500 && !c.req.path.startsWith("/api/") && !c.req.path.startsWith("/join/")) console.error(error);
     if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) c.header("Retry-After", "1");
+    if (error instanceof LinearReadLimited && error.endpointOnly) {
+      c.header("X-RateLimit-Scope", "endpoint");
+      if (error.globalRetryAfter !== undefined) c.header("X-RateLimit-Global-Retry-After", String(error.globalRetryAfter));
+    }
+    if (error instanceof LinearError && error.retryAfter) c.header("Retry-After",
+      error instanceof LinearReadLimited ? error.remaining() : error.retryAfter);
     return c.json({ error: error.message }, status);
   });
   // Linear edits that did not come through this page: for each project with a connected coordinator,
@@ -1597,7 +1679,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // A hash of the node card: two card texts of the same length are still a change.
   const cardHash = (body: string | undefined) => (body === undefined ? "" : createHash("sha1").update(body).digest("hex"));
   const fingerprint = (data: GraphData) => new Map(data.issues.map((i) => [i.id, `${i.updatedAt}|${i.state.id}|${cardHash(i.card?.body)}`]));
-  const check = async () => {
+  const check = () => boardRead.run(true, async () => {
     if (!linkEnabled || !linkAvailable()) return;
     const active = await hub.active({ forCheck: true });
     const present = linkMaxAgeMs ? await hub.active({ forCheck: true, includeGrace: true }) : active;
@@ -1647,7 +1729,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         }
       }, lookupRevision);
     }));
-  };
+  });
   let checking = false;
   const timer = linkEnabled && watchMs > 0 ? setInterval(() => {
     if (checking) return;

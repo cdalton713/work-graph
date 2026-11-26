@@ -41,12 +41,48 @@ impl Installation {
             Err(e) if e.kind() == io::ErrorKind::NotFound => json!({}),
             Err(e) => return Err(e.to_string()),
         };
-        let mut rows = raw["workspaces"].as_array().cloned().unwrap_or_default();
+        if !raw.is_object() {
+            return Err(format!(
+                "{}: the config must be a JSON object",
+                path.display()
+            ));
+        }
+        if let Some(human) = raw.get("human")
+            && !human.as_str().is_some_and(|name| {
+                name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b' ')
+            })
+        {
+            return Err(format!(
+                "{}: human must be a name of letters, digits and spaces",
+                path.display()
+            ));
+        }
+        let mut rows = match raw.get("workspaces") {
+            Some(value) => value
+                .as_array()
+                .cloned()
+                .ok_or("workspaces must be an array")?,
+            None => Vec::new(),
+        };
         if rows.is_empty() {
             rows.push(json!({"id":"default"}));
         }
         let mut ids = std::collections::HashSet::new();
         for row in &rows {
+            if row
+                .get("team")
+                .is_some_and(|team| !team.is_null() && !team.is_string())
+            {
+                return Err("workspace team must be a string or null".into());
+            }
+            if let Some(aliases) = row.get("key_env")
+                && !aliases
+                    .as_array()
+                    .is_some_and(|names| names.iter().all(Value::is_string))
+            {
+                return Err("workspace key_env must be an array of names".into());
+            }
             let id = row["id"].as_str().unwrap_or("");
             if id.is_empty()
                 || !id
@@ -245,6 +281,7 @@ fn command(args: impl Iterator<Item = OsString>) -> Result<(), String> {
         workspace: config.rows[0]["id"].as_str().unwrap().into(),
         ..Default::default()
     };
+    let mut privacy_flag = None;
     let mut args = args.map(|s| s.into_string().map_err(|_| "invalid argument"));
     while let Some(arg) = args.next() {
         let arg = arg?;
@@ -263,7 +300,14 @@ fn command(args: impl Iterator<Item = OsString>) -> Result<(), String> {
                 return Ok(());
             }
             "--private" | "--no-private" if inline.is_none() => {
-                options.private = flag == "--private";
+                let private = flag == "--private";
+                if privacy_flag
+                    .replace(private)
+                    .is_some_and(|previous| previous != private)
+                {
+                    return Err("--private and --no-private cannot be used together".into());
+                }
+                options.private = private;
                 continue;
             }
             "--apply" if inline.is_none() => {
@@ -277,7 +321,7 @@ fn command(args: impl Iterator<Item = OsString>) -> Result<(), String> {
             None => args
                 .next()
                 .transpose()?
-                .filter(|s| !s.starts_with("--"))
+                .filter(|s| s == "-" || !s.starts_with('-'))
                 .ok_or_else(|| format!("{flag}: expected one argument"))?,
         };
     }
@@ -300,7 +344,16 @@ fn command(args: impl Iterator<Item = OsString>) -> Result<(), String> {
         &LinearHttp,
         &SystemTiming,
     )?;
-    let scoped = row["team_labels"].as_bool().unwrap_or(true);
+    // The Python setup command converts the stored JSON value with bool().
+    let scoped = match row.get("team_labels") {
+        None => true,
+        Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => value.as_f64() != Some(0.0),
+        Some(Value::String(value)) => !value.is_empty(),
+        Some(Value::Array(value)) => !value.is_empty(),
+        Some(Value::Object(value)) => !value.is_empty(),
+    };
     super::setup::install(
         &mut client,
         &options,
@@ -309,11 +362,10 @@ fn command(args: impl Iterator<Item = OsString>) -> Result<(), String> {
     )?;
     let entry = json!({"id":options.workspace,"team":options.team,"team_labels":scoped});
     if !config.rows.iter().any(|r| {
-        entry
-            .as_object()
-            .unwrap()
-            .iter()
-            .all(|(k, v)| r.get(k) == Some(v))
+        r["id"] == options.workspace
+            && r["team"] == options.team
+            && (r["team_labels"] == scoped
+                || r["team_labels"].as_f64() == Some(u8::from(scoped) as f64))
     }) {
         println!("Set this entry in workspaces in {}:", config.path.display());
         println!("{}", serde_json::to_string_pretty(&entry).unwrap());

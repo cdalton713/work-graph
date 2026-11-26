@@ -25,10 +25,10 @@ databaseSuites((open) => {
         projects: { nodes: visible ? [{ id: "project" }] : [] } } });
     });
     const check = () => collaborator.request(access, "GET", undefined, scope, true);
-    expect(await (await check()).json()).toEqual({ status: "ok", workspace: "Work", team: "WG" });
+    expect(await (await check()).json()).toEqual({ status: "ok", workspace: "Work", team: "WG", accessRequestedAt: null });
     expect(calls).toContain("Bearer Grace-access");
     visible = false;
-    expect(await (await check()).json()).toEqual({ status: "no_team", workspace: "Work", team: "WG" });
+    expect(await (await check()).json()).toEqual({ status: "no_team", workspace: "Work", team: "WG", accessRequestedAt: null });
   });
 
   it("distinguishes a missing connection from a missing workspace membership", async () => {
@@ -46,27 +46,32 @@ databaseSuites((open) => {
       } });
     });
     const check = () => collaborator.request(access, "GET", undefined, scope, true);
-    expect(await (await check()).json()).toEqual({ status: "no_connection", workspace: "Work", team: "WG" });
+    expect(await (await check()).json()).toEqual({ status: "no_connection", workspace: "Work", team: "WG", accessRequestedAt: null });
     member = false;
     expect((await (await check()).json()).status).toBe("no_connection");
     expect(ownerReads).toBe(2);
     now += 60_001;
-    expect(await (await check()).json()).toEqual({ status: "not_member", workspace: "Work", team: "WG" });
+    expect(await (await check()).json()).toEqual({ status: "not_member", workspace: "Work", team: "WG", accessRequestedAt: null });
   });
 
   it("stores one request, reports it to the owner, and clears it after a successful check", async () => {
     const { owner, collaborator, scope } = await projectFixture(await open());
+    let hasAccess = false;
     vi.stubGlobal("fetch", async () => Response.json({ data: {
       organization: { id: "org", name: "Work", urlKey: "work" },
       project: { id: "project", teams: { nodes: [{ id: "team", key: "WG" }] } },
-      teams: { nodes: [{ id: "team" }] }, projects: { nodes: [{ id: "project" }] },
+      teams: { nodes: hasAccess ? [{ id: "team" }] : [] }, projects: { nodes: [{ id: "project" }] },
     } }));
     const request = () => collaborator.request(access + "/request", "POST", {}, scope, true);
     const list = async () => (await (await owner.request(share, "GET", undefined, undefined, true)).json()).members;
     expect((await request()).status).toBe(204);
-    expect((await list()).find(({ email }: { email: string }) => email === collaborator.email).accessRequestedAt).toEqual(expect.any(String));
+    const { accessRequestedAt } = (await list()).find(({ email }: { email: string }) => email === collaborator.email);
+    expect(accessRequestedAt).toEqual(expect.any(String));
+    const check = () => collaborator.request(access, "GET", undefined, scope, true);
+    expect(await (await check()).json()).toMatchObject({ status: "no_team", accessRequestedAt });
     expect((await request()).status).toBe(429);
-    expect((await collaborator.request(access, "GET", undefined, scope, true)).status).toBe(200);
+    hasAccess = true;
+    expect(await (await check()).json()).toMatchObject({ status: "ok", accessRequestedAt: null });
     expect((await list()).find(({ email }: { email: string }) => email === collaborator.email).accessRequestedAt).toBeNull();
     expect((await request()).status).toBe(429);
   });
@@ -186,7 +191,10 @@ databaseSuites((open) => {
       } });
     });
     const invite = () => owner.request(memberPath + "/access", "POST", { invite: true }, undefined, true);
-    expect(await (await invite()).json()).toEqual({ status: "invite_pending", team: "WG", invitedAt: createdAt });
+    const add = () => owner.request(memberPath + "/access", "POST", {}, undefined, true);
+    const pendingAnswer = { status: "invite_pending", team: "WG", invitedAt: createdAt };
+    expect(await (await add()).json()).toEqual(pendingAnswer);
+    expect(await (await invite()).json()).toEqual(pendingAnswer);
     expect(invites).toBe(0);
     pending = false;
     const responses = await Promise.all([invite(), invite()]);

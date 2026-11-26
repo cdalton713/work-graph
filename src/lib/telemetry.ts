@@ -3,6 +3,7 @@ export const pageEvents = {
   project_viewed: { event: "page_view", fields: { page: "project" } },
   settings_viewed: { event: "page_view", fields: { page: "settings" } },
   onboarding_viewed: { event: "page_view", fields: { page: "onboarding" } },
+  share_dialog_opened: { event: "share_dialog_opened", fields: {} },
   node_opened: { event: "node_opened", fields: {} },
   comment_written: { event: "page_write", fields: { kind: "comment" } },
   status_written: { event: "page_write", fields: { kind: "status" } },

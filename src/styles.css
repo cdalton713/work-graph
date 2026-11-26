@@ -644,3 +644,15 @@ button.copy.is-copied { color: var(--lamp-done); }
   .account-card { padding: 12px; }
   .account-bar { gap: 8px; }
 }
+
+.share-dialog { width: min(calc(100% - 24px), 540px); }
+.share-heading { justify-content: space-between; }
+.share-dialog h3 { font-size: 14px; margin: 0; }
+.share-dialog section, .share-confirm { display: grid; gap: 8px; min-width: 0; }
+.share-confirm { padding: 12px; background: var(--inset); border: 1px solid var(--rail-2); border-radius: var(--r-1); }
+.share-join { max-width: 540px; }
+.member-access { flex-wrap: wrap; white-space: normal; }
+@media (max-width: 720px) {
+  .service-app .bar > .picker { flex: 0 0 auto; max-width: 100%; }
+  .service-app .bar > .picker:first-of-type { flex: 1 1 150px; }
+}

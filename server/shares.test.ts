@@ -64,7 +64,7 @@ databaseSuites((open) => {
       if (query.includes("teams(first:")) return Response.json({ data: { teams: { nodes: [{ projects: { nodes: [
         { id: "private", name: "Private" },
       ], pageInfo: { hasNextPage: false } } }] } } });
-      return Response.json({ data: { project: variables.id === "project" ? { id: "project", name: "Example" } : null } });
+      return Response.json({ data: { project: variables.id === "project" && new Headers(init.headers).get("authorization") !== "Bearer Pat-access" ? { id: "project", name: "Example" } : null } });
     });
     async function account(user: string, org = "org") {
       const accountId = await tenants.accounts.signIn({
@@ -91,7 +91,7 @@ databaseSuites((open) => {
       const other = await account("Pat", "other-org");
       const memberRoute = "/api/projects/project/members/" + randomUUID();
       const minted = await tenants.accounts.createToken(owner.accountId, "Coordinator");
-      const ownerWrites = [[share, "POST"], [share + "/view/rotate", "POST"], [share + "/view", "DELETE"],
+      const ownerWrites = [[share, "POST"], [share + "/view", "POST"], [share + "/view/rotate", "POST"], [share + "/view", "DELETE"],
         [memberRoute, "PATCH"], [memberRoute, "DELETE"]];
       for (const [path, method] of ownerWrites) {
         expect((await owner.request(path, method, { role: "viewer" }, { origin: "https://other.example.com" })).status).toBe(403);
@@ -109,17 +109,31 @@ databaseSuites((open) => {
       const personal = await owner.request(share, "POST", undefined, { "x-workspace": "personal" });
       expect(personal.status).toBe(400);
       expect(await personal.text()).toContain("API key workspace");
-      const concurrent = await Promise.all([owner.request(share, "POST"), owner.request(share, "POST")]);
+      expect((await owner.request(share + "/edit", "POST")).status).toBe(404);
+      const kindPath = (kind: string) => share + "/" + kind;
+      expect((await other.request(kindPath("view"), "POST")).status).toBe(404);
+      const concurrent = await Promise.all([
+        owner.request(kindPath("view"), "POST"), owner.request(kindPath("view"), "POST"),
+      ]);
       expect(concurrent.map(({ status }) => status)).toEqual([200, 200]);
       const issued = await Promise.all(concurrent.map((response) => response.json()));
-      const links = issued.find(({ view }) => view.url);
-      expect(issued.find(({ view }) => view.exists)).toEqual({ view: { exists: true }, collab: { exists: true } });
+      expect(issued.find(({ exists }) => exists)).toEqual({ exists: true });
+      expect(await (await owner.request(share)).json()).toMatchObject({
+        view: { exists: true }, collab: { exists: false },
+      });
+      expect((await owner.request(kindPath("view"), "DELETE")).status).toBe(204);
+      const collabLink = await (await owner.request(kindPath("collab"), "POST")).json();
+      expect(await (await owner.request(share)).json()).toMatchObject({
+        view: { exists: false }, collab: { exists: true },
+      });
+      expect(await (await owner.request(kindPath("collab"), "POST")).json()).toEqual({ exists: true });
+      const viewLink = await (await owner.request(kindPath("view"), "POST")).json();
       const token = (url: string) => {
         expect(url).toMatch(/^https:\/\/page\.example\.com\/join\/[A-Za-z0-9_-]{43}$/);
         return url.split("/").at(-1)!;
       };
-      const view = token(links.view.url);
-      const collab = token(links.collab.url);
+      const view = token(viewLink.url);
+      const collab = token(collabLink.url);
       slow = true;
       const page = await app.request("/join/" + view, { headers: { host } });
       slow = false;
@@ -193,7 +207,7 @@ databaseSuites((open) => {
       expect((await member.request("/api/issues/outside/comments", "GET", undefined, headers)).status).toBe(404);
       expect((await member.request("/api/issues/outside/comments", "POST", { body: "Outside" }, headers)).status).toBe(404);
       expect((await member.request("/api/account", "GET", undefined, headers)).status).toBe(404);
-      for (const path of ["close", "autonomy", "review-effort", "share"]) {
+      for (const path of ["close", "autonomy", "review-effort", "share", "share/view"]) {
         expect((await member.request("/api/projects/project/" + path, "POST", {}, headers)).status).toBe(403);
       }
       expect((await member.request("/api/projects/project/commands", "POST", { name: "pause" }, headers)).status).toBe(403);
@@ -276,7 +290,7 @@ databaseSuites((open) => {
       }
       const list = await owner.request(share);
       const text = await list.text();
-      for (const value of [view, collab, fresh]) {
+      for (const value of [view, collab, fresh, token(issued.find(({ url }) => url).url)]) {
         const hash = createHash("sha256").update(value).digest("hex");
         expect(await db.query("SELECT 1 FROM shares WHERE token_hash = $1", [hash])).toHaveLength(1);
         for (const secret of [value, hash]) {

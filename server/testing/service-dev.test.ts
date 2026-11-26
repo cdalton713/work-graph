@@ -44,6 +44,39 @@ test("the local service starts on loopback, serves service config, and stops", a
     const cookie = signedIn.headers.get("set-cookie")!.split(";")[0];
     const account = await fetch(url + "/api/account", { headers: { cookie } });
     expect(await account.json()).toMatchObject({ human: "Ada", pageUrl: url, onboarding: { name: false } });
+    const projects = await fetch(url + "/api/projects", { headers: { cookie } });
+    expect(await projects.json()).toMatchObject({ projects: [{ id: "project", name: "Example project", workspace: "example" }] });
+    const share = await fetch(url + "/api/projects/project/share", { headers: { cookie, "x-workspace": "example" } });
+    const shareData = await share.json();
+    expect(shareData).toMatchObject({
+      members: expect.arrayContaining([
+        expect.objectContaining({ role: "collaborator", accessRequestedAt: expect.any(String) }),
+        expect.objectContaining({ role: "viewer", accessRequestedAt: null }),
+      ]),
+    });
+    const member = shareData.members.find(({ role }: { role: string }) => role === "collaborator");
+    const add = (invite: boolean) => fetch(url + `/api/projects/project/members/${member.id}/access`, {
+      method: "POST", headers: { cookie, origin: url, "content-type": "application/json", "x-workspace": "example" },
+      body: JSON.stringify({ invite }),
+    });
+    expect(await (await add(false)).json()).toMatchObject({ status: "invite_required" });
+    expect(await (await add(true)).json()).toMatchObject({ status: "invited" });
+    expect(await (await add(false)).json()).toMatchObject({ status: "invite_pending" });
+    const signInCollab = await fetch(url + "/auth/login?as=grace", { redirect: "manual" });
+    const collaboratorCookie = signInCollab.headers.get("set-cookie")!.split(";")[0];
+    const directory = await fetch(url + "/api/projects", { headers: { cookie: collaboratorCookie } });
+    const shared = (await directory.json()).workspaces.find((workspace: { role?: string }) => workspace.role === "collaborator");
+    const sharedHeaders = { cookie: collaboratorCookie, "x-workspace": shared.id };
+    const access = await fetch(url + "/api/projects/project/access", { headers: sharedHeaders });
+    expect(await access.json()).toMatchObject({ status: "not_member", team: "WG", accessRequestedAt: member.accessRequestedAt });
+    const graph = await fetch(url + "/api/projects/project/graph", { headers: sharedHeaders });
+    expect(await graph.json()).toMatchObject({ issues: [{ identifier: "WG-1" }] });
+    const write = await fetch(url + "/api/issues/issue/comments", {
+      method: "POST", headers: { ...sharedHeaders, origin: url, "content-type": "application/json" },
+      body: JSON.stringify({ body: "Example comment" }),
+    });
+    expect(write.status).toBe(403);
+    expect(await write.json()).toMatchObject({ code: "needs_linear_access" });
   } finally {
     child.kill("SIGTERM");
     const result = await exited;

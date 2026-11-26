@@ -101,8 +101,11 @@ export function memberAccessRoutes(access: (c: Context) => Promise<MemberAccess 
     const { shares, project, membership, identity, workspace, ownerRun, ownRun } = target;
     const key = JSON.stringify([membership, workspace.team, identity.linearOrgId, identity.linearUserId, identity.email]);
     const { team, organization } = await cached("team:" + key, () => projectTeam(ownerRun, workspace, project[2]));
-    const answer = (status: "ok" | "no_connection" | "no_team" | "not_member") =>
-      c.json({ status, workspace: organization.name, team: team.key });
+    const answer = async (status: "ok" | "no_connection" | "no_team" | "not_member") =>
+      c.json({
+        status, workspace: organization.name, team: team.key,
+        accessRequestedAt: status === "ok" ? null : await shares.accessRequestedAt(project, membership),
+      });
     if (ownRun) {
       try {
         const data = await ownRun(() => gql(`query CheckProjectAccess($team:ID!, $project:ID!) {
@@ -187,9 +190,9 @@ async function grantAccess(c: Context, { run, identity, confirmed, team, organiz
       if (await run(() => onTeam(member.id, team.id))) return c.json({ status: "already_member", team: team.key });
     } else {
       if (identity.linearOrgId === organization.id) throw missingAccess();
-      if (!confirmed) return c.json({ error: "Confirm the workspace invitation", status: "invite_required", team: team.key }, 409);
       const pending = await run(() => pendingInvite(identity.email));
       if (pending) return c.json({ status: "invite_pending", team: team.key, invitedAt: pending.createdAt });
+      if (!confirmed) return c.json({ error: "Confirm the workspace invitation", status: "invite_required", team: team.key }, 409);
     }
     const method = member ? "added" : "invited";
     const success = await run(async () => {

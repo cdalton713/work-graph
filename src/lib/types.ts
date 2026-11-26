@@ -95,7 +95,20 @@ export interface Card {
 }
 
 /** `GET /api/config`: what the page needs before its first render, and what a deploy check compares. */
-export type ProjectShareLinks = Record<"view" | "collab", { url: string } | { exists: true }>;
+export type ShareKind = "view" | "collab";
+export type ShareLink = { exists: false } | { exists: true; createdAt: string };
+export type NewShareLink = { url: string } | { exists: true };
+export type ShareMember = {
+  id: string;
+  name: string;
+  email: string;
+  role: "viewer" | "collaborator";
+  joinedAt: string;
+  accessRequestedAt: string | null;
+};
+export type ProjectShare = Record<ShareKind, ShareLink> & { members: ShareMember[] };
+export type LinearAccess = { status: "ok" | "no_connection" | "no_team" | "not_member"; workspace: string; team: string; accessRequestedAt?: string | null };
+export type AccessGrant = { status: "added" | "invited" | "already_member" | "invite_pending"; team: string };
 export type ProjectJoin = { project: string; role: "viewer" | "collaborator" };
 export type ProjectJoinPreview = ProjectJoin & { owner: string };
 

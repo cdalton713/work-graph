@@ -35,7 +35,7 @@ function requireUuid(id: string) {
   }
 }
 
-export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (tenant: string) => void | Promise<void> = () => {}) {
+export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (tenant: string, membersOnly?: boolean) => void | Promise<void> = () => {}) {
   function encrypt(tenant: string, connection: string, credential: ConnectionCredential) {
     return [
       credential.kind,
@@ -82,8 +82,11 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
     return result;
   }
 
-  async function notify(tenant: string) {
-    try { await changed(tenant); } catch { console.error("Account change notice could not be delivered"); }
+  async function notify(tenant: string, membersOnly?: boolean) {
+    try {
+      if (membersOnly) await changed(tenant, true);
+      else await changed(tenant);
+    } catch { console.error("Account change notice could not be delivered"); }
   }
 
   function orderedIds(query: Query, tenant: string) {
@@ -428,7 +431,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
         await query("DELETE FROM users WHERE id = $1", [owner]);
         return { revoked, affected };
       });
-      await Promise.all(affected.map(({ tenant }) => notify(tenant)));
+      await Promise.all(affected.map(({ tenant }) => notify(tenant, true)));
       return revoked;
     },
   };

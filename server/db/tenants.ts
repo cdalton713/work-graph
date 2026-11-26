@@ -45,35 +45,35 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
     owners?: Set<string>;
     rows: ReturnType<ReturnType<typeof import("./shares.ts").createShares>["memberships"]>;
   }>();
-  const listeners = new Set<(id: string) => void>();
+  const listeners = new Set<(id: string, membersOnly?: boolean) => void>();
   const source = randomUUID();
   const refreshing = new Map<string, Promise<OAuthCredential>>();
 
-  function invalidate(id: string) {
-    cache.delete(id);
+  function invalidate(id: string, membersOnly?: boolean) {
+    if (!membersOnly) cache.delete(id);
     for (const [account, entry] of memberships) {
       if (account === id || !entry.owners || entry.owners.has(id)) memberships.delete(account);
     }
     for (const listener of listeners) {
-      try { listener(id); } catch { console.error("Tenant change notice could not be delivered"); }
+      try { if (membersOnly) listener(id, true); else listener(id); } catch { console.error("Tenant change notice could not be delivered"); }
     }
   }
 
   const stop = redis?.onMessage((text) => {
     try {
       // The link bus uses arrays on this channel. Account notices use a single object.
-      const event = JSON.parse(text) as { kind?: unknown; source?: unknown; tenant?: unknown } | null;
+      const event = JSON.parse(text) as { kind?: unknown; source?: unknown; tenant?: unknown; membersOnly?: unknown } | null;
       if (event?.kind === "account-changed" && event.source !== source &&
-          typeof event.tenant === "string" && uuid.test(event.tenant)) invalidate(event.tenant.toLowerCase());
+          typeof event.tenant === "string" && uuid.test(event.tenant)) invalidate(event.tenant.toLowerCase(), event.membersOnly === true);
     } catch {
       // Ignore malformed notices.
     }
   });
 
-  const accounts = createAccounts(sql, crypto, async (tenant) => {
-    invalidate(tenant.toLowerCase());
+  const accounts = createAccounts(sql, crypto, async (tenant, membersOnly) => {
+    invalidate(tenant.toLowerCase(), membersOnly);
     if (redis) {
-      const message = JSON.stringify({ kind: "account-changed", source, tenant });
+      const message = JSON.stringify({ kind: "account-changed", source, tenant, ...(membersOnly && { membersOnly }) });
       await redis.run((client) => client.publish(prefix + "events", message));
     }
   });

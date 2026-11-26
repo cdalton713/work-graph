@@ -29,7 +29,7 @@ export interface Tenants {
   fromSession(session: Session | null): Lookup<{ tenant: Tenant; role: TenantRole }>;
   fromToken(authorization: string | undefined): Lookup<Tenant>;
   byId(id: string): Lookup<Tenant>;
-  onChange(listener: (id: string) => void): () => void;
+  onChange(listener: (id: string, membersOnly?: boolean) => void): () => void;
 }
 
 export const CONFIG_TENANT_ID = "config";
@@ -77,6 +77,6 @@ export function configTenants({ human, workspaces, auth, linkToken, readOnly }: 
       return credential && authorization !== undefined && timingSafeEqual(digest(authorization), credential) ? tenant : null;
     },
     byId(id: string) { return id === tenant.id ? tenant : null; },
-    onChange(_listener: (id: string) => void) { return () => {}; },
+    onChange(_listener: (id: string, membersOnly?: boolean) => void) { return () => {}; },
   } satisfies Tenants;
 }

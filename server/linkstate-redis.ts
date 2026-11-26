@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Envelope } from "../src/lib/link.ts";
-import { emptyRoom, expireReconnectGrace, pruneRoom, QUEUE_MAX, roomKey as refKey, type RoomRef, type Coordinator, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
+import { emptyRoom, expireReconnectGrace, pruneRoom, roomAccounts, QUEUE_MAX, roomKey as refKey, type RoomRef, type Coordinator, type MemberAccount, type LinkRoom, type LinkRoomState } from "./linkstate.ts";
 import { LINK_PREFIX, type RedisLink } from "./redis.ts";
 import { ASKS_MAX } from "./store.ts";
 
@@ -50,7 +50,11 @@ if not expiry or tonumber(expiry) < tonumber(ARGV[1]) then
 end
 `;
 
-type SavedRoom = Omit<LinkRoom, "coordinators" | "sockets"> & {
+type SavedAccount = Omit<MemberAccount, "coordinators"> & { coordinators: [string, Coordinator][] };
+
+type SavedRoom = Omit<LinkRoom, "coordinators" | "sockets" | "accounts" | "memberSockets"> & {
+  accounts?: [string, SavedAccount][];
+  memberSockets?: [string, { account: string; viewer: boolean }][];
   coordinators: [string, Coordinator][];
   sockets: [string, "coordinator" | "page"][];
   notifyPresence?: boolean;
@@ -58,7 +62,7 @@ type SavedRoom = Omit<LinkRoom, "coordinators" | "sockets"> & {
 
 function socketIds(room: LinkRoom): Set<string> {
   const ids = new Set(room.sockets.keys());
-  for (const { socket } of room.coordinators.values()) if (socket) ids.add(socket);
+  for (const [, account] of roomAccounts(room)) for (const { socket } of account.coordinators.values()) if (socket) ids.add(socket);
   return ids;
 }
 
@@ -79,13 +83,16 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
     let notifyPresence: boolean | undefined;
     const storedSeen = new Map<string, string>();
     try {
-      const { sockets, coordinators, notifyPresence: notify, ...data }: SavedRoom = JSON.parse(json);
+      const { sockets, coordinators, accounts, memberSockets, notifyPresence: notify, ...data }: SavedRoom = JSON.parse(json);
       if (!Number.isSafeInteger(sequence) || sequence < 1 || !Array.isArray(sockets) || !Array.isArray(coordinators)
           || !data.ref || key(data.ref) !== roomKey || !Array.isArray(data.queue) || !Array.isArray(data.asks)
           || !Array.isArray(data.progress)) throw new Error();
-      room = { ...data, sequence, sockets: new Map(sockets), coordinators: new Map(coordinators) };
+      room = { ...data, sequence, sockets: new Map(sockets), coordinators: new Map(coordinators),
+        ...(accounts && { accounts: new Map(accounts.map(([id, account]) => [id, { ...account, coordinators: new Map(account.coordinators) }])) }),
+        ...(memberSockets && { memberSockets: new Map(memberSockets) }),
+      };
       // Validate coordinator rows before a malformed snapshot reaches another room's read or prune.
-      for (const row of room.coordinators.values()) if (!row || typeof row.lastSeen !== "string") throw new Error();
+      for (const [, account] of roomAccounts(room)) for (const row of account.coordinators.values()) if (!row || typeof row.lastSeen !== "string") throw new Error();
       notifyPresence = notify;
       malformed.delete(roomKey);
     } catch {
@@ -103,13 +110,13 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
       })));
       ids.forEach((id, i) => {
         if (leases[2 * i]) active.set(id, leases[2 * i]!);
-        else room.sockets.delete(id);
+        else { room.sockets.delete(id); room.memberSockets?.delete(id); }
         if (leases[2 * i + 1]) lastSeen.set(id, leases[2 * i + 1]!);
       });
     }
     let expired = notifyPresence ?? false;
-    for (const [session, coordinator] of room.coordinators) {
-      storedSeen.set(session, coordinator.lastSeen);
+    for (const [, account] of roomAccounts(room)) for (const coordinator of account.coordinators.values()) {
+      if (coordinator.socket) storedSeen.set(coordinator.socket, coordinator.lastSeen);
       const socket = coordinator.socket;
       if (!socket) continue;
       const seen = lastSeen.get(socket);
@@ -148,14 +155,18 @@ export function redisLinkState(redis: RedisLink, prefix = LINK_PREFIX, leaseMs =
       const room = loaded ?? (ref && emptyRoom(ref));
       if (!room) return null;
       const before = socketIds(room);
-      const beforeSeen = new Map([...room.coordinators].map(([id, row]) => [id, row.lastSeen]));
+      const beforeSeen = new Map(roomAccounts(room).flatMap(([, account]) => [...account.coordinators.values()].map((row) => [row.socket, row.lastSeen] as const)));
       const result = change(room, expired);
       const leases = [...socketIds(room)]
         .filter((id) => !before.has(id)).map((id) => leaseKey(roomKey, id));
+      const encodeCoordinators = (account: LinkRoom | MemberAccount) =>
+        [...account.coordinators].map(([id, row]) => [id, row.socket && beforeSeen.get(row.socket) === row.lastSeen
+          ? { ...row, lastSeen: storedSeen?.get(row.socket) ?? row.lastSeen } : row]);
       const encoded = prune && result === false ? "" : JSON.stringify({
         ...room, sequence: undefined, sockets: [...room.sockets],
-        coordinators: [...room.coordinators].map(([id, row]) => [id, row.socket && beforeSeen.get(id) === row.lastSeen
-          ? { ...row, lastSeen: storedSeen?.get(id) ?? row.lastSeen } : row]),
+        coordinators: encodeCoordinators(room),
+        ...(room.accounts && { accounts: [...room.accounts].map(([id, account]) => [id, { ...account, coordinators: encodeCoordinators(account) }]) }),
+        ...(room.memberSockets && { memberSockets: [...room.memberSockets] }),
         ...(expired && !prune && { notifyPresence: true }),
       });
       if (!corrupt && encoded === json && !leases.length) return result;

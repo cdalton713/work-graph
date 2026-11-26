@@ -213,11 +213,24 @@ databaseSuites((open) => {
       ] } }));
       await app.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, { ...ref, id: "private" });
       const scopedStatus = await (await member.request("/api/status", "GET", undefined, headers)).json();
-      expect(scopedStatus.rooms).toMatchObject([{ workspace: shared.id, project: "project", asks: 1 }]);
+      expect(scopedStatus.rooms).toMatchObject([{ workspace: shared.id, project: "project", asks: 0 }]);
+      const memberCoordinator = await app.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, ref, {
+        account: member.accountId, name: "Grace", workspace: shared.id, ownerName: "Ada",
+      });
+      await memberCoordinator.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "member" } }));
+      await memberCoordinator.receive(JSON.stringify({ v: 1, type: "asks", payload: { asks: [{ id: "ask1", issue: "WG-1", body: "Member question" }] } }));
+      await app.link.hub.publish(ref, "command", { name: "next", key: null, issue: null });
+      const after = await (await member.request("/api/status", "GET", undefined, headers)).json();
+      expect(after.rooms).toMatchObject([{
+        workspace: shared.id, project: "project", coordinators: 2, asks: 1, queued: scopedStatus.rooms[0].queued,
+      }]);
       const presence = await (await member.request("/api/projects/project/presence", "GET", undefined, headers)).json();
-      expect(presence.asks).toMatchObject([{ id: "ask1", issue: "WG-1" }]);
+      expect(presence.asks).toMatchObject([{ id: "ask1", issue: "WG-1" }, { accountName: "Grace" }]);
+      const memberAskId = presence.asks[1].id;
+      expect(memberAskId).not.toBe("ask1");
       expect((await member.request("/api/projects/project/asks/ask1/reply", "POST", { body: "The project page." }, headers)).status).toBe(200);
       expect(calls.findLast(({ query }) => query.startsWith("mutation"))?.key).toBe("Bearer Grace-access");
+      expect((await member.request("/api/projects/project/asks/" + memberAskId + "/reply", "POST", { body: "The member page." }, headers)).status).toBe(200);
       const memberShare = await member.request(share, "POST");
       expect(memberShare.status).toBe(200);
       const memberLink = token((await memberShare.json()).view.url);

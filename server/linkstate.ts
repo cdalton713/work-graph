@@ -25,16 +25,52 @@ export interface Coordinator {
   reconnectUntil?: number;
 }
 
-export interface LinkRoom {
-  ref: RoomRef;
-  sequence?: number;
+export interface RoomAccount {
   queue: Envelope[];
   asks: Ask[];
   coordinators: Map<string, Coordinator>;
-  /** IDs of project sockets, including coordinators that have sent no hello yet. */
-  sockets: Map<string, "coordinator" | "page">;
   progress: Progress[];
   agents: Agents | null;
+}
+
+export interface MemberAccount extends RoomAccount {
+  name: string;
+}
+
+export interface LinkRoom extends RoomAccount {
+  ref: RoomRef;
+  sequence?: number;
+  sockets: Map<string, "coordinator" | "page">;
+  accounts?: Map<string, MemberAccount>;
+  memberSockets?: Map<string, { account: string; viewer: boolean }>;
+  ownerName?: string;
+}
+
+export function roomAccounts(room: LinkRoom): [string | undefined, RoomAccount][] {
+  return [[undefined, room], ...(room.accounts ?? [])];
+}
+
+export function roomAccount(room: LinkRoom, account?: string): RoomAccount | undefined {
+  return account === undefined ? room : room.accounts?.get(account);
+}
+
+export function addRoomAccount(room: LinkRoom, account: string, name: string): MemberAccount | null {
+  const existing = room.accounts?.get(account);
+  if (existing) { existing.name = name; return existing; }
+  if ((room.accounts?.size ?? 0) >= 8) return null;
+  const member = { name, queue: [], asks: [], coordinators: new Map(), progress: [], agents: null };
+  (room.accounts ??= new Map()).set(account, member);
+  return member;
+}
+
+export function appendMessage(account: RoomAccount, message: Envelope, answeredAsk?: string) {
+  if (account.queue.some(({ id }) => id === message.id)) return;
+  account.queue.push(message);
+  if (answeredAsk !== undefined) account.asks = account.asks.filter((ask) => ask.id !== answeredAsk);
+  if (account.queue.length > QUEUE_MAX) {
+    const firstChanged = account.queue.findIndex((item) => item.type === "changed");
+    account.queue.splice(firstChanged < 0 ? 0 : firstChanged, 1);
+  }
 }
 
 export interface LinkRoomState {
@@ -161,7 +197,7 @@ export function memoryLinkState(store: Store | null = null): LinkRoomState {
 
 export function expireReconnectGrace(room: LinkRoom, now: number): boolean {
   let expired = false;
-  for (const coordinator of room.coordinators.values()) {
+  for (const [, account] of roomAccounts(room)) for (const coordinator of account.coordinators.values()) {
     if (coordinator.reconnectUntil !== undefined && coordinator.reconnectUntil <= now) {
       delete coordinator.reconnectUntil;
       expired = true;
@@ -171,9 +207,19 @@ export function expireReconnectGrace(room: LinkRoom, now: number): boolean {
 }
 
 export function pruneRoom(room: LinkRoom, cutoff: number): boolean {
-  for (const [session, coordinator] of room.coordinators) {
-    if (!coordinator.socket && Date.parse(coordinator.lastSeen) < cutoff) room.coordinators.delete(session);
+  let used = room.sockets.size > 0;
+  const membersWithSockets = new Set([...room.memberSockets?.values() ?? []].map(({ account }) => account));
+  for (const [id, account] of roomAccounts(room)) {
+    for (const [session, coordinator] of account.coordinators) {
+      if (!coordinator.socket && Date.parse(coordinator.lastSeen) < cutoff) account.coordinators.delete(session);
+    }
+    if (account.agents && Date.parse(account.agents.at) < cutoff) account.agents = null;
+    if (id !== undefined && !membersWithSockets.has(id) && !account.coordinators.size && !account.queue.length) {
+      room.accounts!.delete(id);
+      continue;
+    }
+    used ||= !!(account.coordinators.size || account.queue.length || account.asks.length || account.agents);
   }
-  if (room.agents && Date.parse(room.agents.at) < cutoff) room.agents = null;
-  return !!(room.sockets.size || room.coordinators.size || room.queue.length || room.asks.length || room.agents);
+  if (!room.accounts?.size) { delete room.accounts; delete room.ownerName; }
+  return used;
 }

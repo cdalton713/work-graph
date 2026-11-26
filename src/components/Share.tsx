@@ -3,6 +3,7 @@ import { linearAccessRequired, shareApi } from "../api";
 import { accessNotice, linkRow, orderMembers } from "../lib/share";
 import type { LinearAccess, ProjectShare, ShareKind, ShareMember } from "../lib/types";
 import { CopyButton } from "./ui";
+import { useDialogViewport } from "./Settings";
 
 const links = [
   { kind: "view", name: "Read-only link", description: "View the project and its issues." },
@@ -18,6 +19,7 @@ type Confirmation =
 
 export function Share({ id, workspace, team, close }: { id: string; workspace: string; team?: string; close: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  useDialogViewport(dialog);
   const confirmation = useRef<HTMLElement>(null);
   const confirmationTrigger = useRef<HTMLElement | null>(null);
   const [data, setData] = useState<ProjectShare | null>(null);

@@ -123,7 +123,8 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
               </section>
               <section><h3>Coordinator token</h3><TokenForm refresh={refresh} /></section>
               <section className="account-form">
-                <h3>Run these commands in order</h3>
+                <h3>Run these commands on your computer</h3>
+                <p>Run them in the order shown. You can read and copy them here on your phone.</p>
                 <p>Paste the token when <code>wg login</code> asks for it.</p>
                 {setupCommands(account, drafts).map((command) => <Command key={command} text={command} label={`Copy ${command}`} />)}
               </section>

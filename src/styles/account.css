@@ -37,6 +37,14 @@
   width: min(calc(100% - 32px), 440px); max-height: calc(100% - 32px); color: var(--ink-1);
   padding: 20px; background: var(--cab-2); border: 1px solid var(--rail-3); border-radius: var(--r-2);
 }
+.account-dialog[open] {
+  position: fixed;
+  inset-block-start: var(--dialog-top, 0px);
+  inset-block-end: calc(100% - var(--dialog-top, 0px) - var(--dialog-height, 100%));
+  max-height: calc(var(--dialog-height, 100%) - max(16px, env(safe-area-inset-top)) - max(16px, env(safe-area-inset-bottom)));
+  overflow: auto;
+  overscroll-behavior: contain;
+}
 .account-dialog > button { justify-self: start; }
 .account-dialog::backdrop { background: var(--rail-3); }
 
@@ -45,6 +53,8 @@
   .account-guide { grid-template-columns: minmax(0, 1fr); }
   .account-card { padding: 12px; }
   .account-bar { gap: 8px; }
+  .account-command { grid-template-columns: minmax(0, 1fr); }
+  .account-command > button { justify-self: start; }
 }
 
 .share-dialog { width: min(calc(100% - 24px), 540px); }
@@ -62,4 +72,13 @@
 /* iOS makes the page larger when a field with text below 16px takes the focus, and the page stays cut off.
    A large phone, such as one unfolded, is wider than 720px, so this goes by the pointer and not the width. */
 /* Keep this shared field rule at the end of the stylesheet. */
-@media (pointer: coarse) { input, textarea, select { font-size: 16px; } }
+@media (pointer: coarse) {
+  input, textarea, select, .account-form :is(input, select) { font-size: 16px; }
+  :is(.account-content, .account-dialog, .signin, .member-access, .account-bar) :is(button, input:not([type="checkbox"]), select, a),
+  .account-check {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  :is(.account-content, .account-dialog, .signin, .account-bar) a { display: inline-flex; align-items: center; }
+  .signin { padding-inline: 12px; }
+}

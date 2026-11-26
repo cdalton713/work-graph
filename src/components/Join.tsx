@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { joinProject } from "../api";
+import { BrowserSignInHelp, isInAppBrowser } from "./SignIn";
 import type { ProjectJoin, ProjectJoinPreview } from "../lib/types";
 
 export function Join({ path, returnedFromSignIn }: { path: string; returnedFromSignIn: boolean }) {
@@ -17,7 +18,7 @@ export function Join({ path, returnedFromSignIn }: { path: string; returnedFromS
     void request.current.then((value) => {
       if (!active) return;
       if (value) setPreview(value);
-      else if (returnedFromSignIn) setSignInRequired(true);
+      else if (returnedFromSignIn || isInAppBrowser()) setSignInRequired(true);
       else location.replace(login);
     }, (reason: Error) => {
       if (active) setError(reason.message);
@@ -42,7 +43,11 @@ export function Join({ path, returnedFromSignIn }: { path: string; returnedFromS
     <div className="account-content share-join">
       <section className="account-card">
         <h1>{joined?.project ?? preview?.project ?? "Join project"}</h1>
-        {signInRequired ? <p>Sign-in did not complete. <a href={login}>Try signing in again</a>.</p> :
+        {signInRequired ? <>
+          <p>{returnedFromSignIn ? "Sign-in did not complete." : "Sign in to join this project."}</p>
+          <p><a href={login}>{returnedFromSignIn ? "Try signing in again" : "Sign in"}</a></p>
+          <BrowserSignInHelp />
+        </> :
           error ? <p role="alert">{error}</p> :
           joined ? <p role="status">You joined as a {joined.role}.</p> :
           preview ? <>

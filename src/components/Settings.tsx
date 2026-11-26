@@ -1,8 +1,7 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { accountApi } from "../api";
 import { validateNewTeam, type NewTeam } from "../lib/onboarding";
 import type { Account, AccountConnection, AccountTeam } from "../lib/types";
-import { CopyButton } from "./ui";
 
 export type RefreshAccount = () => Promise<Account>;
 
@@ -27,10 +26,31 @@ export function AccountError({ error }: { error: string }) {
   return error ? <p className="account-error" role="alert">{error}</p> : null;
 }
 
+export function useDialogViewport(dialog: RefObject<HTMLDialogElement | null>) {
+  useLayoutEffect(() => {
+    const node = dialog.current;
+    const viewport = window.visualViewport;
+    if (!node || !viewport) return;
+
+    const resize = () => {
+      node.style.setProperty("--dialog-top", `${viewport.offsetTop}px`);
+      node.style.setProperty("--dialog-height", `${viewport.height}px`);
+    };
+    resize();
+    viewport.addEventListener("resize", resize);
+    viewport.addEventListener("scroll", resize);
+    return () => {
+      viewport.removeEventListener("resize", resize);
+      viewport.removeEventListener("scroll", resize);
+    };
+  }, [dialog]);
+}
+
 function AccountDialog({ title, close, children }: { title: string; close: () => void; children: ReactNode }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useId();
   const closeButton = useRef<HTMLButtonElement>(null);
+  useDialogViewport(dialog);
   useLayoutEffect(() => {
     const node = dialog.current!;
     const opener = document.activeElement;
@@ -174,15 +194,47 @@ export function TokenForm({ refresh }: { refresh: RefreshAccount }) {
   const [name, setName] = useState("Coordinator");
   const [token, setToken] = useState("");
   const [revealed, setRevealed] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
   const { busy, error, run } = useAccountAction();
+
+  async function copyToken(trigger: HTMLButtonElement) {
+    try {
+      await navigator.clipboard.writeText(token);
+      setCopyStatus("Token copied.");
+      return;
+    } catch {
+      // Keep the selection inside the active dialog so Safari can copy it.
+      const field = document.createElement("textarea");
+      field.value = token;
+      field.readOnly = true;
+      field.style.cssText = "position:fixed;top:0;left:0;opacity:0;font-size:16px";
+      (trigger.closest("dialog") ?? document.body).append(field);
+      field.select();
+      field.setSelectionRange(0, token.length);
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch {
+        // The token stays available for manual copy when clipboard access is blocked.
+      } finally {
+        field.remove();
+        trigger.focus({ preventScroll: true });
+        setCopyStatus(copied ? "Token copied." : "Could not copy. Show the token, then select and copy it.");
+      }
+    }
+  }
+
   return token ? <div className="account-form">
     <label>Coordinator token<input readOnly value={token} type={revealed ? "text" : "password"} autoComplete="off" spellCheck={false} /></label>
-    <p role="status">Copy this token now. You can only see it here.</p>
+    <p>Copy this token now. It will not appear again after you leave this form or clear it.</p>
     <div className="account-actions">
-      <CopyButton text={token} label="Copy coordinator token" secret />
+      <button type="button" className="ghost copy" aria-label="Copy coordinator token" onClick={(event) => void copyToken(event.currentTarget)}>
+        {copyStatus === "Token copied." ? "Copied" : "Copy"}
+      </button>
       <button type="button" onClick={() => setRevealed(!revealed)}>{revealed ? "Mask token" : "Show token"}</button>
-      <button type="button" onClick={() => { setRevealed(false); setToken(""); }}>Clear token</button>
+      <button type="button" onClick={() => { setRevealed(false); setToken(""); setCopyStatus(""); }}>Clear token</button>
     </div>
+    {copyStatus && <p role="status">{copyStatus}</p>}
     <AccountError error={error} />
   </div> : <form className="account-form" onSubmit={(event) => {
     event.preventDefault();

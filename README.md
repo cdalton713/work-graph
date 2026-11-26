@@ -165,6 +165,17 @@ can start the new code.
 
 When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the agent.
 
+The Overview inbox also shows stalls, with the time since each one started.
+
+- **Worker silent.** A job has a working agent that last reported 20 minutes ago or earlier.
+- **Worker gone.** A job has had no running agent for 3 minutes.
+- **No coordinator.** A job runs or an action is due, and for 15 minutes no coordinator listened or worked.
+- **No agent view.** A job runs and the agent view has no report from the last 3 minutes. The page cannot detect
+  worker stalls until reports resume. Run `wg agents --install` to set up reports.
+
+Paused and completed efforts and read-only views have no stall entries. Each project row shows its next wait
+or action, or the stall if there is one. The browser tab shows the inbox count.
+
 In a workspace on Linear's Free plan (250 issues; archived issues do not count), `wg` archives each completed and
 canceled issue of the workspace at each `wg move` to Done or Canceled and at each `wg tick`. `wg archive <dir>`
 shows the list; `--apply` archives it. `wg` and the page read archived issues and their relations.

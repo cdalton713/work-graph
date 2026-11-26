@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ownerWords } from "../lib/words";
 import { type OverviewData, type OverviewFilter, type OverviewRow, type ProjectSummary, NO_INITIATIVE, PROJECT_LAMP, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
 import { ageText } from "../lib/graph";
+import { nextStep, overviewTitle, stalls } from "../lib/attention";
 import { type Agents, type Ask, type Presence, agentName, agentState, agentsFresh, agentsShown, presenceText } from "../lib/link";
+import { currentSite } from "../lib/site";
 import type { Project, ProjectList } from "../lib/types";
 import { CopyButton, Lamp, Picker, PrLinks } from "./ui";
 
@@ -66,11 +68,36 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const grouped = names.length > 0;
   const sections = useMemo(() => initiativeSections(overviewRows(list, { ...filter, initiative }), list.workspaces), [list, filter, initiative]);
   const rows = useMemo(() => sections.flatMap((section) => section.rows), [sections]);
-  const waiting = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, mine: true, initiative }), [list, filter.workspace, initiative]);
-  const waitingIssues = waiting.reduce((n, r) => n + (r.summary?.you.length ?? 0), 0);
+  const openProjects = useMemo(() => overviewRows(list, START), [list]);
+  const stallsByProject = useMemo(() => {
+    const viewers = new Set(list.workspaces.filter(({ role }) => role === "viewer").map(({ id }) => id));
+    return new Map(openProjects.flatMap(({ project, summary }) => {
+      if (!summary || project.paused || project.statusType === "paused") return [];
+      const key = summaryKey(project);
+      return [[key, stalls(summary, presence?.get(key), agents?.get(key), now,
+        currentSite().readOnly || viewers.has(project.workspace))] as const];
+    }));
+  }, [openProjects, list.workspaces, presence, agents, now]);
+  const inboxProjects = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, initiative }), [list, filter.workspace, initiative]);
+  const waiting = inboxProjects.filter(({ summary }) => summary?.you.length);
+  const waitingIssues = inboxProjects.reduce((n, r) => n + (r.summary?.you.length ?? 0), 0);
   const [active, setActive] = useState(0);
-  const inbox = useMemo(() => rankMoves(waiting.flatMap(({ project, summary }) =>
-    (summary?.you ?? []).map((move) => ({ project, move })))), [waiting]);
+  const inbox = useMemo(() => rankMoves(inboxProjects.flatMap(({ project, summary }) => [
+    ...(summary?.you ?? []).map((move) => ({ project, move, stall: null })),
+    ...(stallsByProject.get(summaryKey(project)) ?? []).map((stall) => ({
+      project, stall,
+      move: {
+        identifier: stall.issue ?? "project", title: stall.title ?? project.name, why: stall.reason,
+        pullRequests: [], idle: true, updatedAt: stall.since ?? "", blocks: 0, unblocks: 0,
+        ...(stall.issue ? summary?.moveImpacts?.[stall.issue] : undefined),
+      },
+    })),
+  ])), [inboxProjects, stallsByProject]);
+  useEffect(() => {
+    const previous = document.title;
+    document.title = overviewTitle(inbox.length);
+    return () => { document.title = previous; };
+  }, [inbox.length]);
   const ranked = inbox.some(({ move }) => move.blocks !== undefined);
   const [allMoves, setAllMoves] = useState(false);
   const find = useRef<HTMLInputElement>(null);
@@ -109,6 +136,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       const coordinator = presenceText(presence?.get(summaryKey(p)), Date.now(), reported);
       const shown = agentsShown(reported, now);
       const fresh = agentsFresh(reported, now);
+      const stall = stallsByProject.get(summaryKey(p))?.[0];
+      const stallAge = stall?.since ? ageText(now - Date.parse(stall.since)) : null;
+      const next = stall ? [stall.issue, stall.reason, stallAge].filter(Boolean).join(" · ") : s && nextStep(s, now);
       return (
         <li key={summaryKey(p)} className={`ov-row${at === active ? " is-active" : ""}${you.length ? " is-you" : ""}${closed ? " is-closed" : ""}`}>
           <button type="button" className="ov-open" onClick={() => onOpen(p)} onFocus={() => setActive(at)} onMouseEnter={() => setActive(at)}>
@@ -141,12 +171,11 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             <span className={`ov-age${s?.freshness?.state === "stale" || s?.freshness?.state === "never" ? " is-warning" : ""}`}>
               {s?.freshness && freshnessText(s.freshness, s.effort?.at ?? null, now)}
             </span>
-            {(s?.error || s?.effort) && (
-              <span className="ov-effort">
-                {s.error ? <span className="sig-fg-stop">{s.error}</span>
-                  : <><span className="ov-effort-mark">wg next</span><span className="ov-effort-status">{s.effort!.status}</span></>}
-              </span>
-            )}
+            <span className="ov-effort">
+              <span className="ov-effort-mark">next:</span>
+              {s?.error ? <span className="sig-fg-stop">{s.error}</span>
+                : <span className={`ov-effort-status${stall ? " is-stalled" : ""}`} title={next ?? undefined}>{next ?? "—"}</span>}
+            </span>
           </button>
           <CopyButton text={p.name} label="Copy the project name" className="ov-copy" />
           {shown.length > 0 && (
@@ -193,20 +222,20 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
 
       {inbox.length > 0 && (
         <section className="inbox" aria-label={`${words.move} in all projects`}>
-          <h2 className="inbox-head"><span>{words.move}</span><b className="mono">{inbox.length}</b><span className="inbox-note">{ranked ? "agent waits, most held back, oldest" : "oldest first"}</span></h2>
+          <h2 className="inbox-head"><span>{words.move}</span><b className="mono">{inbox.length}</b><span className="inbox-note">{ranked ? (inbox.some(({ stall }) => stall) ? "stalls and agent waits, most held back, oldest" : "agent waits, most held back, oldest") : "oldest first"}</span></h2>
           <ul>
-            {(allMoves ? inbox : inbox.slice(0, INBOX)).map(({ project: p, move: m }) => {
+            {(allMoves ? inbox : inbox.slice(0, INBOX)).map(({ project: p, move: m, stall }) => {
               const age = m.updatedAt ? ageText(now - Date.parse(m.updatedAt)) : null;
               // A reason that is the title (a decision: its question) shows once.
               const why = overviewMoveReason(m.why);
               const title = why.trim() !== m.title.trim() && !why.includes(m.title.trim()) ? m.title : null;
               const effect = [
-                m.idle && "agent waits",
+                m.idle && !stall && "agent waits",
                 m.blocks && `holds back ${m.blocks}, ${m.unblocks ?? 0} can start`,
               ].filter(Boolean).join(" · ");
               return (
-                <li key={`${summaryKey(p)}:${m.identifier}`} className="inbox-row">
-                  <button type="button" className="inbox-open" onClick={() => onOpen(p, m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier)} title={`${p.name}: ${m.title}`}>
+                <li key={`${summaryKey(p)}:${m.identifier}:${stall?.kind ?? ""}`} className="inbox-row">
+                  <button type="button" className="inbox-open" onClick={() => onOpen(p, stall ? stall.issue : m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier)} title={`${p.name}: ${m.title}`}>
                     <Lamp signal="stop" />
                     <span className="inbox-id mono">{m.identifier}</span>
                     <span>

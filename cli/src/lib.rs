@@ -50,4 +50,5 @@ pub trait HttpTransport {
 }
 
 pub mod linear;
+pub mod page;
 pub mod state;

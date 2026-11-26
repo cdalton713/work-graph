@@ -74,7 +74,14 @@ function CreateForm({ workspaces, onCreated, onClose }: CreateProps & { onClose:
       </select></label>
       {teamError && <div role="alert">{teamError} <button type="button" onClick={() => setAttempt(n => n + 1)}>Retry teams</button></div>}
       <label>Project name<input required maxLength={120} disabled={busy} value={name} onChange={e => setName(e.target.value)} /></label>
-      <label>First task<input required maxLength={120} disabled={busy} value={firstTask} onChange={e => setFirstTask(e.target.value)} /></label>
+      <label>First task<textarea required rows={4} maxLength={10000} aria-describedby="first-task-help"
+        disabled={busy} value={firstTask} onChange={e => {
+          const field = e.currentTarget;
+          const title = field.value.trim().split("\n", 1)[0].trimEnd();
+          field.setCustomValidity(title.length > 120 ? "Use up to 120 characters for the first line." : "");
+          setFirstTask(field.value);
+        }} /></label>
+      <small id="first-task-help">Use the first line for the title (up to 120 characters). Add details on the following lines.</small>
       {error && <p className="account-error" role="alert">{error}</p>}
       <button className="primary" disabled={busy || !team || !name.trim() || !firstTask.trim()}>{busy ? "Creating…" : "Create project"}</button>
     </form>

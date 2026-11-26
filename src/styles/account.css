@@ -23,10 +23,11 @@
 .account-card { padding: 20px; background: var(--cab-1); border: 1px solid var(--rail-2); border-radius: var(--r-2); }
 .account-item { padding: 12px 0; border-top: 1px solid var(--rail); }
 .account-form label { display: grid; gap: 4px; width: min(100%, 420px); }
-.account-form input, .account-form select {
+.account-form input, .account-form select, .starter-form textarea {
   width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--rail-2);
   border-radius: var(--r-1); background: var(--inset); color: var(--ink-1); font: inherit;
 }
+.starter-form textarea { resize: vertical; }
 .account-error { color: var(--lamp-stop); }
 .account-command {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px;
@@ -75,7 +76,7 @@
    A large phone, such as one unfolded, is wider than 720px, so this goes by the pointer and not the width. */
 /* Keep this shared field rule at the end of the stylesheet. */
 @media (pointer: coarse) {
-  input, textarea, select, .account-form :is(input, select) { font-size: 16px; }
+  input, textarea, select, .account-form :is(input, select, textarea) { font-size: 16px; }
   :is(.account-content, .account-dialog, .signin, .member-access, .account-bar) :is(button, input:not([type="checkbox"]), select, a),
   .account-check {
     min-width: 44px;

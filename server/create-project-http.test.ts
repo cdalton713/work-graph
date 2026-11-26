@@ -47,7 +47,9 @@ it("requires an enabled owner session and writes only in the selected workspace"
     expect((await post(auth.owners[0], "second", { ...input, team: "OTHER" })).status).toBe(403);
     expect(writes).toEqual([]);
     const response = await post(auth.owners[0], "second");
-    expect(await response.json()).toMatchObject({ workspace: "second", handoff: { command: "wg next .", plan: { effort: { name: "Starter" } } } });
+    const result = await response.json();
+    expect(result).toMatchObject({ workspace: "second", handoff: { command: "wg next .", plan: { effort: { name: "Starter" } } } });
+    expect(result.handoff.plan.nodes[0]).not.toHaveProperty("description");
     expect(writes).toHaveLength(10);
   } finally { page.link.stop(); }
 });

@@ -461,8 +461,10 @@ first task blocks the merge point, and the merge point blocks the ship point.
 When `GET /api/config` returns `createProjects: true`, the page can get eligible teams
 with `GET /api/project-creation/teams`. Send the selected workspace ID in `X-Workspace`
 on this request and on `POST /api/projects`. The team response is `{teams: [{key, name}]}`.
-Send the team key, project name, and first task title as JSON fields `team`, `name`, and
-`firstTask`. Trim the fields before submission. Each field accepts 1 to 120 characters.
+Send the team key, project name, and first task as JSON fields `team`, `name`, and
+`firstTask`. Trim the fields before submission. The team, project name, and first line
+of the task each accept 1 to 120 characters. The first line becomes the issue title.
+Subsequent lines become its description. The complete task accepts up to 10,000 characters.
 Set `Idempotency-Key` to the lowercase hexadecimal SHA-256 of the UTF-8 bytes of
 `JSON.stringify([workspaceId, team, name, firstTask])`. Retry the same request after an
 interruption. A changed input with the previous key returns HTTP 409. Identical input

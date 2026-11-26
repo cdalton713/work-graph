@@ -174,11 +174,6 @@ export function overviewRows(list: OverviewData | ProjectList, filter: OverviewF
       || Number((b.summary?.running ?? 0) > 0) - Number((a.summary?.running ?? 0) > 0));
 }
 
-/**
- * The moves of a project with the open questions of its workers (from the link) added. A question is a
- * move of the human's: the worker waits on the reply. Questions come first; a move whose worker also
- * asks says so. Each issue counts once.
- */
 /** What an open ask of a worker is: a question, or an escalation that no coordinator read. */
 const askVerb = (a: Ask) => (a.kind === "escalation" ? "Worker escalates" : "Worker asks");
 
@@ -187,6 +182,10 @@ function liveMoveImpact(impacts: MoveImpacts | undefined, id: string | null | un
   return id && Object.hasOwn(impacts, id) ? impacts[id] : { blocks: 0, unblocks: 0 };
 }
 
+/**
+ * Worker questions appear first. A question joins an issue answer row when there is one.
+ * An issue with a worker question and a merge move has a row for each.
+ */
 export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined, impacts?: MoveImpacts): YourMove[] {
   asks = asks?.filter((ask) => !ask.accountName || ask.accountName === currentSite().human);
   if (!asks?.length) return you;

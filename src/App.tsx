@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { pageEvent } from "./lib/telemetry";
 import { accountApi, api, setOpenProject } from "./api";
 import { Onboarding } from "./components/Onboarding";
@@ -6,13 +6,11 @@ import { AccountError, Settings, useAccountAction } from "./components/Settings"
 import { firstStep } from "./lib/onboarding";
 import { BarMenu, useCompactBar } from "./components/BarMenu";
 import { Board } from "./components/Board";
-import { Canvas } from "./components/Canvas";
 import { EffortSheet } from "./components/EffortSheet";
 import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
 import { PullRefresh } from "./components/PullRefresh";
-import { Panel } from "./components/Panel";
 import { CopyButton, Hint, Lamp, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type GNode, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
@@ -22,11 +20,16 @@ import { agentsFresh, agentsWaiting, canCommandCoordinator, liveJob, presenceTex
 import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, readProjectStates, summaryKey } from "./lib/overview";
 import { ownerWords } from "./lib/words";
 import { configureSite, site, statusOrder } from "./lib/site";
-import { type Layout, layout as runLayout } from "./lib/layout";
+import type { Layout } from "./lib/layout";
 import type { Account, AccountConnection, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
 import { isStandalone, syncAge, useHover, useNarrow } from "./lib/screen";
 import { useLink } from "./useLink";
 import { canReleaseClaim, claimMarks, matchesClaim, parseClaimFilter, type ClaimFilter, type ProjectClaims } from "./lib/claims";
+
+const Canvas = lazy(() => import("./components/Canvas").then(({ Canvas }) => ({ default: Canvas })));
+const Panel = lazy(() => import("./components/Panel").then(({ Panel }) => ({ default: Panel })));
+const runLayout: typeof import("./lib/layout").layout = async (...args) =>
+  (await import("./lib/layout")).layout(...args);
 
 const POLL_MS = 15_000;
 /** The overview loads a graph for each open project, so it polls less often than one graph. */
@@ -944,10 +947,13 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
           live={new Map(link.progress.flatMap((p) => { const job = liveJob(p); return job && p.issue ? [[p.issue, job] as [string, string]] : []; }))} />}
         {graph && data && !graph.nodes.length && <div className="blank">{claimFilter !== "all" ? "No issues match this runner filter." : openOnly ? "No open issues. Turn off “Open issues only” under View to see all." : "This project has no issues."}</div>}
         {graph && placed && graph.nodes.length > 0 && (
+          <Suspense fallback={<div className="blank">Loading graph…</div>}>
           <Canvas graph={graph} marks={marks} now={now} edges={edges} layout={placed.layout} selectedId={narrow ? (graphTrace?.project === openKey ? graphTrace.id : null) : selected?.id ?? null} hoverId={hoverId} statusFilter={statusFilter}
             focus={focus} showMap={map} onSelect={select} onHover={setHoverId} />
+          </Suspense>
         )}
         {selected && full && data && (
+          <Suspense fallback={<div className="blank">Loading issue…</div>}>
           <Panel node={selected} claim={selectedClaim} onShowInGraph={narrow ? showInGraph : undefined}
             onRelease={!viewer && linkRef && canReleaseClaim(selectedClaim, claims?.role) ? async (node) => {
               await api.releaseClaim(linkRef.id, linkRef.workspace, node);
@@ -958,6 +964,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             onDispatch={canCommand ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer} limitedEdits={collaborator}
             refresh={installed ? refreshScreen : undefined} refreshing={busy}
             onGo={pick} />
+          </Suspense>
         )}
         {narrow && full && <ViewSwitch view={view} onChange={showView} />}
       </main>

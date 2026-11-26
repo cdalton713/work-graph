@@ -1,4 +1,4 @@
-import ELK, { type ElkExtendedEdge, type ElkNode } from "elkjs/lib/elk.bundled.js";
+import type { ELK, ElkExtendedEdge, ElkNode } from "elkjs/lib/elk-api.js";
 import type { GEdge, GNode } from "./graph";
 import type { Milestone } from "./types";
 
@@ -10,7 +10,21 @@ export type Point = { x: number; y: number };
 export interface Box { id: string; kind: "phase" | "lane"; label: string; note: string; x: number; y: number; width: number; height: number }
 export interface Layout { positions: Map<string, Point>; boxes: Box[]; routes: Map<string, Point[]>; boxed: Set<string> }
 
-const elk = new ELK();
+let engine: Promise<ELK> | undefined;
+
+function layoutEngine(): Promise<ELK> {
+  return engine ??= (async () => {
+    if (import.meta.env?.SSR ?? typeof window === "undefined") {
+      const { default: BundledELK } = await import("elkjs/lib/elk.bundled.js");
+      return new BundledELK();
+    }
+    const [{ default: WorkerELK }, { default: workerUrl }] = await Promise.all([
+      import("elkjs/lib/elk-api.js"),
+      import("elkjs/lib/elk-worker.min.js?url&no-inline"),
+    ]);
+    return new WorkerELK({ workerUrl });
+  })();
+}
 const PHASE_PAD = "[top=44,left=24,bottom=24,right=24]";
 const LANE_PAD = "[top=30,left=14,bottom=14,right=14]";
 
@@ -63,7 +77,7 @@ export async function layout(nodes: GNode[], edges: GEdge[], milestones: Milesto
   }
   for (const m of milestones) if (phases.get(m.id)!.children!.length) root.children!.push(phases.get(m.id)!);
 
-  const done = await elk.layout(root);
+  const done = await (await layoutEngine()).layout(root);
   const positions = new Map<string, Point>();
   const boxes: Box[] = [];
   const origin = new Map<string, Point>([["root", { x: 0, y: 0 }]]);

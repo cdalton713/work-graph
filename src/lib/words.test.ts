@@ -5,7 +5,7 @@ describe("owner wording", () => {
   it("keeps the full page wording", () => {
     expect(ownerWords({ human: "Ada", readOnly: false })).toMatchObject({
       move: "Your move", step: "Your step:", forOwner: "for you",
-      onOwner: "on you", waitsFilter: "Waits on me",
+      onOwner: "on you", waitsFilter: "Waits on you",
     });
   });
 

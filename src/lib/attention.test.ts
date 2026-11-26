@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { stalls, nextStep, overviewTitle } from "./attention";
+import { stalls, nextStep, overviewTitle, projectState } from "./attention";
 import type { AgentRow, Agents, Presence } from "./link";
 import type { ProjectSummary } from "./overview";
 
@@ -83,4 +83,56 @@ it("describes the first wait or action that belongs to the agents", () => {
 it("includes the inbox count in the tab title only when it has entries", () => {
   expect(overviewTitle(3)).toBe("(3) Overview");
   expect(overviewTitle(0)).toBe("Overview");
+});
+
+const idle = { ...summary, running: 0, liveJobs: [] };
+const duty = { level: "do", text: "dispatch page WG-12" };
+const waiting = { identifier: "WG-13", title: "Choose a date", why: "Decision", pullRequests: [], updatedAt: ago(8), blocks: 0 };
+const withInbox = { ...idle, you: [waiting, { ...waiting, identifier: "WG-14", title: "Approve the plan", why: "Approve the plan", blocks: 2 }] };
+const selectedState = (s: ProjectSummary, link?: Presence, agents?: Agents) =>
+  projectState(s, { presence: link, agents, now });
+
+it("puts the first ranked inbox reason on the row and counts the remaining entries", () => {
+  expect(selectedState(withInbox)).toEqual({ state: "waits", reason: "WG-14 · Approve the plan +1" });
+});
+
+it("puts a stall above inbox, moving work, and an idle reason", () => {
+  for (const s of [withInbox, idle, { ...idle, externalBlocker: "WG-19" }]) {
+    expect(selectedState({ ...s, liveJobs: [job] }, presence(ago(0), true))).toMatchObject({ state: "stalled", reason: expect.stringContaining("No agent view") });
+  }
+});
+
+it("shows moving work until link data confirms a stall", () => {
+  expect(selectedState(summary)).toEqual({ state: "moving", reason: "Worker on WG-12" });
+  expect(selectedState(summary, presence(ago(0), true)).state).toBe("stalled");
+});
+
+it("puts the inbox above moving work and an idle reason", () => {
+  expect(selectedState({ ...withInbox, liveJobs: [job] }, undefined, report(coordinator, { ...worker, at: ago(0) }))).toMatchObject({ state: "waits" });
+  expect(selectedState({ ...withInbox, paused: true })).toMatchObject({ state: "waits" });
+});
+
+it("puts moving ahead of idle when a job runs or a coordinator acts on a do line", () => {
+  const nextLines = [{ level: "wait", text: "worker page WG-12" }];
+  expect(selectedState({ ...summary, nextLines, externalBlocker: "WG-19" }, undefined, report(coordinator, { ...worker, at: ago(0) })))
+    .toEqual({ state: "moving", reason: "worker on WG-12 · 25 min" });
+  const listening = presence(ago(0), true);
+  const s = { ...idle, nextLines: [duty] };
+  expect(selectedState(s, listening)).toEqual({ state: "moving", reason: "coordinator: dispatch WG-12" });
+  expect(selectedState(s, undefined, report(coordinator))).toMatchObject({ state: "moving" });
+  expect(selectedState(idle, listening)).toMatchObject({ state: "idle" });
+});
+
+it.each([
+  [{ paused: true, liveJobs: [job] }, "Paused"],
+  [{ nextLines: [{ level: "wait", text: "soak ship WG-13: until 14:00" }] }, "soak until 14:00"],
+  [{ externalBlocker: "WG-19" }, "Waits for WG-19 outside the project"],
+  [{ nextLines: [{ level: "wait", text: "collaborator Ada page: job=dispatch" }] }, "Waits for Ada"],
+  [{ nextLines: [{ level: "wait", text: "owner ship" }] }, "Waits for the owner"],
+  [{ nextLines: [{ level: "wait", text: "collaborator Ada Example page: job=dispatch" }] }, "Waits for Ada Example"],
+  [{ collaborator: "Ada" }, "Waits for Ada"],
+  [{}, "Not started"],
+  [{ done: 1 }, "Each node is done"],
+] satisfies [Partial<ProjectSummary>, string][])("explains why a project is idle (%o)", (change, reason) => {
+  expect(selectedState({ ...idle, ...change })).toEqual({ state: "idle", reason });
 });

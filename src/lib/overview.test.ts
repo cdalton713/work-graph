@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { NO_INITIATIVE, rankMoves, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, overviewMoveReason, summarize, type OverviewData, type ProjectSummary } from "./overview";
+import { NO_INITIATIVE, countProjectStates, filterProjectStates, readProjectStates, rankMoves, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, overviewMoveReason, summarize, type OverviewData, type ProjectSummary } from "./overview";
 import { DEFAULT_HUMAN, configureSite, createSite } from "./site";
 import type { GraphData, Issue, State } from "./types";
 
@@ -24,6 +24,15 @@ describe("summarize", () => {
     const node = { ...issue("1", { card }), identifier: "WG-1", teamKey: "WG" };
     expect(summarize(graph([node, { ...issue("2", { card, external: true }), identifier: "WG-2", teamKey: "WG" }], status), "work"))
       .toMatchObject({ paused: true, liveJobs: [{ identifier: "WG-1", title: "t1", state: "running", startedAt: started_at }], nextLines: lines.slice(1) });
+  });
+
+  it("reports only unresolved outside blockers of open project issues", () => {
+    const open = issue("1");
+    const closed = issue("2", { state: state("Done", "completed") });
+    const activeBlocker = { ...issue("3"), identifier: "WG-3", inProject: false };
+    open.blockedBy = [{ ...closed, inProject: false }, { ...issue("4"), inProject: true }, activeBlocker];
+    expect(summarize(graph([open, closed]), "work").externalBlocker).toBe("WG-3");
+    expect(summarize(graph([{ ...open, state: closed.state }]), "work").externalBlocker).toBeUndefined();
   });
 
   it("counts open dependents through a chain and fork, and only clears the last blocker", () => {
@@ -111,21 +120,48 @@ describe("overviewRows", () => {
     summaries: [summary("a", 0), summary("b", 1), summary("c", 0, 2), summary("e", 3, 0, "home")],
   };
   const ids = (filter: Partial<Parameters<typeof overviewRows>[1]>) =>
-    overviewRows(list, { text: "", workspace: null, mine: false, closed: false, ...filter }).map((r) => r.project.id);
+    overviewRows(list, { text: "", workspace: null, closed: false, ...filter }).map((r) => r.project.id);
 
   it("puts the projects that wait on Human first, then the ones with running work", () => {
     expect(ids({})).toEqual(["e", "b", "c", "a"]);
   });
-  it("filters by workspace, by waiting, by words, and shows closed projects only on request", () => {
+  it("filters by workspace and by words, and shows closed projects only on request", () => {
     expect(ids({ workspace: "work" })).toEqual(["b", "c", "a"]);
-    expect(ids({ mine: true })).toEqual(["e", "b"]);
     expect(ids({ text: "gam" })).toEqual(["c"]);
     expect(ids({ text: "home" })).toEqual(["e"]);
     expect(ids({ closed: true })).toEqual(["e", "b", "c", "a", "d"]);
   });
+  it("orders by state, counts each state, and filters by any selected state from the URL", () => {
+    const liveJobs = [{ identifier: "WG-1", title: "Work", state: "running", startedAt: null }];
+    const rows = overviewRows({
+      ...list, summaries: list.summaries.map((s) => s.id === "a" ? { ...s, liveJobs } : s.id === "c"
+        ? { ...s, liveJobs, nextLines: [{ level: "wait", text: "worker page WG-1" }] } : s),
+    }, { text: "", workspace: null, closed: true }, {
+      now: 0, presence: new Map([["work:a", { coordinators: [], queued: 0 }]]),
+      agents: new Map([["work:c", { at: new Date(0).toISOString(), agents: [] }]]),
+    });
+    expect(rows.map((r) => r.project.id)).toEqual(["a", "e", "b", "c", "d"]);
+    expect(countProjectStates(rows)).toEqual({ stalled: 1, waits: 2, moving: 1, idle: 1 });
+    const selected = readProjectStates(new URLSearchParams("state=idle,stalled,idle,unknown"));
+    expect(selected).toEqual(["stalled", "idle"]);
+    expect(filterProjectStates(rows, selected).map((r) => r.project.id)).toEqual(["a", "d"]);
+    expect(filterProjectStates(rows, [])).toEqual(rows);
+  });
+
+  it.each(["viewer", "collaborator"] as const)("omits stalled states in shared %s workspaces", (role) => {
+    const liveJobs = [{ identifier: "WG-1", title: "Work", state: "running", startedAt: null }];
+    const rows = overviewRows({
+      ...list, workspaces: list.workspaces.map((w) => ({ ...w, role })),
+      summaries: list.summaries.map((s) => s.id === "a" ? { ...s, liveJobs } : s),
+    }, { text: "", workspace: null, closed: false }, {
+      now: 0, presence: new Map([["work:a", { coordinators: [], queued: 0 }]]),
+    });
+    expect(rows.find(({ project }) => project.id === "a")).toMatchObject({ attention: { state: "moving" }, stalls: [] });
+  });
+
   it("works with the project list alone, before the first summaries", () => {
     const { summaries: _, ...plain } = list;
-    expect(overviewRows(plain, { text: "", workspace: null, mine: false, closed: false }).map((r) => r.summary)).toEqual([null, null, null, null]);
+    expect(overviewRows(plain, { text: "", workspace: null, closed: false }).map((r) => r.summary)).toEqual([null, null, null, null]);
   });
 });
 
@@ -141,17 +177,22 @@ describe("initiatives", () => {
     projects: [project("a", "Tooling"), project("b", "Billing"), project("c", null), project("d", "Tooling"), project("e", "Home", "home")],
     summaries: [summary("a", 0, 1), summary("b", 0), summary("c", 5), summary("d", 2), summary("e", 0, 0, "home")],
   };
-  const all = { text: "", workspace: null, mine: false, closed: false };
+  const all = { text: "", workspace: null, closed: false };
 
-  it("groups the rows by workspace and initiative, waiting first, no initiative last, with sums", () => {
-    const sections = initiativeSections(overviewRows(list, all), list.workspaces);
+  it("groups the rows by workspace and initiative, by roll-up state, with sums", () => {
+    const liveJobs = [{ identifier: "WG-1", title: "Work", state: "running", startedAt: null }];
+    const ranked = { ...list, summaries: list.summaries.map((s) => s.id === "c" ? { ...s, liveJobs } : s) };
+    const sections = initiativeSections(overviewRows(ranked, all, {
+      now: 0, presence: new Map([["work:c", { coordinators: [], queued: 0 }]]),
+    }), list.workspaces);
     expect(sections.map((s) => [s.workspace, s.name, s.rows.map((r) => r.project.id)])).toEqual([
+      ["work", null, ["c"]],
       ["work", "Tooling", ["d", "a"]],
       ["work", "Billing", ["b"]],
-      ["work", null, ["c"]],
       ["home", "Home", ["e"]],
     ]);
-    expect(sections[0]).toMatchObject({ projects: 2, planned: 8, done: 2, you: 2, running: 1 });
+    expect(sections[0].state).toBe("stalled");
+    expect(sections[1]).toMatchObject({ state: "waits", projects: 2, planned: 8, done: 2, you: 2, running: 1 });
   });
   it("filters by initiative name, by no initiative, and finds a project by its initiative", () => {
     const ids = (filter: object) => overviewRows(list, { ...all, ...filter }).map((r) => r.project.id);

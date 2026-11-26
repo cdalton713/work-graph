@@ -1,31 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ownerWords } from "../lib/words";
-import { type OverviewData, type OverviewFilter, type OverviewRow, type ProjectSummary, NO_INITIATIVE, PROJECT_LAMP, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
-import { ageText } from "../lib/graph";
-import { nextStep, overviewTitle, stalls } from "../lib/attention";
-import { type Agents, type Ask, type Presence, agentName, agentState, agentsFresh, agentsShown, presenceText } from "../lib/link";
-import { currentSite } from "../lib/site";
+import { type OverviewData, type OverviewFilter, type OverviewRow, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
+import { ageText, type Signal } from "../lib/graph";
+import { PROJECT_STATES, type ProjectStateName, overviewTitle } from "../lib/attention";
+import { type Agents, type Ask, type Presence, agentName, agentState, agentsFresh, agentsShown } from "../lib/link";
 import type { Project, ProjectList } from "../lib/types";
 import { CopyButton, Lamp, Picker, PrLinks } from "./ui";
 
 const STORE = "wg-overview";
 /** The inbox items that show before "Show all". */
 const INBOX = 8;
-const START: OverviewFilter = { text: "", workspace: null, mine: false, closed: false };
-
-function freshnessText({ state, ran }: NonNullable<ProjectSummary["freshness"]>, at: string | null, now: number): string | null {
-  if (state === "never") return "wg next has not published this effort";
-  if (state === "listening") return "listening";
-  const age = ageText(now - Date.parse((state === "unknown" ? at : ran) ?? ""));
-  if (!age) return null;
-  const label = state === "stale" ? "last ran" : state === "unknown" ? "changed" : "ran";
-  return `${label} ${age}`;
-}
+const START: OverviewFilter = { text: "", workspace: null, closed: false };
+const NO_STATES: ProjectStateName[] = [];
+const STATE_DISPLAY = {
+  stalled: { label: "Stalled", signal: "stop" },
+  waits: { signal: "stop" },
+  moving: { label: "Moving", signal: "running" },
+  idle: { label: "Idle by design", signal: "idle" },
+} satisfies Record<ProjectStateName, { label?: string; signal: Signal }>;
 
 function stored(): OverviewFilter {
   try {
     const saved = JSON.parse(localStorage.getItem(STORE) ?? "null") as Partial<OverviewFilter> | null;
-    return { ...START, ...saved, text: "" };
+    return { ...START, workspace: saved?.workspace ?? null, closed: saved?.closed ?? false };
   } catch {
     return START;
   }
@@ -45,6 +42,8 @@ export interface OverviewProps {
   /** The initiative filter from the link (`?initiative=`): null shows all; NO_INITIATIVE the projects with none. */
   initiative?: string | null;
   onInitiative?: (name: string | null) => void;
+  states?: ProjectStateName[];
+  onStates?: (states: ProjectStateName[]) => void;
   /** The workspaces with a low Linear budget (`budgetWarnings`). */
   budget?: { id: string; text: string; title: string }[];
 }
@@ -53,8 +52,9 @@ export interface OverviewProps {
  * All projects on one page: which ones wait on the human, how far each is, and what wg next last said.
  * `/` finds a project, the arrow keys move, Enter opens.
  */
-export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, initiative = null, onInitiative, budget = [] }: OverviewProps) {
+export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, initiative = null, onInitiative, states = NO_STATES, onStates, budget = [] }: OverviewProps) {
   const words = ownerWords();
+  const stateLabel = (state: ProjectStateName) => state === "waits" ? words.waitsFilter : STATE_DISPLAY[state].label;
   const list = useMemo<OverviewData | ProjectList>(() => ("summaries" in given && (asks?.size || agents?.size)
     ? { ...given, summaries: given.summaries.map((s) => ({ ...s, you: movesWithAgents(movesWithAsks(s.you, asks?.get(summaryKey(s)), s.moveImpacts), agents?.get(summaryKey(s)), now, s.moveImpacts) })) }
     : given), [given, asks, agents, now]);
@@ -66,25 +66,20 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const names = useMemo(() => initiativeNames(list.projects), [list]);
   // Sections only when some project has an initiative; then the rows go in the order of the sections.
   const grouped = names.length > 0;
-  const sections = useMemo(() => initiativeSections(overviewRows(list, { ...filter, initiative }), list.workspaces), [list, filter, initiative]);
-  const rows = useMemo(() => sections.flatMap((section) => section.rows), [sections]);
-  const openProjects = useMemo(() => overviewRows(list, START), [list]);
-  const stallsByProject = useMemo(() => {
-    const shared = new Set(list.workspaces.filter(({ role }) => role).map(({ id }) => id));
-    return new Map(openProjects.flatMap(({ project, summary }) => {
-      if (!summary || project.paused || project.statusType === "paused") return [];
-      const key = summaryKey(project);
-      return [[key, stalls(summary, presence?.get(key), agents?.get(key), now,
-        currentSite().readOnly || shared.has(project.workspace))] as const];
-    }));
-  }, [openProjects, list.workspaces, presence, agents, now]);
-  const inboxProjects = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, initiative }), [list, filter.workspace, initiative]);
+  const activity = useMemo(() => ({ now, presence, agents }), [now, presence, agents]);
+  const matching = useMemo(() => overviewRows(list, { ...filter, initiative }, activity), [list, filter, initiative, activity]);
+  const counts = countProjectStates(matching);
+  const visible = useMemo(() => filterProjectStates(matching, states), [matching, states]);
+  const sections = useMemo(() => grouped ? initiativeSections(visible, list.workspaces) : [], [visible, list.workspaces, grouped]);
+  const rows = useMemo(() => grouped ? sections.flatMap((section) => section.rows) : visible, [sections, visible, grouped]);
+  const inboxProjects = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, initiative }, activity),
+    [list, filter.workspace, initiative, activity]);
   const waiting = inboxProjects.filter(({ summary }) => summary?.you.length);
   const waitingIssues = inboxProjects.reduce((n, r) => n + (r.summary?.you.length ?? 0), 0);
   const [active, setActive] = useState(0);
-  const inbox = useMemo(() => rankMoves(inboxProjects.flatMap(({ project, summary }) => [
+  const inbox = useMemo(() => rankMoves(inboxProjects.flatMap(({ project, summary, stalls }) => [
     ...(summary?.you ?? []).map((move) => ({ project, move, stall: null })),
-    ...(stallsByProject.get(summaryKey(project)) ?? []).map((stall) => ({
+    ...stalls.map((stall) => ({
       project, stall,
       move: {
         identifier: stall.issue ?? "project", title: stall.title ?? project.name, why: stall.reason,
@@ -92,7 +87,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
         ...(stall.issue ? summary?.moveImpacts?.[stall.issue] : undefined),
       },
     })),
-  ])), [inboxProjects, stallsByProject]);
+  ])), [inboxProjects]);
   useEffect(() => {
     const previous = document.title;
     document.title = overviewTitle(inbox.length);
@@ -102,7 +97,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const [allMoves, setAllMoves] = useState(false);
   const find = useRef<HTMLInputElement>(null);
   const root = useRef<HTMLDivElement>(null);
-  useEffect(() => setActive(0), [filter, initiative]);
+  useEffect(() => setActive(0), [filter, initiative, states]);
   useEffect(() => { root.current?.querySelector(".ov-row.is-active")?.scrollIntoView({ block: "nearest" }); }, [active]);
 
   useEffect(() => {
@@ -116,7 +111,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
         find.current?.select();
       } else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && (!typing || inFind)) {
         e.preventDefault();
-        setActive((a) => Math.min(rows.length - 1, Math.max(0, a + (e.key === "ArrowDown" ? 1 : -1))));
+        setActive((a) => Math.min(Math.max(0, rows.length - 1), Math.max(0, a + (e.key === "ArrowDown" ? 1 : -1))));
       } else if (e.key === "Enter" && inFind && rows[active]) {
         e.preventDefault();
         onOpen(rows[active].project);
@@ -129,29 +124,24 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const multi = list.workspaces.length > 1;
   const closedCount = list.projects.filter((p) => p.statusType === "completed" || p.statusType === "canceled").length;
 
-  const renderRow = ({ project: p, summary: s }: OverviewRow, at: number) => {
+  const renderRow = ({ project: p, summary: s, attention }: OverviewRow, at: number) => {
       const closed = p.statusType === "completed" || p.statusType === "canceled";
-      const you = s?.you ?? [];
       const reported = agents?.get(summaryKey(p));
-      const coordinator = presenceText(presence?.get(summaryKey(p)), Date.now(), reported);
       const shown = agentsShown(reported, now);
       const fresh = agentsFresh(reported, now);
-      const stall = stallsByProject.get(summaryKey(p))?.[0];
-      const stallAge = stall?.since ? ageText(now - Date.parse(stall.since)) : null;
-      const next = stall ? [stall.issue, stall.reason, stallAge].filter(Boolean).join(" · ") : s && nextStep(s, now);
+      const { state, reason } = attention;
+      const { signal } = STATE_DISPLAY[state];
       return (
-        <li key={summaryKey(p)} className={`ov-row${at === active ? " is-active" : ""}${you.length ? " is-you" : ""}${closed ? " is-closed" : ""}`}>
+        <li key={summaryKey(p)} className={`ov-row${at === active ? " is-active" : ""}${signal === "stop" ? " is-you" : ""}${closed ? " is-closed" : ""}`}>
           <button type="button" className="ov-open" onClick={() => onOpen(p)} onFocus={() => setActive(at)} onMouseEnter={() => setActive(at)}>
+            <span className="ov-state">
+              <Lamp signal={signal} pulse={state === "moving"} />
+              <span className={`ov-state-label sig-fg-${signal}`}>{stateLabel(state)}</span>
+              <span className="ov-reason" title={reason}>{reason}</span>
+            </span>
             <span className="ov-name">
-              <Lamp signal={PROJECT_LAMP[p.statusType] ?? "idle"} />
               <span className="ov-title" title={p.name}>{p.name}</span>
               {multi && !grouped && <span className="ov-ws">{p.workspaceName}</span>}
-              {p.statusType !== "started" && <span className="ov-pstatus">{p.status}</span>}
-              {p.autonomy && <span className={`ov-auto auto-${p.autonomy}`} title="Autonomy level of the coordinator">{p.autonomy}</span>}
-              {coordinator && <span className={`ov-coord coord-${coordinator.state}`} title={coordinator.title}>{coordinator.text}</span>}
-            </span>
-            <span className={`ov-you${you.length ? "" : " is-zero"}`} title={`Issues in ${words.move}`}>
-              {you.length ? <><b className="mono">{you.length}</b> {words.forOwner}</> : s ? "—" : ""}
             </span>
             <span className="ov-progress">
               {s && s.planned > 0 && (
@@ -168,23 +158,14 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
               {s && s.review > 0 && <span className="sig-fg-review" title="In Review or Verifying"><Lamp signal="review" />{s.review} in review</span>}
               {s && s.ready > 0 && <span className="sig-fg-ready" title="Not started, and no blocker holds it back"><Lamp signal="ready" />{s.ready} can start</span>}
             </span>
-            <span className={`ov-age${s?.freshness?.state === "stale" || s?.freshness?.state === "never" ? " is-warning" : ""}`}>
-              {s?.freshness && freshnessText(s.freshness, s.effort?.at ?? null, now)}
-            </span>
-            {(s?.error || s?.effort) && (
-              <span className="ov-effort">
-                {s.error ? <span className="sig-fg-stop">{s.error}</span>
-                  : <><span className="ov-effort-mark">wg next</span><span className="ov-effort-status">{s.effort!.status}</span></>}
-              </span>
-            )}
-            {next && (
-              <span className="ov-effort">
-                <span className="ov-effort-mark">next:</span>
-                <span className={`ov-effort-status${stall ? " is-stalled" : ""}`} title={next}>{next}</span>
-              </span>
-            )}
           </button>
           <CopyButton text={p.name} label="Copy the project name" className="ov-copy" />
+          {s?.effort && (
+            <details className="ov-effort">
+              <summary>wg next</summary>
+              <p>{s.effort.status}</p>
+            </details>
+          )}
           {shown.length > 0 && (
             <ul className={`ov-agents${fresh ? "" : " is-stale"}`} aria-label={`Agents of ${p.name} in Orca`}>
               {!fresh && <li className="ov-agents-note is-warning">agent view stopped · last report {ageText(now - Date.parse(reported!.at))} · wg agents does not run</li>}
@@ -296,8 +277,17 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             <span className={initiative === null ? "" : "ov-init-on"}>{initiative === null ? "All initiatives" : initiative || "No initiative"}</span><span className="caret">▾</span>
           </Picker>
         )}
-        <button type="button" className={`toggle${filter.mine ? " is-on" : ""}`} aria-pressed={filter.mine} onClick={() => set({ mine: !filter.mine })}
-          title={`Show only the projects that have an issue in ${words.move}.`}>{words.waitsFilter}</button>
+        {onStates && <div className="ov-state-filters" role="group" aria-label="Project state">
+          {PROJECT_STATES.map((state) => {
+            const selected = states.includes(state);
+            return (
+              <button type="button" key={state} className={`toggle${selected ? " is-on" : ""}`} aria-pressed={selected}
+                onClick={() => onStates(PROJECT_STATES.filter((value) => value === state ? !selected : states.includes(value)))}>
+                {stateLabel(state)} <span className="mono">{counts[state]}</span>
+              </button>
+            );
+          })}
+        </div>}
         {closedCount > 0 && (
           <button type="button" className={`toggle${filter.closed ? " is-on" : ""}`} aria-pressed={filter.closed} onClick={() => set({ closed: !filter.closed })}
             title="Also show the completed and canceled projects.">Closed <span className="mono">{closedCount}</span></button>
@@ -307,7 +297,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       {list.workspaces.filter((w) => w.error).map((w) => <p key={w.id} className="empty" role="status">{w.error}</p>)}
       {!list.projects.length && !list.workspaces.some((w) => w.error) && <p className="empty">No projects. `wg load` makes one from plan.json.</p>}
       {list.projects.length > 0 && !rows.length && (
-        <p className="empty">No project matches. <button type="button" className="ghost" onClick={() => { setFilter(START); onInitiative?.(null); }}>Clear the filters</button></p>
+        <p className="empty">No project matches. <button type="button" className="ghost" onClick={() => { setFilter(START); onInitiative?.(null); onStates?.([]); }}>Clear the filters</button></p>
       )}
 
       {grouped ? sections.map((section) => {
@@ -324,7 +314,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                 {section.planned > 0 && ` · ${section.done}/${section.planned} done`}
                 {section.running > 0 && ` · ${section.running} running`}
               </span>
-              {section.you > 0 && <span className="ov-section-you"><Lamp signal="stop" /><b className="mono">{section.you}</b> {words.forOwner}</span>}
+              <span className={`ov-section-state sig-fg-${STATE_DISPLAY[section.state].signal}`}>
+                <Lamp signal={STATE_DISPLAY[section.state].signal} />{stateLabel(section.state)}
+              </span>
             </h2>
             <ul className="ov-list">{section.rows.map((row, i) => renderRow(row, first + i))}</ul>
           </section>

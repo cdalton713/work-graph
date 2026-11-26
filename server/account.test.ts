@@ -38,12 +38,14 @@ it("returns 404 for every account route in config mode", async () => {
 });
 
 databaseSuites((open) => {
-  it("scopes page and account events and persists the account opt-out", async () => {
+  it("sends page and account events for each account in the listed workspace", async () => {
     const t = await setup({
       DD_API_KEY: "test-key", WG_SESSION_SECRET: auth.secret, WG_TELEMETRY_WORKSPACES: "work-id",
     });
     try {
       const { cookie } = await t.owner("usage");
+      const legacy = await t.owner("legacy");
+      await t.sql.query("UPDATE tenants SET send_usage_data = false WHERE id = $1", [legacy.accountId]);
       const personal = "lin_api_" + "x".repeat(30);
       t.identities.set(personal, { org: "personal", teams: ["WG"] });
       expect((await t.request(root + "/workspaces", cookie, "POST", { key: personal })).status).toBe(201);
@@ -54,12 +56,17 @@ databaseSuites((open) => {
       await Promise.all(t.jobs);
       const messages = () => t.intake.flatMap((entry) => Array.isArray(entry) ? entry.map(({ message }) => message) : []);
       expect(messages()).toEqual(["node_opened", "token_created"]);
-      expect((await t.request(root, cookie, "PATCH", { sendUsageData: false })).status).toBe(200);
-      expect(await (await t.request(root, cookie)).json()).toMatchObject({ sendUsageData: false });
-      expect((await t.request(root + "/tokens", cookie, "POST", { name: "Second token" })).status).toBe(201);
-      expect((await t.request("/api/events", cookie, "POST", { event: "node_opened", workspace: "work" })).status).toBe(204);
+      expect((await t.request(root, cookie, "PATCH", { sendUsageData: false })).status).toBe(400);
+      const update = await t.request(root, cookie, "PATCH", { human: "Ada", sendUsageData: false });
+      expect(update.status).toBe(200);
+      expect(await update.json()).not.toHaveProperty("sendUsageData");
+      expect(await (await t.request(root, legacy.cookie)).json()).not.toHaveProperty("sendUsageData");
+      expect((await t.request(root + "/tokens", legacy.cookie, "POST", { name: "Second token" })).status).toBe(201);
+      for (const session of [cookie, legacy.cookie]) {
+        expect((await t.request("/api/events", session, "POST", { event: "node_opened", workspace: "work" })).status).toBe(204);
+      }
       await Promise.all(t.jobs);
-      expect(messages()).toEqual(["node_opened", "token_created"]);
+      expect(messages()).toEqual(["node_opened", "token_created", "token_created", "node_opened", "node_opened"]);
     } finally { await t.close(); }
   });
 
@@ -88,7 +95,8 @@ databaseSuites((open) => {
     });
     try {
       const claim = vi.spyOn(t.tenants.accounts, "claimFirstConnection");
-      const { cookie } = await t.owner("coordinator");
+      const { cookie, accountId } = await t.owner("coordinator");
+      await t.sql.query("UPDATE tenants SET send_usage_data = false WHERE id = $1", [accountId]);
       const response = await t.request(root + "/tokens", cookie, "POST", { name: "Coordinator" });
       expect(response.status).toBe(201);
       const { token } = await response.json();
@@ -101,6 +109,8 @@ databaseSuites((open) => {
       await Promise.all(t.jobs);
       expect(t.jobs).toHaveLength(1);
       expect(claim).toHaveBeenCalledTimes(1);
+      expect(t.intake.flatMap((entry) => Array.isArray(entry) ? entry.map(({ message }) => message) : []))
+        .toContain("first_connection");
     } finally { await t.close(); }
   });
 

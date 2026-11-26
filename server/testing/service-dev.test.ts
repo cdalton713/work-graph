@@ -53,7 +53,9 @@ test("the local service starts on loopback, serves service config, and stops", a
     expect(signedIn.status).toBe(302);
     const cookie = signedIn.headers.get("set-cookie")!.split(";")[0];
     const account = await fetch(url + "/api/account", { headers: { cookie } });
-    expect(await account.json()).toMatchObject({ human: "Ada", pageUrl: url, onboarding: { name: false } });
+    const settings = await account.json();
+    expect(settings).toMatchObject({ human: "Ada", pageUrl: url, onboarding: { name: false } });
+    expect(settings).not.toHaveProperty("sendUsageData");
     const projects = await fetch(url + "/api/projects", { headers: { cookie } });
     expect(await projects.json()).toMatchObject({ projects: [{ id: "project", name: "Example project", workspace: "example" }] });
     const claimsPath = url + "/api/projects/project/claims";

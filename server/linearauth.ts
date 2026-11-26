@@ -112,7 +112,7 @@ export async function linearSessionOf(c: Context, auth: LinearAuth, now: () => n
 
 export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: () => number,
   save: ReturnType<typeof createAccounts>["signIn"], onLogout: (session: Session) => void | Promise<void>,
-  observe?: (id: string, workspace: UsageWorkspace, created: boolean, enabled: boolean) => void) {
+  observe?: (id: string, workspace: UsageWorkspace, created: boolean) => void) {
   const routes = new Hono();
   const redirectUri = () => `${origin()}/auth/callback`;
   routes.get("/login", async (c) => {
@@ -150,7 +150,7 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
     const accountId = await save({ linearUserId: viewer.id, linearOrgId: organization.id, name: viewer.name, email: viewer.email }, {
       workspaceId: organization.urlKey, linearOrgId: organization.id, name: organization.name,
       team: teams?.nodes?.[0]?.key ?? "", teamLabels: false, credential,
-    }, observe && ((id, created, enabled) => observe(id, { id: organization.urlKey, organization: organization.id }, created, enabled)));
+    }, observe && ((id, created) => observe(id, { id: organization.urlKey, organization: organization.id }, created)));
     const exp = Math.floor(now() / 1000) + SESSION_S;
     const session = { accountId, email: viewer.email, exp, id: randomBytes(24).toString("base64url") };
     await setSignedCookie(c, SESSION_COOKIE, pack(session), auth.secret, cookie(SESSION_S));

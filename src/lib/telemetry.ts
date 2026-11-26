@@ -14,17 +14,12 @@ export const pageEvents = {
 export type PageEvent = keyof typeof pageEvents;
 
 let enabled = false;
-let optedIn = true;
 
 export function configureTelemetry(available: boolean) {
   enabled = available;
 }
 
-export function setUsageConsent(consent: boolean) {
-  optedIn = consent;
-}
-
-export const usageEnabled = () => enabled && optedIn;
+export const usageEnabled = () => enabled;
 
 export function pageEvent(event: PageEvent, workspace: string) {
   if (!usageEnabled() || !workspace) return;

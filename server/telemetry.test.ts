@@ -5,7 +5,7 @@ const env = {
   DD_API_KEY: "test-header-secret", WG_SESSION_SECRET: "test-session-secret-at-least-32-characters",
   WG_TELEMETRY_WORKSPACES: "work",
 };
-const scope = { tenant: "private-tenant", workspace: { id: "work", organization: "private-org" }, enabled: true };
+const scope = { tenant: "private-tenant", workspace: { id: "work", organization: "private-org" } };
 
 it("sends only permitted events and attributes, with stable hashes and a header-only key", async () => {
   const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
@@ -15,7 +15,7 @@ it("sends only permitted events and attributes, with stable hashes and a header-
   telemetry.emit("workspace_attached", extra, () => scope);
   // Runtime defense also rejects input from an untyped or outdated caller.
   telemetry.emit("workspace_attached", { kind: "Ada" } as unknown as { kind: "api_key" }, () => scope);
-  telemetry.emit("sign_in", {}, () => ({ ...scope, enabled: false }));
+  telemetry.emit("sign_in", {}, () => scope);
   telemetry.emit("sign_up", {}, () => ({ ...scope, workspace: { id: "personal", organization: "other" } }));
   await Promise.all(jobs);
 
@@ -30,13 +30,18 @@ it("sends only permitted events and attributes, with stable hashes and a header-
     }
   }
   expect(JSON.parse(metrics[1]!.body as string).series.map(({ tags }: { tags: string[] }) => tags))
-    .toEqual([["mode:service", "kind:api_key"], ["mode:service"]]);
-  const [first, second] = JSON.parse(logs[1]!.body as string);
+    .toEqual([["mode:service", "kind:api_key"], ["mode:service"], ["mode:service"]]);
+  const [first, second, signIn] = JSON.parse(logs[1]!.body as string);
   expect(first.tenant).toMatch(/^[a-f0-9]{64}$/);
   expect(first.workspace).toMatch(/^[a-f0-9]{64}$/);
   expect(second.tenant).toBe(first.tenant);
   expect(second.workspace).toBe(first.workspace);
   expect(second.kind).toBeUndefined();
+  expect(signIn).toMatchObject({ message: "sign_in", tenant: first.tenant, workspace: first.workspace });
+});
+
+it.each([{ DD_API_KEY: undefined }, { WG_TELEMETRY_WORKSPACES: "" }])("disables intake without complete operator settings (%j)", (overrides) => {
+  expect(createTelemetry({ ...env, ...overrides }, "service")).toBeNull();
 });
 
 it("drops the oldest events when the queue fills", async () => {

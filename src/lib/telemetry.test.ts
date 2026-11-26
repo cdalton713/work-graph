@@ -1,9 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { configureTelemetry, pageEvent, pageEvents, setUsageConsent } from "./telemetry.ts";
+import { configureTelemetry, pageEvent, pageEvents } from "./telemetry.ts";
 
 afterEach(() => {
   configureTelemetry(false);
-  setUsageConsent(true);
   vi.unstubAllGlobals();
 });
 
@@ -18,7 +17,7 @@ it.each(["node_opened", "share_dialog_opened"] as const)("sends only the %s even
     method: "POST", keepalive: true, headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ event, workspace: "work" }),
   });
-  setUsageConsent(false);
+  configureTelemetry(false);
   pageEvent(event, "work");
   expect(request).toHaveBeenCalledTimes(1);
 });

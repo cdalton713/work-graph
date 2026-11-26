@@ -16,7 +16,7 @@ type Connection = Account["connections"][number];
 export function accountUsage(account: Account, selected?: Pick<Connection, "workspaceId" | "linearOrgId"> | null): UsageScope | null {
   const workspace = selected === undefined ? account.connections.find(({ kind }) => kind === "oauth") : selected;
   return workspace ? {
-    tenant: account.id, workspace: { id: workspace.workspaceId, organization: workspace.linearOrgId }, enabled: account.sendUsageData,
+    tenant: account.id, workspace: { id: workspace.workspaceId, organization: workspace.linearOrgId },
   } : null;
 }
 type Scope = { accounts: Accounts; tenant: Tenant; session: Session };
@@ -118,9 +118,6 @@ export function accountRoutes(options: Options) {
   const attempt = attemptLimit(options);
   const { telemetry } = options;
 
-  function usage(accounts: Accounts, account: Account, workspace?: Pick<Connection, "workspaceId" | "linearOrgId">) {
-    return async () => account.sendUsageData && await accounts.usageConsent(account.id) ? accountUsage(account, workspace) : null;
-  }
   const routes = new Hono<{ Variables: Scope & { account: Account } }>();
 
   routes.use(async (c, next) => {
@@ -182,7 +179,7 @@ export function accountRoutes(options: Options) {
     const { id, human, connections, nameConfirmed, onboardingSkipped } = account;
     const { tokens, connected } = await accounts.tokenSummary(id);
     return c.json({
-      human, connections: connections.map(publicConnection), tokens, pageUrl: options.pageUrl, sendUsageData: account.sendUsageData,
+      human, connections: connections.map(publicConnection), tokens, pageUrl: options.pageUrl,
       onboarding: {
         name: nameConfirmed, workspaces: true, teams: connections.every(({ team }) => !!team),
         token: tokens.length > 0, connected, skipped: onboardingSkipped,
@@ -193,29 +190,18 @@ export function accountRoutes(options: Options) {
   routes.patch("/", async (c) => {
     const input = await body(c);
     const human = displayName(input.human);
-    const { sendUsageData } = input;
-    const { accounts, account } = c.var;
-    if ((input.human !== undefined || sendUsageData === undefined) && !human) {
+    if (!human) {
       return c.json({ error: "Enter a name of 1 to 40 characters without control characters" }, 400);
     }
-    if (sendUsageData !== undefined && typeof sendUsageData !== "boolean") {
-      return c.json({ error: "Send a boolean sendUsageData value" }, 400);
-    }
-    if (sendUsageData === undefined) await accounts.setHuman(account.id, human!);
-    else await accounts.setAccountSettings(account.id, human, sendUsageData);
-    if (sendUsageData === false) telemetry?.discard(account.id);
-    return c.json({
-      human: human ?? account.human,
-      ...(human ? { message: "Set the same human name in your wg config." } : {}),
-      ...(sendUsageData === undefined ? {} : { sendUsageData }),
-    });
+    await c.var.accounts.setHuman(c.var.account.id, human);
+    return c.json({ human, message: "Set the same human name in your wg config." });
   });
 
   routes.post("/tokens", async (c) => {
     const name = displayName((await body(c)).name);
     if (!name) return c.json({ error: "Enter a token name of 1 to 40 characters without control characters" }, 400);
     const { id, token } = await c.var.accounts.createToken(c.var.account.id, name);
-    telemetry?.emit("token_created", {}, usage(c.var.accounts, c.var.account), c.var.account.id);
+    telemetry?.emit("token_created", {}, () => accountUsage(c.var.account), c.var.account.id);
     c.header("Cache-Control", "no-store");
     return c.json({ id, name, token }, 201);
   });
@@ -224,7 +210,7 @@ export function accountRoutes(options: Options) {
     const id = c.req.param("id");
     if (!uuid.test(id)) return c.json({ error: "Coordinator token not found" }, 404);
     await c.var.accounts.revokeToken(c.var.account.id, id);
-    telemetry?.emit("token_revoked", {}, usage(c.var.accounts, c.var.account), c.var.account.id);
+    telemetry?.emit("token_revoked", {}, () => accountUsage(c.var.account), c.var.account.id);
     return c.json({ ok: true });
   });
 
@@ -237,18 +223,18 @@ export function accountRoutes(options: Options) {
       return c.json({ error: "Invalid setup progress" }, 400);
     }
     const { account, accounts } = c.var;
-    const resolve = usage(accounts, account);
+    const resolve = () => accountUsage(account);
     if (name !== undefined || skipped !== undefined) {
       await accounts.setOnboarding(account.id, name, skipped);
       if (name && !account.nameConfirmed) telemetry?.emit("onboarding_step", { step: "name" }, resolve, account.id);
       if (skipped && !account.onboardingSkipped) telemetry?.emit("onboarding_skipped", {}, resolve, account.id);
     }
-    if (telemetry && account.sendUsageData && (step === "workspaces" ||
+    if (telemetry && (step === "workspaces" ||
         (step === "teams" && account.connections.every(({ team }) => !!team)) ||
         (step === "setup" && (await accounts.tokenSummary(account.id)).tokens.length > 0))) {
       telemetry.emit("onboarding_step", { step }, resolve, account.id);
     }
-    if (complete && telemetry && account.sendUsageData && account.nameConfirmed && account.connections.every(({ team }) => !!team)) {
+    if (complete && telemetry && account.nameConfirmed && account.connections.every(({ team }) => !!team)) {
       const { tokens, connected } = await accounts.tokenSummary(account.id);
       if (connected && tokens.length) {
         let claimed: Promise<boolean> | undefined;
@@ -286,7 +272,7 @@ export function accountRoutes(options: Options) {
     });
     const saved = await accounts.readTenant(account.id);
     const connection = findConnection(saved?.connections ?? [], id);
-    telemetry?.emit("workspace_attached", { kind: connection.kind }, usage(accounts, account, connection), account.id);
+    telemetry?.emit("workspace_attached", { kind: connection.kind }, () => accountUsage(account, connection), account.id);
     return c.json({ connection: publicConnection(connection), teams }, 201);
   });
 
@@ -335,7 +321,7 @@ export function accountRoutes(options: Options) {
     const row = findConnection(account.connections, c.req.param("id"));
     if (row.kind !== "api_key") throw new LinearError("The sign-in workspace cannot be removed", 403);
     await accounts.removeConnection(account.id, row.id, true);
-    telemetry?.emit("workspace_removed", { kind: row.kind }, usage(accounts, account, row), account.id);
+    telemetry?.emit("workspace_removed", { kind: row.kind }, () => accountUsage(account, row), account.id);
     return c.json({ ok: true });
   });
   return routes;

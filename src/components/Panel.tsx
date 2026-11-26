@@ -8,6 +8,8 @@ import type { ClaimMark } from "../lib/claims";
 import { site } from "../lib/site";
 import { Asks } from "./Asks";
 import { Reply } from "./Reply";
+import { latestReplyPrompt } from "../lib/reply";
+import { parseOptions } from "../lib/options";
 
 const COMMENTS_MS = 60_000;
 const PRIORITY = ["No priority", "Urgent", "High", "Medium", "Low"];
@@ -80,6 +82,9 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
   const [note, setNote] = useState("");
   const noteWord = node.kind === "ops" ? "evidence" : node.kind === "decision" ? "answer" : null;
   const [comments, setComments] = useState<Comment[] | null>(null);
+  const waitingForReply = !locked && node.status === settings.waitStatus
+    && !issue.labels.some((label) => label.name === "answered");
+  const replyOptions = waitingForReply ? parseOptions(latestReplyPrompt(comments ?? []) ?? "").options : [];
 
   useEffect(() => {
     setDraft(null);
@@ -322,7 +327,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
             </article>
           ))}
           {!readOnly && (
-            <Reply key={issue.id} label="Comment" placeholder="Add a comment (Markdown). ⌘↵ sends it." send={async (body) => {
+            <Reply key={issue.id} options={replyOptions} label="Comment" placeholder="Add a comment (Markdown). ⌘↵ sends it." send={async (body) => {
               const created = await api.comment(issue.id, body, data.workspace, data.project.id);
               setComments((c) => [...(c ?? []), created]);
             }} />

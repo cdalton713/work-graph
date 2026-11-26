@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { agentReplyLine, agentReplyPending, applyAgentReplyResult, canReplyToAgent, inboxReply, latestReplyPrompt, type AgentReplyReceipt, type InboxReply } from "../lib/reply";
 import { Reply } from "./Reply";
+import { parseOptions } from "../lib/options";
 import { ownerWords } from "../lib/words";
 import { type OverviewData, type OverviewFilter, type OverviewRow, type YourMove, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
 import { ageText, type Signal } from "../lib/graph";
@@ -51,16 +52,18 @@ function InboxAnswer({ target, project, expanded, sent, onSent }: {
     return () => { live = false; };
   }, [expanded, issueId, project.workspace, project.id]);
 
+  const body = target.kind === "worker" ? target.ask.body : prompt?.body ?? "";
+  const { question, options } = parseOptions(sent ? "" : body);
   return (
     <>
       {target.kind === "worker"
-        ? <Rich text={target.ask.body} />
+        ? <Rich text={sent ? body : question} />
         : prompt?.error
           ? <p role="alert" className="sig-fg-stop">Could not load the last comment. {prompt.error}</p>
           : prompt?.body
-            ? <Rich text={prompt.body} />
+            ? <Rich text={sent ? body : question} />
             : !prompt && <p role="status">Loading the last comment…</p>}
-      {!sent && <Reply label={target.kind === "worker" ? "Reply to the worker" : "Send answer"}
+      {!sent && <Reply options={options} label={target.kind === "worker" ? "Reply to the worker" : "Send answer"}
         placeholder="Write a reply. ⌘↵ sends it." send={async (body) => {
           if (target.kind === "worker") {
             await api.reply(project.id, target.ask.id, body, project.workspace);

@@ -53,11 +53,20 @@ An Orca message, the end of `wg next --wait`, or a message from the human wakes 
 <!-- explain: human -->
 ### Never block on a prompt
 
-The coordinator often runs where nobody sees a prompt: a background session, an autostart run, or a session that the human left. A question that waits for an answer stops the whole effort, while workers report and the page still shows the coordinator as working.
+A prompt can stop an unattended run.
 
 - Inside the loop, never use `AskUserQuestion` or any other tool that waits for an answer. The one exception is the question for the autonomy level and the review effort at the start of a run in a foreground session (autonomy.md).
-- Ask through Linear: `wg move <plan-dir> <key> "Needs <human>"` with a comment that gives the question, the options with their costs, your recommendation, and the page link. A question that is not a node goes to a `decision` node (recovery.md "Replan"). Then act on the other lines and Wait. Their answer arrives as `do answer` (page) or as a status change.
+- Ask through Linear: `wg move <plan-dir> <key> "Needs <human>"` with a comment that gives the question and the page link. A question that is not a node goes to a `decision` node (recovery.md "Replan"). Then act on the other lines and Wait. Their answer arrives as `do answer` (page) or as a status change.
 - When a permission check refuses a tool call, do not retry it and do not work around it. Write the step that needs their approval to `Needs <human>` and continue with the other lines.
+For a choice, end that comment with a blank line and an `Options:` block, also for a `decision` node. Give two to four options, one line each. Mark one recommendation with its reason.
+
+```text
+When?
+
+Options:
+- Now: Start today. (Recommended: Checks passed.)
+- Later: Keep the schedule.
+```
 <!-- /explain -->
 
 <!-- explain: context -->

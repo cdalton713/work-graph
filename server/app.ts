@@ -18,7 +18,10 @@ import { parseCard, statusName } from "../src/lib/graph.ts";
 import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from "../src/lib/link.ts";
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal, sharedRoutes } from "./access.ts";
-import { readVapid, pushRoutes } from "./push.ts";
+import { configRecipient, sendNotice } from "./pushsend.ts";
+import { noticeKinds } from "../src/lib/types.ts";
+import { deviceId } from "./pushstore.ts";
+import { configuredVapid, pushRoutes } from "./push.ts";
 import { filePushStore, type PushStore } from "./pushstore.ts";
 import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
 import { isLinearIdentifier, planRoutes } from "./plans.ts";
@@ -188,7 +191,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   if (!tenants && auth && !readOnly && !linkToken) throw new Error("the sign-in needs WG_LINK_TOKEN on a full page");
   const configured = configTenants({ human: human ?? DEFAULT_HUMAN, workspaces, auth, linkToken, readOnly });
   const directory: Tenants = tenants ?? configured;
-  const vapid = readVapid(pushEnv);
+  const vapid = configuredVapid(pushEnv);
   const filePush = vapid && !tenants && stateDir && !isInside(stateDir, dist) ? filePushStore(stateDir) : undefined;
   const pushStore = tenants ? hostedPushStore : filePush ? () => filePush : undefined;
   const accountStore = tenants?.accountStore;
@@ -682,6 +685,42 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const selected = sharedScope.getStore();
     return selected ? Promise.resolve([selected]) : directory.sharedWorkspaces?.(tenant.id) ?? Promise.resolve([]);
   };
+  const pushLimit = attemptLimit({ redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX, now: clock }, "push-notices:", 60_000, 30);
+  function schedulePush(c: Context, storage: PushStore, account: string, notice: Parameters<typeof sendNotice>[3]) {
+    const job = sendNotice(storage, account, vapid!, notice).then(failures => {
+      if (failures) console.warn("Push delivery failed attempts:", failures);
+    }).catch(() => console.warn("Push delivery could not finish"));
+    waitUntil?.(job);
+    return c.json({ accepted: true }, 202);
+  }
+  app.post("/api/push/notices", bodyLimit({ maxSize: 8192 }), async c => {
+    c.header("Cache-Control", "no-store");
+    if (!vapid || !pushStore) return c.json({ error: "Push is not set up" }, 503);
+    const reason = linkRefusal("coordinator", name => c.req.header(name), rules);
+    if (reason || readOnly) return c.json({ error: reason ?? "Read only" }, 403);
+    const tenant = await directory.fromToken(c.req.header("authorization"));
+    if (!tenant) return c.json({ error: "Coordinator token required" }, 401);
+    const input = await c.req.json().catch(() => null);
+    if (!noticeKinds.includes(input?.kind) || typeof input.issue !== "string" || !/^[A-Z][A-Z0-9_]*-[0-9]+$/i.test(input.issue)
+      || typeof input.project !== "string" || !input.project || typeof input.workspace !== "string" || !input.workspace) {
+      return c.json({ error: "Name a workspace, project, issue and notice kind" }, 400);
+    }
+    if (tenants && input.recipient !== undefined) return c.json({ error: "The token identifies the recipient" }, 403);
+    const recipient = tenants ? { account: tenant.id } : configRecipient(auth?.owners ?? [], input.recipient);
+    if ("error" in recipient) return c.json({ error: recipient.error }, recipient.status);
+    if (await pushLimit(deviceId(recipient.account))) return c.json({ error: "Too many notices" }, 429);
+    let project;
+    if (input.workspace.startsWith("shared:")) {
+      const shared = await (pushSharedWorkspaces ?? directory.sharedWorkspaces)?.(tenant.id);
+      const entry = shared?.find(e => e.id === input.workspace && e.role === "collaborator" && e.projectId === input.project);
+      if (entry) project = { id: entry.projectId, name: entry.name };
+    } else if (tenant.workspaces.some(w => w.id === input.workspace && !w.needsKey)) {
+      project = await runInTenant(tenant, () => resolve(input.workspace, input.project));
+    }
+    if (!project) return c.json({ error: "Project not found" }, 404);
+    return schedulePush(c, await pushStore(), recipient.account, { project: project.name, projectId: project.id,
+      workspace: input.workspace, kind: input.kind, issue: input.issue });
+  });
   app.route("/api/push", pushRoutes(vapid?.publicKey, pushStore, async c => {
     const reason = refusal(c.req.method, name => c.req.header(name), rules);
     if (reason) return c.json({ error: reason }, 403);
@@ -697,7 +736,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       }
     }
     return tenants ? member.tenant.id : signed.email;
-  }, clock));
+  }, clock, async (c, account, storage, id) => {
+    if (await pushLimit(deviceId(account))) return c.json({ error: "Too many notices" }, 429);
+    if (!(await storage.list(account)).some(device => deviceId(device.endpoint) === id)) return c.json({ error: "Device not found" }, 404);
+    return schedulePush(c, storage, account, { device: id });
+  }));
   const unknownWorkspace = (id: string) => ({ error: `workspace ${id} is not configured` });
   const isAgentReply = (path: string) => /^\/api\/projects\/[^/]+\/agents\/[^/]+\/reply\/?$/.test(path);
   app.use(async (c, next) => {

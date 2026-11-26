@@ -73,7 +73,9 @@ page directory. The server keeps device subscriptions and account notice setting
 directory or VAPID keys, push is off.
 
 Use one P-256 VAPID key pair for the installation. Set `WG_VAPID_PUBLIC_KEY` and `WG_VAPID_PRIVATE_KEY`
-to the base64url keys, or set `WG_VAPID_FILE` to a private JSON file. To create that file on the server,
+to the base64url keys. Set `WG_VAPID_SUBJECT` to a contact email with the `mailto:` prefix or an HTTPS contact URL.
+Push stays off if the subject is missing or invalid. To keep the keys and subject in one mode-600 JSON file,
+set `WG_VAPID_FILE` to its path. Replace the example contact address below with your own. To create the file,
 run this command in a private directory. It creates a new file with mode 600 and prints no keys.
 
 ```sh
@@ -83,7 +85,7 @@ import { writeFileSync } from "node:fs";
 const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
 const { x, y, d } = privateKey.export({ format: "jwk" });
 const publicKey = Buffer.concat([Buffer.from([4]), Buffer.from(x, "base64url"), Buffer.from(y, "base64url")]);
-writeFileSync("vapid.json", JSON.stringify({ publicKey: publicKey.toString("base64url"), privateKey: d }),
+writeFileSync("vapid.json", JSON.stringify({ publicKey: publicKey.toString("base64url"), privateKey: d, subject: "mailto:push@example.com" }),
   { flag: "wx", mode: 0o600 });
 JS
 ```
@@ -91,6 +93,16 @@ JS
 Each account starts with notices on for decisions and ops steps, merge requests, worker questions, and
 other waits. The account can turn notices off or select the kinds to receive. Removing one device
 keeps the account settings and the other devices.
+
+A coordinator sends a move with `POST /api/push/notices`. Use the coordinator bearer token.
+Send a JSON object with `workspace`, `project`, `issue` (the issue identifier), and `kind`
+(`decision`, `merge`, `question`, or `wait`). In config mode, add `recipient` with the email
+of one configured owner. You can omit it if there is one owner. In service mode, omit it.
+The token identifies the account. The server reads the project name for the notice.
+
+The signed-in page can send a test to one registered device with
+`POST /api/push/devices/:id/test`. Both routes return 202 when they accept the request.
+Each account can request 30 notices per minute. A disabled notice produces no delivery.
 
 `wg` and the page server read `~/.config/work-graph/config.json` (or the file `WG_CONFIG`; the server also takes
 the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace with `LINEAR_API_KEY`, the human is

@@ -11,7 +11,19 @@ function encoded(value: unknown, size: number): value is string {
   return bytes.length === size && bytes.toString("base64url") === value;
 }
 
-export function readVapid(env: NodeJS.ProcessEnv): { publicKey: string; privateKey: string } | null {
+class InvalidSubject extends Error {}
+
+function contactSubject(subject: unknown): string {
+  if (typeof subject === "string" && !/\s/.test(subject)) {
+    if (/^mailto:[^@/?#]+@[^@/?#]+$/i.test(subject)) return subject;
+    const url = URL.parse(subject);
+    if (/^https:\/\//i.test(subject) && url?.protocol === "https:" && !url.username && !url.password) return subject;
+  }
+  throw new InvalidSubject();
+}
+
+export function readVapid(env: NodeJS.ProcessEnv) {
+  let subject = env.WG_VAPID_SUBJECT;
   let publicKey = env.WG_VAPID_PUBLIC_KEY;
   let privateKey = env.WG_VAPID_PRIVATE_KEY;
   if (!publicKey && !privateKey && env.WG_VAPID_FILE) {
@@ -19,7 +31,9 @@ export function readVapid(env: NodeJS.ProcessEnv): { publicKey: string; privateK
     try {
       const stat = fstatSync(fd);
       if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.size > 4096) throw new Error();
-      ({ publicKey, privateKey } = JSON.parse(readFileSync(fd, "utf8")));
+      const file = JSON.parse(readFileSync(fd, "utf8"));
+      ({ publicKey, privateKey } = file);
+      subject ??= file.subject;
     } catch { throw new Error("WG_VAPID_FILE must be a mode-600 file with a VAPID key pair"); }
     finally { closeSync(fd); }
   } else if (!publicKey && !privateKey) return null;
@@ -29,8 +43,19 @@ export function readVapid(env: NodeJS.ProcessEnv): { publicKey: string; privateK
     const pair = createECDH("prime256v1");
     pair.setPrivateKey(Buffer.from(privateKey, "base64url"));
     if (pair.getPublicKey().toString("base64url") !== publicKey) throw new Error();
-    return { publicKey, privateKey };
   } catch { throw new Error("Invalid VAPID key pair"); }
+  return { publicKey, privateKey, subject: contactSubject(subject) };
+}
+
+export function configuredVapid(env: NodeJS.ProcessEnv) {
+  try {
+    return readVapid(env);
+  } catch (error) {
+    const setting = !env.WG_VAPID_PUBLIC_KEY && !env.WG_VAPID_PRIVATE_KEY && env.WG_VAPID_FILE
+      ? "WG_VAPID_FILE" : error instanceof InvalidSubject ? "WG_VAPID_SUBJECT" : "WG_VAPID_PUBLIC_KEY and WG_VAPID_PRIVATE_KEY";
+    console.warn("Push is off. Check " + setting + ".");
+    return null;
+  }
 }
 
 function validEndpoint(value: unknown): value is string {
@@ -42,7 +67,8 @@ function validEndpoint(value: unknown): value is string {
 }
 
 export function pushRoutes(publicKey: string | undefined, store: (() => Promise<PushStore> | PushStore) | undefined,
-  authorize: (c: Context) => Promise<string | Response>, now: () => number) {
+  authorize: (c: Context) => Promise<string | Response>, now: () => number,
+  testDevice?: (c: Context, account: string, storage: PushStore, id: string) => Promise<Response>) {
   const routes = new Hono<{ Variables: { account: string; storage: PushStore } }>();
   routes.use(async (c, next) => {
     c.header("Cache-Control", "no-store");
@@ -54,6 +80,12 @@ export function pushRoutes(publicKey: string | undefined, store: (() => Promise<
     return next();
   });
   routes.use(bodyLimit({ maxSize: 8192 }));
+  routes.post("/devices/:id/test", async c => {
+    const id = c.req.param("id");
+    if (!/^[a-f0-9]{64}$/.test(id)) return c.json({ error: "Invalid device" }, 400);
+    if (!testDevice) return c.json({ error: "Push is not set up" }, 503);
+    return testDevice(c, c.var.account, c.var.storage, id);
+  });
   routes.get("/key", c => c.json({ publicKey }));
   routes.get("/devices", async c => {
     const devices = await c.var.storage.list(c.var.account);

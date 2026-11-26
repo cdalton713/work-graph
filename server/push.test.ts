@@ -3,15 +3,19 @@ import { mkdtemp, rm, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serializeSigned } from "hono/utils/cookie";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createApp } from "./app.ts";
 import { readVapid } from "./push.ts";
 import { filePushStore } from "./pushstore.ts";
+
+const transport = vi.hoisted(() => vi.fn().mockResolvedValue({}));
+vi.mock("web-push", () => ({ sendNotification: transport }));
 
 const key = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ format: "jwk" });
 const env = {
   WG_VAPID_PUBLIC_KEY: Buffer.concat([Buffer.from([4]), Buffer.from(key.x!, "base64url"), Buffer.from(key.y!, "base64url")]).toString("base64url"),
   WG_VAPID_PRIVATE_KEY: key.d!,
+  WG_VAPID_SUBJECT: "mailto:push@example.com",
 };
 const host = "page.example.com";
 const auth = { clientId: "client", clientSecret: "secret", secret: "a-session-secret-of-32-characters", owners: ["ada@example.com"], domains: ["example.com"] };
@@ -21,8 +25,8 @@ test("checks key file permissions before reading a pair", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wg-key-"));
   try {
     const file = join(dir, "keys");
-    await writeFile(file, JSON.stringify({ publicKey: env.WG_VAPID_PUBLIC_KEY, privateKey: env.WG_VAPID_PRIVATE_KEY }), { mode: 0o600 });
-    expect(readVapid({ WG_VAPID_FILE: file })?.publicKey).toBe(env.WG_VAPID_PUBLIC_KEY);
+    await writeFile(file, JSON.stringify({ publicKey: env.WG_VAPID_PUBLIC_KEY, privateKey: env.WG_VAPID_PRIVATE_KEY, subject: "https://example.com/contact" }), { mode: 0o600 });
+    expect(readVapid({ WG_VAPID_FILE: file })).toMatchObject({ publicKey: env.WG_VAPID_PUBLIC_KEY, subject: "https://example.com/contact" });
     await chmod(file, 0o644);
     expect(() => readVapid({ WG_VAPID_FILE: file })).toThrow();
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -30,8 +34,9 @@ test("checks key file permissions before reading a pair", async () => {
 
 test("push routes check setup, session, role, origin, and device ownership", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wg-push-"));
+  const deliveries: Promise<void>[] = [];
   const page = (pushEnv: NodeJS.ProcessEnv, stateDir: string) => createApp({ port: 443, tailnet: null, hosted: { host } }, {
-    dist: "/unused", team: "WG", auth, readOnly: false, stateDir, pushEnv, linkToken: "a-link-secret-of-at-least-32-characters", watchMs: 0,
+    dist: "/unused", team: "WG", auth, readOnly: false, waitUntil: job => deliveries.push(job), stateDir, pushEnv, linkToken: "a-link-secret-of-at-least-32-characters", watchMs: 0,
   });
   const signed = async (email: string) => {
     const data = Buffer.from(JSON.stringify({ email, hd: "example.com", exp: Date.now() / 1000 + 600 })).toString("base64url");
@@ -51,13 +56,26 @@ test("push routes check setup, session, role, origin, and device ownership", asy
           expect((await request(route, method, viewer)).status).toBe(enabled ? 403 : 503);
           expect((await request(route, method, "")).status).toBe(enabled ? 401 : 503);
         }
-        if (!enabled) continue;
+        if (!enabled) {
+          expect((await request("notices", "POST", "")).status).toBe(503);
+          expect((await request("devices/id/test", "POST", owner)).status).toBe(503);
+          continue;
+        }
         expect(await (await request("key", "GET", owner)).json()).toEqual({ publicKey: env.WG_VAPID_PUBLIC_KEY });
         expect((await request("devices", "POST", owner, {})).status).toBe(400);
         const device = { endpoint: "https://example.com/device", label: "Phone", keys: { auth: randomBytes(16).toString("base64url"), p256dh: env.WG_VAPID_PUBLIC_KEY } };
         expect((await request("devices", "POST", owner, device)).status).toBe(200);
         const { devices } = await (await request("devices", "GET", owner)).json();
         expect(devices).toEqual([{ label: "Phone", id: expect.any(String), time: expect.any(Number) }]);
+        expect((await request("devices/" + devices[0].id + "/test", "POST", owner)).status).toBe(202);
+        await Promise.all(deliveries);
+        expect(transport.mock.lastCall?.[2].vapidDetails.subject).toBe(env.WG_VAPID_SUBJECT);
+        await request("settings", "PUT", owner, { enabled: false, kinds: [] });
+        expect((await request("devices/" + devices[0].id + "/test", "POST", viewer)).status).toBe(403);
+        expect((await request("devices/" + devices[0].id + "/test", "POST", owner)).status).toBe(202);
+        expect((await request("devices/" + "0".repeat(64) + "/test", "POST", owner)).status).toBe(404);
+        await Promise.all(deliveries);
+        await request("settings", "PUT", owner, { enabled: true, kinds: ["decision", "merge", "question", "wait"] });
         expect((await request("devices/" + devices[0].id, "DELETE", owner)).status).toBe(200);
         expect(await (await request("devices", "GET", owner)).json()).toEqual({ devices: [] });
         expect(await (await request("settings", "GET", owner)).json()).toEqual({ enabled: true, kinds: ["decision", "merge", "question", "wait"] });
@@ -100,4 +118,85 @@ test("a shared collaborator registers in their own account and a shared viewer g
     app.link.stop();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("the notice route binds the token to its project, limits requests and returns before delivery finishes", async () => {
+  const account = { id: "member", human: "Ada", workspaces: [] };
+  const workspace = { id: "work", name: "Work", key: "", team: "WG", teamLabels: false };
+  const shared = { owner: { ...account, id: "owner" }, name: "Project", projectId: "proj", workspace };
+  let finish!: () => void;
+  let listed = "";
+  const pending = new Promise<void>(resolve => { finish = resolve; });
+  const jobs: Promise<void>[] = [];
+  const app = createApp({ port: 443, tailnet: null, hosted: { host } }, {
+    dist: "/unused", team: "WG", watchMs: 0, readOnly: false, pushEnv: env, now: () => 10,
+    hostedPushStore: () => ({ ...filePushStore("/unused"), list: async account => { listed = account; await pending; return []; } }),
+    waitUntil: job => { jobs.push(job); },
+    tenants: { fromToken: token => token === "Bearer test" ? account : null, fromSession: () => null,
+      byId: () => account, onChange: () => () => {}, sharedWorkspaces: async () => [{ ...shared, role: "collaborator", id: "shared:one" }] },
+  });
+  const request = (token: string, project = "proj", recipient?: string) => app.request("/api/push/notices", {
+    method: "POST", headers: { host, authorization: token, "content-type": "application/json" },
+    body: JSON.stringify({ workspace: "shared:one", project, kind: "merge", issue: "WG-1", recipient }),
+  });
+  try {
+    expect((await request("wrong")).status).toBe(401);
+    expect((await request("Bearer test", "other")).status).toBe(404);
+    expect((await request("Bearer test", "proj", "other")).status).toBe(403);
+    expect((await request("Bearer test")).status).toBe(202);
+    expect(listed).toBe(account.id);
+    expect(jobs).toHaveLength(1);
+    for (let i = 2; i < 30; ++i) expect((await request("Bearer test")).status).toBe(202);
+    expect((await request("Bearer test")).status).toBe(429);
+  } finally { finish(); await Promise.all(jobs); app.link.stop(); }
+});
+
+test.each([
+  [{ WG_VAPID_PUBLIC_KEY: "bad-public", WG_VAPID_PRIVATE_KEY: "bad-private" }, "WG_VAPID_PUBLIC_KEY and WG_VAPID_PRIVATE_KEY"],
+  [{ ...env, WG_VAPID_SUBJECT: undefined }, "WG_VAPID_SUBJECT"],
+  [{ ...env, WG_VAPID_SUBJECT: "http://example.com" }, "WG_VAPID_SUBJECT"],
+  [{ ...env, WG_VAPID_SUBJECT: "mailto:missing-address" }, "WG_VAPID_SUBJECT"],
+  [{ WG_VAPID_FILE: "/unreadable/key-file" }, "WG_VAPID_FILE"],
+])("bad VAPID settings leave the page available and push disabled", async (settings, label) => {
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const app = createApp({ port: 443, tailnet: null, hosted: { host } }, {
+      dist: "/unused", team: "WG", pushEnv: settings, stateDir: "/unused-state", watchMs: 0,
+    });
+    try {
+      const config = await app.request("/api/config", { headers: { host } });
+      expect(config.status).toBe(200);
+      expect((await config.json()).push).toBe(false);
+      expect(warning.mock.calls).toEqual([["Push is off. Check " + label + "."]]);
+      expect((await app.request("/api/push/notices", { method: "POST", headers: { host } })).status).toBe(503);
+    } finally { app.link.stop(); }
+  } finally { warning.mockRestore(); }
+});
+
+test("config owners have separate budgets shared by device tests and coordinator notices", async () => {
+  const token = "a-link-secret-of-at-least-32-characters";
+  const owners = ["ada@example.com", "owner@example.com"];
+  const dir = await mkdtemp(join(tmpdir(), "wg-recipients-"));
+  const app = createApp({ port: 443, tailnet: null, hosted: { host } }, {
+    dist: "/unused", team: "WG", auth: { ...auth, owners }, readOnly: false, stateDir: dir, pushEnv: env, linkToken: token, watchMs: 0,
+  });
+  const notice = (recipient?: string) => app.request("/api/push/notices", {
+    method: "POST", headers: { host, authorization: "Bearer " + token, "content-type": "application/json" },
+    body: JSON.stringify({ workspace: "missing", project: "project", kind: "merge", issue: "WG-1", recipient }),
+  });
+  try {
+    const missing = await notice();
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toEqual({ error: "name a recipient: this installation has several owners" });
+    expect((await notice("other@example.com")).status).toBe(403);
+    for (let i = 0; i < 30; i++) expect((await notice(owners[0])).status).toBe(404);
+    expect((await notice(owners[0])).status).toBe(429);
+    expect((await notice(owners[1])).status).toBe(404);
+    const data = Buffer.from(JSON.stringify({ email: owners[0], hd: "example.com", exp: Date.now() / 1000 + 600 })).toString("base64url");
+    const cookie = (await serializeSigned("__Host-wg_session", data, auth.secret, { secure: true, path: "/" })).split(";")[0];
+    const response = await app.request("/api/push/devices/" + "0".repeat(64) + "/test", {
+      method: "POST", headers: { host, cookie, origin: "https://" + host, "content-type": "application/json" },
+    });
+    expect(response.status).toBe(429);
+  } finally { app.link.stop(); await rm(dir, { recursive: true, force: true }); }
 });

@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { expect } from "@playwright/test";
@@ -81,4 +81,55 @@ test("precompressed assets match the final build and keep their cache headers", 
     if (setting === undefined) delete process.env.WG_PRECOMPRESSED_ASSETS;
     else process.env.WG_PRECOMPRESSED_ASSETS = setting;
   }
+});
+
+for (const [chunk, path, message] of [
+  ["Canvas", "/?project=fixture", "Could not load the graph."],
+  ["Panel", "/?project=fixture&issue=WG-1", "Could not load the issue panel."],
+  ["react-markdown", "/?project=panel&issue=WG-14", "Could not load Markdown formatting."],
+] as const) {
+  test(`a missing ${chunk} chunk keeps the app on screen`, async ({ page }, info) => {
+    test.skip(info.project.name !== "desktop-1440x900");
+    await page.route(new RegExp(`/assets/${chunk}-[^/]+\\.js$`), (route) => route.fulfill({ status: 404 }));
+    await page.goto(path);
+    const error = page.getByRole("alert").filter({ hasText: message }).first();
+    await expect(error.getByRole("button", { name: "Reload" })).toBeVisible();
+    await expect(page.locator(".bar")).toBeVisible();
+    if (chunk === "react-markdown") {
+      await expect(page.locator(".panel .rich").first()).toContainText("First column");
+    }
+  });
+}
+
+test("a missing layout worker shows an error and can retry", async ({ page }, info) => {
+  test.skip(info.project.name !== "desktop-1440x900");
+  const assets = new URL("../dist/assets/", import.meta.url);
+  const workers = await Promise.all((await readdir(assets))
+    .filter((name) => /^elk-worker\.min-.*\.js$/.test(name))
+    .map(async (name) => ({ name, size: (await stat(new URL(name, assets))).size })));
+  // The worker script is larger than the generated module that exports its URL.
+  const worker = `**/assets/${workers.sort((a, b) => b.size - a.size)[0].name}`;
+  await page.route(worker, (route) => route.fulfill({ status: 404 }));
+  await page.goto("/?project=fixture");
+  const error = page.getByRole("alert").filter({ hasText: "The layout worker failed." });
+  await expect(error.getByRole("button", { name: "Reload" })).toBeVisible();
+  await expect(page.locator(".bar")).toBeVisible();
+  await page.unroute(worker);
+  await page.getByRole("button", { name: "Retry layout" }).click();
+  await expect(page.locator(".react-flow")).toBeVisible();
+  await expect(error).toHaveCount(0);
+});
+
+test("the page server caches fonts and honors their validators", async ({ request, baseURL }, info) => {
+  test.skip(info.project.name !== "desktop-1440x900");
+  const font = new URL("/fonts/plex-sans-400-latin.woff2", baseURL).href;
+  const reply = await request.get(font);
+  expect(reply.ok()).toBe(true);
+  expect(reply.headers()["cache-control"]).toBe("public, max-age=86400");
+  const tag = reply.headers().etag;
+  expect(tag).toBeTruthy();
+  const cached = await request.get(font, { headers: { "If-None-Match": tag } });
+  expect(cached.status()).toBe(304);
+  expect(cached.headers().etag).toBe(tag);
+  expect(cached.headers()["cache-control"]).toBe("public, max-age=86400");
 });

@@ -11,7 +11,7 @@ import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
 import { PullRefresh } from "./components/PullRefresh";
-import { CopyButton, Hint, Lamp, Picker } from "./components/ui";
+import { CopyButton, Hint, Lamp, LazyBoundary, LoadError, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type GNode, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
 import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
@@ -163,6 +163,8 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const [graphTrace, setGraphTrace] = useState<{ project: string; id: string } | null>(null);
   const [focus, setFocus] = useState<{ id: string; tick: number } | null>(null);
   const [placed, setPlaced] = useState<{ key: string; layout: Layout } | null>(null);
+  const [layoutError, setLayoutError] = useState<{ key: string; message: string } | null>(null);
+  const [layoutAttempt, setLayoutAttempt] = useState(0);
   const pending = useRef(0);
   // The version of the graph that the server sent last. An edit changes the graph on screen, so it clears this.
   // While the graph is stale, the page asks without the version: a fresh graph with the same version must replace it.
@@ -495,9 +497,12 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   useEffect(() => {
     if (!graph || !data) return;
     let live = true;
-    runLayout(graph.nodes, edges, data.milestones).then((l) => live && setPlaced({ key, layout: l })).catch((e) => live && setError(`layout: ${e.message}`));
+    setLayoutError(null);
+    runLayout(graph.nodes, edges, data.milestones)
+      .then((l) => live && setPlaced({ key, layout: l }))
+      .catch((e) => live && setLayoutError({ key, message: e.message }));
     return () => { live = false; };
-  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [key, layoutAttempt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selected = useMemo(() => {
     const wanted = query.get("issue");
@@ -946,13 +951,29 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
           asked={asked} atPrompt={atPrompt}
           live={new Map(link.progress.flatMap((p) => { const job = liveJob(p); return job && p.issue ? [[p.issue, job] as [string, string]] : []; }))} />}
         {graph && data && !graph.nodes.length && <div className="blank">{claimFilter !== "all" ? "No issues match this runner filter." : openOnly ? "No open issues. Turn off “Open issues only” under View to see all." : "This project has no issues."}</div>}
-        {graph && placed && graph.nodes.length > 0 && (
+        {graph && layoutError?.key === key && (
+          <div className="blank">
+            <LoadError message={`Could not lay out the graph. ${layoutError.message}`} />
+            <button type="button" onClick={() => setLayoutAttempt((attempt) => attempt + 1)}>Retry layout</button>
+          </div>
+        )}
+        {graph && placed && layoutError?.key !== key && graph.nodes.length > 0 && (
+          <LazyBoundary fallback={<div className="blank"><LoadError message="Could not load the graph." /></div>}>
           <Suspense fallback={<div className="blank">Loading graph…</div>}>
           <Canvas graph={graph} marks={marks} now={now} edges={edges} layout={placed.layout} selectedId={narrow ? (graphTrace?.project === openKey ? graphTrace.id : null) : selected?.id ?? null} hoverId={hoverId} statusFilter={statusFilter}
             focus={focus} showMap={map} onSelect={select} onHover={setHoverId} />
           </Suspense>
+          </LazyBoundary>
         )}
         {selected && full && data && (
+          <LazyBoundary fallback={
+            <aside className="panel">
+              <div className="panel-head">
+                <LoadError message="Could not load the issue panel." />
+                <button type="button" className="ghost" aria-label="Close panel" onClick={() => select(null)}>✕</button>
+              </div>
+            </aside>
+          }>
           <Suspense fallback={
             <aside className="panel" aria-busy="true">
               <div className="panel-head">
@@ -972,6 +993,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             refresh={installed ? refreshScreen : undefined} refreshing={busy}
             onGo={pick} />
           </Suspense>
+          </LazyBoundary>
         )}
         {narrow && full && <ViewSwitch view={view} onChange={showView} />}
       </main>

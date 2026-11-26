@@ -436,6 +436,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // Vite puts a hash of the content in each name under assets/, so such a file never changes.
     const fixed = c.req.path.startsWith("/assets/") && c.res.status === 200;
     c.header("Cache-Control", fixed ? "public, max-age=31536000, immutable" : "no-store");
+    if (c.req.path.startsWith("/fonts/") && c.res.headers.get("ETag") &&
+      (c.res.status === 304 || c.res.headers.get("Content-Type") === TYPES[".woff2"])) {
+      c.header("Cache-Control", "public, max-age=86400");
+    }
   });
   // Static files and JSON answers of any size, when the client accepts gzip. Every client that accepts Brotli
   // or deflate accepts gzip too. The 1 KiB minimum of `compress` applies only to a reply with a Content-Length,
@@ -1471,6 +1475,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const body = await readFile(type ? file : join(dist, "index.html")).catch(() => null);
     if (!body) return c.text("not found (run `pnpm build`)", 404);
     const contentType = type ?? TYPES[".html"];
+    if (contentType === TYPES[".woff2"] && c.req.path.startsWith("/fonts/")) {
+      const tag = `"${createHash("sha256").update(body).digest("hex")}"`;
+      const have = c.req.header("if-none-match")?.split(",").map((value) => value.trim().replace(/^W\//, ""));
+      if (have?.includes(tag) || have?.includes("*")) return c.body(null, 304, { ETag: tag });
+      return c.body(body, 200, { "Content-Type": contentType, ETag: tag });
+    }
     if (contentType !== TYPES[".html"]) return c.body(body, 200, { "Content-Type": contentType });
     // The page has `no-store`; the ETag lets a client that has it skip the body. The tag is weak, so that the
     // gzip and the plain reply have the same validator, and the 304 has the same ETag and Vary as the 200.

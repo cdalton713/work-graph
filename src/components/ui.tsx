@@ -1,4 +1,4 @@
-import { lazy, Suspense, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { Component, lazy, Suspense, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Components, Options as MarkdownOptions } from "react-markdown";
 import { useCoarse, useHover, useNarrow } from "../lib/screen";
@@ -170,6 +170,24 @@ export function Picker(props: {
   </div>;
 }
 
+export class LazyBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+export function LoadError({ message }: { message: string }) {
+  return <div role="alert">
+    {message} <button type="button" onClick={() => window.location.reload()}>Reload</button>
+  </div>;
+}
+
 const Markdown = lazy(async () => {
   const [{ default: RenderMarkdown }, { default: gfm }] = await Promise.all([
     import("react-markdown"),
@@ -209,7 +227,12 @@ export function Rich({ text, linkHints }: { text: string; linkHints?: boolean })
     at = m.index + m[0].length;
   }
   if (at < text.length) parts.push(<Markdown key={at} components={components}>{text.slice(at)}</Markdown>);
-  return <div className="rich"><Suspense fallback={null}>{parts}</Suspense></div>;
+  const plain = <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{text}</p>;
+  return <div className="rich">
+    <LazyBoundary fallback={<>{plain}<LoadError message="Could not load Markdown formatting." /></>}>
+      <Suspense fallback={plain}>{parts}</Suspense>
+    </LazyBoundary>
+  </div>;
 }
 
 /**

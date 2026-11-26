@@ -195,7 +195,7 @@ It does not confirm that the agent read it. If delivery is unconfirmed, check Or
 issue. A reply to the coordinator has no issue comment.
 
 The Overview shows one state and one reason for each project. It shows stalled projects first, then
-projects that wait on you, then moving projects, then projects that are idle by design. Each switch
+projects that wait on you, then moving projects, then projects in the “Not running” state. Each switch
 shows a count for one state. Select one or more states to filter the projects. The URL keeps the selection.
 
 Select an inbox question to read it and reply in place. Use the arrow keys to move between focused inbox rows.

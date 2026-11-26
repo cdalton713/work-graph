@@ -52,6 +52,110 @@ test.afterEach(async ({ page }) => {
   await page.unrouteAll({ behavior: "ignoreErrors" });
 });
 
+test("phone overview shows the scoped project before secondary filters", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("phone"), "Requires the phone layout");
+  await page.route("**/api/overview*", async (route) => {
+    const response = await route.fetch();
+    const data: OverviewData = await response.json();
+    const project = data.projects.find(({ id }) => id === "fixture")!;
+    const summary = data.summaries.find(({ id }) => id === project.id)!;
+    project.initiative = "Example initiative";
+    Object.assign(summary, { you: [], paused: true });
+    data.projects = [project, { ...project, id: "closed", name: "Closed project", statusType: "completed" }];
+    data.summaries = [summary];
+    data.workspaces[0].name = "Build workspace";
+    data.workspaces.push({ ...data.workspaces[0], id: "other", name: "Other workspace" });
+    await route.fulfill({ response, json: data });
+  });
+  await page.goto("/?initiative=Example+initiative&state=idle");
+  const inbox = page.getByRole("region", { name: "Inbox" });
+  const filters = page.getByRole("button", { name: "Filters", exact: true });
+  const workspace = page.getByRole("group", { name: "Workspace", exact: true });
+  const states = page.getByRole("group", { name: "Project state" });
+  const title = page.getByText("Example project", { exact: true });
+  await expect(inbox.getByText("No inbox items in this scope.")).toBeVisible();
+  await expect(inbox.getByRole("group", { name: "Inbox category" })).toHaveCount(0);
+  await expect(filters).toHaveAttribute("aria-expanded", "false");
+  await expect(workspace).toBeHidden();
+  await expect(title).toBeInViewport({ ratio: 1 });
+  expect(await page.locator(".stage").evaluate((el) => [el.scrollLeft, el.scrollTop])).toEqual([0, 0]);
+  expect(await page.evaluate(() => [window.scrollX, window.scrollY])).toEqual([0, 0]);
+  await expect(page.getByRole("region", { name: "Example initiative" }).getByText("Not running", { exact: true })).toHaveCount(2);
+  const filterBounds = await bounds(filters);
+  expect(filterBounds.height).toBeGreaterThanOrEqual(44);
+  expect(filterBounds.y).toBeCloseTo((await bounds(page.getByRole("searchbox"))).y, 0);
+
+  await filters.press("Enter");
+  await expect(filters).toBeFocused();
+  await expect(filters).toHaveAttribute("aria-expanded", "true");
+  const idle = states.getByRole("button", { name: "Not running 1" });
+  await expect(idle).toHaveAttribute("aria-pressed", "true");
+  const moving = states.getByRole("button", { name: "Moving 0" });
+  await moving.click();
+  await idle.click();
+  await expect(title).toBeHidden();
+  await idle.click();
+  await moving.click();
+  await expect(title).toBeVisible();
+
+  const initiative = page.getByTitle("Show one initiative");
+  await expect(initiative).toHaveText(/Example initiative/);
+  await initiative.click();
+  await page.getByRole("option", { name: "No initiative", exact: true }).click();
+  await expect(title).toBeHidden();
+  await initiative.click();
+  await page.getByRole("option", { name: "Example initiative", exact: true }).click();
+  await expect(title).toBeVisible();
+  await workspace.getByRole("button", { name: "Build workspace" }).click();
+  await page.getByRole("button", { name: "Closed 1" }).click();
+  await expect(page.getByText("Closed project", { exact: true })).toBeVisible();
+  expect(await page.locator(".stage").evaluate((el) => el.scrollWidth - el.clientWidth)).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
+  await page.reload();
+  await expect(filters).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByText("Build workspace · Example initiative · Not running · Includes closed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Closed project", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+  await expect(filters).toBeFocused();
+  await expect(page.getByText("Closed project", { exact: true })).toBeHidden();
+  await expect(page).not.toHaveURL(/[?&](initiative|state)=/);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Clear filters", exact: true })).toBeHidden();
+});
+
+test("phone filters show stale workspace and initiative selections while expanded", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("phone"), "Requires the phone layout");
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("wg-overview")) {
+      localStorage.setItem("wg-overview", JSON.stringify({ workspace: "archived-workspace" }));
+    }
+  });
+  await page.route("**/api/overview*", async (route) => {
+    const response = await route.fetch();
+    const data: OverviewData = await response.json();
+    for (const project of data.projects) project.initiative = null;
+    await route.fulfill({ response, json: data });
+  });
+  await page.goto("/?initiative=Archived");
+  const filters = page.getByRole("button", { name: "Filters", exact: true });
+  const scope = page.getByText("archived-workspace · Archived", { exact: true });
+  await expect(scope).toBeVisible();
+  await filters.click();
+  await expect(filters).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTitle("Show one initiative")).toHaveCount(0);
+  await expect(page.getByRole("group", { name: "Workspace", exact: true })).toHaveCount(0);
+  await expect(scope).toBeVisible();
+
+  await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+  await expect(filters).toBeFocused();
+  await expect(scope).toBeHidden();
+  await expect(page).not.toHaveURL(/[?&]initiative=/);
+  await expect(page.locator(".ov-title").getByText("Example project", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.locator(".ov-title").getByText("Example project", { exact: true })).toBeVisible();
+});
+
 test("overview controls fit the screen and show their details", async ({ page }, testInfo) => {
   const desktop = testInfo.project.name.startsWith("desktop");
   const phone = testInfo.project.name.startsWith("phone");
@@ -78,6 +182,7 @@ test("overview controls fit the screen and show their details", async ({ page },
   const linear = overview.getByRole("link", { name: "Linear" });
   const find = overview.getByRole("searchbox");
   const filters = overview.locator(".ov-filters");
+  if (phone) await filters.getByRole("button", { name: "Filters", exact: true }).tap();
   const stage = page.locator(".stage");
 
   for (const width of new Set([page.viewportSize()!.width, ...(phone || desktop ? [] : [768, 1024])])) {
@@ -96,7 +201,7 @@ test("overview controls fit the screen and show their details", async ({ page },
       expect((await bounds(linear)).x - (left.x + left.width)).toBeGreaterThanOrEqual(8);
       await expect(copy).toHaveCSS("opacity", "1");
       await expect(find).toHaveCSS("font-size", "16px");
-      expect((await bounds(find)).width).toBeCloseTo((await bounds(filters)).width, 0);
+      if (!phone) expect((await bounds(find)).width).toBeCloseTo((await bounds(filters)).width, 0);
     }
   }
 
@@ -155,6 +260,7 @@ test("a picker sheet keeps arrow keys out of the overview", async ({ page }, tes
   test.skip(!testInfo.project.name.startsWith("phone"), "Requires a touch phone");
   await screens.overview(page);
   const overview = page.locator(".overview");
+  await overview.getByRole("button", { name: "Filters", exact: true }).tap();
   const active = overview.locator(".ov-row.is-active");
   const initial = await active.locator(".ov-title").textContent();
   await overview.getByRole("button", { name: "All initiatives" }).tap();
@@ -164,6 +270,44 @@ test("a picker sheet keeps arrow keys out of the overview", async ({ page }, tes
   await page.getByRole("dialog").getByRole("button", { name: "Close" }).tap();
   await page.keyboard.press("ArrowDown");
   await expect(active.locator(".ov-title")).not.toHaveText(initial!);
+});
+
+test("a diagonal touch drag scrolls the installed overview inbox categories", async ({ page, context }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("phone-320"), "Requires the smallest touch viewport");
+  await page.addInitScript(() => Object.defineProperty(navigator, "standalone", { value: true }));
+  await screens.overview(page);
+  const categories = page.getByRole("group", { name: "Inbox category" });
+  const questions = categories.getByRole("button", { name: "Questions 0" });
+  const { x, y, width, height } = await bounds(questions);
+  const client = await context.newCDPSession(page);
+  let navigations = 0;
+  page.on("domcontentloaded", () => { navigations++; });
+  expect(await page.locator(".stage").evaluate((el) => el.scrollTop)).toBe(0);
+  await categories.evaluate((el) => {
+    document.addEventListener("touchmove", (event) => {
+      if (event.defaultPrevented && event.target instanceof Node && el.contains(event.target)) {
+        el.setAttribute("data-drag-intercepted", "");
+      }
+    }, { passive: true });
+  });
+  const drag = async (fromX: number) => {
+    const point = { x: Math.round(fromX), y: Math.round(y + height / 2) };
+    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    for (const [dx, dy] of [[12, 2], [30, 4], [65, 6], [110, 8], [145, 10]]) {
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchMove", touchPoints: [{ x: point.x - dx, y: point.y + dy }],
+      });
+    }
+    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  };
+  await drag(x + width - 8);
+  await expect.poll(() => categories.evaluate((el) => el.scrollLeft)).toBeGreaterThan(40);
+  const rail = await bounds(categories);
+  await drag(rail.x + rail.width - 12);
+  await expect(categories.getByRole("button", { name: /Other actions/ })).toBeInViewport({ ratio: 1 });
+  await expect(categories).not.toHaveAttribute("data-drag-intercepted");
+  expect(navigations).toBe(0);
+  expect(await page.locator(".stage").evaluate((el) => el.scrollTop)).toBe(0);
 });
 
 test("a pull from the top refreshes the installed overview", async ({ page, context }, testInfo) => {
@@ -219,7 +363,7 @@ test("a pull keeps the unsent inbox reply", async ({ page, context }, testInfo) 
   expect(navigations).toBe(0);
 });
 
-test("the inbox keeps questions in scope while searching projects", async ({ page }) => {
+test("the inbox keeps questions in scope while searching projects", async ({ page }, testInfo) => {
   const now = new Date();
   const old = new Date(now.getTime() - 30 * 60_000).toISOString();
   const ask: Ask = { id: "example-ask", from: "worker", key: null, issue: null, body: "Can the draft go ahead?", at: old };
@@ -275,10 +419,20 @@ test("the inbox keeps questions in scope while searching projects", async ({ pag
   const stalls = filters.getByRole("button", { name: "Possible stalls 1" });
   const actions = filters.getByRole("button", { name: "Other actions 1" });
   await expect(inbox.locator(".inbox-open").first()).toContainText("Worker silent");
+  if (testInfo.project.name.startsWith("phone")) {
+    const first = await bounds(questions);
+    for (const category of [stalls, actions]) {
+      const size = await bounds(category);
+      expect(size.y).toBe(first.y);
+      expect(size.height).toBeGreaterThanOrEqual(44);
+    }
+    expect(await page.locator(".stage").evaluate((el) => el.scrollWidth - el.clientWidth)).toBe(0);
+  }
   await page.getByRole("searchbox").fill("Extra project 9");
   await expect(page.locator(".ov-row")).toHaveCount(1);
   await expect(page.locator(".ov-row")).toContainText(/Last activity.*30 min ago/);
   await questions.click();
+  await expect(questions).toHaveAttribute("aria-pressed", "true");
   await expect(inbox.getByText("Which build?")).toBeVisible();
   await expect(inbox.getByText("WG-92")).toBeVisible();
   const visibleRows = inbox.locator(".inbox-row:not([hidden]) .inbox-open");
@@ -317,8 +471,8 @@ test("incomplete summaries cannot give an all-clear headline", async ({ page }) 
   });
   await screens.overview(page);
   await expect(page.locator(".ov-sum")).toContainText("Project data incomplete");
-  await page.getByRole("button", { name: "Questions 0" }).click();
-  await expect(page.getByText(/No questions in this scope/)).toBeVisible();
+  const inbox = page.getByRole("region", { name: "Inbox" });
+  await expect(inbox.getByRole("status")).toHaveText("No inbox items in this scope. Project data is incomplete.");
 });
 
 test("collapsed agents keep their inline reply and delivery receipt", async ({ page }) => {

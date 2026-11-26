@@ -39,7 +39,7 @@ Each is a project label: `wg autonomy <plan-dir> [<level>]` or `wg review-effort
 
 ## Linear workspace
 
-Shared plans: [collaboration](references/collab.md).
+Shared plans and `wg join`: [collaboration](references/collab.md).
 
 `wg` uses the key for `effort.workspace`. Retry only when safe. After a failed mutation, read the issue before you run the command again. On the Free plan, `wg` archives settled issues. Read setup.md "Linear workspace" before step 0.
 

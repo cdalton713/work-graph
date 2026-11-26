@@ -29,6 +29,10 @@ See [Run the hosted service](../../../README.md#run-the-hosted-service) for serv
 
 Select or create the `<slug>-core` coordinator worktree through Orca before writing the plan: `orca worktree list --json`, else `orca worktree create --name <slug>-core --branch <prefix><slug>-core --no-parent --base-branch origin/<target> --setup skip --json`. It is the only top-level workspace of the effort; every lane parent, spike, and integration workspace nests under it. `wg load --apply` gives it the name of the Linear project as its display name in Orca; its path and its branch stay `<slug>-core`, so find it by its path. Reuse it for the core lane parent when the names match. Keep `PLAN.md`, `plan.json`, `keymap.json`, `journal.jsonl`, `journal.1.jsonl`, `evidence/`, and `specs/` together at its root. Do not commit them unless the human asks; never commit the journal files. If `keymap.json` is lost, follow recovery.md "Failure" before any `wg load --apply`.
 
+To set up a coordinator worktree for a shared project, use `wg join`.
+Follow [Join as a collaborator](collab.md#join-as-a-collaborator) for the page
+token, Linear key, and worktree steps.
+
 When moving an existing setup, copy all of them, check that `wg status <new-dir>` prints the same issues, then delete the old copies.
 
 ## Linear

@@ -2,7 +2,8 @@
 
 As the owner, run `wg login` for the workspace page. Load the effort into
 Linear with `wg load <plan-dir> --apply`. Then run `wg share <plan-dir>`.
-This creates version 1 on the page. Create the invitation on the page.
+Set `effort.team` in the plan so a collaborator can find the Linear team.
+The share creates version 1 on the page. Create the invitation on the page.
 
 The local `collab` entry in `keymap.json` tells `wg` which page, workspace,
 project, and version to use. An owner sends the workspace ID. A collaborator
@@ -26,6 +27,32 @@ issue and card IDs, branches, and PR numbers. Before a pull, `wg` checks
 the plan and verifies new or changed issue and milestone IDs in Linear.
 The run rows, card hashes, and status document hash and time stay local.
 `PLAN.md` stays local too.
+
+## Join as a collaborator
+
+1. Open the invitation link in a browser, sign in, and press **Join**.
+2. Make a coordinator token in **Settings**. Run `wg login <page-url>` and paste
+   your token at the prompt. Use the page address in CLI commands. Keep the
+   invitation link in the browser.
+3. Set the local config's `human` to your display name on the page. Run
+   `wg join <page-url>` in your checkout. Use `--repo <path>` to select a
+   checkout and `--project <name-or-id>` to select one of several shared projects.
+   Use the printed `shared:<id>` when two projects have the same name.
+   A viewer needs a collaborator invitation to run `wg join`.
+4. If `wg join` asks for a Linear key, follow the printed config and key
+   instructions. Use your own key. If the key cannot read the team, use
+   **Request access** at the page address that the command prints. Run
+   `wg join` again after you get access.
+5. In Orca, `wg join` creates the coordinator worktree or uses an existing
+   clean one. Outside Orca, follow the printed commands to create it. The
+   command pulls the plan and shared keymap, adds a local project heading,
+   runs preflight, and prints the first `wg next` result. Set up test commands
+   and other machine settings for your own checkout.
+
+The owner handles merge points, ship points, and deploys. To stop local
+collaboration, run `wg leave <plan-dir>`. It removes the local collaboration
+record and warns if it cannot release a claim. Those claims end when their
+leases expire. To end your membership, use the page.
 
 ## Read and edit
 

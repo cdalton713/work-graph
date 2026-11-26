@@ -379,7 +379,7 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
   }
 }
 
-async function pages<T>(query: string, variables: Record<string, unknown>, pick: (data: Data) => Connection<T>): Promise<T[]> {
+export async function pages<T>(query: string, variables: Record<string, unknown>, pick: (data: Data) => Connection<T>): Promise<T[]> {
   const out: T[] = [];
   let after: string | null = null;
   do {

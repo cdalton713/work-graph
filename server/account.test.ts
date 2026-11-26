@@ -38,6 +38,99 @@ it("returns 404 for every account route in config mode", async () => {
 });
 
 databaseSuites((open) => {
+  it("creates a private sub-team and verifies the same team after a lost create response", async () => {
+    const t = await setup();
+    try {
+      const { cookie } = await t.owner("owner");
+      const { connections } = await (await t.request(root, cookie)).json();
+      const path = attach + "/" + connections[0].id + "/teams";
+      const parent = { id: "parent", key: "ORG" };
+      let team: Record<string, unknown> | undefined;
+      let creates = 0;
+      vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+        const { query, variables } = JSON.parse(String(init.body));
+        let data;
+        if (query.includes("teamCreate(")) {
+          creates++;
+          expect(variables.i.parentId).toBe(parent.id);
+          team = { id: "child", key: "WG", name: "Work", visibility: "public", parent };
+          return new Response(null, { status: 503 });
+        } else if (query.includes("teamUpdate(")) {
+          expect(variables.i).toEqual({ private: true });
+          team!.visibility = "private";
+          data = { teamUpdate: { success: true } };
+        } else if (query.includes("includeArchived")) {
+          data = { team: { issues: { nodes: [] }, projects: { nodes: [] } } };
+        } else {
+          const found = variables.key === "ORG" ? parent : team;
+          data = { teams: { nodes: found ? [found] : [] } };
+        }
+        return Response.json({ data });
+      });
+      const input = { key: "WG", name: "Work", parent: "ORG", private: true };
+      const refused = await t.request(path, cookie, "POST", input);
+      expect(refused.status).toBe(409);
+      expect((await refused.json()).error).toContain("wg setup");
+      const retry = await t.request(path, cookie, "POST", input);
+      expect(await retry.json()).toMatchObject({ key: "WG", name: "Work", private: true, parent: "ORG" });
+      expect(creates).toBe(1);
+    } finally { await t.close(); }
+  });
+
+  it("reads contract items and adds only missing items in their configured scopes", async () => {
+    const t = await setup();
+    try {
+      const { cookie } = await t.owner("owner");
+      const { connections, human } = await (await t.request(root, cookie)).json();
+      const path = attach + "/" + connections[0].id + "/teams/WG/setup";
+      const states = [{ name: "ready", type: "unstarted" }, { name: "Done", type: "started" }];
+      const labels: { kind: string; id: string; name: string; team: { id: string } | null;
+        parent: { id: string } | null; isGroup: boolean; groupType?: string }[] = [];
+      const writes: string[] = [];
+      const page = (nodes: unknown[]) => ({ nodes, pageInfo: { hasNextPage: false } });
+      vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+        const { query, variables } = JSON.parse(String(init.body));
+        let data;
+        if (query.includes("teams(filter")) {
+          data = { teams: page([{ id: "team", key: "WG", name: "Work", visibility: "public", triageEnabled: true }]) };
+        } else if (query.includes("states(first")) {
+          data = { team: { states: page(states) } };
+        } else if (query.includes("Create(input:")) {
+          const kind = query.match(/(\w+)Create\(input:/)[1];
+          const input = variables.i;
+          const id = "item-" + writes.length;
+          writes.push(input.name);
+          if (kind === "workflowState") states.push(input);
+          else labels.push({ ...input, id, kind, isGroup: !!input.isGroup,
+            team: input.teamId ? { id: input.teamId } : null, parent: input.parentId ? { id: input.parentId } : null });
+          data = { [kind + "Create"]: { success: true, [kind]: { id } } };
+        } else {
+          const kind = query.includes("issueLabels(") ? "issueLabel" : "projectLabel";
+          const teamId = variables.f.team.id?.eq;
+          data = { [kind + "s"]: page(labels.filter(l => l.kind === kind && l.team?.id === teamId)) };
+        }
+        return Response.json({ data });
+      });
+      const initial = await (await t.request(path, cookie)).json();
+      expect(initial.statuses).toEqual(expect.arrayContaining([
+        { name: "Ready", state: "warn" }, { name: "Done", state: "warn" }, { name: "Todo", state: "missing" },
+      ]));
+      expect(writes).toEqual([]);
+      const applied = await (await t.request(path, cookie, "POST")).json();
+      expect(applied.statuses).toContainEqual({ name: "Needs " + human, state: "exists" });
+      expect(applied.labels).toContainEqual({ name: "agent:codex", state: "exists" });
+      expect(labels.find(l => l.name === "ops")?.team).toEqual({ id: "team" });
+      expect(labels.find(l => l.name === "agent:codex")).toMatchObject({
+        team: null, parent: { id: labels.find(l => l.name === "agent")!.id },
+      });
+      const count = writes.length;
+      expect(await (await t.request(path, cookie, "POST")).json()).toEqual(applied);
+      expect(writes).toHaveLength(count);
+      expect(writes).not.toContain("Ready");
+      expect(writes).not.toContain("Done");
+    } finally { await t.close(); }
+  });
+
   it("sends page and account events for each account in the listed workspace", async () => {
     const t = await setup({
       DD_API_KEY: "test-key", WG_SESSION_SECRET: auth.secret, WG_TELEMETRY_WORKSPACES: "work-id",
@@ -285,6 +378,14 @@ databaseSuites((open) => {
         },
       } });
       try {
+        const { connections } = await (await t.request(root, cookie)).json();
+        const path = attach + "/" + connections[0].id + "/teams";
+        const calls = t.fetch.mock.calls.length;
+        for (const endpoint of [path, path + "/WG/setup"]) {
+          const response = await viewer.request(endpoint, { method: "POST", headers: { host, cookie, origin: "https://" + host } });
+          expect(response.status).toBe(403);
+        }
+        expect(t.fetch.mock.calls).toHaveLength(calls);
         expect((await viewer.request(root, { headers: { host, cookie } })).status).toBe(403);
       } finally { viewer.link.stop(); }
       const output = t.output.join("\n");

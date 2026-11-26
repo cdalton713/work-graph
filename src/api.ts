@@ -121,7 +121,15 @@ export async function joinProject(token: string, confirm?: true): Promise<Projec
   return body;
 }
 
+import type { SetupTeam, SetupTeamInput, TeamSetupState } from "./lib/types";
+const setupPath = (id: string, key: string) => `/workspaces/${encodeURIComponent(id)}/teams/${encodeURIComponent(key)}/setup`;
+
 export const accountApi = {
+  teamSetup: (id: string, key: string, signal?: AbortSignal) =>
+    call<TeamSetupState>("account" + setupPath(id, key), { signal }),
+  applyTeamSetup: (id: string, key: string) => accountWrite<TeamSetupState>(setupPath(id, key), "POST"),
+  createTeam: (id: string, input: SetupTeamInput) =>
+    accountWrite<SetupTeam>(`/workspaces/${encodeURIComponent(id)}/teams`, "POST", input),
   read: (signal?: AbortSignal) => call<Account>("account", { signal }),
   saveName: (human: string) => accountWrite("", "PATCH", { human }),
   onboarding: (state: { name?: true; skipped?: boolean; step?: "workspaces" | "teams" | "setup"; complete?: true }) => accountWrite("/onboarding", "POST", state),

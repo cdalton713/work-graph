@@ -9,6 +9,10 @@ import type { Session } from "./auth.ts";
 import type { Telemetry, UsageScope } from "./telemetry.ts";
 import type { Tenant } from "./tenants.ts";
 
+import type { Workspace } from "./workspaces.ts";
+import type { InWorkspace } from "./linearaccess.ts";
+import { createSetupTeam, teamSetup } from "./teamsetup.ts";
+
 type Accounts = ReturnType<typeof createAccounts>;
 type Account = NonNullable<Awaited<ReturnType<Accounts["readTenant"]>>>;
 type Connection = Account["connections"][number];
@@ -21,6 +25,7 @@ export function accountUsage(account: Account, selected?: Pick<Connection, "work
 }
 type Scope = { accounts: Accounts; tenant: Tenant; session: Session };
 type Options = {
+  runLinear: (tenant: Tenant, workspace: Workspace) => InWorkspace;
   access: (c: Context) => Scope | Response | Promise<Scope | Response>;
   redis?: RedisLink;
   prefix: string;
@@ -308,6 +313,52 @@ export function accountRoutes(options: Options) {
     await accounts.updateConnectionSettings(account.id, row.id, { team, teamLabels: team_labels, position }, checkedKey);
     const saved = await accounts.readTenant(account.id);
     return c.json({ connection: publicConnection(findConnection(saved?.connections ?? [], row.id)) });
+  });
+
+  const setupAttempt = attemptLimit(options, "account-team-setup:");
+  const teamKey = (value: unknown) => {
+    if (typeof value !== "string" || !/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(value)) {
+      throw new LinearError("Enter a valid team key", 400);
+    }
+    return value.toUpperCase();
+  };
+  const shellArg = (value: string) => /^[a-z0-9_-]+$/i.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
+  async function setup<T>(c: Context<{ Variables: Scope & { account: Account } }>, key: string,
+    extra: string, perform: (row: Connection) => Promise<T>) {
+    const { tenant, account } = c.var;
+    const row = findConnection(account.connections, c.req.param("id") ?? "");
+    const workspace = tenant.workspaces.find(w => w.id === row.workspaceId);
+    if (!workspace?.key || workspace.needsKey || row.status !== "ok") {
+      throw new LinearError("This workspace needs a new credential", 409);
+    }
+    const retry = await setupAttempt(account.id);
+    if (retry > 0) {
+      c.header("Retry-After", String(Math.ceil(retry / 1000)));
+      throw new LinearError("Too many team setup requests. Try again later.", 429);
+    }
+    try {
+      return await options.runLinear(tenant, workspace)(() => perform(row));
+    } catch (error) {
+      if (error instanceof LinearError && [404, 409].includes(error.status)) throw error;
+      throw new LinearError(`Linear did not confirm team setup. Run wg setup --workspace ${shellArg(row.workspaceId)} --team ${key}${extra}`, 409);
+    }
+  }
+
+  routes.post("/workspaces/:id/teams", async c => {
+    const input = await body(c);
+    const key = teamKey(input.key);
+    const name = displayName(input.name);
+    const parent = input.parent == null ? null : teamKey(input.parent);
+    const privacy = input.private;
+    if (!name || typeof privacy !== "boolean") throw new LinearError("Enter a team name and private setting", 400);
+    const args = ` --name ${shellArg(name)}${parent ? " --parent " + parent : ""}${privacy ? " --private" : ""} --apply`;
+    return c.json(await setup(c, key, args, () => createSetupTeam({ key, name, parent, private: privacy })));
+  });
+
+  routes.on(["GET", "POST"], "/workspaces/:id/teams/:key/setup", async c => {
+    const key = teamKey(c.req.param("key"));
+    const apply = c.req.method === "POST";
+    return c.json(await setup(c, key, apply ? " --apply" : "", row => teamSetup(key, c.var.account.human, row.teamLabels, apply)));
   });
 
   routes.get("/workspaces/:id/teams", async (c) => {

@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+mod hosted;
 mod services;
 
 pub type Lines = Vec<(String, String)>;
@@ -285,14 +286,33 @@ pub fn collect(
     now: i64,
     fetch: impl FnOnce(&Value) -> Result<BTreeMap<String, MappedIssue>>,
 ) -> Lines {
-    let mut lines = tools();
-    match state::Config::discover()
-        .map_err(Into::into)
-        .and_then(|config| services::inspect(dir, &config))
-    {
-        Ok(services) => lines.extend(services),
-        Err(e) => lines.push(failure("config", e)),
-    }
+    let install = match crate::linear::Installation::load() {
+        Ok(i) => i,
+        Err(e) => return vec![failure("config", e)],
+    };
+    let plan = dir.and_then(|p| install.config.load_plan(p).ok());
+    collect_ordered(&install, dir, plan.as_ref(), roots, now, vec![], fetch)
+}
+
+pub(crate) fn collect_ordered(
+    install: &crate::linear::Installation,
+    dir: Option<&Path>,
+    plan: Option<&Value>,
+    roots: &[PathBuf],
+    now: i64,
+    before_effort: Lines,
+    fetch: impl FnOnce(&Value) -> Result<BTreeMap<String, MappedIssue>>,
+) -> Lines {
+    let hosted = hosted::inspect(dir, plan, install).unwrap_or_else(|e| hosted::Hosted {
+        page: vec![failure("hosted diagnostics", e)],
+        ..Default::default()
+    });
+    let mut lines = hosted.keys;
+    lines.extend(tools());
+    lines.extend(hosted.page);
+    lines.extend(
+        services::inspect(dir, &install.config).unwrap_or_else(|e| vec![failure("config", e)]),
+    );
     match machine::plans(roots) {
         Ok(mut dirs) => {
             if let Some(dir) = dir {
@@ -304,8 +324,10 @@ pub fn collect(
         }
         Err(e) => lines.push(failure("plans", e)),
     }
-    if let Some(dir) = dir {
+    lines.extend(before_effort);
+    if let Some(dir) = dir.filter(|_| plan.is_some()) {
         lines.extend(effort(dir, now, fetch));
+        lines.extend(hosted.effort);
     }
     lines
 }

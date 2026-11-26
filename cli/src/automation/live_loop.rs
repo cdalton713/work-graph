@@ -30,7 +30,7 @@ fn label<'a>(labels: &'a [Value], group: &str, default: &'a str) -> &'a str {
         .map(|s| s.strip_prefix("review:").unwrap_or(s))
         .unwrap_or(default)
 }
-fn levels(e: &mut Effort, a: &mut Actions, labels: &[Value]) -> Result<()> {
+fn levels(e: &mut Effort, a: &mut Actions, labels: &[Value], record: bool) -> Result<()> {
     let human = text(&e.install.config.settings()["human"]);
     let mut lines = vec![];
     let mut fields = vec![];
@@ -92,7 +92,7 @@ fn levels(e: &mut Effort, a: &mut Actions, labels: &[Value]) -> Result<()> {
         fields.push(("resumed", Value::Null));
         a.lines.insert(0,("do".into(),format!("resumed @effort -: {human} resumed this effort on the page; acknowledge it and continue the loop")));
     }
-    if !fields.is_empty() {
+    if record && !fields.is_empty() {
         save_fields(e.dir, &fields)?;
         e.km = crate::state::load_keymap(e.dir)?;
     }
@@ -202,7 +202,32 @@ fn answers(e: &Effort) -> Result<Vec<(String, String)>> {
     }
     Ok(lines)
 }
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Invocation {
+    Next,
+    Watch,
+    Join,
+}
+pub(super) enum NextOutput<'a> {
+    Terminal,
+    Collected(&'a mut Vec<u8>),
+}
+
+impl NextOutput<'_> {
+    fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+        match self {
+            Self::Terminal => {
+                print!("{args}");
+                Ok(())
+            }
+            Self::Collected(bytes) => std::io::Write::write_fmt(bytes, args),
+        }
+    }
+}
+
 struct Run<'a> {
+    invocation: Invocation,
+    output: NextOutput<'a>,
     install: &'a Installation,
     args: &'a arguments::Next,
     plan: Value,
@@ -373,7 +398,7 @@ impl Run<'_> {
         }
         extra.append(&mut a.lines);
         a.lines = extra;
-        levels(&mut e, &mut a, &labels)?;
+        levels(&mut e, &mut a, &labels, self.invocation != Invocation::Join)?;
         let actionable = a.lines.iter().any(|(l, _)| l == "do");
         let complete = a.head == COMPLETE;
         if let Some(link) = &mut self.link {
@@ -388,7 +413,9 @@ impl Run<'_> {
         {
             eprintln!("warn publish: {err}")
         }
-        if let Err(err) = notices::notify(&e, &a.lines, &asks) {
+        if self.invocation != Invocation::Join
+            && let Err(err) = notices::notify(&e, &a.lines, &asks)
+        {
             eprintln!("warn notify: {err}")
         }
         self.actions = Some(a);
@@ -409,7 +436,7 @@ impl Coordinator for Run<'_> {
     }
     fn report(&mut self, result: &Refresh, finished: bool) -> std::result::Result<(), String> {
         if let Some(error) = self.claims_error.take() {
-            println!("wait claims page: {error}");
+            writeln!(self.output, "wait claims page: {error}").map_err(|e| e.to_string())?;
             return Ok(());
         }
         let a = self.actions.as_ref().ok_or("no current actions")?;
@@ -420,12 +447,12 @@ impl Coordinator for Run<'_> {
                         || line.starts_with("reply ")
                         || line.starts_with("replied "))
                 {
-                    println!("note {line}");
+                    writeln!(self.output, "note {line}").map_err(|e| e.to_string())?;
                 }
             }
         }
         if finished {
-            println!("{}", a.head);
+            writeln!(self.output, "{}", a.head).map_err(|e| e.to_string())?;
             let dir = quote(
                 &self
                     .args
@@ -463,16 +490,18 @@ impl Coordinator for Run<'_> {
                 } else {
                     String::new()
                 };
-                println!("{l} {t}{suffix}");
+                writeln!(self.output, "{l} {t}{suffix}").map_err(|e| e.to_string())?;
             }
             if hidden > 0 {
-                println!(
+                writeln!(
+                    self.output,
                     "note other: {hidden} more note line{}; wg next {dir} --all prints them",
                     if hidden == 1 { "" } else { "s" }
                 )
+                .map_err(|e| e.to_string())?;
             }
             if !result.complete {
-                println!("note page {}", self.page_url);
+                writeln!(self.output, "note page {}", self.page_url).map_err(|e| e.to_string())?;
             }
         }
         Ok(())
@@ -484,11 +513,27 @@ impl Coordinator for Run<'_> {
     }
 }
 pub(super) fn next_command(args: &arguments::Next, watch: bool) -> Result<u8> {
+    next_with_output(
+        args,
+        if watch {
+            Invocation::Watch
+        } else {
+            Invocation::Next
+        },
+        NextOutput::Terminal,
+    )
+}
+
+pub(super) fn next_with_output(
+    args: &arguments::Next,
+    invocation: Invocation,
+    output: NextOutput<'_>,
+) -> Result<u8> {
     let interval = Duration::try_from_secs_f64(args.interval)
         .map_err(|_| "--interval must be a positive number of seconds")?;
     let install = Installation::load()?;
     let e = Effort::read(&install, &args.dir)?;
-    if watch {
+    if invocation == Invocation::Watch {
         eprintln!(
             "wg watch is now wg next: load the work-graph skill again and read coordinator.md \"Loop\""
         );
@@ -511,8 +556,10 @@ pub(super) fn next_command(args: &arguments::Next, watch: bool) -> Result<u8> {
         .transpose()?
         .unwrap_or_default();
     let mut run = Run {
+        invocation,
         plan: e.plan.clone(),
         collaborative: false,
+        output,
         install: &install,
         args,
         link,

@@ -118,6 +118,20 @@ impl Link {
         }
         unreachable!()
     }
+    /// Upgrade and disconnect before registering a coordinator session.
+    pub(crate) fn probe(&self) -> Result<()> {
+        self.runtime.block_on(async {
+            timeout(OPEN_TIMEOUT, async {
+                let socket = self.handshake().await?;
+                socket
+                    .close(reqwest_websocket::CloseCode::Normal, None)
+                    .await
+                    .map_err(|_| "link close failed".to_string())
+            })
+            .await
+            .map_err(|_| "link handshake timed out")?
+        })
+    }
     async fn open(&self) -> Result<WebSocket> {
         let mut ws = self.handshake().await?;
         ws.send(self.frame("hello", &self.hello))

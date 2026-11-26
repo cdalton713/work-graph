@@ -1,0 +1,9 @@
+usage: wg.py doctor [-h] [--fix] [dir]
+
+positional arguments:
+  dir
+
+options:
+  -h, --help  show this help message and exit
+  --fix       also write the coordinator settings and context limit of each
+              loaded effort

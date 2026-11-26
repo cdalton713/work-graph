@@ -1,0 +1,43 @@
+claims        the claims page is unavailable; wait before starting a job
+collaborator  another coordinator holds the node
+owner         the project owner handles this node
+stale         the claim lease ended; ask before taking over
+load          a node of plan.json is not in keymap.json: load the graph
+wave          each node of the last wave is code done: pick the next wave
+dispatch      start the first worker job of a ready node
+adopt         a node whose branch or PR exists: adopt it, no dispatch
+integration   the coordinator's own integration branch
+verify        check code done: wg done
+review        the wave review of a draft PR at the review effort, or a change of the review effort
+ask-ready     ask the human to mark PRs ready (merge_prep=human)
+undraft       mark the PR ready for review yourself
+merge-review  request, read, or check the thorough merge review
+ask-merge     the PR can merge: move it to Ready to Merge and ask for the merge
+merge         the PR can merge (autonomy full, config agent_merge): move it to Ready to Merge and merge it yourself
+merged        the PR merged: move the task to Merged
+close         every pre-merge task merged: close the merge point
+restack       send a restack job
+full-suite    the repo-wide test run of the phase
+ops           an ops node that the coordinator does
+ask           an ops or decision node: ask the human
+verifying     move the ship point to Verifying
+ship          the soak passed: close the ship point
+triage        an issue in the project that is not a node
+closed        the PR closed without a merge
+reconcile     the run rows and Linear do not agree: resume
+answer        the human answered on the page
+relay         send the human's reply to the worker yourself
+replied       wg next sent the human's reply to the worker
+autonomy      the autonomy level, or a change of it
+paused        the human paused the effort
+resumed       the human resumed the effort
+below         wait: the node below in the lane comes first
+blockers      wait: a blocker of the ship point opened again
+soak          wait: the soak runs
+worker        wait: a worker job runs
+reviewer      wait: a reviewer job runs
+coordinator   wait: an ops node that you run
+human         wait: the human must act
+health        the last status check found faults (note health)
+health-check  the checks of the status check agent (wg health)
+context       note: this session is over the context limit; after a compaction

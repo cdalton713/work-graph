@@ -261,6 +261,7 @@ pub(crate) fn check_plan(plan: &Value, report: &Value) -> bool {
 }
 
 pub(crate) use contract::satisfied;
+pub(crate) use graph::findings as plan_findings;
 pub(crate) use journal::record_status;
 
 pub(crate) use card::{refresh as refresh_card, render as render_card};

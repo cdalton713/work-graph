@@ -15,4 +15,4 @@ wrapper = root / "wg"
 wrapper.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, "-I", str(root / "entry/wg")]) + ' "$@"\n')
 wrapper.chmod(0o755)
 PY
-sh "$suite/run.sh" "$fixture/wg"
+sh "$suite/run.sh" --python-candidate "$fixture/wg"

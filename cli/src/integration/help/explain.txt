@@ -1,0 +1,7 @@
+usage: wg.py explain [-h] [verb]
+
+positional arguments:
+  verb
+
+options:
+  -h, --help  show this help message and exit

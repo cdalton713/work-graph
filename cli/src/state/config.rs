@@ -240,11 +240,26 @@ fn validate(config: &Value) -> io::Result<()> {
                     || refs.iter().any(|v| v.as_str().is_none_or(str::is_empty)))
                 .then_some("a webhook needs url_env or url_file (the URL never goes in the config)")
             }
+            Some("page") => {
+                if channel
+                    .as_object()
+                    .is_some_and(|fields| fields.keys().any(|k| k != "type" && k != "to"))
+                {
+                    Some("a page channel takes only type and an optional to")
+                } else if channel
+                    .get("to")
+                    .is_some_and(|v| v.as_str().is_none_or(|s| s.trim().is_empty()))
+                {
+                    Some("to must name an owner email")
+                } else {
+                    None
+                }
+            }
             Some("command") => (!channel["argv"].as_array().is_some_and(|a| {
                 !a.is_empty() && a.iter().all(|v| v.as_str().is_some_and(|s| !s.is_empty()))
             }))
             .then_some("a command needs argv, a list of strings"),
-            _ => Some("type must be webhook or command"),
+            _ => Some("type must be page, webhook or command"),
         };
         if let Some(msg) = problem {
             return Err(invalid(format!("notify: channel {i}: {msg}")));

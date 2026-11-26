@@ -86,4 +86,5 @@ pub mod diagnostics;
 pub mod jobs;
 pub mod workflow;
 
+pub mod integration;
 pub mod update;

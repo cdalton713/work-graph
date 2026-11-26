@@ -165,6 +165,14 @@ fn names(keys: &[&str]) -> String {
     )
 }
 pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
+    let errors = findings(p, cfg);
+    for e in &errors {
+        println!("{e}")
+    }
+    u8::from(!errors.is_empty())
+}
+
+pub(crate) fn findings(p: &Value, cfg: &Value) -> Vec<String> {
     let mut errors = Vec::new();
     let effort = &p["effort"];
     if let Some(settings) = effort.get("agents") {
@@ -438,8 +446,5 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
             }
         }
     }
-    for e in &errors {
-        println!("{e}")
-    }
-    u8::from(!errors.is_empty())
+    errors
 }

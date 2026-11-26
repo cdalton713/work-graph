@@ -47,6 +47,58 @@ impl Installation {
             .expect("validated workspace array")
     }
 }
+enum KeySource {
+    Env(String),
+    File(PathBuf, u32),
+}
+
+impl Installation {
+    fn linear_key(&self, id: &str) -> Result<Option<(String, KeySource)>, String> {
+        use std::os::unix::fs::PermissionsExt;
+        let row = self.resolve(id)?;
+        let aliases = row["key_env"].as_array().ok_or("invalid key_env")?;
+        let name = key_env(id);
+        for name in std::iter::once(name.as_str()).chain(aliases.iter().filter_map(Value::as_str)) {
+            if let Ok(value) = env::var(name)
+                && !value.trim().is_empty()
+            {
+                return Ok(Some((value.trim().into(), KeySource::Env(name.into()))));
+            }
+        }
+        let path = self
+            .home
+            .join(format!(".config/work-graph/{id}-linear-api-key"));
+        let value = match fs::read_to_string(&path) {
+            Ok(value) => value,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        if value.trim().is_empty() {
+            return Ok(None);
+        }
+        let mode = fs::metadata(&path)
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode()
+            & 0o7777;
+        Ok(Some((value.trim().into(), KeySource::File(path, mode))))
+    }
+
+    pub(crate) fn diagnostic_key_source(&self, id: &str) -> Result<String, String> {
+        match self.linear_key(id)?.map(|(_, source)| source) {
+            Some(KeySource::Env(name)) => Ok(name),
+            Some(KeySource::File(path, 0o600)) => Ok(path.display().to_string()),
+            Some(KeySource::File(path, mode)) => Err(format!(
+                "{} has mode {mode:o}, not 600; chmod 600 it",
+                path.display()
+            )),
+            None => Err(format!(
+                "none; set {} or write ~/.config/work-graph/{id}-linear-api-key (mode 600)",
+                key_env(id)
+            )),
+        }
+    }
+}
 impl ConfigProvider for Installation {
     type Settings = Value;
     type Error = String;
@@ -70,53 +122,16 @@ impl CredentialProvider for Installation {
         if service != "linear" {
             return Err("unknown credential service".into());
         }
-        let row = self.resolve(id)?;
-        let defaults = json!(["LINEAR_API_KEY"]);
-        let aliases = row
-            .get("key_env")
-            .unwrap_or(&defaults)
-            .as_array()
-            .ok_or("invalid key_env")?;
-        let key = key_env(id);
-        let value = std::iter::once(key.as_str())
-            .chain(aliases.iter().filter_map(Value::as_str))
-            .filter_map(|name| env::var(name).ok())
-            .map(|s| s.trim().to_owned())
-            .find(|s| !s.is_empty());
-        let value = match value {
-            Some(value) => value,
-            None => {
-                let path = self
-                    .home
-                    .join(format!(".config/work-graph/{id}-linear-api-key"));
-                match fs::read_to_string(&path) {
-                    Ok(value) => {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            if !value.trim().is_empty()
-                                && fs::metadata(&path)
-                                    .map_err(|e| e.to_string())?
-                                    .permissions()
-                                    .mode()
-                                    & 0o044
-                                    != 0
-                            {
-                                eprintln!(
-                                    "warn: {} is readable by group or others; set mode 600",
-                                    path.display()
-                                );
-                            }
-                        }
-                        value.trim().to_owned()
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) => return Err(e.to_string()),
-                }
-            }
-        };
-        if value.is_empty() {
+        let Some((value, source)) = self.linear_key(id)? else {
             return Ok(None);
+        };
+        if let KeySource::File(path, mode) = source
+            && mode & 0o044 != 0
+        {
+            eprintln!(
+                "warn: {} is readable by group or others; set mode 600",
+                path.display()
+            );
         }
         Ok(Some(Credential::new(
             HeaderValue::from_str(&value).map_err(|_| "invalid Linear authorization header")?,

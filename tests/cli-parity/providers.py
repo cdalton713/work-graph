@@ -1,9 +1,11 @@
 """Exercise both credential scopes and the state transaction through the compiled CLI."""
 from copy import deepcopy
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -89,11 +91,29 @@ def scenario(root, preflight):
     seen = []
     reject_put = False
 
+    post_join = []
+    joined_files = {}
+    statuses = json.loads((suite.SKILL / "contract.json").read_bytes())["setup"]["statuses"]
+    states = [dict(row, id=row["name"], name=row["name"].replace("{name}", "Human")) for row in statuses]
+
+    def callback(name):
+        fd = os.open(work, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            post_join.append(name)
+            if name == "preflight":
+                joined_files.update(snapshot())
+        finally:
+            os.close(fd)
+
     def get(h):
         auth = h.headers.get("Authorization")
         seen.append(auth)
         if auth not in ("Bearer page-key", "Bearer env-key", "Bearer file-key"):
             return h.send_error(401)
+        if h.path.endswith("/claims"):
+            callback("next")
+            return h.reply({"role":"collaborator","claims":[]})
         if h.path == "/api/status":
             return h.reply({"human": "Human", "workspaces": [membership]})
         if h.path != "/api/projects/project/plan" or h.headers.get("x-workspace") not in ("shared:one", "default"):
@@ -110,7 +130,16 @@ def scenario(root, preflight):
         req = json.loads(h.rfile.read(int(h.headers["Content-Length"])))
         q = req["query"]
         requests.append(q)
-        if "projectMilestones" in q:
+        if "viewer" in q:
+            callback("preflight")
+            data = {"viewer":{"id":"viewer"}}
+        elif "team(id:" in q:
+            key = "states" if "states(" in q else "labels"
+            rows = states if key == "states" else [{"name":"agent:" + role} for role in ("codex","claude","coordinator")]
+            data = {"team":{key:{"nodes":rows,"pageInfo":{"hasNextPage":False}}}}
+        elif "project(id:" in q and "labels(" in q:
+            data = {"project":{"labels":{"nodes":[]}}}
+        elif "projectMilestones" in q:
             data = {"project": {"projectMilestones": {"nodes": [{"id": "milestone"}],
                                                       "pageInfo": {"hasNextPage": False}}}}
         elif "teams(filter" in q:
@@ -118,7 +147,7 @@ def scenario(root, preflight):
         elif "issue(id:" in q:
             data = {"issue": issue}
         elif "issues(first:" in q:
-            data = {"issues": {"nodes": [issue]}}
+            data = {"issues": {"nodes": [dict(issue,state={"name":"Ready","type":"unstarted"},labels={"nodes":[]})]}}
         elif "comment(id:" in q:
             attached = issue if req["variables"]["id"] == "card" else {"id": "another"}
             data = {"comment": {"issue": attached}}
@@ -153,6 +182,7 @@ def scenario(root, preflight):
            "WG_DEFAULT_LINK_TOKEN": "page-key", "WG_LINK": "off"}
     def git(*args):
         subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+    team["states"] = {"nodes":states}
     repo.mkdir()
     git("init", "-q")
     git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit",
@@ -160,15 +190,16 @@ def scenario(root, preflight):
     git("worktree", "add", "-b", "wg/sample-core", str(work))
     (root / "config").write_text(json.dumps({"workspaces": [{"id": "default", "team": "EX",
                                                            "page_url": "https://page.invalid"}]}))
+    blob = subprocess.check_output(["git","hash-object","-w","--stdin"], cwd=repo, input=b"main", env=env).decode().strip()
+    git("update-ref", "refs/stax/trunk", blob)
     tools = root / "bin"
     tools.mkdir()
-    wg = tools / "wg"
-    wg.write_text('#!/bin/sh\n[ "$2" = "$EXPECTED" ] || exit 70\necho "$1" >> "$CALLS"\n'
-                  'echo "ran $1"\nif [ "$1" = preflight ]; then exit "$PREFLIGHT"; fi\n')
-    wg.chmod(0o755)
-    calls = root / "calls"
-    env.update(PATH=str(tools) + os.pathsep + os.defpath, EXPECTED=str(work), CALLS=str(calls),
-               PREFLIGHT=str(preflight))
+    for tool in ("gh", "st"):
+        stub = tools / tool
+        stub.write_text(f"#!/bin/sh\nexit {preflight if tool == 'gh' else 0}\n")
+        stub.chmod(0o755)
+    env["PATH"] = str(tools) + os.pathsep + os.defpath
+    assert shutil.which("wg", path=env["PATH"]) is None
     with patch.object(Handler, "do_GET", get), patch.object(Handler, "do_POST", post), patch.object(Handler, "do_PUT", put, create=True), fixture_service() as (settings, _):
         env.update(settings)
         def run(command, *args, code=0, error=None):
@@ -190,39 +221,32 @@ def scenario(root, preflight):
         run([BIN], *join, code=2)
         assert not (work / "keymap.json").exists()
         team["id"] = "team"
-        preview_bin = root / "preview-bin"
-        preview_bin.mkdir()
-        (preview_bin / "wg").symlink_to(BIN)
-        original_path = env["PATH"]
-        env["PATH"] = str(preview_bin) + os.pathsep + original_path
         output = run([BIN], *join, code=preflight)
-        env["PATH"] = original_path
-        assert "ran preflight" in output
-        assert calls.read_text().splitlines() == (["preflight"] if preflight else ["preflight", "next"])
+        assert output.startswith(f"Joined {work}\n")
+        assert "ok plan: valid" in output and "ok trunk: phase 1 targets main: stax trunk" in output, output
+        assert post_join == (["preflight"] if preflight else ["preflight","next"])
+        if preflight:
+            assert "FAIL tools:" in output
+        else:
+            assert output.index("ok plan: valid") < output.index("phase 1:", output.index("ok trunk:")), output
+        assert not [q for q in requests if q.lstrip().startswith("mutation")], requests
         files = snapshot()
-        # Run the reference join with the same two post-join commands. The
-        # reference normally calls these in-process, after it writes the pair.
+        assert files == joined_files, "join changed the saved files after preflight"
         oracle = root / "oracle"
         oracle.mkdir()
         subprocess.run(["git", "clone", "-q", str(repo), str(oracle)], env=env, check=True)
         subprocess.run(["git", "-C", str(oracle), "switch", "wg/sample-core"], env=env,
                        check=True, capture_output=True)
         script = """
-import runpy, subprocess, sys
-wg = runpy.run_path(sys.argv[1])
-main = wg["main"]
-def step(cmd, path):
-    return subprocess.run(["wg", cmd, str(path)]).returncode
-main.__globals__.update(preflight=lambda p, *_: step("preflight", p),
-                        next_command=lambda p, *_: step("next", p))
-sys.exit(main(sys.argv[1:]))
+import runpy, sys
+main = runpy.run_path(sys.argv[1])["main"]
+main.__globals__.update(preflight=lambda *_: int(sys.argv[2]), next_command=lambda *_: 0)
+sys.exit(main([sys.argv[1], *sys.argv[3:]]))
 """
-        env["EXPECTED"] = str(oracle)
-        run([sys.executable, "-I", "-c", script, suite.REFERENCE[-1]], "join", "--repo", oracle, code=preflight)
+        run([sys.executable, "-I", "-c", script, suite.REFERENCE[-1], str(preflight)], "join", "--repo", oracle, code=preflight)
         assert files["plan.json"] == (oracle / "plan.json").read_bytes()
         assert files["PLAN.md"] == (oracle / "PLAN.md").read_bytes()
         assert json.loads(files["keymap.json"]) == json.loads((oracle / "keymap.json").read_text())
-        env["EXPECTED"] = str(work)
         collab = json.loads(files["keymap.json"])["collab"]
         assert collab["plan_sha"] == hashlib.sha256(files["plan.json"]).hexdigest()
         assert json.loads(files["keymap.json"])["nodes"]["a"]["card"] == {"id": "card"}
@@ -323,6 +347,6 @@ sys.exit(main(sys.argv[1:]))
             (root / "config").write_text(json.dumps({"workspaces": [{"id":"default","key_env":False}]}))
             run([BIN], "run", "show", work)
 
-for status in (0, 7):
+for status in (0, 1):
     with tempfile.TemporaryDirectory() as directory:
         scenario(Path(directory).resolve(), status)

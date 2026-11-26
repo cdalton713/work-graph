@@ -6,6 +6,7 @@ import { WebSocket } from "ws";
 import { RESTART_CODE } from "./link.ts";
 import { serializeSigned } from "hono/utils/cookie";
 import { afterEach, expect, it, vi } from "vitest";
+import type { TeamSetupState } from "../src/lib/types.ts";
 import { createApp } from "./app.ts";
 import { credentialCrypto } from "./db/crypto.ts";
 import { migrate } from "./db/migrations.ts";
@@ -117,12 +118,14 @@ databaseSuites((open) => {
     } finally { await t.close(); }
   });
 
-  it("reads contract items and adds only missing items in their configured scopes", async () => {
+  it.each([false, true])("reads labels and prevents duplicate creation with team scope %s", async teamLabels => {
     const t = await setup();
     try {
       const { cookie } = await t.owner("owner");
       const { connections, human } = await (await t.request(root, cookie)).json();
       const path = attach + "/" + connections[0].id + "/teams/WG/setup";
+      const connection = attach + "/" + connections[0].id;
+      expect((await t.request(connection, cookie, "PATCH", { team_labels: teamLabels })).status).toBe(200);
       const states = [{ name: "ready", type: "unstarted" }, { name: "Done", type: "started" }];
       const labels: { kind: string; id: string; name: string; team: { id: string } | null;
         parent: { id: string } | null; isGroup: boolean; groupType?: string }[] = [];
@@ -179,6 +182,20 @@ databaseSuites((open) => {
       expect(writes).toHaveLength(count);
       expect(writes).not.toContain("Ready");
       expect(writes).not.toContain("Done");
+      labels.find(l => l.name === "answered")!.team = null;
+      expect((await t.request(connection, cookie, "PATCH", { team_labels: !teamLabels })).status).toBe(200);
+      const mismatch = await (await t.request(path, cookie, "POST")).json();
+      expect(mismatch.created).toEqual([]);
+      expect(mismatch.state.suggestedProjectLabelScope).toBe(teamLabels ? "team" : "workspace");
+      expect(mismatch.state.labels).toContainEqual(expect.objectContaining({
+        name: "answered", state: "warn", detail: expect.stringContaining("workspace"),
+      }));
+      expect((await t.request(connection, cookie, "PATCH", { team_labels: teamLabels })).status).toBe(200);
+      labels.splice(labels.findIndex(l => l.name === "supervised"), 1);
+      const corrected: TeamSetupState = await (await t.request(path, cookie)).json();
+      expect(corrected.suggestedProjectLabelScope).toBeUndefined();
+      expect(corrected.labels.filter(item => item.scope === "project" && item.state !== "exists"))
+        .toEqual([{ name: "supervised", scope: "project", group: "autonomy", state: "missing" }]);
     } finally { await t.close(); }
   });
 

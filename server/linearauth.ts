@@ -86,6 +86,25 @@ export async function revokeLinearToken(refreshToken: string): Promise<boolean> 
   }
 }
 
+export function usesTeamProjectLabels(plan?: string): boolean {
+  return /^(business|enterprise)(?:[_-]|$)/i.test(plan ?? "");
+}
+
+export async function defaultTeamLabels(authorization: string): Promise<boolean> {
+  try {
+    const response = await fetch("https://api.linear.app/graphql", {
+      method: "POST", headers: { Authorization: authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "query { organization { subscription { type } } }" }),
+      signal: AbortSignal.timeout(2_000), redirect: "error",
+    });
+    if (!response.ok) return false;
+    const { data, errors } = await response.json();
+    return !errors && usesTeamProjectLabels(data?.organization?.subscription?.type);
+  } catch {
+    return false;
+  }
+}
+
 async function identity(key: string): Promise<Identity | null> {
   try {
     const response = await fetch("https://api.linear.app/graphql", {
@@ -149,7 +168,7 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
     }
     const accountId = await save({ linearUserId: viewer.id, linearOrgId: organization.id, name: viewer.name, email: viewer.email }, {
       workspaceId: organization.urlKey, linearOrgId: organization.id, name: organization.name,
-      team: teams?.nodes?.[0]?.key ?? "", teamLabels: false, credential,
+      team: teams?.nodes?.[0]?.key ?? "", teamLabels: await defaultTeamLabels(`Bearer ${credential.key}`), credential,
     }, observe && ((id, created) => observe(id, { id: organization.urlKey, organization: organization.id }, created)));
     const exp = Math.floor(now() / 1000) + SESSION_S;
     const session = { accountId, email: viewer.email, exp, id: randomBytes(24).toString("base64url") };

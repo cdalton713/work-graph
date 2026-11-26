@@ -145,6 +145,14 @@ export function WorkspaceSetup({ workspace, human, step, record, checkKey, refre
         <h3>Use an existing team</h3><TeamForm key={listVersion} workspace={workspace} refresh={refresh} />
       </> : team && state?.team ? <>
         {added && <p role="status" tabIndex={-1} ref={addStatus}>{added}</p>}
+        {state.suggestedProjectLabelScope && <button disabled={busy} onClick={async () => {
+          setBusy(true);
+          setActionError(null);
+          try {
+            await accountApi.updateWorkspace(id, { team_labels: state.suggestedProjectLabelScope === "team" });
+            await refresh();
+          } catch (e) { setActionError(e); } finally { setBusy(false); }
+        }}>Use {state.suggestedProjectLabelScope} project labels</button>}
         <StatusFlow state={state} workspace={workspace} human={human} apply={apply} busy={busy} /></> :
         <p>Select a team on the Team step.</p>}
     </>}

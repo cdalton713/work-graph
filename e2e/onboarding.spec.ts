@@ -71,3 +71,26 @@ test("a team that Linear could not make private can be selected", async ({ page 
   await page.getByRole("button", { name: /Pending Statuses and labels/ }).click();
   await expect(page.getByRole("list", { name: "Status flow" })).toBeVisible();
 });
+
+for (const scope of ["team", "workspace"] as const) {
+  test(`one click selects existing ${scope} project labels`, async ({ page }) => {
+    const origin = serviceUrl();
+    await page.goto(origin + "/auth/login?setup-user=new");
+    const account = async () => (await (await page.request.get(origin + "/api/account")).json()).connections[0];
+    const workspace = await account();
+    const path = origin + "/api/account/workspaces/" + workspace.id;
+    const headers = { origin };
+    const select = (team_labels: boolean) => page.request.patch(path, { headers, data: { team_labels } });
+
+    expect((await select(scope === "team")).ok()).toBe(true);
+    expect((await page.request.post(path + "/teams/DEMO/setup", { headers, data: {} })).ok()).toBe(true);
+    expect((await select(scope !== "team")).ok()).toBe(true);
+    await page.reload();
+    await page.getByRole("button", { name: /Statuses and labels$/ }).click();
+    const label = page.locator(".setup-labels li").filter({ hasText: "paused" });
+    await expect(label).toContainText(`exists in the ${scope} scope`);
+    await page.getByRole("button", { name: `Use ${scope} project labels` }).click();
+    await expect(label.getByRole("img", { name: "Present" })).toBeVisible();
+    expect((await account()).team_labels).toBe(scope === "team");
+  });
+}

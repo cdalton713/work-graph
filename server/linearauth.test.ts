@@ -71,6 +71,8 @@ databaseSuites((open) => {
       const header = new Headers(init.headers).get("authorization")!;
       expect(header).toMatch(/^Bearer test-access-credential/);
       const { query, variables } = JSON.parse(String(init.body));
+      if (query.includes("subscription")) return user === "other" ? new Response(null, { status: 403 }) :
+        Response.json({ data: { organization: { subscription: { type: "enterprise_annual" } } } });
       if (query.includes("viewer")) return Response.json({ data: {
         viewer: { id: user, name: "Ada", email: "ada@example.com" },
         organization: { id: orgId, name: "Work", urlKey: orgKey },
@@ -135,7 +137,10 @@ databaseSuites((open) => {
       orgKey = "work";
       issued = 0;
       const first = await signIn();
+      expect(await sql.query("SELECT team_labels FROM linear_connections")).toEqual([{ team_labels: true }]);
+      await sql.query("UPDATE linear_connections SET team_labels = false");
       const again = await signIn();
+      expect(await sql.query("SELECT team_labels FROM linear_connections")).toEqual([{ team_labels: false }]);
       const [{ tenant, id, credential }] = await sql.query<{ tenant: string; id: string; credential: string }>(
         "SELECT tenant_id AS tenant, id, credential FROM linear_connections");
       expect(credential).not.toContain(access);
@@ -151,6 +156,8 @@ databaseSuites((open) => {
       expect(refreshed).toBe(2);
       user = "other";
       const another = await signIn();
+      expect(await sql.query("SELECT team_labels FROM linear_connections WHERE tenant_id <> $1", [tenant]))
+        .toEqual([{ team_labels: false }]);
       expect(await sql.query("SELECT id FROM tenants")).toHaveLength(2);
       expect(await (await request("/api/config", another)).json()).toMatchObject({ user: "ada@example.com", defaultWorkspace: "work", signIn: "linear" });
       // Make this token usable without a refresh so the stub can distinguish the users.

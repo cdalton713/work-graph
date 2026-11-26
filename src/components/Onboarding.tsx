@@ -105,9 +105,9 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
             </article>)}
             {step === "setup" && <>
               <section>
-                <h3>Install the skill and local tools</h3>
+                <h3>Install the skill and tools on your computer</h3>
                 <p><a href={readme + "#install-the-skill"} target="_blank" rel="noreferrer">Read the installation instructions</a>.</p>
-                <p><a href={readme + "#config"} target="_blank" rel="noreferrer">Set up a local Linear key</a> for each workspace so <code>wg</code> can work with its team. Set the environment variable or save the key in the file with permissions 600.</p>
+                <p><a href={readme + "#config"} target="_blank" rel="noreferrer">Set up a local Linear key</a> for each workspace on your computer so <code>wg</code> can work with its team. Set the environment variable or save the key in the file with permissions 600.</p>
                 <ul className="account-key-locations">
                   {account.connections.map(({ id, name, workspace_id }) => {
                     const { env, file } = workspaceKeyLocation(workspace_id);
@@ -116,15 +116,15 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
                 </ul>
               </section>
               <section>
-                <h3>Set up the config</h3>
+                <h3>Set up the config on your computer</h3>
                 <p>Add these settings to <code>~/.config/work-graph/config.json</code>.</p>
                 {account.connections.some(({ id, team }) => !team && !drafts[id]) && <p>Choose a team for each workspace before you run the setup commands.</p>}
                 <Command text={configBlock(account, drafts)} label="Copy wg config" />
               </section>
               <section><h3>Coordinator token</h3><TokenForm refresh={refresh} /></section>
               <section className="account-form">
-                <h3>Run these commands in order</h3>
-                <p>Paste the token when <code>wg login</code> asks for it.</p>
+                <h3>Run these commands on your computer</h3>
+                <p>Run them in order. Paste the token when <code>wg login</code> asks for it.</p>
                 {setupCommands(account, drafts).map((command) => <Command key={command} text={command} label={`Copy ${command}`} />)}
               </section>
             </>}

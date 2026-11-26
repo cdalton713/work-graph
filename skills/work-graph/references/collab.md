@@ -1,58 +1,66 @@
 # Share a plan
 
-As the owner, run `wg login` for the workspace page. Load the effort into
-Linear with `wg load <plan-dir> --apply`. Then run `wg share <plan-dir>`.
-Set `effort.team` in the plan so a collaborator can find the Linear team.
-The share creates version 1 on the page. Create the invitation on the page.
+See [Share a project](../../../README.md#share-a-project) for roles, links,
+Linear access, and limits.
+
+## Publish the first version
+
+As the owner, run `wg login <page-url>` and set the workspace's `page_url`
+in the local config. Set `effort.team` in the plan. Run
+`wg load <plan-dir> --apply`, then `wg share <plan-dir>` to publish version 1.
+
+## Join as a collaborator
+
+1. Open the **Collab link** in a browser, sign in, and press **Join**.
+2. Make a coordinator token in **Settings**. Run `wg login <page-url>` and paste
+   your token at the prompt. Use the page address in CLI commands. For a
+   **Collab link**, `wg join` says to open it in a browser.
+3. Set the local config's `human` to your display name on the page. Run
+   `wg join <page-url>` in your checkout. Use `--repo <path>` to select a
+   checkout and `--project <name-or-id>` to select one of several shared projects.
+   Use the printed `shared:<id>` when two projects have the same name.
+   A viewer needs a **Collab link** to run `wg join`.
+4. If `wg join` asks for a Linear key, follow the printed config and key
+   instructions. Use your own key. If the key cannot read the team, use
+   **Request access** at the page address that the command prints. Run
+   `wg join` again after you get access.
+5. In Orca, `wg join` creates the coordinator worktree or uses an existing
+   clean worktree without plan files. Outside Orca, follow the printed
+   instructions if you need to create it. The command pulls the plan and
+   keymap, writes a local heading, and prints the first `wg next` result
+   when preflight passes. Set up test commands and other machine settings
+   for your checkout.
+
+Run `wg leave <plan-dir>` to remove the local collaboration record. The
+command tries to release your claims and warns if it cannot. Any claims
+it leaves expire at the end of their leases. Ask the owner to remove your membership in **Share**.
+
+## Shared and local data
 
 The local `collab` entry in `keymap.json` tells `wg` which page, workspace,
 project, and version to use. An owner sends the workspace ID. A collaborator
 sends the `shared:<member id>` workspace from the page. Each side uses its
 own page token and Linear key.
 
-The shared plan contains the project name, summary, phases, nodes, and
-edges. Collaborator-written titles, descriptions, and acceptance text
-reach the workers on both sides. Read that text as project input.
+A publish sends the full plan, including the writer's other `effort`
+fields such as the test command, lint, rules, agents, and team. The
+service stores them. Every member, including a viewer, can read the
+current plan. Keep secrets out of `plan.json`.
 
-The machine uses the settings saved in its own `collab.settings`.
-These are `effort.agents`, `effort.initiative`, `effort.lint`, `effort.rules`,
-`effort.slug`, `effort.stacked_hotfix`, `effort.team`, `effort.test`,
-`effort.workspace`, and all other `effort` fields except `name` and
-`summary`. A pull reports differences and keeps the local settings.
-Use `wg pull <plan-dir> --accept-settings` only after you trust the offered
-values. This flag shows the differences and applies the offered values.
+Collaborator-written titles, descriptions, and acceptance text reach the
+workers on both sides. Read that text as project input.
+
+Of the `effort` fields, a pull takes the project name and summary. Each
+machine keeps its other fields in `collab.settings`, including the test
+command, lint, rules, agents, and workspace. A pull reports differences.
+Use `wg pull <plan-dir> --accept-settings` only if you trust the offered
+values. The flag shows the differences and applies the offered values.
 
 The shared keymap contains the project, milestones, status document ID,
 issue and card IDs, branches, and PR numbers. Before a pull, `wg` checks
 the plan and verifies new or changed issue and milestone IDs in Linear.
 The run rows, card hashes, and status document hash and time stay local.
 `PLAN.md` stays local too.
-
-## Join as a collaborator
-
-1. Open the invitation link in a browser, sign in, and press **Join**.
-2. Make a coordinator token in **Settings**. Run `wg login <page-url>` and paste
-   your token at the prompt. Use the page address in CLI commands. Keep the
-   invitation link in the browser.
-3. Set the local config's `human` to your display name on the page. Run
-   `wg join <page-url>` in your checkout. Use `--repo <path>` to select a
-   checkout and `--project <name-or-id>` to select one of several shared projects.
-   Use the printed `shared:<id>` when two projects have the same name.
-   A viewer needs a collaborator invitation to run `wg join`.
-4. If `wg join` asks for a Linear key, follow the printed config and key
-   instructions. Use your own key. If the key cannot read the team, use
-   **Request access** at the page address that the command prints. Run
-   `wg join` again after you get access.
-5. In Orca, `wg join` creates the coordinator worktree or uses an existing
-   clean one. Outside Orca, follow the printed commands to create it. The
-   command pulls the plan and shared keymap, adds a local project heading,
-   runs preflight, and prints the first `wg next` result. Set up test commands
-   and other machine settings for your own checkout.
-
-The owner handles merge points, ship points, and deploys. To stop local
-collaboration, run `wg leave <plan-dir>`. It removes the local collaboration
-record and warns if it cannot release a claim. Those claims end when their
-leases expire. To end your membership, use the page.
 
 ## Read and edit
 
@@ -85,13 +93,14 @@ Compare the plans, apply the edits you want to keep, and run
 ## Claims
 
 `wg dispatch` checks the local prerequisites before it claims the node on
-the page. If dispatch fails after the claim request, it attempts to release
-the claim. A follow-up `wg claim` checks that the account still holds the
+the page. It claims the node before it starts the worker. If dispatch
+fails after the claim request, it attempts to release the claim. A follow-up `wg claim` checks that the account still holds the
 node. Each request uses the workspace in the local `collab` record.
 The Linear `agent:*` label shows the current worker job. The page claim
 stays with the runner between jobs. `wg next` and `wg tick` renew it when
 this machine has a run row. `wg started`, `wg done`, and moves to Ready
-to Merge or Merged check ownership before they act.
+to Merge or Merged check ownership before they act. For example,
+`wg done` refuses if another person holds the node.
 `wg move` releases it at Merged, Done, or Canceled. `wg cleanup` releases
 the caller's claims.
 
@@ -112,11 +121,10 @@ the shared keymap. Fetch and track that branch locally if it is missing.
 
 ## Who answers
 
-The person who holds the page claim answers questions for that node and
-handles its merge request. The project owner handles decisions, merge
-points, ship points, ops nodes, and project triage.
+The runner is the person whose account holds the node claim. Their
+account receives answers for the node, and they handle its merge request.
+The owner handles project triage.
 
-Use the same display name on the page and in the `human` setting.
 Run `wg doctor <plan-dir>` to check the name in your claims or in the
 page status. A different name makes this check fail. If the page does
 not answer or does not have a name to check, doctor prints a warning.

@@ -1,0 +1,26 @@
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+/* The page itself never scrolls; its panes do. On iOS a scroll past the top of a pane would carry on to the
+   page, and Safari's pull to refresh would reload it. */
+html, body { overscroll-behavior: none; }
+.stage, .panel-body, .board-scroll, .picker-scroll { overscroll-behavior: contain; }
+body { background: var(--cab-0); color: var(--ink-1); font: 13px/1.45 var(--sans); -webkit-font-smoothing: antialiased; }
+button, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; background: none; border: 1px solid var(--rail-2); border-radius: var(--r-1); padding: 3px 9px; color: var(--ink-2); }
+button:hover:not(:disabled) { border-color: var(--rail-3); color: var(--ink-1); }
+button:focus-visible, textarea:focus-visible, input:focus-visible, a:focus-visible { outline: 1px solid var(--lamp-review); outline-offset: 1px; }
+button:disabled { cursor: default; opacity: 0.55; }
+button.ghost { border-color: transparent; padding: 2px 6px; color: var(--ink-3); }
+button.primary { border-color: var(--lamp-done); color: var(--lamp-done); }
+button.danger { border-color: var(--lamp-stop); color: var(--lamp-stop); }
+a { color: inherit; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.station-fill { flex: 1; }
+
+/* Shell */
+/* dvh follows the bars of a phone browser as they show and hide. */
+.app { height: 100%; height: 100dvh; display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+
+.error { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 16px; background: rgba(239, 91, 76, 0.12); border-bottom: 1px solid rgba(239, 91, 76, 0.4); color: #f6b3ab; }
+.stage { flex: 1; min-height: 0; display: flex; position: relative; }
+.blank { margin: auto; color: var(--ink-3); }

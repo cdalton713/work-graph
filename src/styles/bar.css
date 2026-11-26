@@ -1,0 +1,118 @@
+.bar { flex: none; display: flex; align-items: center; gap: calc(var(--u) * 3); min-height: 44px; padding: 0 calc(var(--u) * 4); border-bottom: 1px solid var(--rail); background: var(--cab-1); }
+.bar button, .bar .picker-trigger { white-space: nowrap; flex: none; }
+.bar .picker, .bar .picker-trigger { flex: 0 1 auto; min-width: 0; }
+.brand { font: 600 11px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); white-space: nowrap; }
+.bar-project { font-weight: 600; color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.caret { color: var(--ink-4); margin-left: 6px; }
+/* A switch with its own lamp: dark when off, lit when on. */
+.toggle { display: inline-flex; align-items: center; gap: 7px; }
+.toggle::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--lamp-off); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
+.toggle.is-on, .toggle.is-on:hover { border-color: var(--rail-3); background: var(--cab-3); color: var(--ink-1); }
+.toggle.is-on::before { background: var(--lamp-ready); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 6px -1px var(--lamp-ready); }
+.sync { display: flex; align-items: center; gap: 6px; font: 12px var(--mono); }
+.sync-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--lamp-done); }
+.sync-dot.is-busy { background: var(--lamp-running); animation: pulse 0.8s linear infinite; }
+/* The status row: a labelled count for each status in workflow order. A status is also a filter. */
+.rail-bar { display: flex; align-items: center; gap: calc(var(--u) * 4); height: 34px; padding: 0 calc(var(--u) * 4) 0 calc(var(--u) * 2); border-bottom: 1px solid var(--rail); background: var(--cab-1); }
+.aspects { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.aspect { flex: none; display: inline-flex; align-items: center; gap: 7px; border-color: transparent; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
+.aspect b { font-weight: 500; color: var(--ink-1); }
+/* On a touch screen a hover stays after the tap, and a status that is off must not look lit. */
+@media (hover: hover) { .aspect:hover:not(:disabled) { border-color: transparent; background: var(--rail); } }
+.aspect:hover:not(:disabled) { border-color: transparent; }
+.aspect.is-on, .aspect.is-on:hover:not(:disabled) { border-color: var(--rail-3); background: var(--cab-3); color: var(--ink-1); }
+.aspects.is-filtered .aspect:not(.is-on) { opacity: 0.5; }
+.tally { flex: none; display: flex; align-items: center; gap: calc(var(--u) * 2); color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+.tally b { font-weight: 500; color: var(--ink-1); }
+.tally-track { display: flex; gap: 2px; width: 160px; height: 24px; align-items: stretch; }
+.tally-segment { position: relative; min-width: 3px; display: flex; align-items: center; outline: none; }
+.tally-segment i { display: block; width: 100%; height: 4px; border-radius: 1px; }
+.tally-tip { display: none; position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; padding: 5px 8px; border: 1px solid var(--rail-3); border-radius: var(--r-1); background: var(--cab-3); color: var(--ink-1); font-style: normal; pointer-events: none; }
+.tally-segment:hover .tally-tip, .tally-segment:focus-visible .tally-tip { display: block; }
+.tally-segment:hover i, .tally-segment:focus-visible i { height: 8px; box-shadow: 0 0 0 1px var(--ink-2); }
+
+/* The way back to the overview, with the count of issues that wait on the human in all projects. */
+.bar-home { display: inline-flex; align-items: center; gap: 6px; }
+.bar-home-count { padding: 0 5px; border-radius: 8px; background: var(--lamp-stop); color: var(--cab-0); font-size: 11px; font-weight: 600; line-height: 16px; }
+
+/* Put the project picker above its controls when they cannot share one row. */
+@media (max-width: 960px) {
+  .bar { position: relative; flex-wrap: wrap; gap: 0 6px; padding: 6px calc(var(--u) * 2); }
+  .bar > button, .bar .picker-trigger { min-height: 32px; }
+  .bar > .station-fill { display: none; }
+  .bar:has(.toggle-board) > .station-fill { display: block; flex: 0 0 100%; height: 6px; }
+  .bar .picker { position: static; flex: 1 1 0%; }
+  .bar .picker-wide { left: 8px; right: 8px; min-width: 0; max-width: 460px; }
+}
+
+/* Phone: a status row that scrolls. */
+@media (max-width: 720px) {
+  .brand, .toggle-map, .sync-time, .tally-track, .react-flow__minimap { display: none; }
+  .bar .toggle { gap: 5px; padding-inline: 6px; }
+  .sync { padding-inline: 6px; }
+  .rail-bar { gap: calc(var(--u) * 2); padding-right: calc(var(--u) * 3); }
+  .aspect { padding: 4px 9px; }
+  /* The row fades at its right end, to show that it scrolls. */
+  .aspects { mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent); }
+}
+
+/* What wg next last said about the effort, and how old that is. */
+.effort { flex: none; display: flex; align-items: baseline; gap: 10px; padding: 5px 14px; border-bottom: 1px solid var(--rail); background: var(--cab-1); color: var(--ink-2); font-size: 12px; min-width: 0; }
+.effort-mark { flex: none; font: 600 10px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-4); }
+.effort-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.effort-age { flex: none; color: var(--ink-3); }
+.effort-warning { background: rgba(242, 178, 62, 0.07); border-color: rgba(242, 178, 62, 0.55); }
+.effort-warning, .effort-warning .effort-mark, .effort-warning .effort-age { color: var(--lamp-running); }
+.run-time { color: var(--ink-2); }
+.run-time.run-warning { color: var(--lamp-running); font-weight: 600; }
+
+/* The coordinator of a project, from the link: listening (green), working (amber), not listening (grey). */
+.coord-listening { color: var(--lamp-done); }
+.coord-working { color: var(--lamp-running); }
+.coord-gone { color: var(--ink-3); }
+.coord-needs { color: var(--lamp-stop); }
+.effort-age[class*="coord-"]::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: currentColor; vertical-align: 1px; }
+
+/* Commands for the coordinator, at the end of the wg next row. */
+.effort-commands { flex: none; display: inline-flex; align-items: baseline; gap: 4px; margin-left: auto; }
+.effort-commands button.ghost { padding: 0 6px; font-size: 11px; }
+.effort-note { color: var(--ink-2); font-size: 11px; margin-right: 6px; }
+@media (max-width: 720px) {
+  .effort, .effort-commands { flex-wrap: wrap; }
+  .effort-status { min-width: 100px; }
+  .effort-commands { max-width: 100%; }
+  .effort-commands .effort-note { display: none; }
+}
+
+/* The keyboard keys of the page (?). */
+.bar-keys { min-width: 26px; font: 600 12px var(--mono); }
+.bar-version { font-size: 11px; color: var(--ink-3); }
+.bar-keys.is-on { color: var(--ink-1); }
+.bar-close { color: var(--ink-4); }
+.bar-share { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-3); }
+.bar-share b { color: var(--lamp-done); font-weight: 500; }
+.bar-viewer { font-size: 11px; color: var(--ink-3); border: 1px solid var(--rail-2); border-radius: var(--r-1); padding: 1px 6px; }
+.bar-user { font-size: 12px; color: var(--ink-3); }
+.bar-close:hover:not(:disabled) { color: var(--lamp-stop); border-color: var(--lamp-stop); }
+.keys { position: fixed; z-index: 50; top: 52px; right: 16px; width: min(380px, calc(100vw - 32px)); padding: 10px 14px 12px; border: 1px solid var(--rail-2); border-radius: var(--r-2); background: var(--cab-1); box-shadow: 0 8px 24px rgb(0 0 0 / 0.4); font-size: 12px; }
+.keys header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; color: var(--ink-1); }
+.keys dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; margin: 0; }
+.keys dt { white-space: nowrap; }
+.keys dd { margin: 0; color: var(--ink-2); }
+.keys kbd { font: 11px/16px var(--mono); padding: 0 5px; border: 1px solid var(--rail-2); border-radius: var(--r-1); color: var(--ink-2); }
+
+/* The View menu of the bar: a dot shows that a view option hides or adds something. */
+.bar-view { display: inline-flex; align-items: center; gap: 6px; }
+/* The autonomy level: full (the agent does more) is amber, supervised (the human approves more) is blue. */
+.bar-autonomy { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--ink-3); }
+.bar-autonomy b { font-weight: 600; color: var(--ink-1); }
+/* The review effort: light (less review) is amber. */
+.bar-review { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--ink-3); }
+.bar-review b { font-weight: 600; color: var(--ink-1); }
+.bar-review.review-light b { color: var(--lamp-running); }
+.bar-autonomy.auto-full b { color: var(--lamp-running); }
+.bar-autonomy.auto-supervised b { color: var(--lamp-review); }
+.bar-view-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--lamp-running); }
+
+.claim-filter { display: flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--ink-3); }
+.claim-filter select { color: var(--ink-1); background: var(--cab-1); border: 1px solid var(--rail); font: inherit; }

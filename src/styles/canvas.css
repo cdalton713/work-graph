@@ -1,0 +1,124 @@
+/* Canvas */
+.react-flow { --xy-background-color: var(--cab-0); --xy-background-pattern-color: rgba(190, 220, 205, 0.07); --xy-edge-stroke: var(--track); --xy-edge-stroke-width: 1.5;
+  --xy-controls-button-background-color: var(--cab-2); --xy-controls-button-background-color-hover: var(--cab-3); --xy-controls-button-color: var(--ink-2);
+  --xy-controls-button-border-color: var(--rail); --xy-minimap-background-color: var(--cab-1); --xy-minimap-mask-background-color: rgba(8, 12, 11, 0.7);
+  --xy-node-border: 0; --xy-node-background-color: transparent; --xy-node-boxshadow-hover: none; --xy-node-boxshadow-selected: none; --xy-handle-background-color: transparent; --xy-handle-border-color: transparent; }
+.react-flow__node { cursor: pointer; padding: 0; border: 0; background: none; }
+/* React Flow gives each node the pointer when the canvas has a node handler. A box and its plate are not targets: the pointer goes through to the pane below, where a click clears the selection and a drag moves the canvas. */
+.react-flow__node.box-node { cursor: default; pointer-events: none !important; }
+.react-flow__handle { width: 1px; height: 1px; min-width: 0; min-height: 0; border: 0; opacity: 0; }
+.react-flow__controls { box-shadow: none; border: 1px solid var(--rail); border-radius: var(--r-1); overflow: hidden; }
+.react-flow__minimap { border: 1px solid var(--rail-2); border-radius: var(--r-1); overflow: hidden; }
+.mini { fill: var(--lamp-idle); } .mini.sig-ready { fill: var(--lamp-ready); } .mini.sig-running { fill: var(--lamp-running); } .mini.sig-review { fill: var(--lamp-review); }
+.mini.sig-merged { fill: var(--lamp-merged); } .mini.sig-done { fill: var(--lamp-done); } .mini.sig-stop { fill: var(--lamp-stop); } .mini.sig-off { fill: var(--lamp-off); }
+.mini-box { fill: rgba(190, 220, 205, 0.05); }
+.mini-none { display: none; }
+.react-flow__attribution { background: none; font-size: 9px; opacity: 0.5; }
+.react-flow__attribution a { color: var(--ink-3); }
+
+/* Tracks. The colour is the state of the blocker. A lit track is brighter and thicker and keeps that colour. No track moves. */
+.track { --trk: var(--track); }
+.track-clear { --trk: var(--track-clear); }
+.track-lit { --trk: var(--track-lit); }
+.track-clear.track-lit { --trk: var(--track-clear-lit); }
+.track .react-flow__edge-path { stroke: var(--trk); stroke-width: 1.5; transition: stroke 120ms, stroke-width 120ms; }
+.track-lit .react-flow__edge-path { stroke-width: 2.5; }
+.track-head { fill: var(--trk); transition: fill 120ms; }
+.react-flow__edge { transition: opacity 120ms; }
+.react-flow__edge.track-dim { opacity: 0.16; }
+.track-note { position: absolute; z-index: 6; pointer-events: none; display: flex; align-items: baseline; gap: 6px; padding: 4px 9px; border: 1px solid var(--rail-2); border-radius: var(--r-1); background: var(--cab-4); color: var(--ink-2); font-size: 12px; white-space: nowrap; }
+.track-note b { font: 500 12px var(--mono); color: var(--ink-1); }
+.track-note span { margin-left: 4px; padding-left: 10px; border-left: 1px solid var(--rail-2); color: var(--ink-3); font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+/* The key sits beside the zoom controls at each width, so a mark on the canvas always has its meaning in view. */
+.react-flow__panel.key { margin: 15px 15px 15px 52px; padding: 4px 10px; border: 1px solid var(--rail); border-radius: var(--r-1); background: var(--cab-1); color: var(--ink-3); font-size: 11px; line-height: 16px; cursor: default; }
+.key-body { display: flex; flex-direction: column; gap: 5px; padding: 6px 2px 4px 0; }
+.key summary { cursor: pointer; color: var(--ink-3); list-style: none; }
+.key summary::-webkit-details-marker { display: none; }
+.key summary::before { content: "▸ "; }
+.key details[open] summary::before { content: "▾ "; }
+.key span { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.key-line { flex: none; overflow: visible; }
+.key .lamp { margin: 0 10px; }
+
+.box { width: 100%; height: 100%; }
+.box-phase { border-radius: 8px; background: var(--cab-1); box-shadow: inset 0 0 0 1px var(--rail); }
+.box-lane { border-radius: 6px; background: var(--cab-2); }
+/* A plate has the colour of its box, so a track goes behind the name and does not cross it. */
+.plate { position: absolute; left: 8px; top: 9px; max-width: calc(100% - 16px); display: flex; align-items: baseline; gap: 10px; padding: 1px 8px; border-radius: var(--r-1); background: var(--cab-1); white-space: nowrap; overflow: hidden; }
+.plate-lane { left: 6px; top: 6px; padding: 0 6px; background: var(--cab-2); }
+.plate > * { flex: none; }
+.plate-label { font: 600 11px/18px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-2); }
+.plate-lane .plate-label { font-weight: 500; color: var(--ink-3); }
+.plate-count { font: 11px var(--mono); color: var(--ink-3); }
+.plate.is-complete .plate-count { color: var(--lamp-done); }
+.plate > .plate-note { flex: 0 1 auto; min-width: 0; font: 11px var(--mono); color: var(--ink-4); overflow: hidden; text-overflow: ellipsis; }
+
+/* Station: the outer layer is the border colour, the face sits 1px inside it, so a clipped shape keeps its edge.
+   --sig is the lamp colour of the status: it colours the status label, and for a status that is live, the border. */
+.station { --sig: var(--ink-3); --edge: var(--rail-2); --face: var(--cab-3); --cut: none; width: 264px; height: 72px; background: var(--edge); border-radius: var(--r-2); clip-path: var(--cut); padding: 1px; transition: opacity 120ms, filter 120ms; }
+.station-face { height: 100%; background: var(--face); border-radius: calc(var(--r-2) - 1px); clip-path: var(--cut); padding: 9px 12px; display: flex; flex-direction: column; gap: 5px; }
+@media (hover: hover) { .station:hover { filter: brightness(1.14); } }
+.station.is-dim { opacity: 0.25; }
+.station.sig-ready { --sig: var(--lamp-ready); --edge: rgba(232, 241, 236, 0.5); }
+.station.sig-running { --sig: var(--lamp-running); --edge: rgba(242, 178, 62, 0.5); }
+.station.sig-review { --sig: var(--lamp-review); --edge: rgba(86, 182, 232, 0.45); }
+.station.sig-merged { --sig: var(--lamp-merged); --edge: rgba(47, 183, 166, 0.45); }
+.station.sig-done { --sig: var(--lamp-done); --edge: rgba(63, 214, 138, 0.22); --face: var(--cab-2); }
+.station.sig-stop { --sig: var(--lamp-stop); --edge: rgba(239, 91, 76, 0.7); --face: color-mix(in srgb, var(--lamp-stop) 8%, var(--cab-3)); }
+.station.sig-off { --edge: var(--rail); --face: var(--cab-2); }
+.station.sig-done .station-title, .station.sig-off .station-title { color: var(--ink-3); }
+.station.sig-off .station-title { text-decoration: line-through; }
+/* A worker runs on the issue now: the face takes a tint of the status colour, and the lamp pulses. */
+.station.is-live { --face: color-mix(in srgb, var(--sig) 10%, var(--cab-3)); }
+.station.is-selected { --edge: var(--ink-1); --face: var(--cab-4); }
+.kind-ops { --cut: polygon(12px 0, 100% 0, calc(100% - 12px) 100%, 0 100%); }
+.kind-merge-point, .kind-ship-point { --cut: polygon(14px 0, calc(100% - 14px) 0, 100% 50%, calc(100% - 14px) 100%, 14px 100%, 0 50%); }
+.kind-decision { --cut: polygon(22px 0, calc(100% - 22px) 0, 100% 50%, calc(100% - 22px) 100%, 22px 100%, 0 50%); }
+.kind-ops .station-face, .kind-merge-point .station-face, .kind-ship-point .station-face { padding-inline: 20px; }
+.kind-decision .station-face { padding-inline: 26px; }
+.kind-ship-point { padding: 3px; }
+/* The double edge of a ship point takes 4px of the face: less padding keeps its two title lines whole. */
+.kind-ship-point .station-face { padding-block: 7px; gap: 3px; }
+.kind-spike { background: none; border: 1px dashed var(--edge); padding: 0; }
+.station-top { display: flex; align-items: center; gap: 7px; font: 500 11px var(--mono); color: var(--ink-3); }
+.station-top > * { flex: none; }
+.station-id { color: var(--ink-2); white-space: nowrap; }
+/* The tags take the room that the status leaves. When that is too small, the last tags fade out; the id and the status always show in full. */
+.station-top > .station-tags { flex: 1; min-width: 0; display: flex; gap: 7px; overflow: hidden; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; color: var(--ink-4); mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent); }
+.station-tags > * { flex: none; }
+.station-worker { color: var(--sig); }
+.station-pr { color: var(--ink-2); }
+.station-pr i { font-style: normal; color: var(--lamp-done); }
+.station-status { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; color: var(--sig); }
+.station-title { font-weight: 500; line-height: 1.25; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+/* Far zoom: the text of a station is too small to read. The station shows its id only, at a size that stays
+   readable (--inv is 1 / zoom), and its face takes the colour of its status. */
+.is-far .station-title, .is-far .station-tags, .is-far .station-pr, .is-far .station-status, .is-far .station .run-time, .is-far .plate-note { display: none; }
+.is-far .station-face { justify-content: center; }
+.is-far .station-top { gap: min(calc(6px * var(--inv)), 20px); }
+.is-far .station-id { font-size: min(calc(12px * var(--inv)), 46px); line-height: 1; font-weight: 600; color: var(--sig); }
+.is-far .station.sig-idle .station-id { color: var(--ink-2); }
+.is-far .station .lamp { width: min(calc(8px * var(--inv)), 24px); height: min(calc(8px * var(--inv)), 24px); }
+.is-far .station:not(.is-selected) { --face: color-mix(in srgb, var(--sig) 12%, var(--cab-2)); }
+.is-far .plate-label, .is-far .plate-count { font-size: min(calc(11px * var(--inv)), 30px); line-height: 1.2; }
+.is-far .plate > .plate-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* A narrow canvas (a board and a panel beside it): the small map goes, and the key is one short row. */
+.react-flow { container-type: inline-size; }
+@container (max-width: 560px) {
+  .react-flow__minimap { display: none; }
+  .react-flow__panel.key { padding: 4px 10px; }
+  .key span:last-child { display: none; }
+}
+
+@media (max-width: 720px) {
+  /* The key is one short row here, so that it hides less of the canvas. */
+  .react-flow__panel.key { padding: 4px 10px; }
+  .key span:last-child { display: none; }
+}
+
+.station-wave { color: var(--ink-2); }
+.station-soak { color: var(--ink-2); text-transform: none; letter-spacing: 0; }
+
+.station-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

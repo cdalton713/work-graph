@@ -2,6 +2,7 @@ import { BaseEdge, Controls, type Edge, type EdgeProps, Handle, MiniMap, type No
 import { type CSSProperties, memo, useEffect, useMemo, useRef, useState } from "react";
 import { type GEdge, type GNode, type Graph, reviewMark, runTime, satisfied, soakLeft, startNode, trace } from "../lib/graph";
 import { type Layout, NODE_H, NODE_W, type Point, arrow, roundedPath, routeAt } from "../lib/layout";
+import { PHONE_MAX_WIDTH } from "../lib/screen";
 import { Lamp } from "./ui";
 
 import type { ClaimMark } from "../lib/claims";
@@ -17,7 +18,7 @@ type PlateNode = Node<{ kind: "phase" | "lane"; label: string; note: string; don
 // page that changes on it can lose the tap. So the trace of the pointer is for a real pointer only.
 const HAS_POINTER = typeof matchMedia === "function" && matchMedia("(hover: hover)").matches;
 // Below this pane width the layout is the phone layout of styles.css.
-const NARROW = 720;
+const NARROW = PHONE_MAX_WIDTH;
 
 // Below this zoom the text of a station cannot be read. The station then shows its id only, large,
 // and the face takes the colour of its status (see .is-far in styles.css).

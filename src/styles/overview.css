@@ -1,0 +1,124 @@
+/* No project yet: the overview of all projects. The projects that wait on the human come first, with a red
+   edge and their next actions under the row. */
+.stage:has(> .overview) { overflow-y: auto; }
+.overview { margin: 0 auto; width: min(1080px, calc(100% - 32px)); padding-block: 20px 40px; }
+.ov-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 12px; }
+.ov-budget { font-size: 11px; color: var(--lamp-running); }
+.ov-head h1 { margin: 0; font: 600 10px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); }
+.ov-sum { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--ink-2); font-size: 13px; }
+.ov-sum b { color: var(--ink-1); font-weight: 600; }
+.ov-sum.is-you b { color: var(--lamp-stop); }
+.ov-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.ov-find { position: relative; flex: 1 1 220px; max-width: 320px; }
+.ov-find input { width: 100%; background: var(--inset); border: 1px solid var(--rail-2); border-radius: var(--r-1); padding: 4px 28px 4px 9px; }
+.ov-find input::placeholder { color: var(--ink-4); }
+.ov-find input:focus-visible { outline: 0; border-color: var(--rail-3); }
+.ov-find kbd { position: absolute; right: 7px; top: 50%; transform: translateY(-50%); font: 11px/16px var(--mono); padding: 0 5px; border: 1px solid var(--rail-2); border-radius: var(--r-1); color: var(--ink-4); pointer-events: none; }
+@media (hover: none) { .ov-find kbd { display: none; } }
+.ov-seg { display: inline-flex; }
+.ov-seg button { border-radius: 0; margin-left: -1px; }
+.ov-seg button:first-child { border-radius: var(--r-1) 0 0 var(--r-1); margin-left: 0; }
+.ov-seg button:last-child { border-radius: 0 var(--r-1) var(--r-1) 0; }
+.ov-seg button.is-on { position: relative; border-color: var(--rail-3); background: var(--cab-3); color: var(--ink-1); }
+.ov-section + .ov-section { margin-top: 16px; }
+.ov-section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 6px; padding: 0 2px; font: 600 12px var(--sans, inherit); color: var(--ink-1); }
+.ov-section-name { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+button.ov-section-name { cursor: pointer; }
+button.ov-section-name:hover { text-decoration: underline; }
+.ov-section-sum { font-size: 11px; font-weight: 400; color: var(--ink-3); }
+.ov-section-state { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 400; }
+.ov-state-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.ov-init-on { color: var(--ink-1); font-weight: 600; }
+.ov-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--rail); border-radius: var(--r-2); background: var(--cab-1); overflow: hidden; }
+.ov-row + .ov-row { border-top: 1px solid var(--rail); }
+.ov-row { display: flex; flex-wrap: wrap; align-items: center; box-shadow: inset 2px 0 0 transparent; }
+.ov-effort { flex: 0 0 100%; min-width: 0; padding: 0 12px 6px 29px; font-size: 12px; color: var(--ink-3); }
+.ov-effort summary { width: fit-content; cursor: pointer; }
+.ov-effort p { margin: 4px 0 0; overflow-wrap: anywhere; color: var(--ink-2); }
+/* The agents of the effort in Orca (wg agents): one line each, below the project row. A click shows the full message. */
+.ov-agents { flex: 0 0 100%; min-width: 0; margin: 0; padding: 0 12px 6px 29px; list-style: none; font-size: 12px; }
+.ov-agents.is-stale .ov-agent { opacity: 0.55; }
+.ov-agents-note { font-size: 11px; }
+.ov-agent summary { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 0; cursor: pointer; list-style: none; color: var(--ink-3); }
+.ov-agent summary::-webkit-details-marker { display: none; }
+.ov-agent-who { flex: none; color: var(--ink-2); }
+.ov-agent-state, .ov-agent-age { flex: none; font-size: 11px; }
+.ov-agent-said { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.ov-agent[open] .ov-agent-said { visibility: hidden; }
+.ov-agent-full { margin: 0 0 6px 14px; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ov-row .ov-open { flex: 1; min-width: 0; }
+/* The copy button of a row shows on hover or focus; a touch screen has no hover, so there it always shows. */
+.ov-copy { flex: none; margin-right: 8px; font-size: 11px; }
+@media (hover: hover) { .ov-row:not(:hover):not(:focus-within) .ov-copy:not(.is-copied) { opacity: 0; } }
+.ov-row.is-you { box-shadow: inset 2px 0 0 var(--lamp-stop); }
+.ov-row.is-active { background: var(--cab-2); }
+.ov-row.is-closed .ov-title { color: var(--ink-3); }
+.ov-open { display: grid; grid-template-columns: minmax(0, 2fr) minmax(120px, 1.1fr) minmax(0, 1.2fr); align-items: center; gap: 4px 16px;
+  width: 100%; border: 0; border-radius: 0; padding: 10px 14px; text-align: left; color: var(--ink-2); }
+.ov-open:hover:not(:disabled) { color: var(--ink-2); }
+.ov-state { grid-column: 1 / -1; display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 12px; }
+.ov-state-label { flex: none; font-weight: 600; }
+.ov-reason { min-width: 0; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-error { grid-column: 1 / -1; padding-left: 17px; font-size: 12px; overflow-wrap: anywhere; }
+.ov-name { display: flex; align-items: center; gap: 9px; min-width: 0; padding-left: 17px; }
+.ov-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 500; color: var(--ink-1); }
+.ov-ws { flex: none; font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-4); }
+.ov-progress { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ov-track { flex: 1; display: flex; gap: 2px; height: 4px; min-width: 40px; }
+.ov-track i { display: block; min-width: 3px; border-radius: 1px; }
+.ov-done { flex: none; font-size: 12px; color: var(--ink-2); }
+.ov-flow { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; min-width: 0; }
+.ov-flow > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ov-flow .lamp { width: 6px; height: 6px; }
+.ov-pr { display: inline-flex; align-items: baseline; gap: 6px; font: 11px var(--mono); color: var(--ink-3); }
+.ov-pr .pr-links a { font-size: 11px; }
+.overview .empty { color: var(--ink-3); }
+
+/* Below 1024px let the project details use the full width. */
+@media (max-width: 1023px) {
+  .ov-open { grid-template-columns: minmax(0, 1fr); gap: 6px 12px; }
+  .ov-progress, .ov-flow { grid-column: 1 / -1; }
+  .ov-progress, .ov-flow { padding-left: 17px; }
+  .ov-progress { max-width: 320px; }
+}
+@media (max-width: 720px) {
+  .overview { width: calc(100% - 32px); padding-top: 14px; }
+  .ov-find { max-width: none; flex-basis: 100%; }
+  .ov-find input { font-size: 16px; }
+  .ov-open { padding-block: 12px; }
+}
+
+/* The inbox: every move that waits on the human, in all projects, the one that waits longest first. */
+.inbox { margin-bottom: 20px; border: 1px solid color-mix(in srgb, var(--lamp-stop) 35%, var(--rail)); border-radius: var(--r-2); background: var(--cab-1); overflow: hidden; }
+.inbox-head { display: flex; align-items: baseline; gap: 8px; margin: 0; padding: 9px 14px 7px; border-bottom: 1px solid var(--rail); font: 600 10px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--lamp-stop); }
+.inbox-head b { font-weight: 500; color: var(--ink-1); }
+.inbox-note { margin-left: auto; font-weight: 400; letter-spacing: 0.06em; color: var(--ink-4); }
+.inbox ul { list-style: none; margin: 0; padding: 0; }
+.inbox-row { display: flex; align-items: center; gap: 12px; padding-right: 14px; }
+.inbox-row + .inbox-row { border-top: 1px solid var(--rail); }
+.inbox-open { flex: 1; min-width: 0; display: grid; grid-template-columns: 8px 72px minmax(0, 1fr) minmax(0, 180px) 64px; align-items: center; gap: 12px;
+  border: 0; border-radius: 0; padding: 8px 0 8px 14px; text-align: left; color: var(--ink-2); }
+@media (hover: hover) { .inbox-open:hover:not(:disabled) { background: var(--rail); } }
+.inbox-id { font-size: 12px; color: var(--ink-2); }
+.inbox-text { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.inbox-why { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-1); font-weight: 500; }
+.inbox-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: 12px; }
+.inbox-effect { display: block; color: var(--ink-3); font-size: 12px; }
+.inbox-project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--ink-3); }
+.inbox-age { font-size: 11px; text-align: right; color: var(--ink-4); }
+.inbox-prs { flex: none; width: 150px; display: inline-flex; flex-direction: column; gap: 2px; }
+.inbox-prs:empty { visibility: hidden; }
+.inbox-more { margin: 4px 8px 6px; font-size: 11px; }
+@media (max-width: 900px) {
+  .inbox-row { flex-wrap: wrap; padding-right: 0; }
+  .inbox-open { grid-template-columns: 8px auto minmax(0, 1fr) auto; row-gap: 2px; }
+  .inbox-project { grid-column: 3 / -1; grid-row: 2; }
+  .inbox-age { grid-column: 4; grid-row: 1; }
+  .inbox-open { flex-basis: 100%; align-items: start; padding-right: 14px; }
+  .inbox-open > .lamp { margin-top: 5px; }
+  .inbox-text { flex-direction: column; align-items: stretch; gap: 1px; }
+  .inbox-why { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .inbox-title { display: none; }
+  .inbox-prs { width: auto; padding: 0 14px 8px 34px; }
+  .inbox-prs:empty { display: none; }
+}

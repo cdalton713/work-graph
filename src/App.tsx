@@ -20,6 +20,7 @@ import { ownerWords } from "./lib/words";
 import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
 import type { Account, AccountConnection, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
+import { TABLET_OR_WIDER } from "./lib/screen";
 import { useLink } from "./useLink";
 import { canReleaseClaim, claimMarks, matchesClaim, parseClaimFilter, type ClaimFilter, type ProjectClaims } from "./lib/claims";
 
@@ -122,7 +123,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const [map, setMap] = useState(() => localStorage.getItem("wg-map") !== "off");
   useEffect(() => localStorage.setItem("wg-map", map ? "on" : "off"), [map]);
   // The board starts open on a wide pane. On a phone it covers the canvas, so it starts closed there.
-  const [board, setBoard] = useState(() => localStorage.getItem("wg-board") !== "off" && matchMedia("(min-width: 721px)").matches);
+  const [board, setBoard] = useState(() => localStorage.getItem("wg-board") !== "off" && matchMedia(TABLET_OR_WIDER).matches);
   useEffect(() => localStorage.setItem("wg-board", board ? "on" : "off"), [board]);
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set());
   const [hoverId, setHoverId] = useState<string | null>(null);
@@ -502,7 +503,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const pick = useCallback((id: string) => {
     select(id);
     setFocus({ id, tick: Date.now() });
-    if (!matchMedia("(min-width: 721px)").matches) setBoard(false);
+    if (!matchMedia(TABLET_OR_WIDER).matches) setBoard(false);
   }, [select]);
 
   // The keys of a project page. `j` and `k` step through the issues in board order (Your move first).

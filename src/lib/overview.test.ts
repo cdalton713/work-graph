@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { NO_INITIATIVE, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, overviewMoveReason, summarize, type OverviewData, type ProjectSummary } from "./overview";
+import { NO_INITIATIVE, rankMoves, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, overviewMoveReason, summarize, type OverviewData, type ProjectSummary } from "./overview";
 import { DEFAULT_HUMAN, configureSite, createSite } from "./site";
 import type { GraphData, Issue, State } from "./types";
 
@@ -16,6 +16,22 @@ const graph = (issues: Issue[], status: GraphData["status"] = null): GraphData =
   ({ project: { id: "p", name: "P", url: "" }, milestones: [], issues, teams: {}, labels: [], viewerId: "me", status });
 
 describe("summarize", () => {
+  it("counts open dependents through a chain and fork, and only clears the last blocker", () => {
+    const nodes = [
+      issue("1", { state: state("Needs Ada", "started") }),
+      issue("2"), issue("3"), issue("4"), issue("5"),
+      issue("6", { state: state("Done", "completed") }),
+      issue("7", { state: state("Canceled", "canceled") }),
+      issue("8"),
+    ];
+    for (const [from, to] of [[1, 2], [2, 3], [1, 4], [1, 5], [1, 6], [1, 7], [8, 5], [6, 4]]) {
+      const parent = nodes[from - 1];
+      parent.blocks.push({ ...nodes[to - 1], inProject: true });
+    }
+    const summary = summarize(graph(nodes), "work", 0, createSite("Ada", "work"));
+    expect(summary.you).toMatchObject([{ blocks: 4, unblocks: 2 }]);
+  });
+
   it("counts both wait statuses but gives the viewer only their own moves", () => {
     const data = graph([
       issue("1", { state: state("Needs Ada", "started") }),
@@ -28,6 +44,16 @@ describe("summarize", () => {
       { status: "Needs Grace", n: 1, signal: "stop" },
     ]);
     expect(summarize(data, "work", 0, createSite("Ada", "work")).you).toHaveLength(2);
+  });
+
+  it("includes the impact of an issue added to the inbox by a live question", () => {
+    const worker = issue("1", { state: state("In Progress", "started") });
+    const dependent = issue("2");
+    worker.blocks.push({ ...dependent, inProject: true });
+    const summary = summarize(graph([worker, dependent]), "work");
+    const ask = { id: "q1", key: null, issue: worker.identifier, from: "w", body: "Which table?", at: worker.updatedAt };
+    expect(summary.you).toEqual([]);
+    expect(movesWithAsks(summary.you, [ask], summary.moveImpacts)).toMatchObject([{ idle: true, blocks: 1, unblocks: 1 }]);
   });
 
   it("reports the freshness of a published work-graph project", () => {
@@ -54,8 +80,8 @@ describe("summarize", () => {
     ], { content: '```json\n{"wg":1,"status":"wave 2: 1 running","at":"2026-11-20T10:00:00Z"}\n```', updatedAt: "x" }), "work");
     expect(s).toMatchObject({ workspace: "work", id: "p", planned: 5, done: 1, running: 1, review: 0, ready: 1, updatedAt: "2026-11-06T00:00:00Z" });
     expect(s.you).toEqual([
-      { identifier: "CD-3", title: "t3", why: "Needs Human", pullRequests: [], updatedAt: "2026-11-03T00:00:00Z" },
-      { identifier: "CD-4", title: "t4", why: "Merge #7", pullRequests: [], updatedAt: "2026-11-04T00:00:00Z" },
+      { identifier: "CD-3", title: "t3", why: "Needs Human", pullRequests: [], updatedAt: "2026-11-03T00:00:00Z", blocks: 0, unblocks: 0 },
+      { identifier: "CD-4", title: "t4", why: "Merge #7", pullRequests: [], updatedAt: "2026-11-04T00:00:00Z", blocks: 0, unblocks: 0 },
     ]);
     expect(s.effort).toEqual({ status: "wave 2: 1 running", at: "2026-11-20T10:00:00Z" });
     expect(s.counts.map((c) => c.status)).toEqual(["Todo", "In Progress", "Needs Human", "In Review", "Done", "Canceled"]);
@@ -137,9 +163,9 @@ describe("movesWithAgents", () => {
   const report = (agents: ReturnType<typeof agent>[], sent = "2026-11-20T11:59:30Z") => ({ at: sent, agents });
   it("adds each agent that waits at a prompt as a move first, and marks the move of its issue", () => {
     expect(movesWithAgents([move], report([agent("c", "blocked"), agent("w1", "waiting", "CD-1"), agent("w2", "blocked", "CD-2"), agent("w3", "working", "CD-3"), agent("w4", "done", "CD-4")]), at)).toEqual([
-      { identifier: "coordinator", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", pullRequests: [], updatedAt: "2026-11-20T11:50:00Z" },
-      { identifier: "CD-2", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", pullRequests: [], updatedAt: "2026-11-20T11:50:00Z" },
-      { ...move, why: "Agent waits for your input · Merge #7" },
+      { identifier: "coordinator", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", idle: true, pullRequests: [], updatedAt: "2026-11-20T11:50:00Z" },
+      { identifier: "CD-2", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", idle: true, pullRequests: [], updatedAt: "2026-11-20T11:50:00Z" },
+      { ...move, idle: true, why: "Agent waits for your input · Merge #7" },
     ]);
   });
   it("keeps the moves as they are with no report, or with a report that is older than 3 minutes", () => {
@@ -153,8 +179,8 @@ describe("movesWithAsks", () => {
   const ask = (id: string, issue: string | null, body = "Which table?\nMore text") => ({ id, key: null, issue, from: "w", body, at: "2026-11-02T00:00:00Z" });
   it("adds each worker question as a move first, and marks a move that also has one", () => {
     expect(movesWithAsks([move], [ask("q1", "CD-2"), ask("q2", "CD-1")])).toEqual([
-      { identifier: "CD-2", title: "Which table?", why: "Worker asks:", pullRequests: [], updatedAt: "2026-11-02T00:00:00Z" },
-      { ...move, why: "Worker asks · Merge #7" },
+      { identifier: "CD-2", title: "Which table?", why: "Worker asks:", idle: true, pullRequests: [], updatedAt: "2026-11-02T00:00:00Z" },
+      { ...move, idle: true, why: "Worker asks · Merge #7" },
     ]);
   });
   it("keeps questions without an account name and omits questions for another person", () => {
@@ -185,5 +211,21 @@ describe("overview move wording", () => {
     expect(summarize(input, "work").you[0].why).toBe(reason);
     expect(overviewMoveReason(reason)).toBe("It waits on Ada. Ada's step: Verify the release.");
     expect(overviewMoveReason("Do you approve the release?")).toBe("Do you approve the release?");
+  });
+});
+
+describe("rankMoves", () => {
+  const items = [
+    { updatedAt: "2026-11-02", blocks: 1 },
+    { updatedAt: "2026-11-04", blocks: 4 },
+    { updatedAt: "2026-11-03", blocks: 4 },
+    { updatedAt: "2026-11-05", idle: true },
+  ].map((move) => ({ move }));
+  it("sorts by idle agent, dependents, then age", () => {
+    expect(rankMoves(items)).toEqual([items[3], items[2], items[1], items[0]]);
+  });
+  it("sorts legacy responses by age even when a live agent waits", () => {
+    const legacy = items.map(({ move: { updatedAt, idle } }) => ({ move: { updatedAt, idle } }));
+    expect(rankMoves(legacy)).toEqual([legacy[0], legacy[2], legacy[1], legacy[3]]);
   });
 });

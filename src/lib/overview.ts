@@ -1,7 +1,7 @@
 // The overview of all projects: one summary for each open project, made from its graph by the
 // same rules as the Board. The server makes the summaries, so the page does not load each graph.
 import { ownerWords } from "./words.ts";
-import { type Signal, boardGroups, buildGraph, parseStatus, projectGroups, statusTiming, yourMove } from "./graph.ts";
+import { type MoveRank, type Signal, boardGroups, buildGraph, compareMoves, isClosed, moveImpact, parseStatus, projectGroups, statusTiming, yourMove } from "./graph.ts";
 import { type Agents, type Ask, agentName, agentNeeds, agentsWaiting } from "./link.ts";
 import type { GraphData, Project, ProjectList, PullRequest } from "./types.ts";
 
@@ -11,15 +11,19 @@ import { currentSite, statusOrder } from "./site.ts";
 export const PROJECT_LAMP: Record<string, Signal> = { started: "running", paused: "stop", planned: "ready", backlog: "idle", completed: "done", canceled: "off" };
 
 /** `updatedAt`: the last change of the issue, so the page can show how long the move waits. */
-export interface YourMove { identifier: string; title: string; why: string; pullRequests: PullRequest[]; updatedAt: string }
+export interface YourMove extends MoveRank { identifier: string; title: string; why: string; pullRequests: PullRequest[]; unblocks?: number }
+type MoveImpacts = Record<string, ReturnType<typeof moveImpact>>;
+
 export interface ProjectSummary {
   workspace: string; id: string;
   /** The issues that are not canceled, and how many of them are done. */
   planned: number; done: number;
   /** The number of issues of each status, in workflow order. */
   counts: { status: string; n: number; signal: Signal }[];
-  /** The issues of the Board group "Your move", in run order. */
+  /** The issues of the Board group "Your move", by impact. */
   you: YourMove[];
+  /** Impact for other issues that can enter the inbox through live questions or prompts. */
+  moveImpacts?: MoveImpacts;
   running: number; review: number;
   /** Not started, and no blocker holds it back. */
   ready: number;
@@ -48,6 +52,12 @@ export function overviewMoveReason(reason: string): string {
 export function summarize(data: GraphData, workspace: string, now = Date.now(), settings = currentSite()): ProjectSummary {
   const graph = buildGraph(data, { site: settings });
   const groups = new Map(boardGroups(graph).map((g) => [g.id, g.nodes]));
+  const humanMoves = groups.get("you") ?? [];
+  const humanIds = new Set(humanMoves.map((n) => n.id));
+  const moveImpacts: MoveImpacts = Object.fromEntries(graph.nodes
+    .filter((n) => !humanIds.has(n.id) && !isClosed(n) && graph.dependents.get(n.id)?.length)
+    .map((n) => [n.issue.identifier, moveImpact(graph, n)] as const)
+    .filter(([, impact]) => impact.blocks > 0));
   const tally = new Map<string, { n: number; signal: Signal }>();
   for (const n of graph.nodes) tally.set(n.status, { n: (tally.get(n.status)?.n ?? 0) + 1, signal: n.signal });
   const order = statusOrder({ ...settings, waitNames: data.waitNames ?? settings.waitNames });
@@ -62,7 +72,8 @@ export function summarize(data: GraphData, workspace: string, now = Date.now(), 
     planned: graph.nodes.filter((n) => n.status !== "Canceled").length,
     done: graph.nodes.filter((n) => n.status === "Done").length,
     counts,
-    you: (groups.get("you") ?? []).map((n) => ({ identifier: n.issue.identifier, title: n.issue.title, why: yourMove(n.card?.next, summaryWords) ?? n.status, pullRequests: n.issue.pullRequests, updatedAt: n.issue.updatedAt })),
+    moveImpacts,
+    you: humanMoves.map((n) => ({ identifier: n.issue.identifier, title: n.issue.title, why: yourMove(n.card?.next, summaryWords) ?? n.status, pullRequests: n.issue.pullRequests, updatedAt: n.issue.updatedAt, ...moveImpact(graph, n) })),
     running: groups.get("running")?.length ?? 0,
     review: groups.get("review")?.length ?? 0,
     ready: groups.get("next")?.length ?? 0,
@@ -76,6 +87,11 @@ export function summarize(data: GraphData, workspace: string, now = Date.now(), 
 export interface OverviewFilter { text: string; workspace: string | null; mine: boolean; closed: boolean; initiative?: string | null }
 export const NO_INITIATIVE = "";
 export interface OverviewRow { project: Project & { workspace: string; workspaceName: string }; summary: ProjectSummary | null }
+
+export function rankMoves<T extends { move: MoveRank }>(items: T[]): T[] {
+  const ranked = items.some(({ move }) => move.blocks !== undefined);
+  return [...items].sort((a, b) => compareMoves(a.move, b.move, ranked));
+}
 
 export const summaryKey = (p: { workspace?: string; id: string }) => `${p.workspace ?? currentSite().defaultWorkspace}:${p.id}`;
 
@@ -107,7 +123,12 @@ export function overviewRows(list: OverviewData | ProjectList, filter: OverviewF
 /** What an open ask of a worker is: a question, or an escalation that no coordinator read. */
 const askVerb = (a: Ask) => (a.kind === "escalation" ? "Worker escalates" : "Worker asks");
 
-export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined): YourMove[] {
+function liveMoveImpact(impacts: MoveImpacts | undefined, id: string | null | undefined) {
+  if (!impacts) return {};
+  return id && Object.hasOwn(impacts, id) ? impacts[id] : { blocks: 0, unblocks: 0 };
+}
+
+export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined, impacts?: MoveImpacts): YourMove[] {
   asks = asks?.filter((ask) => !ask.accountName || ask.accountName === currentSite().human);
   if (!asks?.length) return you;
   const asked = new Set(asks.map((a) => a.issue ?? "worker"));
@@ -115,10 +136,10 @@ export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined): YourMov
   for (const a of asks) {
     const id = a.issue ?? "worker";
     if (you.some((m) => m.identifier === id) || extra.some((m) => m.identifier === id)) continue;
-    extra.push({ identifier: id, title: a.body.split("\n")[0].trim(), why: `${askVerb(a)}:`, pullRequests: [], updatedAt: a.at });
+    extra.push({ identifier: id, title: a.body.split("\n")[0].trim(), why: `${askVerb(a)}:`, pullRequests: [], updatedAt: a.at, idle: true, ...liveMoveImpact(impacts, a.issue) });
   }
   const verb = (id: string) => askVerb(asks.find((a) => (a.issue ?? "worker") === id)!);
-  return [...extra, ...you.map((m) => (asked.has(m.identifier) ? { ...m, why: `${verb(m.identifier)} · ${m.why}` } : m))];
+  return [...extra, ...you.map((m) => (asked.has(m.identifier) ? { ...m, idle: true, why: `${verb(m.identifier)} · ${m.why}` } : m))];
 }
 
 /**
@@ -126,13 +147,13 @@ export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined): YourMov
  * stops until the human answers it in Orca. They come first. A worker's move names its issue, so an issue
  * that is in the list keeps one entry and says that its worker waits.
  */
-export function movesWithAgents(you: YourMove[], agents: Agents | undefined, now: number): YourMove[] {
+export function movesWithAgents(you: YourMove[], agents: Agents | undefined, now: number, impacts?: MoveImpacts): YourMove[] {
   const waiting = agentsWaiting(agents, now);
   if (!waiting.length) return you;
   const byIssue = new Map(waiting.flatMap((a) => (a.issue ? [[a.issue, a] as const] : [])));
   const extra: YourMove[] = waiting.filter((a) => !a.issue || !you.some((m) => m.identifier === a.issue))
-    .map((a) => ({ identifier: agentName(a), title: a.said || a.title, why: `Agent ${agentNeeds(a)} in Orca:`, pullRequests: [], updatedAt: a.at ?? agents!.at }));
-  return [...extra, ...you.map((m) => (byIssue.has(m.identifier) ? { ...m, why: `Agent ${agentNeeds(byIssue.get(m.identifier)!)} · ${m.why}` } : m))];
+    .map((a) => ({ identifier: agentName(a), title: a.said || a.title, why: `Agent ${agentNeeds(a)} in Orca:`, pullRequests: [], updatedAt: a.at ?? agents!.at, idle: true, ...liveMoveImpact(impacts, a.issue) }));
+  return [...extra, ...you.map((m) => (byIssue.has(m.identifier) ? { ...m, idle: true, why: `Agent ${agentNeeds(byIssue.get(m.identifier)!)} · ${m.why}` } : m))];
 }
 
 /** The projects of one initiative in one workspace, and the sums of their summaries. `name` null: no initiative. */

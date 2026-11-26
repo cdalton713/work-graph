@@ -242,6 +242,28 @@ export function satisfied(blocker: GNode, node: GNode): boolean {
   return status === "Done";
 }
 
+export function moveImpact(graph: Graph, node: GNode): { blocks: number; unblocks: number } {
+  const downstream = reach(node.id, graph.dependents);
+  downstream.delete(node.id);
+  let blocks = 0, unblocks = 0;
+  for (const id of downstream) {
+    const dependent = graph.byId.get(id)!;
+    if (isClosed(dependent)) continue;
+    blocks++;
+    const blockers = graph.blockers.get(id) ?? [];
+    if (blockers.includes(node.id) && !satisfied(node, dependent)
+      && blockers.every((b) => b === node.id || satisfied(graph.byId.get(b)!, dependent))) unblocks++;
+  }
+  return { blocks, unblocks };
+}
+
+export interface MoveRank { updatedAt: string; blocks?: number; idle?: boolean }
+
+export function compareMoves(a: MoveRank, b: MoveRank, ranked = true): number {
+  const priority = ranked ? Number(!!b.idle) - Number(!!a.idle) || (b.blocks ?? 0) - (a.blocks ?? 0) : 0;
+  return priority || (a.updatedAt || "~").localeCompare(b.updatedAt || "~");
+}
+
 /** Reasons a move of `id` to `target` breaks the graph order. Empty when the move is in order. */
 export function moveWarnings(graph: Graph, id: string, target: State): string[] {
   const node = graph.byId.get(id);
@@ -390,14 +412,14 @@ const BOARD: [BoardGroupId, string, string][] = [
   ["closed", "Closed", "Done or Canceled."],
 ];
 
-/** The departure board: each issue in the group of the action it needs, each group in run order. */
-export function boardGroups(graph: Graph, asked?: Set<string>): BoardGroup[] {
+/** The departure board: each issue in the group of the action it needs, human moves by impact and the other groups in run order. */
+export function boardGroups(graph: Graph, asked?: Set<string>, atPrompt?: Set<string>): BoardGroup[] {
   const groupOf = (n: GNode): BoardGroupId => {
     if (isClosed(n)) return "closed";
     if (n.waitsOnOther) return "waiting";
     if (n.signal === "stop") return "you";
     // A worker that asks a question waits on the human's reply (from the link).
-    if (asked?.has(n.issue.identifier)) return "you";
+    if (asked?.has(n.issue.identifier) || atPrompt?.has(n.issue.identifier)) return "you";
     if (n.status === "Triage") return "you";
     if (n.status === "Backlog") return "waiting";
     // wg next can flag a PR that waits on the human while its status is still In Review.
@@ -428,19 +450,25 @@ export function boardGroups(graph: Graph, asked?: Set<string>): BoardGroup[] {
   for (const n of graph.nodes) groups.get(groupOf(n))!.push(n);
   const order = (a: GNode, b: GNode) => depthOf(a.id) - depthOf(b.id) || a.issue.sortOrder - b.issue.sortOrder;
   const words = ownerWords();
+  const humanMoves = groups.get("you")!.map((node) => ({
+    node,
+    updatedAt: node.issue.updatedAt,
+    blocks: moveImpact(graph, node).blocks,
+    idle: asked?.has(node.issue.identifier) || atPrompt?.has(node.issue.identifier),
+  })).sort((a, b) => compareMoves(a, b) || order(a.node, b.node));
   return BOARD.map(([id, title, hint]) => ({
     id,
     title: id === "you" ? words.move : title,
     hint: id === "you"
       ? `Triage, a status that waits ${words.onOwner}, a PR that wg next asks ${words.owner} to merge, or an issue where wg next waits ${words.onOwner}.`
       : hint,
-    nodes: groups.get(id)!.sort(order),
+    nodes: id === "you" ? humanMoves.map(({ node }) => node) : groups.get(id)!.sort(order),
   }));
 }
 
-/** The issues in board order: the groups top to bottom, each in run order. `j` and `k` step through it. */
-export function boardOrder(graph: Graph, asked?: Set<string>): GNode[] {
-  return boardGroups(graph, asked).flatMap((g) => g.nodes);
+/** The issues in board order: the groups top to bottom, in display order. `j` and `k` step through it. */
+export function boardOrder(graph: Graph, asked?: Set<string>, atPrompt?: Set<string>): GNode[] {
+  return boardGroups(graph, asked, atPrompt).flatMap((g) => g.nodes);
 }
 
 /** Where the first view of a project starts: the first issue in Your move, else the first that runs, is in review, or can start. */

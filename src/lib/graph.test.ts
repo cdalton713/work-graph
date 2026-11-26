@@ -351,6 +351,11 @@ describe("statusName and shapeKey", () => {
 
 describe("boardGroups", () => {
   const ids = (g: ReturnType<typeof boardGroups>) => Object.fromEntries(g.map((x) => [x.id, x.nodes.map((n) => n.issue.identifier)]));
+  it("orders human moves by waiting agent, open dependents, then age", () => {
+    const triage = (id: string, day: string) => issue(id, { state: state("Triage"), updatedAt: `2026-11-${day}` });
+    const g = buildGraph(data([triage("a", "01"), triage("b", "03"), triage("c", "04"), triage("d", "02"), issue("e")], [["b", "e"]]));
+    expect(ids(boardGroups(g, new Set(["CD-c"]))).you).toEqual(["CD-c", "CD-b", "CD-a", "CD-d"]);
+  });
   it("puts Triage in Your move and Backlog in Waiting even with no blockers", () => {
     const triage = issue("t", { state: state("Triage") });
     const backlog = issue("b", { state: state("Backlog") });

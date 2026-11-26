@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ownerWords } from "../lib/words";
-import { type OverviewData, type OverviewFilter, type OverviewRow, type ProjectSummary, NO_INITIATIVE, PROJECT_LAMP, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, summaryKey } from "../lib/overview";
+import { type OverviewData, type OverviewFilter, type OverviewRow, type ProjectSummary, NO_INITIATIVE, PROJECT_LAMP, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
 import { ageText } from "../lib/graph";
 import { type Agents, type Ask, type Presence, agentName, agentState, agentsFresh, agentsShown, presenceText } from "../lib/link";
 import type { Project, ProjectList } from "../lib/types";
@@ -54,7 +54,7 @@ export interface OverviewProps {
 export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, initiative = null, onInitiative, budget = [] }: OverviewProps) {
   const words = ownerWords();
   const list = useMemo<OverviewData | ProjectList>(() => ("summaries" in given && (asks?.size || agents?.size)
-    ? { ...given, summaries: given.summaries.map((s) => ({ ...s, you: movesWithAgents(movesWithAsks(s.you, asks?.get(summaryKey(s))), agents?.get(summaryKey(s)), now) })) }
+    ? { ...given, summaries: given.summaries.map((s) => ({ ...s, you: movesWithAgents(movesWithAsks(s.you, asks?.get(summaryKey(s)), s.moveImpacts), agents?.get(summaryKey(s)), now, s.moveImpacts) })) }
     : given), [given, asks, agents, now]);
   const [filter, setFilter] = useState(stored);
   useEffect(() => {
@@ -69,9 +69,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const waiting = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, mine: true, initiative }), [list, filter.workspace, initiative]);
   const waitingIssues = waiting.reduce((n, r) => n + (r.summary?.you.length ?? 0), 0);
   const [active, setActive] = useState(0);
-  // One inbox for all projects: each move that waits on the human, the one that waits longest first.
-  const inbox = useMemo(() => waiting.flatMap(({ project, summary }) => (summary?.you ?? []).map((move) => ({ project, move })))
-    .sort((a, b) => (a.move.updatedAt || "~").localeCompare(b.move.updatedAt || "~")), [waiting]);
+  const inbox = useMemo(() => rankMoves(waiting.flatMap(({ project, summary }) =>
+    (summary?.you ?? []).map((move) => ({ project, move })))), [waiting]);
+  const ranked = inbox.some(({ move }) => move.blocks !== undefined);
   const [allMoves, setAllMoves] = useState(false);
   const find = useRef<HTMLInputElement>(null);
   const root = useRef<HTMLDivElement>(null);
@@ -193,21 +193,28 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
 
       {inbox.length > 0 && (
         <section className="inbox" aria-label={`${words.move} in all projects`}>
-          <h2 className="inbox-head"><span>{words.move}</span><b className="mono">{inbox.length}</b><span className="inbox-note">oldest first</span></h2>
+          <h2 className="inbox-head"><span>{words.move}</span><b className="mono">{inbox.length}</b><span className="inbox-note">{ranked ? "agent waits, most held back, oldest" : "oldest first"}</span></h2>
           <ul>
             {(allMoves ? inbox : inbox.slice(0, INBOX)).map(({ project: p, move: m }) => {
               const age = m.updatedAt ? ageText(now - Date.parse(m.updatedAt)) : null;
               // A reason that is the title (a decision: its question) shows once.
               const why = overviewMoveReason(m.why);
               const title = why.trim() !== m.title.trim() && !why.includes(m.title.trim()) ? m.title : null;
+              const effect = [
+                m.idle && "agent waits",
+                m.blocks && `holds back ${m.blocks}, ${m.unblocks ?? 0} can start`,
+              ].filter(Boolean).join(" · ");
               return (
                 <li key={`${summaryKey(p)}:${m.identifier}`} className="inbox-row">
                   <button type="button" className="inbox-open" onClick={() => onOpen(p, m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier)} title={`${p.name}: ${m.title}`}>
                     <Lamp signal="stop" />
                     <span className="inbox-id mono">{m.identifier}</span>
-                    <span className="inbox-text">
-                      <span className="inbox-why">{why}</span>
-                      {title && <span className="inbox-title">{title}</span>}
+                    <span>
+                      <span className="inbox-text">
+                        <span className="inbox-why">{why}</span>
+                        {title && <span className="inbox-title">{title}</span>}
+                      </span>
+                      {effect && <span className="inbox-effect">{effect}</span>}
                     </span>
                     <span className="inbox-project">{p.name}</span>
                     <span className="inbox-age mono">{age ?? ""}</span>

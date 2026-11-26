@@ -17,18 +17,19 @@ export interface BoardProps {
   onReview?: (id: string) => void;
   /** The identifiers of issues whose worker asks a question (from the link). */
   asked?: Set<string>;
+  atPrompt?: Set<string>;
   /** The live job of each issue, by identifier (from the link). */
   live?: Map<string, string>;
 }
 
 /**
- * The departure board: the issues by the action they need, in run order. A row selects the issue and
+ * The departure board: the issues grouped by the action they need. A row selects the issue and
  * centres it on the canvas. The find field takes an id or words of a title; `/` puts the focus in it.
  */
-export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked, live, marks, filter }: BoardProps) {
+export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked, atPrompt, live, marks, filter }: BoardProps) {
   const copy = ownerWords();
   const includes = (node: GNode) => matchesClaim(node.card?.key ? marks.get(node.card.key) : undefined, filter);
-  const groups = useMemo(() => boardGroups(graph, asked), [graph, asked]);
+  const groups = useMemo(() => boardGroups(graph, asked, atPrompt), [graph, asked, atPrompt]);
   const [query, setQuery] = useState("");
   const [folded, setFolded] = useState<Set<BoardGroupId>>(() => new Set(FOLDED));
   const find = useRef<HTMLInputElement>(null);

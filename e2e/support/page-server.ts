@@ -167,3 +167,13 @@ const server = serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch }, ({ po
   console.log(`Page fixture at http://127.0.0.1:${port}/`);
 });
 if (server instanceof Server) app.injectWebSocket(server);
+if (server instanceof Server) {
+  // The same socket keeps this listener when HTTP upgrades to WebSocket.
+  server.on("connection", (socket) => {
+    socket.on("error", (error: NodeJS.ErrnoException) => {
+      console.warn(`Page fixture socket error: ${error.code ?? error.name}`);
+    });
+  });
+  // A parser error can occur before a request exists. Close only its socket.
+  server.on("clientError", (error, socket) => socket.destroy(error));
+}

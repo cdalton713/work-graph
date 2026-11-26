@@ -13,6 +13,7 @@ import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
 import { parseAccept } from "hono/utils/accept";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { omitWorkspacesHeader, omittedWorkspaces } from "../src/lib/retry-after.ts";
 import { type OverviewData, type ProjectSummary, summarize } from "../src/lib/overview.ts";
 import { parseCard, statusName } from "../src/lib/graph.ts";
 import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from "../src/lib/link.ts";
@@ -926,13 +927,15 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     });
   });
   api.use(bodyLimit({ maxSize: 2_000_000, onError: (c) => c.json({ error: "request body too large" }, 413) }));
-  const readProjectList = async (viewer = false): Promise<ProjectList> => {
+  const readProjectList = async (viewer = false, omitted?: Set<string>): Promise<ProjectList> => {
     const { tenant, state: { lists, sharedNames } } = scope();
     const workspaces = viewer ? tenant.workspaces.filter((workspace) => !workspace.rejectApiKey) : tenant.workspaces;
-    const order = ++lists.started;
-    const results = await Promise.allSettled(workspaces.map((workspace) =>
-      linearWorkspace.run(workspace, () => workspace.kind && !workspace.team ? Promise.resolve([]) : listProjects(workspace.team)),
-    ));
+    const order = omitted ? 0 : ++lists.started;
+    if (workspaces.some(w => omitted?.has(w.id) && w.needsKey)) throw new LinearSignInRequired();
+    const results = await Promise.allSettled(workspaces.map(async workspace => {
+      if (omitted?.has(workspace.id) || (workspace.kind && !workspace.team)) return [];
+      return linearWorkspace.run(workspace, () => listProjects(workspace.team));
+    }));
     const refused = results.find((result) => result.status === "rejected" && result.reason instanceof LinearSignInRequired);
     if (refused?.status === "rejected") throw refused.reason;
     const list: ProjectList = {
@@ -940,9 +943,15 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const result = results[at];
         if (result.status === "rejected" && result.reason instanceof LinearKeyRequired) return [];
         const address = shareUrl ?? (auth && !readOnly ? `https://${rules.hosted!.host}` : undefined);
+        const row = { id, name, ...(address ? { shareUrl: address } : {}) };
+        if (omitted?.has(id)) return [{ ...row, error: `${name} is temporarily unavailable.` }];
+        if (result.status === "rejected" && result.reason instanceof LinearReadLimited) {
+          const limit = result.reason;
+          return [{ ...row, error: `${name} is temporarily unavailable. Retry at ${new Date(limit.deadline).toISOString()}.`,
+            retryAfter: limit.globalRetryAfter }];
+        }
         return [{
-          id, name, ...(address ? { shareUrl: address } : {}),
-          ...(result.status === "rejected" && result.reason instanceof LinearReadLimited && { retryAfter: result.reason.globalRetryAfter }),
+          ...row,
           ...(result.status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
         }];
       }),
@@ -978,13 +987,22 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     pending.set(viewer, reading);
     return reading;
   };
-  const listedProjects = async (viewer: boolean, join = false): Promise<ProjectList> => {
+  const listedProjects = async (c: Context, join = false): Promise<ProjectList> => {
     const { tenant } = scope();
     const scoped = sharedScope.getStore();
-    const list = scoped ? { workspaces: [], projects: [] } : await projectList(viewer, join);
+    const viewer = c.var.viewer;
+    const omitted = omittedWorkspaces(c.req.header(omitWorkspacesHeader));
+    c.header("Cache-Control", "private, no-store");
+    // A projection cannot join or publish an authoritative permission check.
+    const list = scoped ? { workspaces: [], projects: [] }
+      : omitted.size ? await readProjectList(viewer, omitted) : await projectList(viewer, join);
     const shared = await sharedFor(tenant);
     const sharedRows: ProjectList["workspaces"] = shared.map(sharedEntry);
     const projects = await Promise.all(shared.map(async (entry, at) => {
+      if (omitted.has(entry.id)) {
+        sharedRows[at].error = `${entry.name} is temporarily unavailable.`;
+        return null;
+      }
       const read = () => gql("query($id:String!){project(id:$id){id name url status{name type}}}", { id: entry.projectId });
       let data;
       try {
@@ -1037,7 +1055,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }
     return c.json({ workspace: workspace.id, project, handoff: { ...data, command: "wg next ." } }, 200);
   });
-  api.get("/projects", async (c) => c.json<ProjectList>(await listedProjects(c.var.viewer)));
+  api.get("/projects", async (c) => c.json<ProjectList>(await listedProjects(c)));
   const waitNamesFor = async (owner: Tenant, workspace: Workspace, id: string) => {
     const connection = workspace.connectionId;
     if (connection) return (await accountStore?.())?.shares.waitNames([owner.id, connection, id]);
@@ -1048,7 +1066,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   api.get("/overview", async (c) => {
     const { workspaces } = scope().tenant;
     const viewer = c.var.viewer;
-    const list = await listedProjects(viewer, true);
+    const list = await listedProjects(c, true);
     const shared = await sharedFor(scope().tenant);
     const open = list.projects.filter((p) => p.statusType !== "completed" && p.statusType !== "canceled");
     const waitingOnly = c.req.query("view") === "waiting";

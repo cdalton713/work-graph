@@ -4,7 +4,7 @@ import type { Ask, Presence } from "./lib/link";
 import type { AutonomyLevel } from "./lib/autonomy";
 import type { ReviewEffort } from "./lib/review";
 import { pageEvent, type PageEvent } from "./lib/telemetry";
-import { retryDeadline } from "./lib/retry-after";
+import { maxEncodedWorkspaceLength, maxOmittedWorkspaces, omitWorkspacesHeader, retryDeadline } from "./lib/retry-after";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
 import type { SetupTeam, SetupTeamInput, TeamSetupResult, TeamSetupState, StarterResult, Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShare, NewShareLink, ShareKind, ShareMember, LinearAccess, AccessGrant, ServerStatus } from "./lib/types";
@@ -102,6 +102,33 @@ function holdReads(key: string, deadline: number) {
   try { localStorage.setItem(key, String(until)); } catch {}
 }
 
+function activeWorkspaceOmissions(now: number): string[] {
+  const prefix = "wg:linear-retry:";
+  const keys = new Set(deadlines.keys());
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(prefix)) keys.add(key);
+    }
+  } catch { /* Storage is optional. */ }
+  const ids: string[] = [];
+  for (const key of keys) {
+    if (deadlineFor(key) <= now) continue;
+    try {
+      const id = JSON.parse(key.slice(prefix.length))[2];
+      if (typeof id !== "string" || key !== readKey(id)) continue;
+      const encoded = encodeURIComponent(id);
+      if (encoded.length <= maxEncodedWorkspaceLength) ids.push(encoded);
+      if (ids.length === maxOmittedWorkspaces) break;
+    } catch { /* Endpoint-specific keys do not encode a workspace hold. */ }
+  }
+  return ids;
+}
+
+function retryMessage(deadline: number, reason = "Linear rate limit") {
+  return `${reason}. Retry at ${new Date(deadline).toLocaleTimeString()}.`;
+}
+
 async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace, event?: PageEvent, project = openProject, idempotencyKey?: string): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "x-workspace": workspace };
   if (project && !(site.user && workspace.startsWith("shared:"))) headers["x-project"] = project;
@@ -116,7 +143,13 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
   const read = method === "GET" && (directory || graph);
   const key = readKey(directory ? null : workspace);
   const operation = key + ":" + (graph ? path.split("?")[0] : path);
-  if (read && Math.max(deadlineFor(key), deadlineFor(operation)) > Date.now()) throw new ApiError(429, { error: "Linear rate limit" });
+  const now = Date.now();
+  const held = Math.max(deadlineFor(key), deadlineFor(operation));
+  if (read && held > now) throw new ApiError(429, { error: retryMessage(held) });
+  if (read && directory) {
+    const omitted = activeWorkspaceOmissions(now);
+    if (omitted.length) headers[omitWorkspacesHeader] = omitted.join(",");
+  }
   const response = await fetch(`/api/${path}`, { ...init, headers });
   const retry = response.headers?.get?.("Retry-After");
   if (read && (response.status === 429 || (response.ok && retry != null))) {
@@ -137,15 +170,27 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
     if (response.status === 403 && body.code === "needs_linear_access" && method !== "GET" && method !== "HEAD") {
       window.dispatchEvent(new CustomEvent(linearAccessRequired, { detail: workspace }));
     }
+    if (read && response.status === 429) {
+      const until = Math.max(deadlineFor(key), deadlineFor(operation));
+      body.error = retryMessage(until, body.error);
+    }
     throw new ApiError(response.status, body);
   }
   if (read && directory && Array.isArray(body.workspaces)) {
     const workspaces = (body as ProjectList).workspaces;
     for (const entry of workspaces) {
-      if (entry.retryAfter !== undefined) holdReads(readKey(entry.id), Date.now() + entry.retryAfter * 1000);
+      const workspaceKey = readKey(entry.id);
+      let until = deadlineFor(workspaceKey);
+      if (entry.retryAfter !== undefined && until <= Date.now()) {
+        until = Date.now() + entry.retryAfter * 1000;
+        holdReads(workspaceKey, until);
+      }
+      if (until > Date.now() && entry.error) {
+        entry.error = `${entry.name} is temporarily unavailable. ${retryMessage(until)}`;
+      }
     }
     if (workspaces.length && workspaces.every(w => w.retryAfter !== undefined)) {
-      holdReads(key, Date.now() + Math.min(...workspaces.map(w => w.retryAfter!)) * 1000);
+      holdReads(key, Math.min(...workspaces.map(w => deadlineFor(readKey(w.id)))));
     }
   }
   if (event) pageEvent(event, workspace);

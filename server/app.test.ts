@@ -220,6 +220,32 @@ describe("api", () => {
     const unknown = await app().request("/api/nothing", { headers: local });
     expect(await unknown.json()).toEqual({ error: "no route GET /api/nothing" });
   });
+  it.each(["/api/projects", "/api/overview?view=waiting", "/api/overview"].flatMap(path =>
+    [false, true].map(warm => ({ path, warm }))))(
+    "$path keeps a workspace omission private to one request (warm: $warm)", async ({ path, warm }) => {
+      const calls: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+        const key = (init.headers as Record<string, string>).Authorization;
+        calls.push(key);
+        if (key === "limited") return new Response(null, { status: 429, headers: { "Retry-After": "3600" } });
+        return Response.json({ data: { teams: { nodes: [{ projects: { nodes: [], pageInfo: { hasNextPage: false } } }] } } });
+      }));
+      for (const projectedFirst of [true, false]) {
+        const server = createApp(rules, { team: "CD", dist, workspaces: ["healthy", "limited"].map(id =>
+          ({ ...workWorkspace(), id, name: id, key: id })) });
+        const read = async (projected: boolean) => (await server.request(path, { headers: projected
+          ? { ...local, "x-omit-workspaces": "limited,unknown" } : local })).json();
+        if (warm) expect((await read(false)).workspaces[1].retryAfter).toBe(3600);
+        calls.length = 0;
+        const [first, second] = await Promise.all([read(projectedFirst), read(!projectedFirst)]);
+        const [filtered, full] = projectedFirst ? [first, second] : [second, first];
+        expect(filtered.workspaces).toEqual([{ id: "healthy", name: "healthy" },
+          { id: "limited", name: "limited", error: "limited is temporarily unavailable." }]);
+        expect(full.workspaces[1].retryAfter).toBe(3600);
+        expect(calls.filter(key => key === "limited")).toHaveLength(warm ? 0 : 1);
+        expect(calls).toContain("healthy");
+      }
+    });
   it("keeps work projects available when the home key fails", async () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
       const home = (init.headers as Record<string, string>).Authorization === "home-key";
@@ -2379,6 +2405,10 @@ describe("read-only viewer", () => {
     }));
     const page = viewer();
     expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
+    const filtered = await page.request("/api/overview", { headers: { ...local, "x-omit-workspaces": "work" } });
+    expect(await filtered.json()).toMatchObject({ projects: [], summaries: [] });
+    // A projected list must not revoke another tab's confirmed share.
+    expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(200);
     hold = true;
     const older = page.request("/api/projects", { headers: local });
     await vi.waitFor(() => expect(waiting).toHaveLength(1));
@@ -2390,6 +2420,9 @@ describe("read-only viewer", () => {
     waiting[0].go();
     expect((await (await older).json()).projects).toHaveLength(1);
     hold = false;
+    // A later projection cannot publish a new grant after the authoritative revocation.
+    shared = true;
+    expect((await (await page.request("/api/projects", { headers: { ...local, "x-omit-workspaces": "unknown" } })).json()).projects).toHaveLength(1);
     expect((await page.request("/api/projects/p1/graph", { headers: local })).status).toBe(404);
   });
   it.each([false, true])("gives no project or stale graph when Linear fails (signed-in role: %s)", async (mixed) => {

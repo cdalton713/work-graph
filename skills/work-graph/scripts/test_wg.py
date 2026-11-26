@@ -4798,6 +4798,136 @@ class NotifyTests(unittest.TestCase):
         path.write_text("{}")
         self.assertEqual(wg.read_config(path)["notify"], [])
 
+    def test_page_sends_each_new_issue_and_retries_only_the_failed_entries(self):
+        calls = []
+        def request(page, headers, path, data, timeout):
+            calls.append(data)
+            if len(calls) == 2:
+                raise wg.ReadError("HTTP 503")
+
+        with patch.dict(wg.CONFIG, {"notify": [{"type": "page", "to": "ada@example.com"}]}), \
+                patch.object(wg, "link_token_for", return_value="saved"), \
+                patch.object(wg, "push_page_request", side_effect=request):
+            result, error = self.notify()
+            self.assertEqual(result, "failed")
+            self.assertEqual(error.count("warn notify:"), 1)
+            self.assertEqual(self.notify()[0], None)
+            self.now += timedelta(minutes=5)
+            self.assertEqual(self.notify()[0], "sent")
+            self.assertEqual(self.notify()[0], None)
+        self.assertEqual([(d["kind"], d["issue"]) for d in calls],
+                         [("merge", "CD-1"), ("decision", "CD-2"), ("decision", "CD-2")])
+        self.assertEqual(calls[0], {"kind": "merge", "issue": "CD-1", "project": "proj",
+                                    "workspace": wg.DEFAULT_WORKSPACE_ID, "recipient": "ada@example.com"})
+
+    @staticmethod
+    def page_response(status, body=None):
+        stream = io.BytesIO(json.dumps(body).encode())
+        if status >= 400:
+            return urllib.error.HTTPError("https://page.example.com", status, "", {}, stream)
+        stream.status = status
+        return stream
+
+    def test_page_skips_permanent_errors_and_keeps_sending(self):
+        lines = [("wait", "human empty -"), ("do", "ask malformed"),
+                 ("do", "ask a WG-1"), ("do", "ask b WG-2"), ("do", "ask c WG-3")]
+        asks = [{"key": "unmapped", "body": "Which base?"}]
+        with patch.dict(wg.CONFIG, {"notify": [{"type": "page"}]}), \
+                patch.object(wg, "link_token_for", return_value="saved"), \
+                patch.object(wg.urllib.request, "build_opener") as build:
+            send = build.return_value.open
+            send.side_effect = [self.page_response(400, {"error": "Invalid issue"}),
+                                self.page_response(404, {"error": "Project not found"}), self.page_response(202)]
+            result, warning = self.notify(lines, asks)
+            self.assertEqual(result, "sent")
+            self.assertEqual(warning.count("warn notify:"), 1)
+            self.assertIn("Invalid issue", warning)
+            self.assertIn("Project not found", warning)
+            self.assertIn("no issue", warning)
+            self.assertEqual(self.notify(lines, asks), (None, ""))
+            self.assertNotIn("notify_failed_0", self.effort())
+            requests = [call.args[0] for call in send.call_args_list]
+            self.assertEqual([json.loads(r.data)["issue"] for r in requests], ["WG-1", "WG-2", "WG-3"])
+            for request in requests:
+                self.assertEqual(request.get_method(), "POST")
+                self.assertEqual(request.full_url, wg.PAGE_URL + "/api/push/notices")
+                self.assertEqual(request.get_header("Authorization"), "Bearer saved")
+
+    def test_page_retries_temporary_failures(self):
+        with patch.dict(wg.CONFIG, {"notify": [{"type": "page"}]}), \
+                patch.object(wg, "link_token_for", return_value="saved"), \
+                patch.object(wg.urllib.request, "build_opener") as build:
+            for n, failure in enumerate([TimeoutError(), self.page_response(429), self.page_response(503)]):
+                with self.subTest(failure=failure):
+                    lines = [("do", f"ask a WG-{n + 1}")]
+                    send = build.return_value.open
+                    send.side_effect = [failure, self.page_response(202)]
+                    self.assertEqual(self.notify(lines)[0], "failed")
+                    self.assertEqual(self.notify(lines), (None, ""))
+                    self.now += timedelta(minutes=5)
+                    self.assertEqual(self.notify(lines), ("sent", ""))
+
+    def test_page_doctor_reports_recipient_errors_from_the_page(self):
+        with patch.object(wg, "link_token_for", return_value="saved"), \
+                patch.object(wg.urllib.request, "build_opener") as build:
+            send = build.return_value.open
+            for channel, status, message, hint in [
+                ({}, 400, "name a recipient: this installation has several owners", "set to"),
+                ({"to": "ada@example.com"}, 403, "The token identifies the recipient", "remove to"),
+            ]:
+                with self.subTest(status=status):
+                    send.side_effect = self.page_response(status, {"error": message})
+                    with self.assertRaises(wg.ReadError) as error:
+                        wg.doctor_push("work", channel, None)
+                    self.assertIn(message, str(error.exception))
+                    self.assertIn(hint, str(error.exception))
+                    self.assertEqual(send.call_args.args[0].get_method(), "GET")
+
+    def test_page_checks_expected_http_status(self):
+        with patch.object(wg.urllib.request, "build_opener") as build:
+            for data, status in [(None, 202), ({"issue": "WG-1"}, 200)]:
+                build.return_value.open.return_value = self.page_response(status)
+                with self.assertRaisesRegex(wg.ReadError, f"HTTP {status}"):
+                    wg.push_page_request(wg.PAGE_URL, {}, "/api/push/status", data, 5)
+
+    def test_doctor_without_plan_warns_for_a_workspace_without_a_page_token(self):
+        run = wg.doctor_run
+        with patch.object(wg, "tick_plans", return_value=[]), \
+                patch.object(wg, "doctor_run", side_effect=lambda name, step:
+                             run(name, step) if name.startswith("page notices") else []), \
+                patch.dict(wg.CONFIG, {"notify": [{"type": "page"}]}), \
+                patch.object(wg, "link_token_for", side_effect=lambda page, w: "saved" if w == "work" else ""), \
+                patch.object(wg, "push_page_request", return_value={"enabled": True, "devices": 1}) as request:
+            rows = list(wg.doctor_lines())
+            self.assertEqual([level for level, _ in rows], ["ok", "warn"])
+            self.assertIn("home", rows[-1][1])
+            request.assert_called_once()
+            with self.assertRaisesRegex(wg.ReadError, "login"):
+                wg.doctor_push("home", {}, None)
+
+    def test_page_notice_kinds(self):
+        nodes = {"approve": "decision", "deploy": "ops", "build": "task"}
+        km = {"nodes": {"build": {"identifier": "WG-1"}}}
+        for text, kind in [
+            ("wait human approve WG-1: choose", "decision"), ("wait human deploy WG-1: deploy", "decision"),
+            ("do ask-ready build WG-1: #1", "merge"), ("do ask-merge build WG-1: #1", "merge"),
+            ("question WG-1: which base?", "question"), ("escalation build: stopped", "question"),
+            ("wait human build WG-1: check the build", "wait")
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(wg.page_notice_entry(text, nodes, km), {"kind": kind, "issue": "WG-1"})
+
+    def test_page_doctor_reports_setup_and_device_count(self):
+        channel = {"type": "page", "to": "ada@example.com"}
+        with patch.object(wg, "link_token_for", return_value="saved"), patch.object(wg, "push_page_request") as get:
+            for enabled, devices, level in [(False, 0, "FAIL"), (True, 0, "FAIL"), (True, 2, "ok")]:
+                get.return_value = {"enabled": enabled, "devices": devices}
+                self.assertEqual(wg.doctor_push(wg.DEFAULT_WORKSPACE_ID, channel, None)[0], level)
+                self.assertEqual(get.call_args.args[1:4], ({"Authorization": "Bearer saved"},
+                                 "/api/push/status?recipient=ada%40example.com", None))
+        self.assertIsNone(wg.notify_problem([channel]))
+        self.assertIsNotNone(wg.notify_problem([channel | {"token": "private"}]))
+
     def test_the_entries_are_human_waits_asks_and_open_questions(self):
         asks = [{"key": "b", "issue": "CD-2", "body": "Which\nbase?"}]
         self.assertEqual(sorted(wg.notify_entries(self.lines, asks).values()), [

@@ -156,6 +156,9 @@ On a hosted page with accounts, only the account that sends the lines can see th
 Keep `wg agents` running on the machine that runs Orca. Run `wg login` for the workspace page so the sender can
 use the token for that page. `wg doctor <dir>` shows the sender service and the last successful send for that effort.
 
+The sender checks for config and token changes each cycle. If `wg.py` changes, the sender exits so its service
+can start the new code.
+
 When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the agent.
 
 In a workspace on Linear's Free plan (250 issues; archived issues do not count), `wg` archives each completed and

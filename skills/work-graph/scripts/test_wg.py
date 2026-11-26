@@ -5888,6 +5888,100 @@ class LinkTests(unittest.TestCase):
         self.assertTrue(all(req.headers.get("Authorization") == f"Bearer {token}" for req in self.requests))
         self.assertNotIn(token, out + err)
 
+    def test_agents_loop_reloads_the_page_and_token_and_restarts_for_new_code(self):
+        config = Path(self.d) / "config.json"
+        script = Path(self.d) / "wg.py"
+        script.touch()
+        old_page = os.environ["WG_UI_URL"]
+        agent = {"path": self.d, "orcaSessionId": "sender", "state": "working"}
+        next_page = ws_server.serve(self.handler, "127.0.0.1", 0)
+        try:
+            thread = threading.Thread(target=next_page.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join)
+            self.addCleanup(next_page.shutdown)
+            new_page = f"http://127.0.0.1:{next_page.socket.getsockname()[1]}"
+            def write_config(page):
+                config.write_text(json.dumps({"workspaces": [{"id": "work", "page_url": page}]}))
+            write_config(old_page)
+            cycles = 0
+            def advance(_delay):
+                nonlocal cycles
+                cycles += 1
+                if cycles == 1:
+                    write_config(new_page)
+                    wg.save_page_token(wg.page_token_path(new_page), "new-page-token")
+                    level, status = wg.doctor_agents(self.d)
+                    self.assertEqual(level, "warn")
+                    self.assertIn("old settings", status)
+                elif cycles == 2:
+                    self.assertNotIn("old settings", wg.doctor_agents(self.d)[1])
+                    script.write_text("# updated")
+                    self.assertIn("old settings", wg.doctor_agents(self.d)[1])
+                else:
+                    self.fail("the sender did not exit")
+            with patch.object(Path, "home", return_value=Path(self.d)), \
+                    patch.multiple(wg, CONFIG_PATH=config, LINK_TOKEN_FILE=Path(self.d) / "link-token",
+                                   CONFIG=wg.read_config(config), WORKSPACES={"work": {"id": "work", "page_url": old_page}},
+                                   PAGE_URL=old_page, DEFAULT_WORKSPACE_ID="work", HUMAN=wg.HUMAN,
+                                   __file__=str(script)), \
+                    patch.dict(os.environ, {}, clear=True), patch.object(wg, "orca_agents", return_value=[agent]), \
+                    patch.object(wg, "read_current_plan", return_value=self.p), \
+                    patch.object(wg, "tick_plans", return_value=[Path(self.d)]), patch.object(wg, "trim_tick_logs"), patch.object(wg.time, "sleep", side_effect=advance), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                status = wg.watch_command(wg.argparse.Namespace(install=False, uninstall=False, once=False,
+                                                            root=[Path(self.d).parent]))
+                self.assertEqual(status, 1)
+                self.assertIn("wg.py changed", err.getvalue())
+        finally:
+            next_page.shutdown()
+        self.assertEqual(self.types(), ["agents", "agents"])
+        self.assertIsNone(self.requests[0].headers.get("Authorization"))
+        self.assertEqual(self.requests[1].headers.get("Authorization"), "Bearer new-page-token")
+
+    def test_a_silent_page_does_not_delay_two_other_efforts(self):
+        from websockets.exceptions import ConnectionClosed
+
+        release = threading.Event()
+        both_received = threading.Event()
+        seen = []
+        def fast(conn):
+            with contextlib.suppress(ConnectionClosed):
+                seen.append(json.loads(conn.recv()))
+                if len(seen) == 2:
+                    both_received.set()
+        def silent(_conn, _request):
+            release.wait(3)
+        with ws_server.serve(fast, "127.0.0.1", 0) as good, \
+                ws_server.serve(fast, "127.0.0.1", 0, process_request=silent) as bad:
+            for server in (good, bad):
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                root = Path(self.d)
+                plans = [root / name for name in ("bad-core", "first-core", "second-core")]
+                configs = {}
+                for path, server in zip(plans, [bad, good, good]):
+                    path.mkdir()
+                    (path / "plan.json").write_text("{}")
+                    wg.save_keymap(path, {"project": {"id": path.name}, "nodes": {}})
+                    configs[path.name] = {"page_url": f"http://127.0.0.1:{server.socket.getsockname()[1]}"}
+                agents = [{"path": str(path), "orcaSessionId": path.name, "state": "working"} for path in plans]
+                with patch.dict(os.environ, {}, clear=True), patch.object(wg, "WORKSPACES", configs), \
+                        patch.object(wg, "orca_agents", return_value=agents), \
+                        patch.object(wg, "read_current_plan", side_effect=lambda path: {
+                            "effort": {"name": path.name, "workspace": path.name}}), \
+                        patch.object(wg, "WATCH_OPEN_TIMEOUT", 1):
+                    worker = threading.Thread(target=wg.watch_poll, args=({}, {}, [root]), daemon=True)
+                    worker.start()
+                    self.assertTrue(both_received.wait(0.75))
+                    worker.join(2)
+                    self.assertFalse(worker.is_alive())
+            finally:
+                release.set()
+                good.shutdown()
+                bad.shutdown()
+        self.assertEqual({frame["project"]["id"] for frame in seen}, {"first-core", "second-core"})
+
     def test_agents_retries_503_and_allows_a_slow_upgrade(self):
         import logging
 
@@ -9536,6 +9630,11 @@ class WatchTests(unittest.TestCase):
         with patch.object(Path, "home", return_value=self.root), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(wg.doctor_agents(self.d), ("warn", "agents: service stopped; last send: none"))
             self.assertEqual(wg.main(["wg", "agents", "--once", "--root", str(self.root)]), 0)
+            script = Path(wg.__file__).resolve()
+            wg.save_json(wg.agents_state_path().with_suffix(".sender"), {
+                "script": str(script), "source": wg.agents_file_stamp(script),
+                "config": wg.agents_file_stamp(wg.CONFIG_PATH), "tokens": wg.agents_token_stamps(),
+            })
             with (self.root / ".local/state/work-graph/agents.lock").open("rb") as lock:
                 wg.fcntl.flock(lock, wg.fcntl.LOCK_EX | wg.fcntl.LOCK_NB)
                 self.assertEqual(wg.doctor_agents(self.d),
@@ -9589,6 +9688,15 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(out.getvalue().splitlines(), [
             "Example: coordinator claude working 2026-01-01T11:59:00Z: Step 2 of 5. / Tests run.",
             "Example: worker CD-1 claude blocked 2026-01-01T11:59:00Z: Allow?"])
+
+    def test_agents_once_reports_the_failure_without_leaking_the_token(self):
+        self.agents = [self.agent(self.d)]
+        self.fail_send = OSError("secret-token")
+        with patch.object(Path, "home", return_value=self.root), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            wg.main(["wg", "agents", "--once", "--root", str(self.root)])
+        self.assertIn("warn link: Example: OSError", err.getvalue())
+        self.assertNotIn("secret-token", err.getvalue())
 
     def test_agents_install_writes_an_agent_that_launchd_keeps_alive(self):
         python = self.root / "bin/python3"

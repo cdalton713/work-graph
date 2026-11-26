@@ -48,9 +48,9 @@ button.ov-section-name:hover { text-decoration: underline; }
 .ov-agent-full { margin: 0 0 6px 14px; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ov-agent-reply-status { margin: 0 0 6px 14px; overflow-wrap: anywhere; }
 .ov-row .ov-open { flex: 1; min-width: 0; }
-/* The copy button of a row shows on hover or focus; a touch screen has no hover, so there it always shows. */
-.ov-copy { flex: none; margin-right: 8px; font-size: 11px; }
-@media (hover: hover) { .ov-row:not(:hover):not(:focus-within) .ov-copy:not(.is-copied) { opacity: 0; } }
+.ov-row-tools { flex: none; margin-right: 8px; }
+.ov-copy { font-size: 11px; }
+@media (hover: hover) and (pointer: fine) { .ov-row:not(:hover):not(:focus-within) .ov-copy:not(.is-copied) { opacity: 0; } }
 .ov-row.is-you { box-shadow: inset 2px 0 0 var(--lamp-stop); }
 .ov-row.is-active { background: var(--cab-2); }
 .ov-row.is-closed .ov-title { color: var(--ink-3); }
@@ -71,12 +71,13 @@ button.ov-section-name:hover { text-decoration: underline; }
 .ov-flow { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; min-width: 0; }
 .ov-flow > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .ov-flow .lamp { width: 6px; height: 6px; }
+.ov-flow > .ov-coord { display: none; }
 .ov-pr { display: inline-flex; align-items: baseline; gap: 6px; font: 11px var(--mono); color: var(--ink-3); }
 .ov-pr .pr-links a { font-size: 11px; }
 .overview .empty { color: var(--ink-3); }
 
-/* Below 1024px let the project details use the full width. */
-@media (max-width: 1023px) {
+/* Stack the project details on phones. */
+@media (max-width: 720px) {
   .ov-open { grid-template-columns: minmax(0, 1fr); gap: 6px 12px; }
   .ov-progress, .ov-flow { grid-column: 1 / -1; }
   .ov-progress, .ov-flow { padding-left: 17px; }
@@ -128,6 +129,34 @@ button.ov-section-name:hover { text-decoration: underline; }
   .inbox-why { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .inbox-title { display: none; }
   .inbox-detail > .inbox-why { -webkit-line-clamp: unset; }
-  .inbox-prs { width: auto; padding: 0 14px 8px 34px; }
+  .inbox-prs { width: auto; min-width: 0; padding: 0 14px 8px 34px; }
   .inbox-prs:empty { display: none; }
+}
+
+@media (pointer: coarse) {
+  .ov-head { flex-wrap: wrap; gap: 4px 12px; }
+  .ov-sum { flex-wrap: wrap; }
+  .ov-find { flex: 0 0 100%; max-width: none; }
+  .ov-find input, .overview textarea { font-size: 16px; }
+  .ov-seg { flex-wrap: wrap; max-width: 100%; }
+  .ov-seg button, .ov-filters .picker-trigger { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+  .ov-filters .picker { min-width: 0; max-width: 100%; }
+  .overview button, .ov-find input, .ov-agent summary, .ov-effort summary {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .ov-agent summary, .ov-effort summary { align-content: center; }
+  .ov-row-tools { margin-right: 4px; }
+  .ov-flow > .ov-coord { display: inline-flex; font-size: 11px; color: var(--ink-2); }
+  .ov-pr { align-items: center; }
+  .ov-pr .pr-links { gap: 8px; }
+  .ov-pr .pr-links a {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 44px; min-height: 44px; padding-inline: 8px;
+  }
+  .inbox-note { text-align: right; }
+  .inbox-title, .inbox-project, .inbox-why {
+    display: block; white-space: normal; overflow: visible; overflow-wrap: anywhere;
+  }
+  .inbox-why { -webkit-line-clamp: unset; }
 }

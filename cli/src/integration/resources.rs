@@ -1,9 +1,59 @@
 use super::*;
 use std::{env, fs};
 
+#[cfg(target_os = "macos")]
+fn running_executable() -> std::io::Result<PathBuf> {
+    use nix::libc;
+    use std::{
+        ffi::{CStr, OsStr},
+        os::unix::ffi::OsStrExt,
+    };
+
+    // The kernel names the running image. dyld's launch path can still contain
+    // the installer's "current" symlink after a different release becomes active.
+    let mut bytes = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: bytes is writable for the supplied length. The PID is this process.
+    let count = unsafe {
+        libc::proc_pidpath(
+            std::process::id() as i32,
+            bytes.as_mut_ptr().cast(),
+            bytes.len() as u32,
+        )
+    };
+    if count <= 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let path = CStr::from_bytes_until_nul(&bytes).map_err(std::io::Error::other)?;
+    Ok(OsStr::from_bytes(path.to_bytes()).into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn running_executable() -> std::io::Result<PathBuf> {
+    // On Linux current_exe reads /proc/self/exe.
+    env::current_exe()
+}
+
 pub(crate) fn root() -> Result<PathBuf, String> {
-    let exe = env::current_exe().map_err(|e| e.to_string())?;
+    let exe = running_executable().map_err(|e| e.to_string())?;
     let home = env::var_os("HOME").map(PathBuf::from);
+    if let Some(generation) = exe.parent()
+        && let Some(versions) = generation.parent()
+        && home
+            .as_ref()
+            .and_then(|h| {
+                h.join(".local/share/work-graph/versions")
+                    .canonicalize()
+                    .ok()
+            })
+            .as_deref()
+            == Some(versions)
+    {
+        return if generation.join("skills/work-graph/SKILL.md").is_file() {
+            Ok(generation.to_owned())
+        } else {
+            Err("the running release has no bundled work-graph skill".into())
+        };
+    }
     let registrations = [".agents", ".codex", ".claude"]
         .into_iter()
         .filter_map(|base| {

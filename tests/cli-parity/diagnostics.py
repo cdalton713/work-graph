@@ -36,6 +36,34 @@ class Health(BaseHTTPRequestHandler):
         pass
 
 
+def managed_launcher(home, env):
+    managed = home / ".local/share/work-graph"
+    current = managed / "current"
+    launcher = home / ".local/bin/wg"
+    launcher.parent.mkdir(parents=True)
+    for generation in ("first", "second"):
+        root = managed / "versions" / generation
+        docs = root / "skills/work-graph"
+        (docs / "references").mkdir(parents=True)
+        (docs / "SKILL.md").write_text(f"<!-- explain: dispatch -->\n{generation} generation\n<!-- /explain -->\n")
+        shutil.copy2(binary, root / "wg")
+    current.symlink_to("versions/first")
+    launcher.symlink_to(current / "wg")
+    args = [launcher, "explain", "dispatch"]
+    assert "first generation" in subprocess.check_output(args, env=env, cwd=home, text=True)
+    # Popen returns after exec. Hold config input open while the updater switches
+    # current, then let the original process resolve and read its bundled skill.
+    with subprocess.Popen(args, cwd=home, env=env | {"WG_CONFIG": "/dev/stdin"},
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True) as running:
+        replacement = managed / "replacement"
+        replacement.symlink_to("versions/second")
+        replacement.replace(current)
+        out, err = running.communicate("{}", timeout=10)
+        assert running.returncode == 0 and "first generation" in out, (out, err)
+    assert "second generation" in subprocess.check_output(args, env=env, cwd=home, text=True)
+
+
 with TemporaryDirectory() as tmp:
     root = Path(tmp).resolve()
     install = root / "version"
@@ -50,6 +78,8 @@ with TemporaryDirectory() as tmp:
     tools.mkdir()
     env = {"PATH": str(tools), "HOME": tmp, "WG_CONFIG": str(root / "config"),
            "ORCA_CLI_COMMAND": str(tools / "orca")}
+    managed_launcher(root, env)
+
     def stub(name, script):
         path = tools / name
         path.write_text("#!/bin/sh\n" + script)

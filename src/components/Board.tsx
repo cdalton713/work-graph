@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ownerWords } from "../lib/words";
 import { type BoardGroupId, type GNode, type Graph, agentStep, boardGroups, reviewOf, runTime, satisfied, yourMove } from "../lib/graph";
 import { matchesClaim, type ClaimFilter, type ClaimMark } from "../lib/claims";
-import { Lamp, PrLinks } from "./ui";
+import { Hint, Lamp, PrLinks } from "./ui";
 
 /** Groups that start folded: they hold the issues that need nothing now. */
 const FOLDED: BoardGroupId[] = ["waiting", "merged", "closed"];
@@ -60,28 +60,36 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
     const elapsed = runTime(n.card, now);
     const holder = groupId === "waiting" ? (graph.blockers.get(n.id) ?? []).map((b) => graph.byId.get(b)!).find((b) => !satisfied(b, n)) : undefined;
     const reason = n.status === "Triage" ? "Triage: decide if it joins the graph" : yourMove(n.card?.next);
+    const status = n.waitsOnOther ? `waits on ${n.waitsOnOther}` : n.status === "Backlog" ? n.status
+      : worker ?? (holder ? `after ${holder.issue.identifier}`
+        : groupId === "running" ? ""
+        : groupId === "review" ? (n.status === "Ready to Merge" && agentStep(n.card?.next) ? `${n.status} · wg: ${agentStep(n.card?.next)}` : "")
+        : n.status);
     return (
       <li key={n.id}>
         <button type="button" className={`board-row${n.id === selectedId ? " is-selected" : ""}`} aria-current={n.id === selectedId || undefined}
           onClick={() => onPick(n.id)} onMouseEnter={() => onHover(n.id)} onMouseLeave={() => onHover(null)}>
           <Lamp signal={n.signal} pulse={!!worker} />
-          <span className="board-id mono">{n.issue.identifier}{asked?.has(n.issue.identifier) && <b className="board-ask" title={`The worker asks ${copy.owner} a question. Open the issue to reply.`}>asks {copy.owner}</b>}</span>
+          <span className="board-id mono">{n.issue.identifier}{asked?.has(n.issue.identifier) && <b className="board-ask">asks {copy.owner}</b>}</span>
           <span className="board-title">{n.issue.title}{claim && <span className={`runner-mark${claim.stale ? " is-stale" : ""}`} role="img"
             aria-label={`Runner: ${claim.holder}${claim.stale ? ", stale claim" : ""}`} title={claim.holder}>
             {claim.stale && "⚠ "}{claim.initials}</span>}</span>
           <span className={`board-status sig-fg-${n.signal}`}>
-            {n.waitsOnOther ? `waits on ${n.waitsOnOther}` : n.status === "Backlog" ? n.status : worker ?? (holder ? `after ${holder.issue.identifier}` : groupId === "running" ? "" : groupId === "review" ? (n.status === "Ready to Merge" && agentStep(n.card?.next) ? `${n.status} · wg: ${agentStep(n.card?.next)}` : "") : n.status)}
-            {elapsed && <> <span className={`run-time${elapsed.warning ? " run-warning" : ""}`} title="Worker run time">{elapsed.text}</span></>}
+            {!status.startsWith(n.status) && <span className="board-state">{n.status}</span>}
+            {status && <span>{status}</span>}
+            {worker && worker !== status && <span className="board-runner">{worker}</span>}
+            {claim && <span className="board-runner">{claim.holder}{claim.stale && " (stale)"}</span>}
+            {elapsed && <> <span className={`run-time${elapsed.warning ? " run-warning" : ""}`}>{elapsed.text}</span></>}
           </span>
         </button>
         {/* A reason that is the title (a decision: its question) shows once. */}
-        {groupId === "you" && reason && !reason.includes(n.issue.title.trim()) && <div className="board-why">{reason}</div>}
+        {groupId === "you" && reason && reason !== n.issue.title.trim() && <div className="board-why">{reason}</div>}
         {groupId && PR_GROUPS.includes(groupId) && n.issue.pullRequests.map((pr) => (
           <div key={pr.url} className="board-pr"><span className="mono">#{pr.number}</span><PrLinks pr={pr} compact /></div>
         ))}
         {groupId === "you" && onReview && n.kind === "task" && !n.issue.external && n.issue.pullRequests.length > 0 && (
           <div className="board-pr">
-            <button type="button" className={`board-mark${reviewOf(n.issue, n.card).marked ? " is-on" : ""}`} onClick={() => onReview(n.id)} title="Add or remove the `reviewed` label: it counts as the wave review and the merge review of this PR.">
+            <button type="button" className={`board-mark${reviewOf(n.issue, n.card).marked ? " is-on" : ""}`} onClick={() => onReview(n.id)}>
               {reviewOf(n.issue, n.card).marked ? "✓ Reviewed" : "Mark reviewed"}
             </button>
           </div>
@@ -99,7 +107,8 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
             if (e.key === "Enter" && matches?.[0]) onPick(matches[0].id);
             if (e.key === "Escape") { setQuery(""); e.currentTarget.blur(); }
           }} />
-        {!query && <kbd aria-hidden>/</kbd>}
+        {query ? <button type="button" className="board-find-clear" aria-label="Clear issue search"
+          onClick={() => { setQuery(""); find.current?.focus(); }}>×</button> : <kbd aria-hidden>/</kbd>}
       </div>
       <div className="board-scroll">
         {!matches && !groups.some((g) => g.id === "you" && g.nodes.some(includes)) && <p className="board-clear"><Lamp signal="done" />{copy.clear}</p>}
@@ -113,10 +122,12 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
           return (
             <section key={g.id} className={`board-group board-${g.id}`}>
               <h3>
-                <button type="button" className="board-head" aria-expanded={open} title={g.hint}
-                  onClick={() => setFolded((now) => { const next = new Set(now); if (!next.delete(g.id)) next.add(g.id); return next; })}>
-                  <span className="board-caret" aria-hidden>{open ? "▾" : "▸"}</span><span>{g.title}</span><b className="mono">{g.nodes.length}</b>
-                </button>
+                <Hint text={g.hint} infoLabel={`About ${g.title}`} className="board-heading">
+                  <button type="button" className="board-head" aria-expanded={open}
+                    onClick={() => setFolded((now) => { const next = new Set(now); if (!next.delete(g.id)) next.add(g.id); return next; })}>
+                    <span className="board-caret" aria-hidden>{open ? "▾" : "▸"}</span><span>{g.title}</span><b className="mono">{g.nodes.length}</b>
+                  </button>
+                </Hint>
               </h3>
               {open && <ul>{g.nodes.map((n) => row(n, g.id))}</ul>}
             </section>

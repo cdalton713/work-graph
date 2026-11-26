@@ -41,6 +41,36 @@ const issues = states.map((state, order) => {
   };
 });
 
+const canvasProject = { ...project, id: "canvas", name: "Graph example", url: "https://example.com/graph" };
+projects.push(canvasProject);
+const canvasPhases = [
+  { id: "finished", name: "Finished phase", description: "", sortOrder: 0 },
+  { id: "current", name: "Current phase", description: "", sortOrder: 1 },
+];
+const canvasIssues = Array.from({ length: 16 }, (_, order) => {
+  const id = order + 21;
+  const active = order === 14 || order === 15;
+  return {
+    ...issues[0], id: `issue-${id}`, identifier: `WG-${id}`, title: `Graph issue ${id}`,
+    url: `https://example.com/issue/${id}`, project: canvasProject, sortOrder: order,
+    state: states.find(({ name }) => name === (active ? "In Progress" : "Done"))!,
+    projectMilestone: canvasPhases[active ? 1 : 0],
+    comments: { nodes: [{
+      id: `card-${id}`, createdAt: updatedAt, user: null,
+      body: `**work-graph node card**\n\n\`\`\`json\n${JSON.stringify({
+        wg: 1, key: `graph-${id}`, kind: "task", lane: "Build", ...(active && { wave: "yes" }),
+      })}\n\`\`\``,
+    }], pageInfo },
+  };
+});
+for (let order = 1; order < canvasIssues.length; order++) {
+  const { id, identifier, title, url, team, state } = canvasIssues[order - 1];
+  canvasIssues[order] = {
+    ...canvasIssues[order],
+    inverseRelations: { nodes: [{ type: "blocks", issue: { id, identifier, title, url, team, state, project: canvasProject } }], pageInfo },
+  };
+}
+
 // Keep the real page API and graph loader. Only the upstream data comes from the fixture.
 setTransport({
   async fetch(_url, init) {
@@ -57,6 +87,12 @@ setTransport({
       return data({ issue: { project, comments: empty } });
     }
     if (query.includes("project(id:")) {
+      if (variables.id === canvasProject.id) {
+        return data({ viewer: { id: "ada" }, project: { ...canvasProject,
+          projectMilestones: { nodes: canvasPhases }, documents: empty,
+          issues: { nodes: canvasIssues, pageInfo },
+        } });
+      }
       const entry = projects.find(({ id }) => id === variables.id);
       return data({
         viewer: { id: "ada" },

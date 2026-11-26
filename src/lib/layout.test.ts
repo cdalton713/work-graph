@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildGraph, reduceEdges } from "./graph";
-import { NODE_H, NODE_W, arrow, layout, roundedPath, routeAt } from "./layout";
+import { EDGE_TAP_REACH, NODE_H, NODE_W, arrow, layout, roundedPath, routeAt } from "./layout";
 import type { GraphData, Issue, Milestone } from "./types";
 
 const card = (lane: string) => ({ id: "c", body: `**work-graph node card** \`k\`\n\n\`\`\`json\n${JSON.stringify({ wg: 1, lane })}\n\`\`\`` });
@@ -113,6 +113,11 @@ describe("routeAt", () => {
   it("gives the nearer route when two are within reach", () => {
     expect(routeAt(routes, { x: 12, y: 30 }, 20)).toBe("a");
     expect(routeAt(routes, { x: 18, y: 30 }, 20)).toBe("b");
+  });
+  it("includes taps 12 screen pixels from a route at double zoom", () => {
+    const reach = EDGE_TAP_REACH / 2;
+    expect(routeAt(routes, { x: 6, y: 50 }, reach)).toBe("a");
+    expect(routeAt(routes, { x: 6.5, y: 50 }, reach)).toBeNull();
   });
   it("gives nothing when no route is within reach, also past the end of a route", () => {
     expect(routeAt(routes, { x: 15, y: 30 }, 6)).toBeNull();

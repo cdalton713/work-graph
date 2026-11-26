@@ -766,6 +766,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           ? { createProjects: true } : {}),
         ...(telemetryEnv.WG_SENTRY_BROWSER_DSN ? { sentry: {
           dsn: telemetryEnv.WG_SENTRY_BROWSER_DSN,
+          ...(telemetryEnv.WG_SENTRY_TEST_EVENT === "1" ? { test: true } : {}),
           environment: telemetryEnv.WG_SENTRY_ENVIRONMENT || "production",
           release: telemetryEnv.WG_VERSION || "dev",
         } } : {}),

@@ -41,7 +41,7 @@ pub(super) fn run(
     Ok(u8::from(failed))
 }
 
-fn refresh(dir: &Path, target: &str) -> Result<String, String> {
+pub(super) fn refresh(dir: &Path, target: &str) -> Result<String, String> {
     let meta = git(
         dir,
         &["cat-file", "-p", &format!("refs/branch-metadata/{target}")],
@@ -127,4 +127,12 @@ fn refresh(dir: &Path, target: &str) -> Result<String, String> {
     } else {
         format!("{} -> {}", short(&old), short(&new))
     })
+}
+
+pub(super) fn bottom<'a>(node: &Value, target: &'a str) -> &'a str {
+    if node["role"] == "sync" {
+        "main"
+    } else {
+        target
+    }
 }

@@ -451,11 +451,7 @@ pub(super) fn done(
             .iter()
             .find(|p| p["key"] == node["phase"])
             .ok_or("missing phase")?;
-        let target = if node["role"] == "sync" {
-            "main"
-        } else {
-            field(phase, "target")?
-        };
+        let target = base::bottom(node, field(phase, "target")?);
         if matches!(
             snap.statuses.get(below_key).map(String::as_str),
             Some("Merged" | "Done")

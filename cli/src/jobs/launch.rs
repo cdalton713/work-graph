@@ -825,29 +825,34 @@ pub(super) fn claim(
         return Ok(1);
     }
     let mut restack = String::new();
+    let mut new_lower = None;
     if job == "restack" {
         let n = worktree::names(ctx, node, &km, &snap)?;
-        let phase = node["phase"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| node["phase"].to_string());
-        let target = &n.target;
-        let frozen = git(
-            ctx.dir,
-            &["cat-file", "-p", &format!("refs/branch-metadata/{target}")],
-        )
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .is_some_and(|m| m["frozen"] == true);
-        let pin = if matches!(node["role"].as_str(), Some("sync" | "hotfix")) {
+        let target = n.target.as_str();
+        let kind = match node["role"].as_str() {
+            Some("sync") => "sync",
+            Some("hotfix") => "hotfix",
+            _ if target.starts_with("effort/") => "integration",
+            _ if git(ctx.dir, &["cat-file", "-p", "refs/stax/trunk"]).as_deref() == Ok(target) => {
+                "trunk"
+            }
+            _ => "frozen",
+        };
+        let pin = if matches!(kind, "sync" | "hotfix") {
             field(ctx.install.config.settings(), "release_branch")?
         } else {
             target
         };
-        if frozen && pin == target {
-            if base::run(ctx.dir, ctx.install, ctx.plan, Some(&phase))? != 0 {
-                return Err("base refresh failed".into());
+        let remote = format!("origin/{pin}");
+        let sha = if kind == "frozen" {
+            base::refresh(ctx.dir, target)?;
+            let local = git(ctx.dir, &["rev-parse", target])?;
+            if git(ctx.dir, &["rev-parse", &remote])? != local {
+                return Err(format!(
+                    "{target} and {remote} differ after the base refresh"
+                ));
             }
+            local
         } else {
             git(
                 ctx.dir,
@@ -859,17 +864,18 @@ pub(super) fn claim(
                     &format!("+refs/heads/{pin}:refs/remotes/origin/{pin}"),
                 ],
             )?;
-        }
-        let sha = git(ctx.dir, &["rev-parse", &format!("origin/{pin}")])?;
+            git(ctx.dir, &["rev-parse", &remote])?
+        };
+        let bottom = base::bottom(node, target);
         let below = worktree::below(ctx.plan, node).and_then(|node| node["key"].as_str());
         let merged_parent = below.filter(|key| {
             snap.statuses
                 .get(*key)
                 .is_some_and(|s| matches!(s.as_str(), "Merged" | "Done"))
-                && row["parent"] != pin
+                && row["parent"] != bottom
         });
         restack = format!(
-            "target {pin} at {sha}; parent merged: {}",
+            "target {pin} at {sha}; base: {kind}; parent merged: {}",
             if merged_parent.is_some() { "yes" } else { "no" }
         );
         if let Some(below) = merged_parent {
@@ -880,10 +886,7 @@ pub(super) fn claim(
                 &km["run"]["nodes"][below],
             )?;
             restack.push_str(&format!("; refresh: git rebase --onto origin/{pin} {old}, then st branch reparent --parent {pin}"));
-            ctx.change(k, "claim", |r| {
-                r["lower"] = format!("origin/{pin}").into();
-                Ok(())
-            })?;
+            new_lower = Some(format!("origin/{bottom}"));
         }
     }
     if action == "taken_over" {
@@ -920,6 +923,9 @@ pub(super) fn claim(
             if job == "review" {
                 r.as_object_mut().unwrap().remove("review_patch");
                 r.as_object_mut().unwrap().remove("review_dispatch");
+            }
+            if let Some(lower) = new_lower {
+                r["lower"] = lower.into();
             }
             r["state"] = "starting".into();
             r["job"] = job.into();

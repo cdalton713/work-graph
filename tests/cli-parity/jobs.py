@@ -360,10 +360,47 @@ print(json.dumps(r))
         correct=["git","rebase","--onto","origin/main",fork]
         emitted=instruction(fork)
         assert emitted==correct
+        # Without usable stax metadata the reference uses the local merge base,
+        # which can precede the old fork when the parent was rewritten.
         for revision in [rewritten,base,"unavailable"]:
             assert instruction(revision)==correct[:-1]+[base]
         git("update-ref","-d","refs/heads/"+lower)
         assert instruction("unavailable")==correct
+        git("branch","release",rewritten)
+        git("push","-q","origin","main:refs/heads/release")
+        for role in ["sync","hotfix"]:
+            plan["nodes"][0]["role"]=role
+            write(core/"plan.json",plan)
+            assert instruction(fork)==["git","rebase","--onto","origin/release",fork]
+            text=(core/"specs/a-restack.md").read_text()
+            assert f"target release at {base}; base: {role}; parent merged: yes" in text
+            assert row()["lower"]=="origin/main"
+            # If the recorded parent is already the bottom, the merged node below
+            # must not trigger a second reparent to the release pin.
+            km["run"]["nodes"]["a"].update(parent="main",lower="main")
+            issue["labels"]=page([])
+            write(core/"keymap.json",km)
+            run("claim","a","restack")
+            assert f"target release at {base}; base: {role}; parent merged: no" in (core/"specs/a-restack.md").read_text()
+            assert row()["lower"]=="main"
+        del plan["nodes"][0]["role"]
+        plan["phases"][0]["target"]="frozen"
+        write(core/"plan.json",plan)
+        metadata=subprocess.check_output(["git","hash-object","-w","--stdin"],cwd=work,
+                                         input=b'{"sourceRemote":"origin","frozen":true}').decode().strip()
+        git("update-ref","refs/branch-metadata/frozen",metadata)
+        git("branch","frozen",base)
+        git("push","-q","origin",squash+":refs/heads/frozen")
+        assert instruction(fork)==["git","rebase","--onto","origin/frozen",fork]
+        assert git("rev-parse","frozen")==squash
+        assert f"target frozen at {squash}; base: frozen;" in (core/"specs/a-restack.md").read_text()
+        # With a narrow fetch refspec, a local fast-forward can leave a stale remote ref.
+        git("config","remote.origin.fetch","+refs/heads/main:refs/remotes/origin/main")
+        git("update-ref","refs/remotes/origin/frozen",base)
+        issue["labels"]=page([])
+        write(core/"keymap.json",km)
+        assert "differ after the base refresh" in run("claim","a","restack",code=2).stderr
+        assert row()["lower"]==lower
         git(*emitted[1:])
         assert git("log","--reverse","--format=%s","origin/main..HEAD").splitlines()==["child one","child two"]
         assert not errors,errors

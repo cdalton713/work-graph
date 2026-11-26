@@ -317,7 +317,7 @@ fn project_request(
         .header("Authorization", token)
         .header("x-workspace", field(collab, "workspace")?))
 }
-fn fetch(page: &Page, collab: &Value, force: bool) -> Result<Option<Value>> {
+fn fetch(page: &Page, collab: &Value, force: bool) -> PageResult<Option<Value>> {
     let mut req = project_request(page, collab, Method::GET, &["plan"])?;
     if !force && let Some(version) = collab["version"].as_u64() {
         req = req.header("If-None-Match", format!("\"{version}\""));
@@ -352,7 +352,7 @@ fn connect<K: CredentialProvider<Error = String>>(
     credentials: &K,
     collab: &Value,
     scope: &str,
-) -> Result<Page> {
+) -> PageResult<Page> {
     let raw = collab["page"].as_str().unwrap_or_default();
     let mut page = Page::new(settings, Some(raw))?;
     let credential = page_credential(
@@ -362,7 +362,7 @@ fn connect<K: CredentialProvider<Error = String>>(
         field(collab, "workspace")?.starts_with("shared:"),
         credentials,
     )?
-    .ok_or("no page token; run wg login for the page")?;
+    .ok_or_else(|| PageError::Unavailable("no page token; run wg login for the page".into()))?;
     page.token = Some(credential.into_header());
     Ok(page)
 }
@@ -467,10 +467,12 @@ pub(super) fn run<
                 PullOptions {
                     force,
                     accept: accept_settings,
+                    implicit: None,
                     dir,
                 },
             )
             .map(Output::success)
+            .map_err(Into::into)
         }
         _ => unreachable!(),
     }
@@ -816,7 +818,7 @@ fn publish_pending(
         extend(&mut wire["effort"], settings)?;
     }
     let new = shared(&local.keymap)?;
-    let put = |version: u64, mapping: &Value| -> Result<(u16, Vec<u8>)> {
+    let put = |version: u64, mapping: &Value| -> PageResult<(u16, Vec<u8>)> {
         response(
             project_request(page, c, Method::PUT, &["plan"])?
                 .header("If-Match", format!("\"{version}\""))
@@ -857,11 +859,12 @@ fn publish_pending(
 }
 
 struct PullOptions<'a> {
+    implicit: Option<bool>,
     force: bool,
     accept: bool,
     dir: &'a Path,
 }
-fn shell_quote(path: &Path) -> String {
+pub(crate) fn shell_quote(path: &Path) -> String {
     let text = path.to_string_lossy();
     if !text.is_empty()
         && text
@@ -880,15 +883,22 @@ fn pull(
     local: LocalEffort,
     scope: &str,
     options: PullOptions,
-) -> Result<String> {
-    let PullOptions { force, accept, dir } = options;
+) -> PageResult<String> {
+    let PullOptions {
+        force,
+        accept,
+        dir,
+        implicit,
+    } = options;
     let mut c = local.keymap["collab"].clone();
     if !c["settings"].is_object() {
         c["name"] = local.plan["effort"]["name"].clone();
         c["settings"] = settings(&local.plan["effort"])?;
     }
     let Some(data) = fetch(page, &c, force || accept)? else {
-        if let Err(e) = publish_pending(page, lock, &local, stores, scope) {
+        if implicit != Some(true)
+            && let Err(e) = publish_pending(page, lock, &local, stores, scope)
+        {
             eprintln!("warn: pending keymap changes: {e}");
         }
         return Ok(format!("plan v{} is current", c["version"]));
@@ -930,11 +940,21 @@ fn pull(
                     true
                 ))
             );
-    if dirty && !(force || saved || accept && *version == c["version"]) {
+    if dirty
+        && !(force
+            || recovered
+            || saved && implicit.is_none()
+            || accept && *version == c["version"])
+    {
         return Err(format!(
             "the server has plan v{version} by {writer}; save your change, run wg pull {} --force, and make your change again",
             shell_quote(dir)
-        ));
+        ).into());
+    }
+    if implicit == Some(true) && !recovered {
+        return Err(format!(
+            "the server has plan v{version} by {writer}; run wg pull, then run wg load --apply again"
+        ).into());
     }
     let remote_settings = settings(&wire["effort"])?;
     let mut lines = vec![];
@@ -1052,4 +1072,129 @@ pub(crate) fn save_run_keymap(
         *km = effort.keymap()?;
     }
     Ok(())
+}
+
+pub(crate) fn project_claims(
+    installation: &crate::linear::Installation,
+    scope: &str,
+    collab: &Value,
+) -> Result<Value> {
+    let settings = crate::providers::PageSettings(installation).resolve(scope)?;
+    let page = connect(&settings, installation, collab, scope)?;
+    let answer = json_response(project_request(&page, collab, Method::GET, &["claims"])?)?;
+    array(&answer, "claims")?;
+    field(&answer, "role")?;
+    Ok(answer)
+}
+
+pub(crate) fn update_claim(
+    installation: &crate::linear::Installation,
+    scope: &str,
+    c: &Value,
+    key: &str,
+    job: Option<&Value>,
+) -> Result<()> {
+    let settings = crate::providers::PageSettings(installation).resolve(scope)?;
+    let page = connect(&settings, installation, c, scope)?;
+    let method = if job.is_some() {
+        Method::PUT
+    } else {
+        Method::DELETE
+    };
+    let req = project_request(&page, c, method, &["claims", key])?;
+    let req = if let Some(job) = job {
+        req.header("Content-Type", "application/json")
+            .body(json!({"job":job}).to_string())
+    } else {
+        req
+    };
+    let (status, _) = response(req)?;
+    if job.is_none() && status == 404 {
+        return Ok(());
+    }
+    check(status).map_err(Into::into)
+}
+
+pub(crate) fn publish_load(
+    installation: &crate::linear::Installation,
+    scope: &str,
+    guard: &crate::state::PlanLock,
+    plan: &Value,
+    km: &mut Value,
+    sha: &str,
+) -> Result<()> {
+    let mapping = shared(km)?;
+    let payload = json!({"plan":plan,"keymap":mapping});
+    km["collab"]["load_attempt"] =
+        json!({"sha":sha,"payload":format!("{:x}",Sha256::digest(json_text(&payload,true)))});
+    guard.save_keymap(km).map_err(|e| e.to_string())?;
+    let c = &km["collab"];
+    let settings = crate::providers::PageSettings(installation).resolve(scope)?;
+    let page = connect(&settings, installation, c, scope)?;
+    let version = c["version"].as_u64().ok_or("invalid version")?;
+    let reply = json_response(
+        project_request(&page, c, Method::PUT, &["plan"])?
+            .header("If-Match", format!("\"{version}\""))
+            .header("Content-Type", "application/json")
+            .body(payload.to_string()),
+    )?;
+    let collab = km["collab"]
+        .as_object_mut()
+        .ok_or("invalid collaboration")?;
+    collab.insert(
+        "version".into(),
+        json!(reply["version"].as_u64().ok_or("invalid remote version")?),
+    );
+    collab.insert("remote_settings".into(), self::settings(&plan["effort"])?);
+    collab.insert("plan_sha".into(), json!(sha));
+    collab.remove("pending");
+    collab.remove("load_attempt");
+    guard.save_keymap(km).map_err(|e| e.to_string())
+}
+
+pub(crate) fn refresh_workflow(
+    installation: &crate::linear::Installation,
+    dir: &Path,
+    applying: bool,
+) -> Result<()> {
+    if !truthy(&crate::state::load_keymap(dir).map_err(|e| e.to_string())?["collab"]) {
+        return Ok(());
+    }
+    let lock = installation.lock(dir)?;
+    let local = lock.read()?;
+    let scope = local.plan["effort"]["workspace"]
+        .as_str()
+        .or_else(|| installation.workspaces().first()?.get("id")?.as_str())
+        .ok_or("missing workspace")?
+        .to_owned();
+    let settings = crate::providers::PageSettings(installation).resolve(&scope)?;
+    let response =
+        connect(&settings, installation, &local.keymap["collab"], &scope).and_then(|page| {
+            pull(
+                &page,
+                installation,
+                lock.as_ref(),
+                local,
+                &scope,
+                PullOptions {
+                    force: false,
+                    accept: false,
+                    dir,
+                    implicit: Some(applying),
+                },
+            )
+        });
+    match response {
+        Ok(s) => {
+            if !s.starts_with("plan v") {
+                println!("{s}");
+            }
+            Ok(())
+        }
+        Err(PageError::Unavailable(e)) if !applying => {
+            eprintln!("warn plan: {e}; using the local copy");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }

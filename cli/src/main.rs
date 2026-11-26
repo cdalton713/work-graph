@@ -34,6 +34,24 @@ fn dispatch(on_io_failure: &dyn Fn(std::io::ErrorKind)) -> ExitCode {
             _ => {}
         }
     }
+    if matches!(
+        std::env::args_os()
+            .nth(1)
+            .as_deref()
+            .and_then(|s| s.to_str()),
+        Some(
+            "archive"
+                | "status"
+                | "ready"
+                | "load"
+                | "move"
+                | "approve"
+                | "autonomy"
+                | "review-effort"
+        )
+    ) {
+        return wg_preview::workflow::command();
+    }
     if std::env::args_os().nth(1).is_some_and(|v| v == "usage") {
         return wg_preview::usage::command(std::env::args().skip(2));
     }

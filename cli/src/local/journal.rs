@@ -247,39 +247,96 @@ pub(super) fn record(dir: &Path, cmd: &str, before: &Value, after: &Value) -> io
         if changes == json!({}) {
             continue;
         }
-        let mut line =
-            sorted_line(json!({"time":t,"command":cmd,"kind":"run","key":k,"changes":changes}));
-        let path = dir.join("journal.jsonl");
-        if fs::metadata(&path).is_ok_and(|m| m.len() + line.len() as u64 > 5 * 1024 * 1024) {
-            fs::rename(&path, dir.join("journal.1.jsonl"))?
-        }
-        if !path.exists() {
-            let mut run = after.clone();
-            fn redact(row: &mut Value) {
-                if let Some(o) = row.as_object_mut() {
-                    o.retain(|k, v| {
-                        *v = safe(k, v);
-                        !secret(k)
-                    })
-                }
+        append(
+            dir,
+            cmd,
+            after,
+            &t,
+            json!({"time":t,"command":cmd,"kind":"run","key":k,"changes":changes}),
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn record_status(
+    dir: &Path,
+    cmd: &str,
+    run: &Value,
+    key: &str,
+    old: &str,
+    new: &str,
+) -> io::Result<()> {
+    if old == new {
+        return Ok(());
+    }
+    let t = now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    append(
+        dir,
+        cmd,
+        run,
+        &t,
+        json!({"time":t,"command":cmd,"kind":"status","key":key,"changes":{"status":[old,new]}}),
+    )
+}
+
+fn append(dir: &Path, cmd: &str, after: &Value, t: &str, entry: Value) -> io::Result<()> {
+    let mut line = sorted_line(entry);
+    let path = dir.join("journal.jsonl");
+    if fs::metadata(&path).is_ok_and(|m| m.len() + line.len() as u64 > 5 * 1024 * 1024) {
+        fs::rename(&path, dir.join("journal.1.jsonl"))?
+    }
+    if !path.exists() {
+        let mut run = json!({"effort":after["effort"].as_object().cloned().unwrap_or_default(),"nodes":after["nodes"].as_object().cloned().unwrap_or_default()});
+        fn redact(row: &mut Value) {
+            if let Some(o) = row.as_object_mut() {
+                o.retain(|k, v| {
+                    *v = safe(k, v);
+                    !secret(k)
+                })
             }
-            redact(&mut run["effort"]);
-            if let Some(o) = run["nodes"].as_object_mut() {
-                for row in o.values_mut() {
-                    redact(row)
-                }
-            }
-            line = sorted_line(
-                json!({"time":t,"command":cmd,"kind":"baseline","key":"@baseline","changes":{},"run":run}),
-            ) + &line
         }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(line.as_bytes())?;
+        redact(&mut run["effort"]);
+        if let Some(o) = run["nodes"].as_object_mut() {
+            for row in o.values_mut() {
+                redact(row)
+            }
+        }
+        line = sorted_line(
+            json!({"time":t,"command":cmd,"kind":"baseline","key":"@baseline","changes":{},"run":run}),
+        ) + &line
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(line.as_bytes())
+}
+
+pub(crate) fn record_workflow(
+    dir: &Path,
+    cmd: &str,
+    before: &Value,
+    after: &Value,
+) -> io::Result<()> {
+    record(dir, cmd, &before["run"], &after["run"])?;
+    let keys: BTreeSet<_> = fields(&before["nodes"])
+        .chain(fields(&after["nodes"]))
+        .collect();
+    let t = now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    for k in keys {
+        let old = &before["nodes"][k]["identifier"];
+        let new = &after["nodes"][k]["identifier"];
+        if old != new {
+            append(
+                dir,
+                cmd,
+                &after["run"],
+                &t,
+                json!({"time":t,"command":cmd,"kind":"issue","key":k,"changes":{"issue":[old,new]}}),
+            )?;
+        }
     }
     Ok(())
 }

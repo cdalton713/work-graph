@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { configBlock, pollWhileVisible, workspaceKeyLocation, doneSteps, firstStep, setupCommands, validateNewTeam } from "./onboarding";
+import contract from "../../skills/work-graph/contract.json";
+import { installBlock, statusMeanings, configBlock, pollWhileVisible, workspaceKeyLocation, doneSteps, firstStep, setupCommands, validateNewTeam } from "./onboarding";
 import type { OnboardingState, AccountConnection } from "./types";
 
 const complete: OnboardingState = {
@@ -13,6 +14,11 @@ const account = { human: "Ada", pageUrl: "https://example.com", connections: [ho
 const second = { ...home, id: "second", workspace_id: "extra", team: "", position: 1 };
 
 describe("onboarding", () => {
+  it("marks the status step done only after verification", () => {
+    expect(doneSteps(complete, false).statuses).toBe(false);
+    expect(doneSteps(complete, true).statuses).toBe(true);
+  });
+
   it("opens Welcome until the account has confirmed setup progress", () => {
     const fresh = { ...complete, name: false, token: false, connected: false };
     expect(firstStep(fresh)).toBe("welcome");
@@ -30,7 +36,7 @@ describe("onboarding", () => {
 
   it("shows the server's progress and closes the guide when skipped or complete", () => {
     const state = { ...complete, name: false, token: false, skipped: true };
-    expect(doneSteps(state)).toEqual({ welcome: true, name: false, workspaces: true, teams: true, setup: false, connect: true });
+    expect(doneSteps(state)).toEqual({ welcome: true, name: false, workspaces: true, teams: true, statuses: false, setup: false, connect: true });
     expect(firstStep(state)).toBeNull();
     expect(firstStep(complete)).toBeNull();
     expect(firstStep({ ...state, skipped: false })).toBe("name");
@@ -94,6 +100,18 @@ describe("onboarding", () => {
       "wg setup --workspace extra --apply --name 'Ada'\\''s team'",
       "wg doctor",
     ]);
+  });
+
+  it("ends the copied block at the token prompt and runs doctor after login", () => {
+    const commands = setupCommands({ ...account, connections: [home, second] }, {});
+    expect(installBlock(commands).split("\n")).toEqual([
+      "wg setup --workspace example --apply", "wg setup --workspace extra --apply",
+      "wg login https://example.com && wg doctor",
+    ]);
+  });
+
+  it.each(contract.setup.statuses)("explains $name and identifies who moves it", ({ name }) => {
+    expect(statusMeanings[name]).toEqual([expect.stringMatching(/\S/), expect.stringMatching(/\S/)]);
   });
 
   it("checks the team key and name before they enter the commands", () => {

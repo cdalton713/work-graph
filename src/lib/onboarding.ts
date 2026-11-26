@@ -4,8 +4,9 @@ export const steps = [
   { id: "welcome", label: "Welcome" },
   { id: "name", label: "Your name" },
   { id: "workspaces", label: "Linear workspaces" },
-  { id: "teams", label: "Teams" },
-  { id: "setup", label: "Set up wg" },
+  { id: "teams", label: "Team" },
+  { id: "statuses", label: "Statuses and labels" },
+  { id: "setup", label: "Install wg" },
   { id: "connect", label: "Connect" },
 ] as const;
 
@@ -14,13 +15,14 @@ export type NewTeam = { key: string; name: string };
 export type NewTeams = Record<string, NewTeam>;
 type SetupAccount = Pick<Account, "human" | "pageUrl" | "connections">;
 
-export function doneSteps({ name, workspaces, teams, token, connected }: OnboardingState): Record<Step, boolean> {
-  return { welcome: name || token || connected, name, workspaces, teams, setup: token, connect: connected };
+export function doneSteps({ name, workspaces, teams, token, connected }: OnboardingState, statuses = false): Record<Step, boolean> {
+  return { welcome: name || token || connected, name, workspaces, teams, statuses, setup: token, connect: connected };
 }
 
-export function firstStep(state: OnboardingState): Step | null {
+export function firstStep(state: OnboardingState, statuses?: boolean): Step | null {
   if (state.skipped) return null;
-  const done = doneSteps(state);
+  // Account-only callers can route before the team setup check returns.
+  const done = doneSteps(state, statuses ?? true);
   return steps.find(({ id }) => !done[id])?.id ?? null;
 }
 
@@ -42,7 +44,7 @@ function shellArg(value: string): string {
   return /^[a-zA-Z0-9_./:-]+$/.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
 }
 
-export function setupCommands({ connections, pageUrl }: SetupAccount, drafts: NewTeams): string[] {
+export function setupCommands({ connections, pageUrl }: SetupAccount, drafts: NewTeams): [string, ...string[], string] {
   return [
     `wg login ${shellArg(pageUrl)}`,
     ...connections.map(({ id, workspace_id }) => {
@@ -88,4 +90,27 @@ export function pollWhileVisible(
     page.removeEventListener("visibilitychange", sync);
     clearInterval(timer);
   };
+}
+
+export const statusMeanings: Record<string, [string, string]> = {
+  Triage: ["New work needs a decision.", "Worker"],
+  Backlog: ["Work is deferred.", "You"],
+  Todo: ["The issue needs a specification or has open blockers.", "Coordinator"],
+  Ready: ["All blockers are closed. Work can start.", "Coordinator"],
+  "In Progress": ["A worker has started the issue.", "Coordinator"],
+  "Needs {name}": ["Work waits for your answer or action.", "Worker"],
+  "In Review": ["The pull request is open for review.", "Worker"],
+  "Ready to Merge": ["Checks passed and review is complete.", "Worker"],
+  Merged: ["The change is merged and waits for deployment.", "Worker"],
+  Verifying: ["Checks are running after deployment.", "Coordinator"],
+  Done: ["The change meets its acceptance criteria.", "Coordinator"],
+  Canceled: ["Work stopped on this issue.", "You"],
+  Duplicate: ["Another issue tracks the same work.", "Linear"],
+};
+
+export function installBlock(commands: ReturnType<typeof setupCommands>): string {
+  const setup = commands.slice(1, -1);
+  // Login reads the token from the terminal. Leave no pasted command after its line.
+  const loginAndDoctor = commands[0] + " && " + commands.at(-1);
+  return [...setup, loginAndDoctor].join("\n");
 }

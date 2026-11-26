@@ -252,6 +252,11 @@ LINEAR_API_KEY=... node server/main.ts      # http://127.0.0.1:4747
 pnpm test
 ```
 
+Install Chromium once with `pnpm exec playwright install chromium`. Run `pnpm test:e2e` to build the page
+and check its layout at six window sizes. The tests start local fixture servers and use no Linear key.
+Run `pnpm shots` to build the page and save screenshots in `shots/<size>/`.
+The service fixture stops if `DATABASE_URL`, `WG_HOSTED`, `WG_DATA_KEY`, or `WG_SESSION_SECRET` is set in the shell.
+
 `node server/main.ts --team <key>` gives a team to a workspace that has none in the config. The server also puts
 the page on your tailnet with Tailscale Serve while it runs; `--no-tailnet` keeps it on this machine. Keys stay in
 the server. Every graph, edit, comment, and cache is scoped to its workspace.

@@ -277,7 +277,10 @@ export class NeedsLinearAccess extends LinearError {
 
 export const sharedLinear = new AsyncLocalStorage<{ projectId: string; writer?: Workspace }>();
 
-export async function gql(query: string, variables: Record<string, unknown> = {}): Promise<Data> {
+export class LinearAccessRefused extends Error {}
+
+export async function gql(query: string, variables: Record<string, unknown> = {},
+  options?: { accessMutation: true }): Promise<Data> {
   const mutation = isMutation(query);
   const shared = sharedLinear.getStore();
   const memberWrite = mutation && shared;
@@ -313,11 +316,13 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       const send = async (value: string) => {
         try { return await transport.fetch(ENDPOINT, init(value)); } catch (error) { return failed(error); }
       };
-      let response = await send(credential);
+      let sentCredential = credential;
+      let response = await send(sentCredential);
       if ("failure" in response) return response;
       if (response.status === 401 && oauthKey) {
         await response.body?.cancel().catch(() => {});
-        response = await send(await credentialFor(credential));
+        sentCredential = await credentialFor(credential);
+        response = await send(sentCredential);
         if ("failure" in response) return response;
       }
       if (response.status === 401 && rejectApiKey) {
@@ -347,6 +352,13 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       if (shared && !mutation && (response.status === 404 || body?.errors?.some((error) =>
         /not.?found/i.test(error.extensions?.code ?? "") || /not found/i.test(error.message)))) {
         throw new LinearError("Resource not found in the shared project", 404);
+      }
+      if (options?.accessMutation && !rated && response.status < 500 && (response.status === 403 || body?.errors?.length)) {
+        let reason = body?.errors?.[0]?.message || "Linear refused the access change";
+        for (const secret of new Set([key, credential, sentCredential])) {
+          if (secret) reason = reason.replaceAll(secret, "[redacted]");
+        }
+        throw new LinearAccessRefused(reason);
       }
       const failure: Failure = rated ? "rate" : response.status >= 500 ? "server" : "final";
       const retryAfter = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;

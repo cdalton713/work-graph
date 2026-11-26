@@ -21,6 +21,7 @@ import { planRoutes } from "./plans.ts";
 import { claimRoutes } from "./claims.ts";
 import type { ClaimScope } from "./db/claims.ts";
 import { shareRoutes, type ShareAccess } from "./shares.ts";
+import { memberAccessRoutes, missingAccess, type InWorkspace } from "./linearaccess.ts";
 import { type Auth, type Session, LOGIN_PATH, authRoutes, clearSessionCookie, sessionOf } from "./auth.ts";
 import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
 import { createGraphCache } from "./cache.ts";
@@ -642,6 +643,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await runInTenant(entry.owner, () => linearWorkspace.run(entry.workspace, () =>
       sharedScope.run({ ...entry, member: linkMember(entry, account), coordinator }, () => sharedLinear.run({ projectId: entry.projectId, writer }, next))), lookupRevision);
   });
+  if (!accountStore) {
+    const missing = (c: Context) => c.json({ error: "Project access not found" }, 404);
+    app.get("/api/projects/:id/access", missing);
+    app.post("/api/projects/:id/access/request", missing);
+    app.post("/api/projects/:id/members/:member/access", missing);
+  }
   const api = new Hono<{ Variables: { viewer: boolean } }>();
   // The API can change Linear with the user's key. Accept only this page as the caller.
   api.use(async (c, next) => {
@@ -1234,7 +1241,34 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         clearSessionCookie(c);
       },
     }));
+    const runLinear = (tenant: Tenant, workspace: Workspace): InWorkspace => (run) =>
+      runInTenant(tenant, () => sharedLinear.exit(() => linearWorkspace.run(workspace, run)));
+
+    app.route("/api", memberAccessRoutes(async (c) => {
+      const shared = sharedScope.getStore();
+      if (!shared || shared.coordinator || shared.projectId !== c.req.param("id")) throw missingAccess();
+      if (shared.role !== "collaborator") return c.json({ error: "Only collaborators need Linear access" }, 403);
+      const accounts = await accountStore();
+      if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
+      const tenant = await directory.byId(shared.member.account);
+      const account = tenant && await accounts.readTenant(tenant.id);
+      const connection = shared.workspace.connectionId;
+      if (!tenant || !account || !connection) throw missingAccess();
+      const writer = sharedLinear.getStore()?.writer;
+      return {
+        shares: accounts.shares,
+        project: [shared.owner.id, connection, shared.projectId],
+        membership: shared.id.slice("shared:".length),
+        email: account.user.email,
+        workspace: shared.workspace,
+        ownerRun: runLinear(shared.owner, shared.workspace),
+        ownRun: writer && runLinear(tenant, writer),
+        usage: () => usageScope(shared.owner, shared.workspace),
+      };
+    }, telemetry));
+
     app.route("/api", shareRoutes({
+      runLinear,
       access, pageUrl, telemetry,
       limit: attemptLimit({ now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX }, "join-attempts:"),
       project: shareProject,

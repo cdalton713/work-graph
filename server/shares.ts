@@ -5,12 +5,14 @@ import { accountUsage } from "./account.ts";
 import type { createAccounts } from "./db/accounts.ts";
 import { SHARE_KINDS, type MemberRole, type ShareKind } from "./db/shares.ts";
 import { LinearError } from "./linear.ts";
+import { addLinearAccess, missingAccess, type InWorkspace } from "./linearaccess.ts";
 import type { Telemetry } from "./telemetry.ts";
 import type { Tenant } from "./tenants.ts";
 import type { Workspace } from "./workspaces.ts";
 
 export type ShareAccess = { accounts: ReturnType<typeof createAccounts>; tenant: Tenant; session: Session };
 type Options = {
+  runLinear: (tenant: Tenant, workspace: Workspace) => InWorkspace;
   access: (c: Context) => Promise<ShareAccess | Response>;
   project: (tenant: Tenant, workspace: Workspace, id: string) => Promise<string | null>;
   limit: (session: string) => Promise<number>;
@@ -27,7 +29,7 @@ function shareKind(kind: string | undefined): ShareKind {
   throw unavailable();
 }
 
-export function shareRoutes({ access, project, limit, pageUrl, telemetry }: Options) {
+export function shareRoutes({ access, project, limit, pageUrl, telemetry, runLinear }: Options) {
   const routes = new Hono();
   const url = (token: string) => ({ url: `${pageUrl}/join/${token}` });
   const smallBody = bodyLimit({ maxSize: 1024 });
@@ -99,6 +101,16 @@ export function shareRoutes({ access, project, limit, pageUrl, telemetry }: Opti
   }));
 
   const members = "/projects/:id/members/:member";
+  routes.post(members + "/access", smallBody, (c) => owner(c, async ({ account, key, workspace, projectId, resolve }) => {
+    const id = c.req.param("member")!;
+    const member = uuid.test(id) ? await account.accounts.shares.accessMember(key, id) : null;
+    if (!member) throw missingAccess();
+    if (member.role !== "collaborator") throw new LinearError("Only collaborators need Linear access", 403);
+    return addLinearAccess(c, runLinear(account.tenant, workspace), workspace, projectId, member.email, (status) => {
+      if (status === "refused") telemetry?.emit("access_refused", {}, resolve, key[0]);
+      else telemetry?.emit("access_added", { method: status }, resolve, key[0]);
+    });
+  }));
   async function changeMember(c: Context, edit = false) {
     return owner(c, async ({ account, key, resolve }) => {
       const member = c.req.param("member")!;

@@ -8059,6 +8059,410 @@ class ContextLimitTests(LaneTests):
         self.assertTrue(self.settings()["autoMemoryEnabled"])
 
 
+class CollaborativePlanTests(DirTests):
+    def setUp(self):
+        super().setUp()
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.p["effort"]["slug"] = "example"
+        self.write_plan()
+        self.km = self.keymap(rows={"a": {"dispatch": "local-dispatch", "branch": "wg/a"}})
+        self.km["status_doc"] = {"id": "doc", "sha": "local-sha", "at": "local-time"}
+        self.km["nodes"]["a"]["card"] = {"id": "card", "sha": "card-sha"}
+        wg.save_keymap(self.d, self.km)
+        self.requests = []
+        self.version = 0
+        self.data = {}
+        self.down = False
+        self.refused = None
+        self.race = None
+        self.redirect = None
+        self.writer_in_plan = False
+        test = self
+
+        class Page(BaseHTTPRequestHandler):
+            def answer(self, status, body=None):
+                self.send_response(status)
+                if status in (200, 304):
+                    self.send_header("ETag", f'"{test.version}"')
+                self.end_headers()
+                if body is not None:
+                    self.wfile.write(json.dumps(body).encode())
+
+            def record(self, body=None):
+                test.requests.append((self.command, self.path, dict(self.headers), body))
+
+            def do_GET(self):
+                self.record()
+                if test.down:
+                    self.answer(503)
+                elif test.refused:
+                    self.answer(test.refused)
+                elif test.redirect:
+                    self.send_response(302)
+                    self.send_header("Location", test.redirect)
+                    self.end_headers()
+                elif self.path.endswith("/versions"):
+                    self.answer(200, {"versions": [{"version": test.version, "writer": "Ada"}]})
+                elif self.headers.get("If-None-Match") == f'"{test.version}"':
+                    self.answer(304)
+                else:
+                    writer = {"writer": "Ada"} if test.writer_in_plan else {}
+                    self.answer(200, {"version": test.version} | test.data | writer)
+
+            def do_PUT(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                self.record(body)
+                if test.race:
+                    test.race()
+                    test.race = None
+                if test.down:
+                    self.answer(503)
+                elif (test.version == 0 and self.headers.get("If-None-Match") == "*"
+                      or test.version > 0 and self.headers.get("If-Match") == f'"{test.version}"'):
+                    test.version += 1
+                    test.data = body
+                    self.answer(200, {"version": test.version})
+                else:
+                    self.answer(412, {"version": test.version, "writer": "Ada"})
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.url = f"http://127.0.0.1:{server.server_port}"
+        workspace = wg.plan_workspace(self.p)
+        self.enterContext(patch.dict(wg.WORKSPACES[workspace], {"page_url": self.url}))
+        self.enterContext(patch.dict(os.environ, {wg.link_token_env(workspace): "example-token"}))
+
+    def cli(self, cmd, *args, code=0):
+        words = cmd.split() + [str(self.d), *args]
+        return self.call(wg.main, ["wg", *words], code=code)
+
+    def test_share_initializes_once_and_sends_only_shared_fields(self):
+        self.cli("share")
+        out, _ = self.cli("share")
+        self.assertIn("already shared", out)
+        [(method, path, headers, body)] = self.requests
+        self.assertEqual((method, path), ("PUT", "/api/projects/project/plan"))
+        self.assertEqual(headers["If-None-Match"], "*")
+        self.assertEqual(headers["Authorization"], "Bearer example-token")
+        self.assertEqual(headers["X-Workspace"], wg.plan_workspace(self.p))
+        self.assertEqual(body["keymap"]["nodes"]["a"]["branch"], "wg/a")
+        self.assertEqual(body["keymap"]["nodes"]["a"]["card"], {"id": "card"})
+        self.assertEqual(body["keymap"]["status_doc"], {"id": "doc"})
+        self.assertTrue({"run", "collab"}.isdisjoint(body["keymap"]))
+        self.assertNotIn("local-dispatch", json.dumps(body))
+        collab = wg.load_keymap(self.d)["collab"]
+        self.assertEqual((collab["page"], collab["project"], collab["version"]), (self.url, "project", 1))
+
+    def remote_change(self):
+        self.version += 1
+        self.data["plan"]["effort"]["summary"] = "remote change"
+        self.data["keymap"]["nodes"]["a"].update(branch="wg/remote-a", pr="7")
+
+    def test_read_pulls_and_keeps_local_fields_then_304_leaves_files_alone(self):
+        self.cli("share")
+        self.remote_change()
+        before = wg.load_keymap(self.d)
+        out, _ = self.cli("run show", "a")
+        self.assertIn("note plan v2 by Ada", out)
+        after = wg.load_keymap(self.d)
+        self.assertEqual(after["run"], before["run"])
+        self.assertEqual(after["status_doc"], before["status_doc"])
+        self.assertEqual(after["collab"]["version"], 2)
+        self.assertEqual(after["nodes"]["a"]["branch"], "wg/remote-a")
+        self.assertEqual(after["nodes"]["a"]["pr"], "7")
+        paths = [self.d / name for name in ("plan.json", "keymap.json")]
+        stamp = [p.stat().st_mtime_ns for p in paths]
+        self.assertNotIn("note plan", self.cli("run show", "a")[0])
+        self.assertEqual([p.stat().st_mtime_ns for p in paths], stamp)
+        self.assertEqual(self.requests[-1][2]["If-None-Match"], '"2"')
+
+    def test_local_edit_stops_commands_until_forced_pull(self):
+        self.cli("share")
+        self.remote_change()
+        self.p["effort"]["summary"] = "local change"
+        self.write_plan()
+        for cmd, args in (("run show", ("a",)), ("status", ()), ("load", ("--apply",)), ("pull", ())):
+            with self.subTest(command=cmd):
+                _, err = self.cli(cmd, *args, code=2)
+                self.assertIn("server has plan v2 by Ada", err)
+                self.assertIn("wg pull", err)
+        count = len(self.requests)
+        self.cli("check")
+        self.assertEqual(len(self.requests), count)
+        out, _ = self.cli("pull", "--force")
+        self.assertIn("discarded local", out)
+        self.assertIn("remote change", (self.d / "plan.json").read_text())
+
+    def test_page_down_warns_on_read_and_refuses_load(self):
+        self.cli("run show", "a")
+        self.assertEqual(self.requests, [])
+        self.cli("share")
+        self.down = True
+        _, err = self.cli("run show", "a")
+        self.assertEqual(err.count("warn"), 1)
+        with patch.object(wg, "gql") as linear:
+            _, err = self.cli("load", "--apply", code=2)
+            self.assertIn("HTTP 503", err)
+            linear.assert_not_called()
+
+    def test_timeout_warns_and_auth_errors_name_the_token(self):
+        self.cli("share")
+        with patch.object(wg.urllib.request.OpenerDirector, "open", side_effect=TimeoutError):
+            _, err = self.cli("run show", "a")
+        self.assertIn("warn plan", err)
+        self.assertIn("TimeoutError", err)
+        for self.refused in (401, 403):
+            with self.subTest(status=self.refused):
+                _, err = self.cli("run show", "a", code=2)
+                self.assertIn(f"refused the token (HTTP {self.refused})", err)
+
+    def test_load_refuses_newer_version_before_linear_even_with_a_clean_plan(self):
+        self.cli("share")
+        self.remote_change()
+        with patch.object(wg, "gql") as linear:
+            _, err = self.cli("load", "--apply", code=2)
+            self.assertIn("server has plan v2 by Ada", err)
+            linear.assert_not_called()
+        self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 1)
+        self.cli("pull")
+        self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 2)
+
+    def test_load_pushes_after_linear_and_preserves_local_files_on_conflict(self):
+        self.cli("share")
+        self.p["effort"]["summary"] = "local change"
+        self.write_plan()
+        self.km = wg.load_keymap(self.d)
+        self.km["milestones"] = {}
+        wg.save_json(self.d / "keymap.json", self.km)
+        self.data["keymap"]["milestones"] = {}
+        self.enterContext(patch.object(wg, "team_info", return_value=(
+            "team", {}, {"merge-point": "m", "ship-point": "s", "reviewed": "r"})))
+        self.enterContext(patch.object(wg, "fetch_nodes", return_value={}))
+        self.enterContext(patch.object(wg, "_relations"))
+        self.enterContext(patch.object(wg, "_sort"))
+        self.enterContext(patch.object(wg, "sync_card", return_value=False))
+        settings = self.enterContext(patch.object(wg, "set_core_settings"))
+
+        def gql(query, args=None):
+            self.assertEqual(self.requests[-1][0], "GET")
+            if "projectMilestoneCreate" in query:
+                return {"projectMilestoneCreate": {"projectMilestone": {"id": "milestone"}}}
+            self.assertIn("viewer", query)
+            return {"viewer": {"id": "me"}}
+
+        self.enterContext(patch.object(wg, "gql", side_effect=gql))
+        before = (self.d / "plan.json").read_bytes()
+        synced = wg.load_keymap(self.d)["collab"]
+        self.race = self.remote_change
+        _, err = self.cli("load", "--apply", code=2)
+        self.assertIn("run wg pull", err)
+        self.assertEqual((self.d / "plan.json").read_bytes(), before)
+        after = wg.load_keymap(self.d)
+        self.assertEqual(after["milestones"], {"1": "milestone"})
+        self.assertEqual(after["collab"]["version"], synced["version"])
+        self.assertEqual(after["collab"]["plan_sha"], synced["plan_sha"])
+        settings.assert_not_called()
+        self.assertEqual(self.requests[-1][2]["If-Match"], '"1"')
+        self.cli("pull")
+        self.assertEqual(wg.load_keymap(self.d)["milestones"], {"1": "milestone"})
+        self.p["effort"]["summary"] = "rebased change"
+        self.write_plan()
+        self.cli("load", "--apply")
+        self.assertEqual(self.data["plan"]["effort"]["summary"], "rebased change")
+        self.assertEqual(self.data["keymap"]["milestones"], {"1": "milestone"})
+        self.assertEqual(self.requests[-1][2]["If-Match"], '"2"')
+        self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 3)
+
+    def test_branch_and_pr_retry_once_after_a_keymap_only_race(self):
+        self.cli("share")
+        self.writer_in_plan = True
+        peer = self.d / "peer"
+        peer.mkdir()
+        peer_keymap = wg.load_keymap(self.d)
+        peer_keymap["collab"]["workspace"] = "shared:member"
+        peer_keymap["run"]["nodes"]["a"] = {"dispatch": "peer-dispatch"}
+        wg.save_json(peer / "keymap.json", peer_keymap)
+        (peer / "plan.json").write_bytes((self.d / "plan.json").read_bytes())
+
+        def race():
+            self.version += 1
+            self.data["keymap"]["nodes"]["mp"]["branch"] = "wg/remote-mp"
+
+        self.race = race
+        self.cli("run set", "a", "branch=wg/new-a", "pr=9")
+        self.assertEqual([req[0] for req in self.requests], ["PUT", "GET", "PUT", "GET", "PUT"])
+        keymap = self.data["keymap"]
+        self.assertEqual(keymap["nodes"]["mp"]["branch"], "wg/remote-mp")
+        self.assertEqual(keymap["nodes"]["a"]["branch"], "wg/new-a")
+        self.assertEqual(keymap["nodes"]["a"]["pr"], "9")
+        self.assertNotIn("run", keymap)
+        self.assertNotIn("local-dispatch", json.dumps(self.requests))
+        self.assertEqual(wg.load_keymap(self.d)["run"]["nodes"]["a"]["dispatch"], "local-dispatch")
+        self.call(wg.main, ["wg", "run", "show", str(peer), "a"])
+        pulled = wg.load_keymap(peer)
+        self.assertEqual(pulled["nodes"]["a"]["pr"], "9")
+        self.assertEqual(pulled["run"]["nodes"]["a"], {"dispatch": "peer-dispatch"})
+        self.assertEqual(self.requests[-1][2]["X-Workspace"], "shared:member")
+        self.assertEqual(self.requests[-1][2]["Authorization"], "Bearer example-token")
+
+    def test_plan_requests_refuse_redirects(self):
+        self.cli("share")
+        self.redirect = self.url + "/different-origin-path"
+        _, err = self.cli("run show", "a", code=2)
+        self.assertIn("HTTP 302", err)
+        self.assertEqual([req[1] for req in self.requests], ["/api/projects/project/plan"] * 2)
+
+    def test_remote_settings_need_explicit_acceptance(self):
+        self.p["effort"]["test"] = ["local-test"]
+        self.write_plan()
+        self.cli("share")
+        self.remote_change()
+        remote = {"test": ["remote-test"], "lint": ["remote-lint"], "rules": "remote rules",
+                  "workspace": "home", "team": "WG", "slug": "remote-slug", "agents": {
+                      "worker": {"agent": "claude"}}, "stacked_hotfix": True, "initiative": "Remote"}
+        self.data["plan"]["effort"].update(remote)
+        with patch.object(wg, "evidence", return_value=0) as evidence:
+            out, _ = self.cli("evidence", "a")
+            effective = evidence.call_args.args[1]
+            self.assertEqual(wg.test_command(effective), ["local-test"])
+            self.assertEqual(wg.plan_workspace(effective), wg.plan_workspace(self.p))
+            for field in remote:
+                self.assertEqual(effective["effort"].get(field), self.p["effort"].get(field) if field != "team"
+                                 else wg.plan_team(self.p))
+                self.assertTrue(any(field in line and "Ada" in line for line in out.splitlines()), field)
+        self.data["plan"]["effort"].pop("workspace")
+        self.data["plan"]["effort"].pop("team")
+        out, _ = self.cli("pull", "--accept-settings")
+        self.assertIn("test", out)
+        self.assertEqual(wg.test_command(wg.load_plan(self.d)), ["remote-test"])
+
+    def test_invalid_remote_plan_and_foreign_mappings_stay_off_disk(self):
+        self.cli("share")
+        before = ((self.d / "plan.json").read_bytes(), (self.d / "keymap.json").read_bytes())
+        original = json.dumps(self.data)
+        for change, problem in [
+            (lambda d: d["plan"]["nodes"][0].update(key=".."), "node key"),
+            (lambda d: d["plan"]["nodes"][0].pop("title"), "no title"),
+            (lambda d: d["plan"]["effort"].update(name="Other project"), "project name"),
+            (lambda d: d["keymap"]["project"].update(id="other"), "wrong project id"),
+            (lambda d: d["keymap"]["nodes"]["a"].update(id="other"), "outside the project"),
+            (lambda d: d["keymap"]["milestones"].update({"1": "other"}), "outside the project"),
+        ]:
+            with self.subTest(problem=problem):
+                self.data = json.loads(original)
+                self.version += 1
+                change(self.data)
+                with patch.object(wg, "fetch_nodes", return_value={"other": {"project": {"id": "other"}}}), \
+                     patch.object(wg, "project_entries", return_value=[]):
+                    _, err = self.cli("pull", code=2)
+                self.assertIn(problem, err)
+                self.assertEqual(((self.d / "plan.json").read_bytes(), (self.d / "keymap.json").read_bytes()), before)
+
+    def test_pending_run_row_survives_outage_and_reaches_page(self):
+        self.cli("share")
+        self.down = True
+        _, err = self.cli("run set", "a", "pr=9")
+        self.assertEqual(err.count("warn"), 1)
+        self.assertEqual(wg.load_keymap(self.d)["run"]["nodes"]["a"]["pr"], "9")
+        self.down = False
+        self.cli("run show", "a")
+        self.assertEqual(self.data["keymap"]["nodes"]["a"]["pr"], "9")
+
+    def test_pending_run_row_does_not_publish_local_plan_edits(self):
+        self.cli("share")
+        path = self.d / "plan.json"
+        baseline = path.read_bytes()
+        self.p["effort"]["summary"] = "unpublished"
+        self.write_plan()
+        _, err = self.cli("run set", "a", "pr=9")
+        self.assertIn("pending", err)
+        self.assertEqual(wg.load_keymap(self.d)["run"]["nodes"]["a"]["pr"], "9")
+        self.assertEqual(self.version, 1)
+        path.write_bytes(baseline)
+        self.cli("run show", "a")
+        self.assertEqual(self.data["keymap"]["nodes"]["a"]["pr"], "9")
+        self.assertNotIn("summary", self.data["plan"]["effort"])
+
+    def test_load_saves_issue_ids_before_a_linear_failure_and_recovers_an_accepted_push(self):
+        self.km["nodes"].pop("a")
+        wg.save_keymap(self.d, self.km)
+        self.cli("share")
+        self.p["effort"]["summary"] = "local changes"
+        self.write_plan()
+        self.enterContext(patch.object(wg, "team_info", return_value=(
+            "team", {"Todo": "todo"}, {"merge-point": "m", "ship-point": "s", "reviewed": "r"})))
+        self.enterContext(patch.object(wg, "fetch_nodes", return_value={}))
+        self.enterContext(patch.object(wg, "project_entries", return_value=[]))
+        self.enterContext(patch.object(wg, "_sort"))
+        self.enterContext(patch.object(wg, "sync_card", return_value=False))
+        relations = self.enterContext(patch.object(wg, "_relations", side_effect=wg.ReadError("Linear stopped")))
+        created = []
+
+        def gql(query, args=None):
+            if "issueCreate" in query:
+                created.append("issue-a")
+                return {"issueCreate": {"issue": {"id": "issue-a", "identifier": "WG-1"}}}
+            self.assertIn("viewer", query)
+            return {"viewer": {"id": "me"}}
+
+        self.enterContext(patch.object(wg, "gql", side_effect=gql))
+        _, err = self.cli("load", "--apply", code=2)
+        self.assertIn("Linear stopped", err)
+        self.assertEqual(wg.load_keymap(self.d)["nodes"]["a"]["id"], "issue-a")
+        relations.side_effect = None
+
+        save = wg.save_keymap
+
+        def interrupted(plan_dir, km, **kwargs):
+            if km["collab"]["version"] == 2:
+                raise OSError("interrupted after server write")
+            return save(plan_dir, km, **kwargs)
+
+        with patch.object(wg, "save_keymap", side_effect=interrupted):
+            _, err = self.cli("load", "--apply", code=2)
+        self.assertIn("interrupted after server write", err)
+        self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 1)
+        self.cli("run show", "a")
+        self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 2)
+        self.assertEqual(created, ["issue-a"])
+
+    def test_interrupted_pull_recovers_the_plan_keymap_pair(self):
+        self.cli("share")
+        self.remote_change()
+        save = wg.save_json
+
+        def interrupted(path, value, *args, **kwargs):
+            if path == self.d / "plan.json":
+                save(path, value, *args, **kwargs)
+                raise OSError("interrupted after plan write")
+            return save(path, value, *args, **kwargs)
+
+        with patch.object(wg, "save_json", side_effect=interrupted):
+            _, err = self.cli("pull", code=2)
+        self.assertIn("interrupted after plan write", err)
+        self.cli("run show", "a")
+        self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 2)
+        self.assertEqual(wg.load_keymap(self.d)["nodes"]["a"]["pr"], "7")
+
+    def test_incoming_keymap_cannot_replace_local_fields(self):
+        self.cli("share")
+        self.remote_change()
+        self.data["keymap"].update(run={"nodes": {}}, collab={"page": "https://example.com"},
+                                   status_doc={"id": "doc", "sha": "other", "at": "other"})
+        self.cli("pull")
+        km = wg.load_keymap(self.d)
+        self.assertEqual(km["collab"]["page"], self.url)
+        self.assertEqual(km["run"], self.km["run"])
+        self.assertEqual(km["status_doc"], self.km["status_doc"])
+
+
 class PageLoginTests(unittest.TestCase):
     def setUp(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

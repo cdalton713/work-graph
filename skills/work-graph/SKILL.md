@@ -39,7 +39,9 @@ Each is a project label: `wg autonomy <plan-dir> [<level>]` or `wg review-effort
 
 ## Linear workspace
 
-`effort.workspace` names the workspace that owns the work; `wg` uses only its key. `wg` tries a failed request again only when that is safe: after a failed mutation, read the issue before you run the command again. On the Free plan, `wg` archives settled issues. Details: setup.md "Linear workspace". Read it before step 0.
+Shared plans: [collaboration](references/collab.md).
+
+`wg` uses the key for `effort.workspace`. Retry only when safe. After a failed mutation, read the issue before you run the command again. On the Free plan, `wg` archives settled issues. Read setup.md "Linear workspace" before step 0.
 
 ## Initiatives
 

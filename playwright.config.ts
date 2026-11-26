@@ -9,6 +9,10 @@ export default defineConfig({
   testDir: "e2e",
   fullyParallel: true,
   workers: 2,
+  retries: process.env.CI ? 1 : 0,
+  reporter: process.env.GITHUB_ACTIONS
+    ? [["dot"], ["json", { outputFile: "test-results/report.json" }]]
+    : undefined,
   forbidOnly: !!process.env.CI,
   use: { browserName: "chromium", screenshot: "only-on-failure", serviceWorkers: "block" },
   projects: sizes.map(([device, width, height]) => ({

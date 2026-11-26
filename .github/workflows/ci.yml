@@ -57,6 +57,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e
+      - name: List flaky browser tests
+        if: ${{ !cancelled() && hashFiles('test-results/report.json') != '' }}
+        run: |
+          jq -r '
+            .. | objects | select(has("tests") and has("file")) as $spec
+            | $spec.tests[] | select(.status == "flaky")
+            | "- Flaky: [\(.projectName)] \($spec.file):\($spec.line) — \($spec.title)"
+          ' test-results/report.json >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

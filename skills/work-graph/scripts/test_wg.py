@@ -8161,11 +8161,127 @@ class CollaborativePlanTests(DirTests):
         self.km["collab"] = {"page": self.url, "project": "project", "workspace": workspace}
         wg.save_keymap(self.d, self.km, sync=False)
 
-    def test_claim_refusals_precede_linear_and_local_writes(self):
+    def dispatch_fixture(self, wave="a"):
+        self.p["effort"]["slug"] = "example"
+        wg.run_rows(self.km)["nodes"].clear()
+        wg.run_rows(self.km)["effort"]["wave"] = wave
         self.enable_claims()
+        return patch.object(wg, "fetch_nodes", return_value={key: live_issue("Ready") for key in self.km["nodes"]})
+
+    def test_refused_local_dispatch_does_not_claim(self):
+        with self.dispatch_fixture(wave=""):
+            out, _ = self.call(wg.dispatch, self.d, self.p, "a", "codex", None, code=1)
+        self.assertIn("not in the wave", out)
+        self.assertEqual(self.requests, [])
+
+    def test_failed_dispatch_releases_claim(self):
+        for status in (200, 503):
+            with self.subTest(status=status), self.dispatch_fixture(), \
+                 patch.object(wg, "issue_update", side_effect=wg.ReadError("Linear refused")), \
+                 patch.object(wg, "workspace_labels", return_value={"agent:codex": "label"}):
+                self.requests.clear()
+                self.claim_responses.update(POST=(status, {"action": "claimed"}), DELETE=(204, None))
+                with self.assertRaises(wg.ReadError):
+                    wg.dispatch(self.d, self.p, "a", "codex", None)
+                self.assertEqual([req[0] for req in self.requests], ["POST", "DELETE"])
+
+    def test_dispatch_releases_after_post_response_is_lost(self):
+        opener = wg.urllib.request.build_opener
+
+        def lose_response(*args):
+            actual = opener(*args)
+
+            def open_request(request, **options):
+                response = actual.open(request, **options)
+                if request.method == "POST":
+                    response.close()
+                    raise TimeoutError("response lost")
+                return response
+
+            return Mock(open=open_request)
+
+        self.claim_responses.update(POST=(200, {"action": "claimed"}), DELETE=(204, None))
+        with self.dispatch_fixture(), patch.object(wg.urllib.request, "build_opener", side_effect=lose_response):
+            with self.assertRaises(wg.PlanPageUnavailable):
+                wg.dispatch(self.d, self.p, "a", "codex", None)
+        self.assertEqual([req[0] for req in self.requests], ["POST", "DELETE"])
+
+    def test_next_reconciles_lost_and_orphaned_claims(self):
+        self.km["run"]["nodes"]["a"].update(state="running", agent="codex")
+        self.enable_claims()
+        self.claims["claims"] = [
+            {"node": "a", "mine": False, "holder": "Grace", "job": "dispatch", "stale": False},
+            {"node": "mp", "mine": True, "job": "dispatch", "stale": False},
+        ]
+        self.claims["role"] = "owner"
+        lines = self.next_claim_lines()
+        self.assertIn("do reconcile a: Grace holds this node now", lines)
+        self.assertIn("do reconcile mp: this account holds a claim with no local job", lines)
+        self.assertFalse(any("wait collaborator Grace a" in line for line in lines))
+        self.assertEqual([req[0] for req in self.requests], ["GET"])
+        self.claims["claims"].clear()
+        self.assertIn("do reconcile a: no claim", self.next_claim_lines())
+
+    def test_lost_claim_refuses_done_started_and_merge_gate(self):
+        self.enable_claims()
+        with patch.object(wg, "issue_update") as update, patch.object(wg, "fetch_nodes") as read:
+            self.claims["claims"] = [{"node": "a", "mine": False, "holder": "Grace", "job": "dispatch", "stale": False}]
+            for act in (
+                lambda: wg.done(self.d, self.p, "a", dispatch_id="local-dispatch"),
+                lambda: wg.started(self.d, self.p, "a", []),
+                lambda: wg.claim(self.d, self.p, "a", "review", "codex"),
+                lambda: wg.move(self.d, self.p, "a", "Ready to Merge"),
+            ):
+                with self.assertRaisesRegex(wg.ReadError, "Grace holds this node now"):
+                    act()
+            read.assert_not_called()
+            update.assert_not_called()
+        self.assertEqual([req[0] for req in self.requests], ["GET", "GET", "GET", "GET"])
+
+    def test_expired_holder_reconciles_after_another_coordinator_takes_over(self):
+        self.enable_claims()
+        ada = copy.deepcopy(self.km)
+        ada["run"]["nodes"]["a"].update(state="running", agent="codex")
+        self.km["run"]["nodes"]["a"].update(parent="main", lower="origin/main", pr="7")
+        self.enable_claims()
+        self.claim_responses["POST"] = (200, {"action": "taken_over"})
+        live = {"a": live_issue("In Review", ("agent:codex",))}
+        with patch.object(wg, "fetch_nodes", side_effect=[live, {"a": live_issue("In Review")}]), \
+             patch.object(wg, "issue_update") as write, \
+             patch.object(wg, "workspace_labels", return_value={"agent:claude": "label"}):
+            self.call(lambda: wg.claim(self.d, self.p, "a", "review", "claude", takeover=True))
+        self.assertEqual(self.requests[0][3], {"job": "review", "takeover": True})
+        self.assertIn("removedLabelIds", write.call_args_list[0].args[1])
+        self.assertEqual(write.call_args_list[1].args[1], {"addedLabelIds": ["label"]})
+        self.km = ada
+        self.enable_claims()
+        self.claims["claims"] = [{"node": "a", "mine": False, "holder": "Grace", "job": "review", "stale": False}]
+        self.assertIn("do reconcile a: Grace holds this node now", self.next_claim_lines())
+        with patch.object(wg, "issue_update") as write, self.assertRaisesRegex(wg.ReadError, "Grace holds this node now"):
+            wg.done(self.d, self.p, "a", dispatch_id="local-dispatch")
+        write.assert_not_called()
+
+    def test_release_401_does_not_stop_close_or_cleanup(self):
+        self.enable_claims()
+        self.claims["claims"] = [{"node": "a", "mine": True, "job": "dispatch"}]
+        self.claim_responses["DELETE"] = (401, {"error": "Expired token"})
+        with patch.object(wg, "fetch_nodes", return_value={"a": live_issue("Merged")}), \
+             patch.object(wg, "comment") as comment, patch.object(wg, "sync_ready") as ready, \
+             patch.object(wg, "cleanup_worktrees", return_value=0) as cleanup:
+            _, err = self.call(lambda: wg.move(self.d, self.p, "a", "Merged", note="Merge evidence", force="test"))
+            self.assertIn("warn a:", err)
+            self.assertIn("Expired token", err)
+            comment.assert_called_once()
+            ready.assert_called_once()
+            _, err = self.call(wg.cleanup_command, self.d, self.p, False)
+            self.assertIn("Expired token", err)
+            self.assertEqual(cleanup.call_count, 2)
+
+    def test_claim_refusals_precede_linear_and_local_writes(self):
+        fixture = self.dispatch_fixture()
         before = (self.d / "keymap.json").read_bytes()
         claim = {"holder": "Ada", "job": "review", "leaseUntil": "2026-01-01T00:00:00Z"}
-        with patch.object(wg, "fetch_nodes") as read, patch.object(wg, "issue_update") as write:
+        with fixture, patch.object(wg, "issue_update") as write:
             for status, body, message in [
                 (409, {"claim": claim, "error": "Node already claimed"}, "Ada"),
                 (403, {"error": "Owner node"}, "Owner node"),
@@ -8174,21 +8290,20 @@ class CollaborativePlanTests(DirTests):
                 self.claim_responses["POST"] = (status, body)
                 for start in (
                     lambda: wg.dispatch(self.d, self.p, "a", None, None),
-                    lambda: wg.claim(self.d, self.p, "a", "review", None),
+                    lambda: wg.claim(self.d, self.p, "a", "review", None, takeover=True),
                 ):
                     with self.assertRaisesRegex(wg.ReadError, message) as error:
                         start()
                     if status == 409:
                         self.assertIn("review", str(error.exception))
                         self.assertIn(claim["leaseUntil"], str(error.exception))
-            read.assert_not_called()
             write.assert_not_called()
         self.assertEqual((self.d / "keymap.json").read_bytes(), before)
         self.assertEqual(len(self.requests), 6)
-        for method, path, headers, body in self.requests:
+        for index, (method, path, headers, body) in enumerate(self.requests):
             self.assertEqual((method, path), ("POST", "/api/projects/project/claims/a"))
             self.assertEqual(headers["X-Workspace"], "shared-workspace")
-            self.assertNotIn("takeover", body)
+            self.assertEqual(body.get("takeover"), True if index % 2 else None)
 
     def test_takeover_needs_flag_and_workspace(self):
         self.enable_claims()
@@ -8196,9 +8311,10 @@ class CollaborativePlanTests(DirTests):
         with self.assertRaisesRegex(wg.ReadError, "Held"):
             wg.claim(self.d, self.p, "a", "review", None, takeover=True)
         self.assertEqual(self.requests[-1][3], {"job": "review", "takeover": True})
-        self.enable_claims("")
-        with self.assertRaisesRegex(wg.ReadError, "collaboration record needs a workspace"):
-            wg.dispatch(self.d, self.p, "a", None, None)
+        with self.dispatch_fixture():
+            self.enable_claims("")
+            with self.assertRaisesRegex(wg.ReadError, "collaboration record needs a workspace"):
+                wg.dispatch(self.d, self.p, "a", None, None)
         self.assertEqual(len(self.requests), 1)
 
     def next_claim_lines(self, *, statuses=None):
@@ -8270,12 +8386,13 @@ class CollaborativePlanTests(DirTests):
         self.data = {"keymap": wg.shared_keymap(self.km), "plan": self.p}
         wg.save_keymap(self.d, self.km, sync=False)
 
-        def read(_):
-            self.assertEqual(self.requests[0][0], "POST")
-            return {key: live_issue("In Review" if key == "a" else "Ready") for key in self.km["nodes"]}
+        live = {key: live_issue("In Review" if key == "a" else "Ready") for key in self.km["nodes"]}
 
-        with patch.object(wg, "fetch_nodes", side_effect=read), \
-             patch.object(wg, "issue_update") as write, \
+        def write_label(*_):
+            self.assertEqual(self.requests[0][0], "POST")
+
+        with patch.object(wg, "fetch_nodes", return_value=live), \
+             patch.object(wg, "issue_update", side_effect=write_label) as write, \
              patch.object(wg, "workspace_labels", return_value={"agent:codex": "label"}), \
              patch.object(wg, "move"), patch.object(wg, "refresh_card"), patch.object(wg, "start_project"):
             out, _ = self.call(wg.dispatch, self.d, self.p, "b", "codex", None)
@@ -8284,14 +8401,16 @@ class CollaborativePlanTests(DirTests):
 
     def test_tick_renews_claims(self):
         self.enable_claims()
-        self.claims["claims"] = [{"node": "a", "mine": True, "job": "review", "stale": False}]
+        self.claims["claims"] = [{"node": key, "mine": True, "job": "review", "stale": False}
+                                for key in ("a", "mp")]
         live = {key: live_issue("Ready") for key in self.km["nodes"]}
         with patch.object(wg, "fetch_nodes", return_value=live), \
              patch.object(wg, "project_entries", return_value=[]), \
              patch.object(wg, "read_current_plan", return_value=self.p), \
-             patch.object(wg, "linear_key"), patch.object(wg, "publish", return_value=None):
+             patch.object(wg, "linear_key"), patch.object(wg, "publish", return_value=None) as publish:
             self.assertEqual(wg.tick_effort(self.d, {}, lambda: None, Mock()), "ok")
         self.assertEqual([req[0] for req in self.requests], ["GET", "PUT"])
+        self.assertIn(("do", "reconcile mp: this account holds a claim with no local job"), publish.call_args.args[3])
 
     def test_next_without_collaboration_makes_no_claim_requests(self):
         self.next_claim_lines()

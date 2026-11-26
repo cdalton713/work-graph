@@ -57,10 +57,14 @@ Compare the plans, apply the edits you want to keep, and run
 
 ## Claims
 
-Before a worker job starts, `wg dispatch` or `wg claim` claims the node on
-the page. Each request uses the workspace in the local `collab` record.
+`wg dispatch` checks the local prerequisites before it claims the node on
+the page. If dispatch fails after the claim request, it attempts to release
+the claim. A follow-up `wg claim` checks that the account still holds the
+node. Each request uses the workspace in the local `collab` record.
 The Linear `agent:*` label shows the current worker job. The page claim
-stays with the runner between jobs. `wg next` and `wg tick` renew it.
+stays with the runner between jobs. `wg next` and `wg tick` renew it when
+this machine has a run row. `wg started`, `wg done`, and moves to Ready
+to Merge or Merged check ownership before they act.
 `wg move` releases it at Merged, Done, or Canceled. `wg cleanup` releases
 the caller's claims.
 
@@ -71,8 +75,9 @@ the caller's claims.
   `wg claim <plan-dir> <key> <job> --takeover`.
 - `wait owner <key>` means the owner handles the merge point, ship point,
   or ops node.
-- `do reconcile <key>: …` means a renewal failed because the claim or node
-  changed. Check who holds it and the latest plan before starting work.
+- `do reconcile <key>: …` means this machine lost the claim, the node
+  changed, or the account holds a claim with no local job. Check the holder,
+  the local run row, and the latest plan before starting work.
 
 If the claims page does not answer, start no new job. Running jobs continue.
 For a node that stacks on someone else's work, use the parent branch from

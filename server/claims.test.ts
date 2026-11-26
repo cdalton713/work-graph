@@ -102,6 +102,28 @@ databaseSuites((open) => {
     } finally { await db.close(); }
   }, 30_000);
 
+  it("admits one account when two collaborators race to take over a stale claim", async () => {
+    const db = await open();
+    try {
+      const { owner, collaborator, viewer, scope, viewScope } = await projectFixture(db);
+      const membersPath = "/api/projects/project/members/";
+      const { members } = await (await owner.request("/api/projects/project/share", "GET", undefined, undefined, true)).json();
+      const member = members.find(({ name }: { name: string }) => name === "Pat");
+      expect((await owner.request(membersPath + member.id, "PATCH", { role: "collaborator" }, undefined, true)).status).toBe(204);
+      expect((await owner.request(node, "POST", job)).status).toBe(200);
+      await db.query("UPDATE node_claims SET lease_until = now() - interval '1 second'");
+      const input = { ...job, takeover: true };
+      const responses = await Promise.all(Array.from({ length: 20 }, (_, index) => index % 2
+        ? collaborator.request(node, "POST", input, scope) : viewer.request(node, "POST", input, viewScope)));
+      const winner = responses[0].status === 200 ? "Pat" : "Grace";
+      expect(responses.map(({ status }) => status)).toEqual(Array.from({ length: 20 }, (_, index) =>
+        (index % 2 ? "Grace" : "Pat") === winner ? 200 : 409));
+      const bodies = await Promise.all(responses.map((response) => response.json()));
+      expect(bodies.filter(({ action }) => action === "taken_over")).toHaveLength(1);
+      expect(bodies.every(({ claim }) => claim.holder === winner)).toBe(true);
+    } finally { await db.close(); }
+  }, 30_000);
+
   it("validates inputs and limits concurrent additions to 200 live claims", async () => {
     const db = await open();
     try {

@@ -8,7 +8,7 @@ use std::{
     error::Error,
     fs::{self, File},
     io::{Read, Write},
-    os::unix::fs::{PermissionsExt, symlink},
+    os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::{Duration, SystemTime},
@@ -73,9 +73,49 @@ fn atomic(root: &Path, name: &str, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn switch(root: &Path, name: &str, target: &Path) -> Result<()> {
-    let tmp = Builder::new().prefix(".switch-").tempdir_in(root)?;
-    let path = tmp.path().join("link");
+// The installer and updater lock the same root directory. Record the identity
+// of the private scratch directory before writing any payload into it.
+fn cleanup(root: &Path) -> Result<()> {
+    let Ok(record) = read(root, "update-work", 256) else {
+        return Ok(());
+    };
+    let record = std::str::from_utf8(&record)?;
+    let fields: Vec<_> = record.split_whitespace().collect();
+    if let [name, device, inode] = fields.as_slice()
+        && name.strip_prefix(".update-").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_alphanumeric())
+        })
+    {
+        let path = root.join(name);
+        if let Ok(meta) = path.symlink_metadata()
+            && meta.is_dir()
+            && meta.dev().to_string() == *device
+            && meta.ino().to_string() == *inode
+            && read(&path, "owner", 256).ok().as_deref() == Some(record.as_bytes())
+        {
+            fs::remove_dir_all(path)?;
+        }
+    }
+    Ok(())
+}
+
+fn scratch(root: &Path) -> Result<tempfile::TempDir> {
+    cleanup(root)?;
+    let tmp = Builder::new().prefix(".update-").tempdir_in(root)?;
+    let meta = tmp.path().metadata()?;
+    let record = format!(
+        "{} {} {}",
+        tmp.path().file_name().unwrap().to_string_lossy(),
+        meta.dev(),
+        meta.ino()
+    );
+    fs::write(tmp.path().join("owner"), &record)?;
+    atomic(root, "update-work", record.as_bytes())?;
+    Ok(tmp)
+}
+
+fn switch(root: &Path, scratch: &Path, name: &str, target: &Path) -> Result<()> {
+    let path = scratch.join("link");
     symlink(target, &path)?;
     fs::rename(path, root.join(name))?;
     File::open(root)?.sync_all()?;
@@ -141,15 +181,6 @@ fn inspect_generation(root: &Path, relative: &Path) -> Result<Manifest> {
                 .to_str()
                 .ok_or("invalid file name")?;
             if entry.file_type()?.is_dir() {
-                let prefix = format!("{name}/");
-                if !manifest
-                    .files
-                    .range(prefix.clone()..)
-                    .next()
-                    .is_some_and(|(k, _)| k.starts_with(&prefix))
-                {
-                    return Err("preserve added directory".into());
-                }
                 pending.push(path);
             } else if !entry.file_type()?.is_file() {
                 return Err("preserve redirected file".into());
@@ -215,7 +246,43 @@ fn fetch(client: &reqwest::blocking::Client, url: String, limit: u64) -> Result<
     limited(client.get(url).send()?.error_for_status()?, limit)
 }
 
-fn check(root: &Path, version: &str, repo: &str) -> Result<()> {
+fn stable_tag(info: &serde_json::Value) -> Option<&str> {
+    if info["draft"] != false || info["prerelease"] != false {
+        return None;
+    }
+    let version = info["tag_name"].as_str()?.strip_prefix("wg-v")?;
+    stable(version)?;
+    Some(version)
+}
+
+struct Candidate {
+    prefix: String,
+    raw: Vec<u8>,
+    signature: Vec<u8>,
+    manifest: Manifest,
+}
+
+fn authenticate(
+    client: &reqwest::blocking::Client,
+    assets: &str,
+    repo: &str,
+    version: &str,
+) -> Result<Candidate> {
+    let tag = format!("wg-v{version}");
+    let prefix = format!("{assets}/{repo}/releases/download/{tag}/{tag}-{TARGET}");
+    let raw = fetch(client, format!("{prefix}.json"), METADATA)?;
+    let signature = fetch(client, format!("{prefix}.sig"), 64)?;
+    let manifest =
+        release::verify_manifest(&release::embedded_key()?, &raw, &signature, version, TARGET)?;
+    Ok(Candidate {
+        prefix,
+        raw,
+        signature,
+        manifest,
+    })
+}
+
+fn check(root: &Path, version: &str, repo: &str) -> Result<&'static str> {
     let (api, assets) = (
         "https://api.github.com".to_owned(),
         "https://github.com".to_owned(),
@@ -247,28 +314,57 @@ fn check(root: &Path, version: &str, repo: &str) -> Result<()> {
         METADATA,
     )?;
     let info: serde_json::Value = serde_json::from_slice(&bytes)?;
-    if info["draft"] != false || info["prerelease"] != false {
-        return Ok(());
+    let Some(next) = stable_tag(&info) else {
+        return Ok("No stable release selected.");
+    };
+    if pin.as_deref().is_some_and(|v| v != next) || stable(next) <= stable(version) {
+        return Ok("No newer matching stable release.");
     }
-    let next = info["tag_name"]
-        .as_str()
-        .and_then(|s| s.strip_prefix("wg-v"))
-        .ok_or("invalid tag")?
-        .to_owned();
-    if pin.is_some_and(|v| v != next)
-        || stable(&next).ok_or("invalid release version")?
-            <= stable(version).ok_or("invalid version")?
-    {
-        return Ok(());
-    }
-    let tag = format!("wg-v{next}");
-    let prefix = format!("{assets}/{repo}/releases/download/{tag}/{tag}-{TARGET}");
-    let raw = fetch(&client, format!("{prefix}.json"), METADATA)?;
-    let sig = fetch(&client, format!("{prefix}.sig"), 64)?;
-    let key = release::embedded_key()?;
-    let manifest = release::verify_manifest(&key, &raw, &sig, &next, TARGET)?;
+    let candidate = match authenticate(&client, &assets, repo, next) {
+        Ok(c) => c,
+        Err(error) if error.to_string() == "release signature mismatch" && pin.is_none() => {
+            // The old pin must authenticate every transition. Bound both the list
+            // size and number of manifest requests, in addition to the watchdog.
+            let list = fetch(
+                &client,
+                format!("{api}/repos/{repo}/releases?per_page=100"),
+                METADATA,
+            )?;
+            let releases: Vec<serde_json::Value> = serde_json::from_slice(&list)?;
+            let mut versions: Vec<_> = releases
+                .iter()
+                .filter_map(stable_tag)
+                .filter(|v| stable(v) > stable(version) && stable(v) < stable(next))
+                .collect();
+            versions.sort_unstable_by_key(|v| std::cmp::Reverse(stable(v)));
+            versions.dedup();
+            versions
+                .into_iter()
+                .take(8)
+                .find_map(|v| {
+                    authenticate(&client, &assets, repo, v).ok().filter(|c| {
+                        Some(c.manifest.public_key.as_str()) != option_env!("WG_RELEASE_PUBLIC_KEY")
+                    })
+                })
+                .ok_or("no authenticated bridge")?
+        }
+        Err(e) => return Err(e),
+    };
+    let Candidate {
+        prefix,
+        raw,
+        signature: sig,
+        manifest,
+    } = candidate;
+    let next = &manifest.version;
     let archive = fetch(&client, format!("{prefix}.tar.gz"), ARCHIVE)?;
-    let scratch = Builder::new().prefix(".update-").tempdir_in(root)?;
+    let lock = File::open(root)?;
+    lock.try_lock()?;
+    managed(version)?;
+    if root.join("update-hold").try_exists()? {
+        return Ok("Updates are on hold.");
+    }
+    let scratch = scratch(root)?;
     let stage = scratch.path().join("release");
     fs::create_dir(&stage)?;
     extract(&stage, &archive, &manifest)?;
@@ -293,13 +389,7 @@ fn check(root: &Path, version: &str, repo: &str) -> Result<()> {
         atomic(&stage, name, bytes)?;
     }
     File::open(&stage)?.sync_all()?;
-    let lock = File::open(root)?;
-    lock.try_lock()?;
-    managed(version)?;
-    if root.join("update-hold").try_exists()? {
-        return Ok(());
-    }
-    let (current, m) = inspect(root, "current")?;
+    let (current, m) = inspect(root, "current").map_err(|_| "active generation modified")?;
     if m.public_key != signer {
         return Err("active key mismatch".into());
     }
@@ -310,11 +400,11 @@ fn check(root: &Path, version: &str, repo: &str) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    let dest = generation(&next);
+    let dest = generation(next);
     let path = root.join(&dest);
     match path.symlink_metadata() {
         Ok(_) => {
-            inspect_generation(root, &dest)?;
+            inspect_generation(root, &dest).map_err(|_| "existing generation modified")?;
             if read(&path, "manifest.json", METADATA)? != raw
                 || read(&path, "manifest.sig", 64)? != sig
                 || read(&path, "signer", 64)? != signer.as_bytes()
@@ -326,17 +416,39 @@ fn check(root: &Path, version: &str, repo: &str) -> Result<()> {
         Err(e) => return Err(e.into()),
     }
     File::open(root.join("versions"))?.sync_all()?;
-    switch(root, "previous", &current)?;
-    switch(root, "current", &dest)
+    plugin_notice(root, &m, &manifest)?;
+    switch(root, scratch.path(), "previous", &current)?;
+    switch(root, scratch.path(), "current", &dest)?;
+    Ok("Installed verified release.")
+}
+
+fn plugin_notice(root: &Path, former: &Manifest, next: &Manifest) -> Result<()> {
+    if !former
+        .files
+        .iter()
+        .filter(|(p, _)| p.starts_with("orca-plugin/"))
+        .eq(next
+            .files
+            .iter()
+            .filter(|(p, _)| p.starts_with("orca-plugin/")))
+    {
+        atomic(root,"update-plugin-review", b"Plugin files changed. Run wg agents --install to review the registered plugin and any requested access.")?;
+    }
+    Ok(())
 }
 
 fn rollback(root: &Path, version: &str) -> Result<()> {
     let lock = File::open(root)?;
     lock.try_lock()?;
     managed(version)?;
-    let (previous, _) = inspect(root, "previous")?;
+    let (previous, manifest) = inspect(root, "previous")?;
+    let work = scratch(root)?;
+    if let Ok((_, active)) = inspect(root, "current") {
+        plugin_notice(root, &active, &manifest)?;
+    }
+
     atomic(root, "update-hold", b"rollback\n")?;
-    switch(root, "current", &previous)
+    switch(root, work.path(), "current", &previous)
 }
 
 fn due(root: &Path) -> Result<bool> {
@@ -370,7 +482,13 @@ fn claim(root: &Path, version: &str) -> Result<bool> {
     if !due(root)? {
         return Ok(false);
     }
+    cleanup(root)?;
     atomic(root, "update-check", b"")?;
+    atomic(
+        root,
+        "update-result",
+        b"Check started. If interrupted, the current version remains usable.",
+    )?;
     Ok(true)
 }
 
@@ -378,6 +496,11 @@ fn schedule(root: &Path, version: &str) -> Result<()> {
     if !due(root)? {
         return Ok(());
     }
+    if root.metadata()?.permissions().readonly() {
+        return Ok(());
+    }
+    // Check effective write access (including read-only mounts) before spawning.
+    drop(NamedTempFile::new_in(root)?);
     Command::new(root.join(generation(version)).join("wg"))
         .arg("--wg-background-update")
         .stdin(Stdio::null())
@@ -399,7 +522,47 @@ pub fn on_start() -> Option<ExitCode> {
                 std::process::exit(1)
             });
             if claim(&root, version).unwrap_or(false) {
-                let _ = check(&root, version, repo);
+                let result = check(&root, version, repo);
+                let message = match result {
+                    Ok(message) => message,
+                    Err(e) if e.is::<reqwest::Error>() => "Release service unavailable.",
+                    Err(e) => match e.to_string().as_str() {
+                        "active generation modified" => {
+                            "Active release has local changes or is incomplete."
+                        }
+                        "existing generation modified" => {
+                            "Existing candidate has local changes or is incomplete."
+                        }
+                        "no authenticated bridge" => {
+                            "No verified key transition found. Pin a verified bridge release."
+                        }
+                        "invalid pin" => "Invalid release pin.",
+                        _ => "Release verification or activation failed.",
+                    },
+                };
+                let _ = atomic(&root, "update-result", message.as_bytes());
+            }
+            Some(ExitCode::SUCCESS)
+        }
+        (Some(cmd), Some(arg), None) if cmd == "update" && arg == "status" => {
+            println!("Active version {version}");
+            if root.metadata().is_ok_and(|m| m.permissions().readonly()) {
+                println!("Installation is read-only.");
+            }
+            if root.join("update-hold").is_file() {
+                println!("Updates are on hold.");
+            }
+            println!(
+                "{}",
+                String::from_utf8_lossy(
+                    &read(&root, "update-result", 256)
+                        .unwrap_or_else(|_| b"No recorded check.".to_vec())
+                )
+            );
+            if root.join("update-plugin-review").is_file() {
+                println!(
+                    "Plugin files changed. Run wg agents --install to review the registered plugin and any requested access."
+                );
             }
             Some(ExitCode::SUCCESS)
         }

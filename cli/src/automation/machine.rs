@@ -5,7 +5,7 @@ use std::{
     env,
     ffi::OsStr,
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -39,7 +39,7 @@ pub fn orca_path() -> PathBuf {
 }
 
 /// Temporary files allow the child to write either stream without filling a pipe.
-pub fn output(command: &mut Command, timeout: Duration) -> Result<String> {
+pub fn capture(command: &mut Command, timeout: Duration) -> Result<std::process::Output> {
     let mut out = tempfile::tempfile()?;
     let mut err = tempfile::tempfile()?;
     let mut child = command
@@ -50,19 +50,17 @@ pub fn output(command: &mut Command, timeout: Duration) -> Result<String> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
-            let file = if status.success() { &mut out } else { &mut err };
-            file.seek(SeekFrom::Start(0))?;
-            let mut body = String::new();
-            file.read_to_string(&mut body)?;
-            if status.success() {
-                return Ok(body);
-            }
-            let reason = if body.trim().is_empty() {
-                format!("command exited {}", status.code().unwrap_or(-1))
-            } else {
-                body.trim().to_owned()
-            };
-            return Err(reason.into());
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            out.rewind()?;
+            err.rewind()?;
+            out.read_to_end(&mut stdout)?;
+            err.read_to_end(&mut stderr)?;
+            return Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            });
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -74,6 +72,22 @@ pub fn output(command: &mut Command, timeout: Duration) -> Result<String> {
         thread::sleep(
             Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
         );
+    }
+}
+
+pub fn output(command: &mut Command, timeout: Duration) -> Result<String> {
+    let result = capture(command, timeout)?;
+    if result.status.success() {
+        return Ok(String::from_utf8(result.stdout)?);
+    }
+    Err(process_error(&result).into())
+}
+pub fn process_error(result: &std::process::Output) -> String {
+    let reason = String::from_utf8_lossy(&result.stderr);
+    if reason.trim().is_empty() {
+        format!("command exited {}", result.status.code().unwrap_or(-1))
+    } else {
+        reason.trim().to_string()
     }
 }
 

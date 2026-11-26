@@ -219,3 +219,31 @@ pub fn tick_schedule(
     )?;
     Ok(0)
 }
+
+/// Preserve the previous digest and pending deliveries across a restart.
+pub fn deliver_members(
+    record: &mut Value,
+    members: &serde_json::Map<String, Value>,
+    mut persist: impl FnMut(&Value) -> Result<()>,
+    send: impl FnOnce(&[Value]) -> Result<()>,
+) -> Result<()> {
+    let mut pending = std::collections::BTreeMap::new();
+    for (key, value) in members {
+        if record["pending"].get(key).is_some()
+            || record
+                .get("members")
+                .is_some_and(|previous| previous.get(key).is_none())
+        {
+            pending.insert(key, value.clone());
+        }
+    }
+    record["members"] = json!(members);
+    record["pending"] = json!(pending);
+    persist(record)?;
+    if !pending.is_empty() {
+        send(&pending.into_values().collect::<Vec<_>>())?;
+        record["pending"] = json!({});
+        persist(record)?;
+    }
+    Ok(())
+}

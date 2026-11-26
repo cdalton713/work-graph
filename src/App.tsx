@@ -9,7 +9,7 @@ import { Canvas } from "./components/Canvas";
 import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { Panel } from "./components/Panel";
-import { CopyButton, Lamp, Picker } from "./components/ui";
+import { CopyButton, Hint, Lamp, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type GNode, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
 import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
@@ -648,7 +648,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             </button>
           </>
         )}
-        {versionText(status) && <span className="bar-version mono" title={`The build of the server: ${status!.version}`}>{versionText(status)}</span>}
+        {versionText(status) && <Hint className="bar-version mono" text={`The build of the server: ${status!.version}`}>{versionText(status)}</Hint>}
         <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} title="Keyboard keys (?)">?</button>
         {openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>}
         {site.user && <a className="bar-user" href="/auth/logout" title={`Signed in as ${site.user}. Select to sign out.`}>Sign out</a>}

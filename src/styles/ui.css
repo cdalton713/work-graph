@@ -49,3 +49,43 @@ button.copy.is-copied { color: var(--lamp-done); }
 .runner-mark { flex: none; display: inline-block; border: 1px solid var(--rail); border-radius: 3px; padding: 0 3px; color: var(--ink-2); font-size: 10px; white-space: nowrap; }
 
 .runner-mark.is-stale { color: var(--lamp-running); }
+
+.hint { display: inline-flex; align-items: center; min-width: 0; }
+button.hint-trigger {
+  display: inline-grid; place-items: center; min-width: var(--touch); min-height: var(--touch);
+  padding: 0; border: 0; color: inherit; background: transparent;
+}
+.hint-mark {
+  display: grid; place-items: center; width: 16px; height: 16px;
+  border: 1px solid var(--rail-2); border-radius: 50%; font: 11px/1 var(--mono);
+}
+.hint-popover {
+  position: fixed; inset: auto; margin: 0; width: max-content; max-width: 28ch;
+  padding: 6px 8px; border: 1px solid var(--rail-2); border-radius: var(--r-2);
+  color: var(--ink-1); background: var(--cab-3); box-shadow: 0 4px 16px #0006;
+  font: 13px/1.45 var(--sans); overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap;
+}
+
+html:has(.sheet[open]), body:has(.sheet[open]) { overflow: hidden; }
+.sheet {
+  position: fixed; inset: auto 0 0; margin: 0; width: 100%; max-width: none;
+  max-height: calc(100dvh - env(safe-area-inset-top) - var(--touch)); padding: 0;
+  border: 1px solid var(--rail-2); border-bottom: 0; border-radius: var(--r-2) var(--r-2) 0 0;
+  color: var(--ink-1); background: var(--cab-3); overflow: hidden;
+}
+.sheet::backdrop { background: rgb(0 0 0 / 60%); }
+.sheet-layout {
+  display: flex; flex-direction: column; max-height: inherit;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.sheet-header {
+  display: flex; flex: none; align-items: center; justify-content: space-between; gap: var(--touch-gap);
+  padding: 0 12px; border-bottom: 1px solid var(--rail-2);
+}
+.sheet-header h2 { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.sheet-close { flex: none; min-width: var(--touch); min-height: var(--touch); border-color: transparent; font-size: 20px; }
+.sheet-body { min-height: 0; padding: 12px; overflow: auto; overscroll-behavior: contain; }
+@media (prefers-reduced-motion: no-preference) {
+  .sheet[open] .sheet-layout { animation: sheet-enter 150ms ease-out; }
+  @keyframes sheet-enter { from { transform: translateY(16px); opacity: 0; } }
+}

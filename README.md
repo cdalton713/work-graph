@@ -386,6 +386,8 @@ unavailable while `/healthz` returns 200.
 
 ## Run the hosted service
 
+A collaborator can ask the project owner for access to the Linear team. The owner can add an existing workspace member to the team or confirm an email invite for someone outside the workspace. An invite can add a seat to the Linear plan.
+
 The hosted service stores node claims for each project. A coordinator token can
 claim a node and renew its lease. The lease defaults to ten minutes. The project
 owner can list and release claims. Project members can list claims, and

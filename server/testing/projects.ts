@@ -12,18 +12,19 @@ const origin = "https://" + host;
 export const rules = { port: 443, tailnet: null, hosted: { host } };
 export const options = { team: "WG", dist: "/unused/", watchMs: 0, readOnly: false };
 const auth = { clientId: "client", clientSecret: "secret", secret: "test-session-secret-of-32-characters" };
-export async function projectFixture(db: Database) {
+export async function projectFixture(db: Database, collaboratorOrg = "org", overrides: Pick<Parameters<typeof createApp>[1], "telemetryEnv" | "waitUntil" | "now"> = {}) {
   await migrate(db);
   const tenants = dbTenants(db, credentialCrypto({ WG_DATA_KEY: Buffer.alloc(32).toString("base64") }), { linearAuth: auth });
-  vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+  vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+    if (url.includes("datadoghq.com")) return new Response(null, { status: 202 });
     const { variables } = JSON.parse(String(init.body));
     return Response.json({ data: { project: variables.id === "project" ? { id: "project", name: "Example" } : null } });
   });
-  const app = createApp(rules, { ...options, tenants, linearAuth: auth });
-  async function account(name: string) {
+  const app = createApp(rules, { ...options, tenants, linearAuth: auth, ...overrides });
+  async function account(name: string, org = "org") {
     const email = name + "@example.com";
-    const id = await tenants.accounts.signIn({ linearUserId: name, linearOrgId: "org", name, email }, {
-      workspaceId: "work", linearOrgId: "org", name: "Work", team: "WG", teamLabels: false,
+    const id = await tenants.accounts.signIn({ linearUserId: name, linearOrgId: org, name, email }, {
+      workspaceId: "work", linearOrgId: org, name: "Work", team: "WG", teamLabels: false,
       credential: { kind: "oauth", key: name + "-access", refreshToken: "refresh", expiresAt: new Date(Date.now() + 3600_000) },
     });
     const { token } = await tenants.accounts.createToken(id, "Coordinator");
@@ -41,7 +42,7 @@ export async function projectFixture(db: Database) {
     };
   }
   const owner = await account("Ada");
-  const collaborator = await account("Grace");
+  const collaborator = await account("Grace", collaboratorOrg);
   const viewer = await account("Pat");
   const outsider = await account("Sam");
   const links = await (await owner.request("/api/projects/project/share", "POST", {}, undefined, true)).json();

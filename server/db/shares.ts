@@ -8,11 +8,12 @@ export type MemberRole = "viewer" | "collaborator";
 export const MAX_PROJECT_MEMBERS = 50;
 
 type ProjectScope = [tenant: string, connection: string, project: string];
+export type LinearIdentity = { email: string; linearUserId: string; linearOrgId: string };
 const scope = "tenant_id = $1 AND connection_id = $2 AND project_id = $3";
 const live = "revoked_at IS NULL";
 type Share = { id: string; tenant: string; connection: string; project: string; name: string; kind: ShareKind };
 const roleFor = (kind: ShareKind): MemberRole => kind === "view" ? "viewer" : "collaborator";
-type Member = { id: string; name: string; email: string; role: MemberRole; joinedAt: Date };
+type Member = { id: string; name: string; email: string; role: MemberRole; joinedAt: Date; accessRequestedAt: Date | null };
 
 export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: boolean) => Promise<void>) {
   async function lock(query: Query, tenant: string) {
@@ -50,12 +51,49 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
 
     async list(project: ProjectScope) {
       const links = await liveLinks(sql.query, project);
-      const members = await sql.query<Member>(`SELECT u.id, u.name, u.email, m.role, m.joined_at AS "joinedAt"
+      const members = await sql.query<Member>(`SELECT u.id, u.name, u.email, m.role, m.joined_at AS "joinedAt",
+        m.access_requested_at AS "accessRequestedAt"
         FROM project_members m JOIN users u ON u.id = m.user_id WHERE ${scope}
         ORDER BY m.joined_at, u.id`, project);
       // A revoked project can still have members to manage.
       const known = links.length || members.length || (await sql.query(`SELECT 1 FROM shares WHERE ${scope} LIMIT 1`, project)).length;
       return known ? { links, members } : null;
+    },
+
+    async accessMember(project: ProjectScope, member: string) {
+      const [row] = await sql.query<LinearIdentity & { role: MemberRole }>(`
+        SELECT m.role, u.email, u.linear_user_id AS "linearUserId", u.linear_org_id AS "linearOrgId" FROM project_members m JOIN users u ON u.id = m.user_id
+        WHERE ${scope} AND m.user_id = $4`, [...project, member]);
+      return row;
+    },
+
+    async reserveAccessInvite(project: ProjectScope, member: string) {
+      const [row] = await sql.query<{ attempt: string }>(`UPDATE project_members SET access_invited_at = now()
+        WHERE ${scope} AND user_id = $4 AND role = 'collaborator'
+        AND (access_invited_at IS NULL OR access_invited_at <= now() - interval '10 minutes')
+        RETURNING access_invited_at::text AS attempt`, [...project, member]);
+      return row?.attempt;
+    },
+
+    async releaseAccessInvite(project: ProjectScope, member: string, attempt: string) {
+      await sql.query(`UPDATE project_members SET access_invited_at = NULL
+        WHERE ${scope} AND user_id = $4 AND access_invited_at = $5`, [...project, member, attempt]);
+    },
+
+    async requestAccess(project: ProjectScope, membership: string) {
+      const rows = await sql.query(`UPDATE project_members
+        SET access_requested_at = now(), access_request_limit_until = now() + interval '10 minutes'
+        WHERE ${scope} AND id = $4 AND role = 'collaborator'
+        AND (access_request_limit_until IS NULL OR access_request_limit_until <= now()) RETURNING id`, [...project, membership]);
+      if (rows.length) return "requested";
+      const [row] = await sql.query(`SELECT id FROM project_members
+        WHERE ${scope} AND id = $4 AND role = 'collaborator'`, [...project, membership]);
+      return row ? "limited" : "missing";
+    },
+
+    async clearAccessRequest(project: ProjectScope, membership: string) {
+      await sql.query(`UPDATE project_members SET access_requested_at = NULL
+        WHERE ${scope} AND id = $4 AND access_requested_at IS NOT NULL`, [...project, membership]);
     },
 
     async make(project: ProjectScope, name: string, rotate?: ShareKind) {
@@ -91,7 +129,7 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
       const changed = await sql.transaction(async ({ query }) => {
         if (!await lock(query, project[0])) return false;
         const rows = role
-          ? await query(`UPDATE project_members SET role = $5 WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member, role])
+          ? await query(`UPDATE project_members SET role = $5, access_requested_at = CASE WHEN $5 = 'viewer' THEN NULL ELSE access_requested_at END WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member, role])
           : await query(`DELETE FROM project_members WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member]);
         if (rows.length && role !== "collaborator") {
           await query(`DELETE FROM node_claims WHERE ${scope} AND holder_user_id = $4`, [...project, member]);

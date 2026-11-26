@@ -134,6 +134,10 @@ const migrations = [
     "CREATE INDEX project_plans_connection ON project_plans (connection_id)",
     "CREATE INDEX project_plans_writer ON project_plans (writer_user_id)",
   ],
+  [
+    "ALTER TABLE project_members ADD COLUMN access_requested_at timestamptz, ADD COLUMN access_request_limit_until timestamptz",
+  ],
+  ["ALTER TABLE project_members ADD COLUMN access_invited_at timestamptz"],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

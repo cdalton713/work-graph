@@ -323,6 +323,7 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       if (response.status === 401 && rejectApiKey) {
         await response.body?.cancel().catch(() => {});
         await rejectApiKey();
+        if (memberWrite) throw new NeedsLinearAccess();
         throw new LinearKeyRequired();
       }
       if (!memberWrite) keepBudget(response.headers);
@@ -340,9 +341,9 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       const detail = (kind !== "oauth" && !rejectApiKey ? body?.errors?.map((e) => e.message).join("; ") : undefined) ?? `HTTP ${response.status}`;
       const rated = response.status === 429 || !!body?.errors?.some((e) => e.extensions?.code === "RATELIMITED");
       if (memberWrite && !rated && response.status < 500 &&
-          (response.status === 401 || response.status === 403 || body?.errors?.some((error) =>
-            /forbidden|unauthenticated|unauthorized|permission/i.test(error.extensions?.code ?? "") ||
-            /permission|forbidden|unauthorized|not authorized|authentication/i.test(error.message)))) throw new NeedsLinearAccess();
+          (response.status === 401 || response.status === 403 || response.status === 404 || body?.errors?.some((error) =>
+            /forbidden|unauthenticated|unauthorized|permission|not.?found/i.test(error.extensions?.code ?? "") ||
+            /permission|forbidden|unauthorized|not authorized|authentication|entity not found/i.test(error.message)))) throw new NeedsLinearAccess();
       if (shared && !mutation && (response.status === 404 || body?.errors?.some((error) =>
         /not.?found/i.test(error.extensions?.code ?? "") || /not found/i.test(error.message)))) {
         throw new LinearError("Resource not found in the shared project", 404);

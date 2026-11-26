@@ -395,7 +395,7 @@ The recipient signs in with Linear to join the project. Revoking a link prevents
 Existing members keep their role until the owner changes it or removes them.
 The host's access logs and the browser's history can hold a join address, so rotate a link if you sent it to the wrong place.
 
-Open a project under **Shared projects** in the project menu. A viewer can read the project. A collaborator
+Open a project under **Shared projects** in the project menu. Viewers and collaborators see the same graph, with issues from the shared project only. A collaborator
 can also comment, change issue status and labels, and send commands to the coordinator. To write to Linear,
 a collaborator needs their own connection to the project’s Linear organization. The owner manages project settings and members.
 

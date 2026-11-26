@@ -509,10 +509,9 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     .map(({ p }) => {
       const closed = p.statusType === "completed" || p.statusType === "canceled";
       const mine = yours.get(summaryKey(p)) ?? 0;
-      const hint = [mine ? `${mine} ${words.forOwner}` : "", p.statusType === "started" ? "" : p.status].filter(Boolean).join(" · ");
+      const hint = [owner, mine ? `${mine} ${words.forOwner}` : "", p.statusType === "started" ? "" : p.status].filter(Boolean).join(" · ");
       return {
         id: `${p.workspace}:${p.id}`, label: p.name, dim: closed,
-        ...(owner ? { hint: owner } : {}),
         group: role ? "Shared projects" : [directory && directory.workspaces.length > 1 ? name : "", p.initiative ?? (initiatives ? "No initiative" : "")].filter(Boolean).join(" · ") || undefined,
         hint: hint || undefined, lead: <Lamp signal={mine ? "stop" : PROJECT_LAMP[p.statusType] ?? "idle"} />,
       };

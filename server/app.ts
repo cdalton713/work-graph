@@ -630,22 +630,37 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   api.get("/status", async (c) => {
     const { tenant, state } = scope();
     const shared = sharedScope.getStore();
+    if (shared) {
+      const ref = currentRoom({ workspace: shared.workspace.id, id: shared.projectId });
+      const room = await linkRead(() => roomState.read(ref), null);
+      return c.json({
+        version, contract, readOnly: c.var.viewer, link: null,
+        workspaces: [sharedEntry(shared)],
+        rooms: room ? [{
+          workspace: shared.id, project: shared.projectId,
+          coordinators: [...room.coordinators.values()].filter((entry) => entry.socket).length,
+          pages: [...room.sockets.values()].filter((role) => role === "page").length,
+          queued: c.var.viewer ? 0 : room.queue.length,
+          asks: c.var.viewer ? 0 : room.asks.length,
+        }] : [],
+      });
+    }
     const entries = await sharedFor(tenant);
-    const rooms = shared || (redis && (readOnly || !redis.ready)) || (!readOnly && c.var.viewer)
+    const rooms = (redis && (readOnly || !redis.ready)) || (!readOnly && c.var.viewer)
       ? [] : await linkRead(() => hub.counts(tenants ? tenant.id : undefined), []);
     return c.json<ServerStatus & Pick<SiteConfig, "readOnly" | "link">>({
       version, contract, uptime: Math.floor((clock() - started) / 1000),
-      readOnly: c.var.viewer, link: linkEnabled && !shared ? "/api/link" : null,
+      readOnly: c.var.viewer, link: linkEnabled ? "/api/link" : null,
       workspaces: [
-        ...(shared ? [] : tenant.workspaces.map(({ id, name }) => ({ id, name, workspaceId: id }))),
-        ...entries.map((entry) => ({ ...sharedEntry(entry), workspaceId: shared ? entry.workspace.id : entry.id })),
+        ...tenant.workspaces.map(({ id, name }) => ({ id, name, workspaceId: id })),
+        ...entries.map((entry) => ({ ...sharedEntry(entry), workspaceId: entry.id })),
       ].map(({ workspaceId, ...entry }) => {
         const budget = linearBudget(workspaceId);
         return { ...entry, requestsRemaining: budget?.requestsRemaining ?? null, requestsLimit: budget?.requestsLimit ?? null,
           requestsReset: budget?.requestsReset ?? null, complexityRemaining: budget?.complexityRemaining ?? null,
           complexityReset: budget?.complexityReset ?? null, at: budget?.at ?? null };
       }),
-      cache: shared || (!readOnly && c.var.viewer) ? 0 : [...state.graphs.values()].reduce((sum, cache) => sum + cache.size(), 0),
+      cache: !readOnly && c.var.viewer ? 0 : [...state.graphs.values()].reduce((sum, cache) => sum + cache.size(), 0),
       rooms, linkStore: redis ? "redis" : "memory", redisReady: redis?.ready ?? null,
     });
   });

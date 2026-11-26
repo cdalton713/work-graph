@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { CARD_PREFIX, ageText, cardText, type GNode, type Graph, isProtectedLabel, moveWarnings, reviewMark, reviewOf, runTime, satisfied, signalOf, sortStates, statusName, yourMove } from "../lib/graph";
 import type { Comment, GraphData, IssuePatch, Issue, State } from "../lib/types";
-import { Lamp, Picker, PrLinks, Rich } from "./ui";
+import { Hint, Lamp, Picker, PrLinks, Rich, Sheet } from "./ui";
 import { type AgentRow, type Ask, type Progress, agentNeeds, agentState, liveJob } from "../lib/link";
 import type { ClaimMark } from "../lib/claims";
 import { site } from "../lib/site";
@@ -10,10 +10,11 @@ import { Asks } from "./Asks";
 import { Reply } from "./Reply";
 import { latestReplyPrompt } from "../lib/reply";
 import { parseOptions } from "../lib/options";
+import { useNarrow } from "../lib/screen";
 
 const COMMENTS_MS = 60_000;
 const PRIORITY = ["No priority", "Urgent", "High", "Medium", "Low"];
-const WG_FIELDS: [string, string][] = [["key", "Key"], ["phase", "Phase"], ["lane", "Lane"], ["role", "Role"], ["branch", "Branch"], ["pr", "PR"], ["review", "Wave review"], ["merge_review", "Merge review"], ["code_done", "Code done"], ["state", "Worker"], ["job", "Job"], ["soak_until", "Soak until"]];
+const WG_FIELDS: [string, string][] = [["key", "Key"], ["phase", "Phase"], ["lane", "Lane"], ["role", "Role"], ["branch", "Branch"], ["pr", "PR"], ["review", "Wave review"], ["merge_review", "Merge review"], ["code_done", "Code done"], ["state", "Worker"], ["job", "Job"]];
 
 export interface PanelProps {
   claim?: ClaimMark;
@@ -55,6 +56,9 @@ function Links({ title, ids, graph, onGo, note, clear }: { title: string; ids: s
 
 export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress, agent, readOnly = false, limitedEdits = false }: PanelProps) {
   const { issue, card } = node;
+  const phone = useNarrow();
+  const body = useRef<HTMLDivElement>(null);
+  const [more, setMore] = useState(false);
   const settings = { ...site, waitNames: data.waitNames };
   const [releasing, setReleasing] = useState(false);
   async function release() {
@@ -91,6 +95,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
     setMove(null);
     setNote("");
     setComments(null);
+    setMore(false);
   }, [issue.id]);
   // A worker comments while the panel is open. Load the comments again when the issue changes, and
   // each minute, because a new comment does not always change the issue itself.
@@ -136,20 +141,70 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
   const held = dependents.filter((id) => !satisfied(node, graph.byId.get(id)!)).length;
   const thread = comments?.filter((c) => !c.body.startsWith(CARD_PREFIX)) ?? [];
 
+  const dispatch = onDispatch && card?.key && /(^|\n)do dispatch\b/.test(card.next ?? "") ? (
+    <button type="button" className="primary" onClick={() => void onDispatch(card.key!, issue.identifier)}>Dispatch</button>
+  ) : null;
+  const { marked } = reviewOf(issue, card);
+  const review = onReview && !locked && node.kind === "task" && (issue.pullRequests.length > 0 || card?.pr) ? (
+    <button type="button" className={marked ? "" : "primary"} onClick={() => onReview(issue.id)}>
+      {marked ? "Remove “reviewed”" : "Mark reviewed"}
+    </button>
+  ) : null;
+  const completion = states.findLast((state) => state.type === "completed");
+  const showAnswer = waitingForReply || (!readOnly && !!asks?.length);
+  const focusAnswer = () => {
+    setMore(false);
+    const editor = body.current?.querySelector<HTMLTextAreaElement>(".asks textarea, textarea[aria-label='Comment']");
+    requestAnimationFrame(() => editor?.focus());
+  };
+  const openCompletion = () => {
+    if (!completion) return;
+    setMore(false);
+    requestMove(completion);
+    requestAnimationFrame(() => body.current?.querySelector<HTMLTextAreaElement>(".warning textarea")?.focus());
+  };
+  const actions: ReactNode[] = [dispatch, review, showAnswer && (
+    <button type="button" onClick={focusAnswer}>Answer</button>
+  ), !locked && completion && noteWord && issue.state.type !== "completed" && (
+    <button type="button" onClick={openCompletion}>{noteWord === "evidence" ? "Record evidence" : "Record answer"}</button>
+  )].filter(Boolean);
+
+  const titleField = <textarea className="title-input" aria-label="Issue title" rows={2} value={title} readOnly={locked || limitedEdits || !!card}
+          onChange={(e) => setTitle(e.target.value)} onBlur={saveTitle}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }} />;
+
+  const agentDetails = agent && (
+    <><b>Agent in Orca:</b> {agent.agent} {agentState(agent).text}{agent.at ? ` · ${ageText(now - Date.parse(agent.at))}` : ""}</>
+  );
+
+  const pullRequests = (
+    <div className="prs">
+      {issue.pullRequests.map((pr) => {
+        const row = <div className="pr-row">
+          <span className="mono">#{pr.number}</span><span className="pr-status">{pr.status}</span><PrLinks pr={pr} linkHints />
+          {phone && pr.title && <span className="panel-pr-title">{pr.title}</span>}
+        </div>;
+        return pr.title && !phone
+          ? <Hint key={pr.url} text={pr.title} infoLabel={`About PR #${pr.number}`}>{row}</Hint>
+          : <div key={pr.url}>{row}</div>;
+      })}
+    </div>
+  );
+
   return (
     <aside className="panel">
       <header className="panel-head">
         <Lamp signal={node.signal} />
-        <a className="mono panel-id" href={issue.url} target="_blank" rel="noreferrer" title="Open in Linear">{issue.identifier} ↗</a>
+        <a className="mono panel-id" href={issue.url} target="_blank" rel="noreferrer" aria-label={`Open ${issue.identifier} in Linear`}>{issue.identifier} ↗</a>
         <span className="chip">{node.kind}</span>
         {node.claim && <span className="chip chip-claim"><Lamp signal="running" pulse />{node.claim}</span>}
         <span className="station-fill" />
         <button type="button" className="ghost" onClick={onClose} aria-label="Close panel">✕</button>
       </header>
 
-      <div className="panel-body" key={issue.id}>
+      <div className="panel-body" key={issue.id} ref={body}>
         {claim && <div className={`notice${claim.stale ? " is-warning" : ""}`}>
-          <div>{claim.holder} · {claim.job} · since <time dateTime={claim.claimedAt}>{new Date(claim.claimedAt).toLocaleString()}</time></div>
+          <div>Runner: {claim.holder} · {claim.job} · since <time dateTime={claim.claimedAt}>{new Date(claim.claimedAt).toLocaleString()}</time></div>
           {claim.stale && <div>⚠ No sign of {claim.holder}'s coordinator since <time dateTime={claim.renewedAt}>{new Date(claim.renewedAt).toLocaleString()}</time></div>}
           {onRelease && <button type="button" className="ghost" disabled={releasing} onClick={() => void release()}>
             {releasing ? "Releasing…" : "Release"}
@@ -165,47 +220,45 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
           </p>
         )}
         {agent && (
-          <p className={`notice panel-agent${agentNeeds(agent) ? " is-warning" : ""}`} title={agent.title || undefined}>
-            <b>Agent in Orca:</b> {agent.agent} {agentState(agent).text}{agent.at ? ` · ${ageText(now - Date.parse(agent.at))}` : ""}
+          <p className={`notice panel-agent${agentNeeds(agent) ? " is-warning" : ""}`}>
+            {agent.title ? <Hint text={agent.title} infoLabel="About the agent">{agentDetails}</Hint> : agentDetails}
             {agent.said && <span className="panel-agent-said">{agent.said}</span>}
           </p>
         )}
         {!readOnly && asks && asks.length > 0 && <Asks asks={asks} projectId={data.project.id} workspace={data.workspace} now={now} />}
-        {/* `wg load` sets the title of a node from plan.json, so the title of a node is not changed here. */}
-        <textarea className="title-input" rows={2} value={title} readOnly={locked || limitedEdits || !!card}
-          title={card && !locked ? "plan.json has the title of a wg node. Change it there, then run `wg load --apply`." : undefined} onChange={(e) => setTitle(e.target.value)} onBlur={saveTitle}
-          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }} />
+        {card && !locked ? (
+          <Hint text="plan.json has the title of a wg node. Change it there, then run wg load --apply."
+            infoLabel="About the issue title" className="panel-title-hint">{titleField}</Hint>
+        ) : titleField}
 
         {/* What wg next says about this node comes first: it is the action. */}
         {card?.next && (
           <div className={`next-action${!node.waitsOnOther && yourMove(card.next) ? " is-you" : ""}`}>
             <span className="next-mark">wg next</span>
             <div className="next-lines mono">{card.next.split("\n").map((line) => <div key={line}>{line}</div>)}</div>
-            {onDispatch && card.key && /(^|\n)do dispatch\b/.test(card.next) && (
-              <button type="button" className="primary" onClick={() => void onDispatch(card.key!, issue.identifier)}
-                title="wg next says this node can be dispatched. The coordinator dispatches it at once if it listens, else at its next wg next.">Dispatch</button>
-            )}
+            {dispatch && <Hint text="The coordinator dispatches this node now if it is listening, or at its next wg next."
+              infoLabel="About Dispatch">{!phone && dispatch}</Hint>}
           </div>
         )}
 
         <dl className="fields">
           <dt>Status</dt>
           <dd>
-            <Picker disabled={locked} value={[issue.state.id]} onChange={([id]) => requestMove(states.find((s) => s.id === id)!)}
+            <Picker label="Status" disabled={locked} value={[issue.state.id]} onChange={([id]) => requestMove(states.find((s) => s.id === id)!)}
               options={states.map((s) => ({ id: s.id, label: s.name, lead: <Lamp signal={signalOf(statusName(s, [], settings), s.type, settings)} /> }))}>
               <Lamp signal={node.signal} />{issue.state.name}
             </Picker>
           </dd>
           <dt>Priority</dt>
           <dd>
-            <Picker disabled={locked || limitedEdits} value={[String(issue.priority)]} onChange={([p]) => patch({ priority: Number(p) }, { priority: Number(p) })}
+            <Picker label="Priority" disabled={locked || limitedEdits} value={[String(issue.priority)]} onChange={([p]) => patch({ priority: Number(p) }, { priority: Number(p) })}
               options={PRIORITY.map((label, i) => ({ id: String(i), label }))}>
               {PRIORITY[issue.priority] ?? "No priority"}
             </Picker>
           </dd>
           <dt>Assignee</dt>
           <dd>
-            <Picker disabled={locked || limitedEdits} value={[issue.assignee?.id ?? "none"]}
+            <Picker label="Assignee" disabled={locked || limitedEdits} value={[issue.assignee?.id ?? "none"]}
               onChange={([id]) => patch({ assigneeId: id === "none" ? null : id }, { assignee: team?.members.find((m) => m.id === id) ?? null })}
               options={[{ id: "none", label: "No assignee" }, ...(team?.members ?? []).map((m) => ({ id: m.id, label: m.name, hint: m.id === data.viewerId ? "you" : undefined }))]}>
               {issue.assignee?.name ?? "No assignee"}
@@ -213,39 +266,26 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
           </dd>
           <dt>Labels</dt>
           <dd className="labels">
-            {fixed.map((l) => <span key={l.id} className="chip chip-fixed" title="Set by wg or the coordinator">{l.name}</span>)}
+            {fixed.map((l) => <Hint key={l.id} text="Set by wg or the coordinator." infoLabel={`About ${l.name}`}><span className="chip chip-fixed">{l.name}</span></Hint>)}
             {issue.labels.filter((l) => !isProtectedLabel(l)).map((l) => <span key={l.id} className="chip"><i style={{ background: l.color }} />{l.name}</span>)}
             {!locked && (
-              <Picker multi value={issue.labels.map((l) => l.id)} onChange={setLabels}
+              <Picker label="Labels" multi value={issue.labels.map((l) => l.id)} onChange={setLabels}
                 options={freeLabels.map((l) => ({ id: l.id, label: l.name, hint: l.group ?? undefined, lead: <i className="dot" style={{ background: l.color }} /> }))}>
                 Edit
               </Picker>
             )}
           </dd>
-          {issue.pullRequests.length > 0 && <dt>Pull request</dt>}
-          {issue.pullRequests.length > 0 && (
-            <dd className="prs">
-              {issue.pullRequests.map((pr) => (
-                <div key={pr.url} className="pr-row" title={pr.title}>
-                  <span className="mono">#{pr.number}</span><span className="pr-status">{pr.status}</span><PrLinks pr={pr} />
-                </div>
-              ))}
-            </dd>
-          )}
+          {!phone && issue.pullRequests.length > 0 && <dt>Pull request</dt>}
+          {!phone && issue.pullRequests.length > 0 && <dd>{pullRequests}</dd>}
         </dl>
 
-        {onReview && !locked && node.kind === "task" && (issue.pullRequests.length > 0 || card?.pr) && (() => {
-          const { marked } = reviewOf(issue, card);
-          return (
-            <div className="review-row">
-              <button type="button" className={marked ? "" : "primary"} onClick={() => onReview(issue.id)}
-                title="The `reviewed` label on the issue. It counts as the wave review and the merge review of this PR, and it accepts findings that are still open.">
-                {marked ? "Remove “reviewed”" : "Mark reviewed"}
-              </button>
-              <span>{marked ? "You marked this PR reviewed." : reviewMark(issue, card)?.title ?? "No review passed yet."}</span>
-            </div>
-          );
-        })()}
+        {review && (
+          <div className="review-row">
+            <Hint text="This accepts the wave review, the merge review, and any open findings for this PR."
+              infoLabel="About Mark reviewed">{!phone && review}</Hint>
+            <span>{marked ? "You marked this PR reviewed." : reviewMark(issue, card)?.title ?? "No review passed yet."}</span>
+          </div>
+        )}
 
         {move && (() => {
           const needsNote = !!noteWord && move.state.type === "completed";
@@ -287,13 +327,21 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
               {WG_FIELDS.filter(([f]) => card[f as keyof typeof card] && !(f === "pr" && issue.pullRequests.some((p) => String(p.number) === card.pr))).map(([f, label]) => (
                 <div key={f}><dt>{label}</dt><dd className="mono">{f === "pr" ? `#${card.pr}` : card[f as keyof typeof card]}</dd></div>
               ))}
+              {card.wave === "yes" && <div><dt>Wave</dt><dd>In the current wave.</dd></div>}
+              {card.soak_until && <div><dt>Soak ends</dt><dd className="mono">
+                <time dateTime={card.soak_until}>{new Date(card.soak_until).toLocaleString()}</time>
+              </dd></div>}
               {progress && (liveJob(progress) || progress.evidence) && (
-                <div className="wide" title="Reported by the coordinator through the link, before it reaches Linear."><dt>Live</dt>
-                  <dd className="mono live-job">{[liveJob(progress), progress.evidence && `tests ${progress.evidence}`, progress.ci && `CI ${progress.ci}`].filter(Boolean).join(" · ")}</dd></div>
+                <div className="wide"><dt>Live</dt>
+                  <dd className="mono live-job">
+                    <Hint text="Reported by the coordinator through the link, before it reaches Linear." infoLabel="About live progress">
+                      {[liveJob(progress), progress.evidence && `tests ${progress.evidence}`, progress.ci && `CI ${progress.ci}`].filter(Boolean).join(" · ")}
+                    </Hint>
+                  </dd></div>
               )}
               {elapsed && <div><dt>Run time</dt><dd className={`mono run-time${elapsed.warning ? " run-warning" : ""}`}>{elapsed.text}</dd></div>}
             </dl>
-            {notes && <Rich text={notes} />}
+            {notes && <Rich linkHints text={notes} />}
           </section>
         )}
 
@@ -304,7 +352,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
           <h3>Description
             {!locked && !limitedEdits && draft === null && <button type="button" className="ghost" onClick={() => { setBase(issue.description); setDraft(issue.description); }}>Edit</button>}
           </h3>
-          {draft === null ? (issue.description ? <Rich text={issue.description} /> : <p className="empty">No description.</p>) : (
+          {draft === null ? (issue.description ? <Rich linkHints text={issue.description} /> : <p className="empty">No description.</p>) : (
             <>
               {issue.description !== base && <p className="notice">The description changed in Linear after you opened it. Copy your text, cancel, and edit the new description.</p>}
               <textarea className="editor" autoFocus rows={14} value={draft} onChange={(e) => setDraft(e.target.value)} />
@@ -323,7 +371,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
           {thread.map((c) => (
             <article key={c.id} className={`comment${c.parentId ? " comment-reply" : ""}`}>
               <header><strong>{c.author}</strong><time>{new Date(c.createdAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</time></header>
-              <Rich text={c.body} />
+              <Rich linkHints text={c.body} />
             </article>
           ))}
           {!readOnly && (
@@ -334,6 +382,25 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
           )}
         </section>
       </div>
+      {phone && (actions.length > 0 || issue.pullRequests.length > 0) && (
+        <footer className="panel-actions" aria-label="Issue actions">
+          {actions.slice(0, 2).map((action, index) => <div key={index}>{action}</div>)}
+          {(actions.length > 2 || issue.pullRequests.length > 0) && (
+            <button type="button" aria-haspopup="dialog" onClick={() => setMore(true)}>More</button>
+          )}
+          {more && <Sheet open title="More issue actions" onClose={() => setMore(false)}>
+            <div className="panel-more">
+              {actions.slice(2).map((action, index) => (
+                <div key={index}>{action}</div>
+              ))}
+              {issue.pullRequests.length > 0 && <section>
+                <h3>Pull requests</h3>
+                {pullRequests}
+              </section>}
+            </div>
+          </Sheet>}
+        </footer>
+      )}
     </aside>
   );
 }

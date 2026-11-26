@@ -77,12 +77,22 @@ setTransport({
     const { query, variables } = JSON.parse(String(init.body));
     const data = (value: object) => Response.json({ data: value });
     if (query.includes("projects(first:50")) {
-      return data({ teams: { nodes: [{ projects: { nodes: projects, pageInfo } }] } });
+      return data({ teams: { nodes: [{ projects: { nodes: [...projects, panelProject], pageInfo } }] } });
     }
     if (query.includes("teams(first:10")) {
       return data({ teams: { nodes: [{ ...team, states: { nodes: states }, members: empty }] } });
     }
     if (query.includes("issueLabels(")) return data({ issueLabels: empty });
+    if (query.includes("project(id:") && variables.id === panelProject.id) return data({
+      viewer: { id: "ada" },
+      project: { ...panelProject, projectMilestones: empty, documents: empty,
+        issues: { nodes: panelIssues, pageInfo } },
+    });
+    if (query.includes("issue(id:") && variables.id === panelIssue.id) {
+      return data({ issue: { project: panelProject, comments: { nodes: [{
+        id: "panel-comment", createdAt: updatedAt, user: { name: "Ada" }, body: panelMarkdown,
+      }], pageInfo } } });
+    }
     if (query.includes("issue(id:")) {
       return data({ issue: { project, comments: empty } });
     }
@@ -104,6 +114,47 @@ setTransport({
   },
   sleep: async () => {},
 });
+
+const panelProject = { ...project, id: "panel", name: "Panel project", url: "https://example.com/panel" };
+const wideLine = "long-value-".repeat(28);
+const panelMarkdown = `\`\`\`text
+${wideLine}
+\`\`\`
+
+| First column | Second column |
+| --- | --- |
+| ${wideLine} | ${wideLine} |
+`;
+const blocker = {
+  ...issues[2], project: panelProject, id: "panel-blocker", identifier: "WG-13",
+  title: `Blocker ${wideLine}`, sortOrder: 12,
+};
+const panelIssue = {
+  ...issues[5], project: panelProject, id: "panel-task", identifier: "WG-14",
+  state: states[4],
+  title: "Panel actions", sortOrder: 13, description: panelMarkdown,
+  labels: { nodes: [{ id: "worker", name: "agent:worker", color: "#4466aa" }], pageInfo },
+  inverseRelations: { nodes: [{ type: "blocks", issue: blocker }], pageInfo },
+  comments: { nodes: [{
+    id: "panel-card", createdAt: updatedAt, user: null, body: `**work-graph node card**
+
+\`\`\`json
+${JSON.stringify({
+      wg: 1, key: "panel-task", kind: "task", branch: `cd/${wideLine}`,
+      wave: "yes", soak_until: "2099-01-01T00:00:00Z", job: "build",
+      next: `do dispatch ${wideLine}`, pr: "42",
+    })}
+\`\`\``,
+  }], pageInfo },
+};
+const panelIssues = [blocker, panelIssue, {
+  ...issues[5], project: panelProject, id: "panel-ops", identifier: "WG-15", title: "Check the rollout", sortOrder: 14,
+  state: states[4],
+  comments: { nodes: [{
+    id: "panel-ops-card", createdAt: updatedAt, user: null,
+    body: "**work-graph node card**\n\n\`\`\`json\n{\"wg\":1,\"key\":\"panel-ops\",\"kind\":\"ops\"}\n\`\`\`",
+  }], pageInfo },
+}];
 
 const rules = { port: 0, tailnet: null };
 const app = createApp(rules, {

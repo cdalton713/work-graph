@@ -18,6 +18,7 @@ import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteCon
 import { type Rules, linkRefusal, refusal, sharedRoutes } from "./access.ts";
 import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
 import { isLinearIdentifier, planRoutes } from "./plans.ts";
+import { createStarter, creationInput, starterTeam } from "./create-project.ts";
 import { claimRoutes } from "./claims.ts";
 import type { ClaimScope } from "./db/claims.ts";
 import { shareRoutes, type ShareAccess } from "./shares.ts";
@@ -698,7 +699,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     app.post("/api/projects/:id/access/request", missing);
     app.post("/api/projects/:id/members/:member/access", missing);
   }
-  const api = new Hono<{ Variables: { viewer: boolean } }>();
+  const creationEnabled = process.env.WG_CREATE_PROJECTS === "1";
+  const api = new Hono<{ Variables: { viewer: boolean; creationActor?: string } }>();
   // The API can change Linear with the user's key. Accept only this page as the caller.
   api.use(async (c, next) => {
     const shared = sharedScope.getStore();
@@ -722,6 +724,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (tenants && membership) checkLinkTenant(membership.tenant.id);
     const role = membership?.role ?? null;
     const viewer = readOnly || role === "viewer";
+    if (creationEnabled && !viewer && membership?.role === "owner" && session) {
+      c.set("creationActor", JSON.stringify([membership.tenant.id, session.accountId ?? session.email]));
+    }
     if (viewer && method === "POST" && isAgentReply(c.req.path)) return c.json({ error: "Only the project owner can reply to agents" }, 403);
     if (viewer && method !== "GET" && method !== "HEAD") return c.json({ error: "this page is read-only" }, 405);
     const reason = refusal(method, header, rules);
@@ -735,7 +740,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const state = states.get(membership.tenant.id);
         if (state) state.lastUsed = clock();
       }
-      return c.json<SiteConfig & { linkStore?: ServerStatus["linkStore"] }>({
+      return c.json<SiteConfig & { createProjects?: boolean; linkStore?: ServerStatus["linkStore"] }>({
+        ...(c.var.creationActor && !disconnected && tenant?.workspaces.some(w => w.key && w.team && !w.needsKey)
+          ? { createProjects: true } : {}),
         human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version, telemetry: !!telemetry,
         readOnly: viewer, auth: !!(auth || linearAuth), user: membership && !disconnected ? session?.email ?? null : null,
         role: disconnected ? null : role, ...(linearAuth ? { signIn: "linear" as const } : {}),
@@ -748,7 +755,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const tenant = tokenTenant ?? membership?.tenant;
     if (!tenant) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     if (tenants && tokenTenant) { checkLinkTenant(tokenTenant.id); firstConnection(tokenTenant); }
-    const listsWorkspaces = /^\/api\/(status|projects|overview)$/.test(c.req.path);
+    const listsWorkspaces = read && /^\/api\/(status|projects|overview)$/.test(c.req.path);
     const selected = listsWorkspaces ? undefined : header("x-workspace");
     const id = selected || tenant.workspaces[0]?.id;
     const workspace = tenant.workspaces.find((w) => w.id === id);
@@ -853,6 +860,37 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     return { workspaces: [...list.workspaces, ...shared.map(sharedEntry)],
       projects: [...list.projects, ...projects.filter((project) => project !== null)] };
   };
+  api.get("/project-creation/teams", async (c) => {
+    if (!c.var.creationActor) return c.json({ error: "Project creation requires an enabled owner session" }, 403);
+    const workspace = linearWorkspace.getStore()!;
+    if (c.req.header("x-workspace") !== workspace.id) return c.json({ error: "Select a workspace" }, 400);
+    const team = await starterTeam(workspace);
+    return c.json({ teams: team ? [{ key: team.key, name: team.name }] : [] });
+  });
+  api.post("/projects", async (c) => {
+    const actor = c.var.creationActor;
+    if (!actor) return c.json({ error: "Project creation requires an enabled owner session" }, 403);
+    const workspace = linearWorkspace.getStore()!;
+    if (c.req.header("x-workspace") !== workspace.id) return c.json({ error: "Select a workspace" }, 400);
+    const key = c.req.header("idempotency-key");
+    const input = creationInput(await c.req.json().catch(() => null), workspace, key);
+    const team = await starterTeam(workspace);
+    if (!team) return c.json({ error: "Team is unavailable for creation" }, 403);
+    const accounts = await accountStore?.();
+    if (accountStore && (!accounts || !workspace.connectionId)) return c.json({ error: "Plan storage unavailable" }, 503);
+    const data = await createStarter(workspace, team, input, actor, key!);
+    const project = data.keymap.project;
+    if (accounts && workspace.connectionId) {
+      const tenant = scope().tenant.id;
+      const result = await accounts.plans({ account: tenant, project: [tenant, workspace.connectionId, project.id] },
+        { kind: "put", initialize: true, data });
+      if (result.status !== 200 && result.status !== 412) throw new LinearError("Could not save the project plan", 503);
+      const collab = { page: `https://${rules.hosted!.host}`, workspace: workspace.id, project: project.id, name: input.name };
+      return c.json({ workspace: workspace.id, project, handoff: { plan: data.plan,
+        keymap: { ...data.keymap, collab }, command: "wg pull . --force && wg next ." } });
+    }
+    return c.json({ workspace: workspace.id, project, handoff: { ...data, command: "wg next ." } }, 200);
+  });
   api.get("/projects", async (c) => c.json<ProjectList>(await listedProjects(c.var.viewer)));
   const waitNamesFor = async (owner: Tenant, workspace: Workspace, id: string) => {
     const connection = workspace.connectionId;

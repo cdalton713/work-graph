@@ -2995,6 +2995,54 @@ class JobTests(LaneTests):
         self.assertNotEqual(fork, last)
         self.assertIn(f"git rebase --onto origin/main {fork},", line)
 
+    def test_restack_line_uses_the_recorded_parent_tip_after_the_parent_was_restacked(self):
+        # The parent is restacked after the child was cut, then squash-merged: the merge base of the child and
+        # the parent is the trunk base, which would replay the parent's old commit. stax records the old tip.
+        repo, origin = Path(self.d) / "repo2", Path(self.d) / "origin2.git"
+
+        def git(*args, cwd=repo):
+            return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+        def commit(name):
+            (repo / name).write_text(name)
+            git("add", name)
+            git("commit", "-qm", name)
+
+        git("init", "-q", "--bare", str(origin), cwd=self.d)
+        git("init", "-q", "-b", "main", str(repo), cwd=self.d)
+        git("remote", "add", "origin", str(origin))
+        git("config", "user.name", "t")
+        git("config", "user.email", "t@t")
+        commit("base")
+        git("checkout", "-qb", "wg/ex-one-00-a")
+        commit("parent")
+        old_tip = git("rev-parse", "HEAD")
+        git("checkout", "-qb", "wg/ex-one-01-b")
+        commit("child")
+        git("checkout", "-q", "main")
+        commit("other")  # main moves; the parent is restacked onto it
+        git("checkout", "-q", "wg/ex-one-00-a")
+        git("rebase", "-q", "main")
+        git("checkout", "-q", "main")
+        git("merge", "-q", "--squash", "wg/ex-one-00-a")
+        git("commit", "-qm", "squash a")
+        git("push", "-q", "origin", "main")
+        meta = json.dumps({"parentBranchName": "wg/ex-one-00-a", "parentBranchRevision": old_tip})
+        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=meta, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        git("update-ref", "refs/branch-metadata/wg/ex-one-01-b", blob)
+        nodes = {n["key"]: n for n in self.p["nodes"]}
+        row = {"branch": "wg/ex-one-01-b", "parent": "wg/ex-one-00-a"}
+        self.assertNotEqual(git("merge-base", "wg/ex-one-01-b", "wg/ex-one-00-a"), old_tip)
+        with patch.object(wg, "stax_trunk", return_value="main"):
+            line = wg.restack_line(repo, self.p, nodes["b"], row, nodes, {"b": ["a"]}, {"a": "Merged"})
+        self.assertIn(f"git rebase --onto origin/main {old_tip},", line)
+        rebase = line.split("refresh: ")[1].split(", then")[0]
+        git("checkout", "-q", "wg/ex-one-01-b")
+        git(*rebase.split()[1:])
+        self.assertEqual(git("rev-list", "--count", "origin/main..HEAD"), "1")  # only the child's own commit
+        self.assertEqual(git("diff", "--name-only", "origin/main...HEAD"), "child")
+
     def test_a_restack_after_a_merged_parent_checks_from_the_new_target(self):
         rows = {"a": {"code_done_head": SHA}, "b": {"branch": "wg/ex-one-01-b", "parent": "wg/ex-one-00-a",
                                                     "lower": "wg/ex-one-00-a", "pr": "8", "dispatch": "d2"}}

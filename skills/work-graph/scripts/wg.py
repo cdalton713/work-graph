@@ -10055,7 +10055,14 @@ def restack_line(plan_dir, plan, node, row, nodes, deps, st):
     if not merged:
         return line
     # After a squash merge, `st restack` replays the parent's commits. The branch's own commits are the ones
-    # after the old tip of the parent: where the branch left it.
+    # after the old tip of the parent: where the branch left it. stax records that tip as the branch's
+    # parentBranchRevision. The merge base with the parent is wrong when the parent was restacked after the
+    # branch was cut (2026-11-26: the trunk base, so the rebase replayed the parent's old commits).
+    recorded = (branch_metadata(plan_dir, row["branch"]) or {}).get("parentBranchRevision") if row.get("branch") else None
+    if (isinstance(recorded, str) and recorded and command(
+            "git", "merge-base", "--is-ancestor", recorded, row["branch"], cwd=plan_dir).returncode == 0
+            and command("git", "merge-base", "--is-ancestor", recorded, f"origin/{pin}", cwd=plan_dir).returncode):
+        return f"{line}; refresh: git rebase --onto origin/{pin} {recorded}, then st branch reparent --parent {pin}"
     try:
         old = (git_output("merge-base", row["branch"], row["parent"], cwd=plan_dir) if row.get("branch")
                else git_output("rev-parse", row["parent"], cwd=plan_dir))

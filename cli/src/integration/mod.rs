@@ -96,6 +96,10 @@ pub fn command(args: impl Iterator<Item = OsString>) -> Option<ExitCode> {
             println!("usage: wg update {{status,rollback}}");
             return Some(ExitCode::SUCCESS);
         }
+        "setup" if args.len() == 2 && matches!(args[1].to_str(), Some("-h" | "--help")) => {
+            print!("{}", include_str!("help/setup.txt"));
+            return Some(ExitCode::SUCCESS);
+        }
         "preflight" => include_str!("help/preflight.txt"),
         "explain" => include_str!("help/explain.txt"),
         "doctor" => include_str!("help/doctor.txt"),

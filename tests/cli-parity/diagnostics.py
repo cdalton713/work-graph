@@ -16,7 +16,7 @@ binary = Path(sys.argv[1]).resolve()
 frozen = json.loads((suite.HERE / "expected.json").read_bytes())
 for case, expected in frozen.items():
     args = case.split()
-    if args[0] not in {"explain", "config", "preflight", "ui", "doctor"}:
+    if case != "setup --help" and args[0] not in {"explain", "config", "preflight", "ui", "doctor"}:
         continue
     result = suite.run_case([str(binary)], args)
     if args[-1] == "--help":

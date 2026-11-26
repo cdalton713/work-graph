@@ -41,48 +41,85 @@ pub(super) fn owns(mode: &str, p: &Value, args: &[String]) -> Result<u8> {
             println!("{k}: no owns");
             return Ok(1);
         }
-        if base.starts_with('-') {
-            return Err(invalid("invalid diff base"));
-        }
-        let o = Command::new("git")
-            .args(["diff", "--name-only", &format!("{base}...HEAD")])
-            .output()
-            .map_err(ioerr)?;
-        if !o.status.success() {
-            return Err(invalid(String::from_utf8_lossy(&o.stderr).trim()));
-        }
-        for path in String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .filter(|s| !s.is_empty())
-        {
-            let matches = |f| {
-                strings(n, f).any(|g| {
-                    let mut pattern = g.replace("**", "*");
-                    // fnmatch treats an unclosed character class as a literal bracket.
-                    if let Some(i) = pattern.rfind('[')
-                        && !pattern[i..].contains(']')
-                    {
-                        pattern.replace_range(i..i + 1, "[[]");
-                    }
-                    glob::Pattern::new(&pattern).is_ok_and(|pat| pat.matches(path))
-                })
-            };
-            if matches("owns") {
-                continue;
-            }
-            if matches("shares") {
-                println!("SHARED {path}")
-            } else {
-                println!("OUT {path}");
-                bad = 1
-            }
-        }
+        bad = u8::from(!check_ownership(n, base, Path::new("."))?);
     } else {
         return Err(invalid(
             "usage: wg.py owns overlap <plan-dir> <key>... | owns diff <plan-dir> <key> <base>",
         ));
     }
     Ok(bad)
+}
+// fnmatch treats every run of stars as one wildcard and an unmatched '[' as a literal.
+fn filename_pattern(pattern: &str) -> glob::Pattern {
+    let chars: Vec<_> = pattern.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                out.push('*');
+                while chars.get(i + 1) == Some(&'*') {
+                    i += 1;
+                }
+            }
+            '[' => {
+                let first = i + 1 + usize::from(chars.get(i + 1) == Some(&'!'));
+                let close = chars
+                    .get(first + 1..)
+                    .and_then(|tail| tail.iter().position(|c| *c == ']'))
+                    .map(|n| first + 1 + n);
+                if let Some(end) = close {
+                    out.extend(&chars[i..=end]);
+                    i = end;
+                } else {
+                    out.push_str("[[]");
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    glob::Pattern::new(&out).expect("normalized filename pattern")
+}
+
+pub(crate) fn ownership_diff(
+    node: &Value,
+    base: &str,
+    cwd: &Path,
+) -> std::result::Result<bool, String> {
+    check_ownership(node, base, cwd).map_err(|(_, message)| message)
+}
+
+fn check_ownership(node: &Value, base: &str, cwd: &Path) -> Result<bool> {
+    if base.starts_with('-') {
+        return Err(invalid("invalid diff base"));
+    }
+    let result = Command::new("git")
+        .args(["diff", "--name-only", &format!("{base}...HEAD")])
+        .current_dir(cwd)
+        .output()
+        .map_err(ioerr)?;
+    if !result.status.success() {
+        return Err(invalid(String::from_utf8_lossy(&result.stderr).trim()));
+    }
+    let patterns = |key| strings(node, key).map(filename_pattern).collect::<Vec<_>>();
+    let (owns, shares) = (patterns("owns"), patterns("shares"));
+    let mut ok = true;
+    for path in String::from_utf8_lossy(&result.stdout)
+        .lines()
+        .filter(|s| !s.is_empty())
+    {
+        if owns.iter().any(|p| p.matches(path)) {
+            continue;
+        }
+        if shares.iter().any(|p| p.matches(path)) {
+            println!("SHARED {path}");
+        } else {
+            println!("OUT {path}");
+            ok = false;
+        }
+    }
+    Ok(ok)
 }
 type Deps<'a> = HashMap<&'a str, Vec<&'a str>>;
 fn reach<'a>(a: &'a str, b: &str, deps: &Deps<'a>) -> bool {

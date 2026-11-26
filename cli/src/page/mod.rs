@@ -130,7 +130,7 @@ impl Page {
     }
 }
 
-enum PageError {
+pub(crate) enum PageError {
     Unavailable(String),
     Failed(String),
 }
@@ -290,4 +290,4 @@ pub(crate) use collaboration::publish_load;
 pub(crate) use collaboration::save_run_keymap;
 pub(crate) use collaboration::{ClaimSession, update_claim};
 
-pub(crate) use collaboration::{refresh_workflow, shell_quote};
+pub(crate) use collaboration::{acquire_claim, refresh_workflow, shell_quote};

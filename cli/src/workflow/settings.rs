@@ -103,7 +103,7 @@ fn safe_target(dir: &Path, name: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn agent(dir: &Path, agent: &str, values: &Value, apply: bool) -> io::Result<bool> {
+pub(crate) fn agent(dir: &Path, agent: &str, values: &Value, apply: bool) -> io::Result<bool> {
     let name = if agent == "claude" {
         ".claude/settings.local.json"
     } else {

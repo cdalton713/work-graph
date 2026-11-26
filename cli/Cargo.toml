@@ -42,3 +42,7 @@ path = "../tests/cli-parity/workflow.rs"
 
 [features]
 update-fixture = []
+
+[[test]]
+name = "jobs"
+path = "../tests/cli-parity/jobs.rs"

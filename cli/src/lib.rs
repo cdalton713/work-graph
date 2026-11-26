@@ -83,6 +83,7 @@ pub mod providers;
 
 pub mod automation;
 pub mod diagnostics;
+pub mod jobs;
 pub mod workflow;
 
 pub mod update;

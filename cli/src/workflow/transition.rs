@@ -118,7 +118,7 @@ fn gh(dir: &Path, pr: &str, fields: &str) -> Result<Value, String> {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Workflow<'a> {
+pub(crate) struct Workflow<'a> {
     pub dir: &'a Path,
     pub installation: &'a Installation,
     pub plan: &'a Value,
@@ -511,7 +511,7 @@ fn milestone(
     Ok(())
 }
 
-pub(super) fn move_node(
+pub(crate) fn move_node(
     ctx: Workflow<'_>,
     k: &str,
     want: &str,

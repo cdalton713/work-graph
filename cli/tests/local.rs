@@ -176,17 +176,47 @@ fn journal_recovery_and_invalid_graph_match_reference() {
 fn contract_write_uses_the_selected_checkout() {
     let root = tempfile::tempdir().unwrap();
     let skill = root.path().join("skills/work-graph");
-    fs::create_dir_all(&skill).unwrap();
-    let o = Command::new(BIN)
-        .current_dir(root.path())
-        .args(["contract", "--write"])
-        .output()
-        .unwrap();
-    assert!(o.status.success());
-    assert!(o.stdout.is_empty());
-    assert!(o.stderr.is_empty());
-    assert_eq!(
-        fs::read(skill.join("contract.json")).unwrap(),
-        include_bytes!("../../skills/work-graph/contract.json")
-    );
+    let scripts = skill.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    let oracle = scripts.join("wg.py");
+    fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../skills/work-graph/scripts/wg.py"
+        ),
+        &oracle,
+    )
+    .unwrap();
+    let path = skill.join("contract.json");
+    for stale in [false, true] {
+        let mut expected = Vec::new();
+        for python in [true, false] {
+            if stale {
+                fs::write(&path, b"outdated contract").unwrap();
+            }
+            let mut cmd = if python {
+                let mut cmd = Command::new("python3");
+                cmd.arg("-I").arg(&oracle);
+                cmd
+            } else {
+                Command::new(BIN)
+            };
+            let o = cmd
+                .current_dir(root.path())
+                .env("WG_CONFIG", root.path().join("config"))
+                .args(["contract", "--write"])
+                .output()
+                .unwrap();
+            assert!(o.status.success());
+            assert!(o.stdout.is_empty());
+            assert!(o.stderr.is_empty());
+            let bytes = fs::read(&path).unwrap();
+            if python {
+                expected = bytes;
+            } else {
+                assert_eq!(bytes, expected);
+            }
+            fs::remove_file(&path).unwrap();
+        }
+    }
 }

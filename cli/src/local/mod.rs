@@ -1,4 +1,5 @@
 mod card;
+mod contract;
 mod graph;
 mod journal;
 mod rows;
@@ -21,6 +22,16 @@ fn ioerr(e: io::Error) -> Error {
 }
 fn list(v: &Value) -> &[Value] {
     v.as_array().map(Vec::as_slice).unwrap_or_default()
+}
+fn truth(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::Array(a) => !a.is_empty(),
+        Value::String(s) => !s.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
 }
 fn val(v: &Value) -> String {
     match v {
@@ -112,9 +123,9 @@ fn execute(args: &[String], cards: Option<&mut dyn CardWriter>) -> Result<u8> {
         return Ok(0);
     }
     if verb == "contract" {
-        const CONTRACT: &str = include_str!("../../../skills/work-graph/contract.json");
+        let generated = contract::generate();
         match args {
-            [] => print!("{CONTRACT}"),
+            [] => print!("{generated}"),
             [s] if s == "--write" => {
                 let cwd = std::env::current_dir().map_err(ioerr)?;
                 let exe = std::env::current_exe().map_err(ioerr)?;
@@ -126,7 +137,7 @@ fn execute(args: &[String], cards: Option<&mut dyn CardWriter>) -> Result<u8> {
                     .ok_or_else(|| {
                         invalid("cannot locate skills/work-graph for contract --write")
                     })?;
-                std::fs::write(skill.join("contract.json"), CONTRACT).map_err(ioerr)?;
+                std::fs::write(skill.join("contract.json"), generated).map_err(ioerr)?;
             }
             _ => return Err(invalid("usage: wg contract [--write]")),
         }

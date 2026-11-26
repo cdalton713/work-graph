@@ -8,6 +8,8 @@ import { Hint, Lamp, PrLinks } from "./ui";
 const FOLDED: BoardGroupId[] = ["waiting", "merged", "closed"];
 /** Groups whose pull requests the human opens: to merge, to review, or to see a worker's draft. */
 const PR_GROUPS: BoardGroupId[] = ["you", "running", "review"];
+const RUN_TIME_HINT = "Worker run time";
+const REVIEW_HINT = "Add or remove the `reviewed` label: it counts as the wave review and the merge review of this PR.";
 
 export interface BoardProps {
   marks: ReadonlyMap<string, ClaimMark>; filter: ClaimFilter;
@@ -58,6 +60,9 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
     const claim = n.card?.key ? marks.get(n.card.key) : undefined;
     const worker = job ?? n.claim?.replace(/^agent:/, "");
     const elapsed = runTime(n.card, now);
+    const askHint = asked?.has(n.issue.identifier)
+      ? `The worker asks ${copy.owner} a question. Open the issue to reply.` : null;
+    const activityHint = [askHint, elapsed && RUN_TIME_HINT].filter(Boolean).join("\n");
     const holder = groupId === "waiting" ? (graph.blockers.get(n.id) ?? []).map((b) => graph.byId.get(b)!).find((b) => !satisfied(b, n)) : undefined;
     const reason = n.status === "Triage" ? "Triage: decide if it joins the graph" : yourMove(n.card?.next);
     const status = n.waitsOnOther ? `waits on ${n.waitsOnOther}` : n.status === "Backlog" ? n.status
@@ -70,7 +75,7 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
         <button type="button" className={`board-row${n.id === selectedId ? " is-selected" : ""}`} aria-current={n.id === selectedId || undefined}
           onClick={() => onPick(n.id)} onMouseEnter={() => onHover(n.id)} onMouseLeave={() => onHover(null)}>
           <Lamp signal={n.signal} pulse={!!worker} />
-          <span className="board-id mono">{n.issue.identifier}{asked?.has(n.issue.identifier) && <b className="board-ask">asks {copy.owner}</b>}</span>
+          <span className="board-id mono">{n.issue.identifier}{askHint && <b className="board-ask" title={askHint}>asks {copy.owner}</b>}</span>
           <span className="board-title">{n.issue.title}{claim && <span className={`runner-mark${claim.stale ? " is-stale" : ""}`} role="img"
             aria-label={`Runner: ${claim.holder}${claim.stale ? ", stale claim" : ""}`} title={claim.holder}>
             {claim.stale && "⚠ "}{claim.initials}</span>}</span>
@@ -79,9 +84,10 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
             {status && <span>{status}</span>}
             {worker && worker !== status && <span className="board-runner">{worker}</span>}
             {claim && <span className="board-runner">{claim.holder}{claim.stale && " (stale)"}</span>}
-            {elapsed && <> <span className={`run-time${elapsed.warning ? " run-warning" : ""}`}>{elapsed.text}</span></>}
+            {elapsed && <> <span className={`run-time${elapsed.warning ? " run-warning" : ""}`} title={RUN_TIME_HINT}>{elapsed.text}</span></>}
           </span>
         </button>
+        {activityHint && <Hint text={activityHint} infoLabel="About issue activity" className="board-row-hint">{null}</Hint>}
         {/* A reason that is the title (a decision: its question) shows once. */}
         {groupId === "you" && reason && reason !== n.issue.title.trim() && <div className="board-why">{reason}</div>}
         {groupId && PR_GROUPS.includes(groupId) && n.issue.pullRequests.map((pr) => (
@@ -89,9 +95,11 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
         ))}
         {groupId === "you" && onReview && n.kind === "task" && !n.issue.external && n.issue.pullRequests.length > 0 && (
           <div className="board-pr">
-            <button type="button" className={`board-mark${reviewOf(n.issue, n.card).marked ? " is-on" : ""}`} onClick={() => onReview(n.id)}>
-              {reviewOf(n.issue, n.card).marked ? "✓ Reviewed" : "Mark reviewed"}
-            </button>
+            <Hint text={REVIEW_HINT} infoLabel="About marking reviewed" className="board-mark-hint">
+              <button type="button" className={`board-mark${reviewOf(n.issue, n.card).marked ? " is-on" : ""}`} onClick={() => onReview(n.id)}>
+                {reviewOf(n.issue, n.card).marked ? "✓ Reviewed" : "Mark reviewed"}
+              </button>
+            </Hint>
           </div>
         )}
       </li>

@@ -2,9 +2,14 @@ import { expect, type Locator } from "@playwright/test";
 import type { GraphData, Issue, IssuePatch } from "../src/lib/types";
 import { screens, test } from "./support/screens";
 
-const title = "Check each result in the report and record the observed outcome before sending the changes for review";
-const reason = "Read the evidence from the last run and confirm that all checks pass before continuing. " +
-  "Record each failed check with the full error and the step where it occurred.";
+const title = "Check each result in the report and record the observed outcome before sending the changes for review " +
+  "and before you add the report to the release notes for the next person to read";
+const token = "unbroken".repeat(18);
+const reason = `${title}. Use reference ${token}.`;
+const decision = "Choose a date for the next run";
+const askHint = "The worker asks you a question. Open the issue to reply.";
+const runTimeHint = "Worker run time";
+const reviewHint = "Add or remove the `reviewed` label: it counts as the wave review and the merge review of this PR.";
 const reviewed = { id: "reviewed", name: "reviewed", color: "#4466aa", group: null };
 const runningHint = "A worker runs on it, or it is In Progress.";
 
@@ -15,6 +20,16 @@ async function expectTouchTarget(control: Locator) {
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.route("**/api/config", async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), link: "/board-test-link" } });
+  });
+  await page.routeWebSocket(/\/board-test-link\?.*project=fixture/, (socket) => {
+    socket.send(JSON.stringify({
+      type: "asks", project: { workspace: "default", id: "fixture" },
+      payload: { asks: [{ id: "ask", key: "example-5", issue: "WG-5", from: "worker", body: "Which report?", at: new Date().toISOString() }] },
+    }));
+  });
   let issue: Issue;
   await page.route("**/api/issues/issue-5", (route) => {
     const patch: IssuePatch = route.request().postDataJSON();
@@ -40,6 +55,12 @@ test.beforeEach(async ({ page }) => {
       ...issue, id: `extra-${index}`, identifier: `WG-${100 + index}`, title: "Example running issue",
       card: null, pullRequests: [], sortOrder: 100 + index,
     })));
+    graph.issues.push({
+      ...issue, id: "decision", identifier: "WG-200", title: decision, pullRequests: [], sortOrder: 200,
+      card: { id: "decision-card", body: `**work-graph node card**\n\n\`\`\`json\n${JSON.stringify({
+        wg: 1, key: "example-decision", kind: "decision", next: "wait human: " + decision,
+      })}\n\`\`\`` },
+    });
     await route.fulfill({ response, json: graph });
   });
   await screens.board(page);
@@ -57,12 +78,20 @@ test("issue details and review controls fit the board", async ({ page }, { proje
   await expect(row.locator(".run-time:visible")).toHaveText(/\d+m/);
   const why = board.getByText(reason, { exact: true });
   await expect(why).toBeVisible();
-  expect(await why.evaluate((el) => el.scrollHeight)).toBe(await why.evaluate((el) => el.clientHeight));
+  expect(await why.evaluate((el) => [el.scrollWidth - el.clientWidth, el.scrollHeight - el.clientHeight])).toEqual([0, 0]);
+  const decisionRow = board.getByRole("button", { name: /WG-200/ });
+  await expect(decisionRow).toContainText(decision);
+  await expect(decisionRow.locator("..").getByText(decision, { exact: true })).toHaveCount(1);
 
   if (touch) {
     await expectTouchTarget(row);
     await expect(row.getByText("In Progress", { exact: true })).toBeVisible();
-    await expect(row.getByText(title, { exact: true })).toHaveCSS("-webkit-line-clamp", "2");
+    const titleBox = await row.getByText(title, { exact: true }).evaluate((el) => ({
+      height: el.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(el).lineHeight),
+      clipped: el.scrollHeight > el.clientHeight,
+    }));
+    expect(titleBox.height).toBeCloseTo(2 * titleBox.lineHeight, 0);
+    expect(titleBox.clipped).toBe(true);
     await expectTouchTarget(pr);
     await expectTouchTarget(board.getByRole("link", { name: "Linear", exact: true }));
     await expectTouchTarget(review);
@@ -82,6 +111,37 @@ test("issue details and review controls fit the board", async ({ page }, { proje
   await expect(page.locator(".panel")).toHaveCount(0);
   await row.click();
   await expect(page.locator(".panel")).toBeVisible();
+});
+
+test("board activity and review explanations are available", async ({ page }, { project }) => {
+  const row = page.locator(".board-row").filter({ hasText: "WG-5" });
+  const ask = row.locator(".board-ask");
+  const time = row.locator(".run-time");
+  if (project.name.startsWith("desktop-")) {
+    for (const width of [1440, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(ask).toHaveAttribute("title", askHint);
+      await expect(time).toHaveAttribute("title", runTimeHint);
+      await expect(page.locator(".board-mark-hint")).toHaveAttribute("title", reviewHint);
+    }
+  } else {
+    await expect(ask).toBeVisible();
+    await expect(time).toBeVisible();
+    const activity = row.locator("..").getByRole("button", { name: "About issue activity" });
+    await expectTouchTarget(activity);
+    await activity.tap();
+    const hint = page.getByRole("tooltip");
+    await expect(hint).toContainText(askHint);
+    await expect(hint).toContainText(runTimeHint);
+    await activity.tap();
+    await expect(hint).toBeHidden();
+    const review = page.getByRole("button", { name: "About marking reviewed" });
+    await expectTouchTarget(review);
+    await review.tap();
+    await expect(hint).toHaveText(reviewHint);
+    await expect(page.getByRole("button", { name: "Mark reviewed", exact: true })).toBeVisible();
+    await expect(page.locator(".panel")).toHaveCount(0);
+  }
 });
 
 test("group heads fold and explain their contents", async ({ page }, { project }) => {

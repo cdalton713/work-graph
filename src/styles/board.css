@@ -64,6 +64,11 @@
 .board-mark.is-on { border-color: color-mix(in srgb, var(--lamp-done) 50%, transparent); color: var(--lamp-done); }
 
 .board-title .runner-mark { margin-inline-start: 5px; }
+.board-row-hint:not(.hint) { display: none; }
+.board-group li:has(> .board-row-hint.hint) { position: relative; }
+.board-row:has(+ .board-row-hint.hint) { width: calc(100% - var(--touch)); min-height: var(--touch); }
+.board-row-hint.hint { position: absolute; inset-block-start: 0; inset-inline-end: 0; }
+.board-mark-hint.hint { gap: var(--touch-gap); }
 
 @media (max-width: 1279px), (pointer: coarse) {
   .board-find input { min-height: var(--touch); font-size: 16px; padding-inline-end: calc(var(--touch) + 4px); }

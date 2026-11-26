@@ -112,8 +112,8 @@ export function summarize(data: GraphData, workspace: string, now = Date.now(), 
   };
 }
 
-/** `initiative`: null shows every project; NO_INITIATIVE shows the projects with no initiative; a name shows that initiative. */
-export interface OverviewFilter { text: string; workspace: string | null; closed: boolean; initiative?: string | null }
+/** An empty initiative selection shows all projects. NO_INITIATIVE selects projects with no initiative. */
+export interface OverviewFilter { text: string; workspace: string | null; closed: boolean; initiatives?: readonly string[] }
 export const NO_INITIATIVE = "";
 export interface OverviewRow {
   project: Project & { workspace: string; workspaceName: string };
@@ -151,6 +151,7 @@ export const summaryKey = (p: { workspace?: string; id: string }) => `${p.worksp
 export function overviewRows(list: OverviewData | ProjectList, filter: OverviewFilter, activity: OverviewActivity = { now: Date.now() }): OverviewRow[] {
   const summaries = new Map(("summaries" in list ? list.summaries : []).map((s) => [summaryKey(s), s]));
   const { open, closed } = projectGroups(list.projects);
+  const initiatives = new Set(filter.initiatives?.map((name) => name.toLowerCase()));
   const words = filter.text.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const shared = new Set(list.workspaces.filter(({ role }) => role).map(({ id }) => id));
   return [...open, ...(filter.closed ? closed : [])]
@@ -167,7 +168,7 @@ export function overviewRows(list: OverviewData | ProjectList, filter: OverviewF
       return { project, summary, attention, stalls: found };
     })
     .filter(({ project }) => (!filter.workspace || project.workspace === filter.workspace)
-      && (filter.initiative == null || (project.initiative ?? NO_INITIATIVE).toLowerCase() === filter.initiative.toLowerCase())
+      && (!initiatives.size || initiatives.has((project.initiative ?? NO_INITIATIVE).toLowerCase()))
       && words.every((w) => `${project.name} ${project.workspaceName} ${project.initiative ?? ""}`.toLowerCase().includes(w)))
     .sort((a, b) => stateOrder(a.attention.state) - stateOrder(b.attention.state)
       || (b.summary?.you.length ?? 0) - (a.summary?.you.length ?? 0)

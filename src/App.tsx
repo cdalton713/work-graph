@@ -39,9 +39,16 @@ function useQuery() {
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
   }, []);
-  const set = useCallback((changes: Record<string, string | null>, push: boolean | "issue" = false) => {
+  const set = useCallback((changes: Record<string, string | readonly string[] | null>, push: boolean | "issue" = false) => {
     const next = read();
-    for (const [k, v] of Object.entries(changes)) v === null ? next.delete(k) : next.set(k, v);
+    for (const [key, value] of Object.entries(changes)) {
+      if (typeof value === "string") {
+        next.set(key, value);
+      } else {
+        next.delete(key);
+        for (const entry of value ?? []) next.append(key, entry);
+      }
+    }
     const state = push === "issue" ? { issuePanel: true } : push ? null : history.state;
     history[push ? "pushState" : "replaceState"](state, "", `?${next}`);
     setQuery(next);
@@ -116,6 +123,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
 } = {}) {
   const [query, setQuery] = useQuery();
+  const overviewInitiatives = useMemo(() => query.getAll("initiative"), [query]);
   const overviewStates = useMemo(() => readProjectStates(query), [query]);
   const [directory, setDirectory] = useState<ProjectList | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
@@ -891,7 +899,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         {!project && directory && (
           <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
             budget={budget} states={overviewStates} onStates={(states) => setQuery({ state: states.join(",") || null }, true)}
-            initiative={query.get("initiative")} onInitiative={(name) => setQuery({ initiative: name }, true)} />
+            initiatives={overviewInitiatives} onInitiatives={(names) => setQuery({ initiative: names }, true)} />
         )}
         {project && !data && !error && <div className="blank">Loading {project.name}…</div>}
         {(board || narrow) && full && full.nodes.length > 0 && <Board graph={full} marks={marks} filter={claimFilter} now={now} selectedId={selected?.id ?? null} onPick={pick} onHover={setHoverId} onReview={canReview && !viewer ? onReview : undefined}

@@ -44,6 +44,7 @@ test("the status filters scroll with a fixed done count and explain each filter"
   const rowBox = (await row.boundingBox())!;
   expect(railBox.height).toBe(desktop ? 34 : 44);
   if (phone) expect(railBox.height + rowBox.height).toBeLessThanOrEqual(72);
+  if (phone) expect((await filter.boundingBox())!.x - railBox.x).toBeLessThanOrEqual(16);
   const tallyBox = await tally.boundingBox();
   if (!desktop) {
     expect((await filter.boundingBox())!.height).toBeGreaterThanOrEqual(44);
@@ -68,8 +69,8 @@ test("the status filters scroll with a fixed done count and explain each filter"
   await expect(filter).toHaveAttribute("aria-pressed", "false");
   if (phone) {
     const box = (await details.boundingBox())!;
-    // The first 44 pixels of the trigger extend up into the free space above it.
-    await page.touchscreen.tap(box.x + 22, box.y - 16);
+    // The touch target extends up into the static done tally.
+    await page.touchscreen.tap(box.x + box.width - 22, box.y - 16);
   } else {
     await details.click();
   }

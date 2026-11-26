@@ -45,15 +45,14 @@
   .project-bar > .picker:first-of-type > .picker-trigger { width: 100%; justify-content: space-between; }
 }
 @media (max-width: 720px) {
-  .project-bar { position: relative; gap: 6px; }
+  .project-bar { position: relative; gap: 4px; padding-inline: 4px; }
   .project-bar > .picker { position: static; }
-  .project-bar .bar-home { padding-inline: 6px; }
+  .project-bar .bar-home { width: 52px; justify-content: center; gap: 2px; padding-inline: 2px; }
+  .project-bar :is(.bar-home, .picker-trigger, .sync, .bar-more) { min-height: var(--touch); }
+  .project-bar .bar-more { width: var(--touch); padding-inline: 0; }
   .project-bar > .picker:first-of-type > .picker-trigger { gap: 4px; padding-inline: 5px; }
   .project-bar > .picker:first-of-type .caret { margin-left: 0; }
   .project-bar > .picker > .picker-wide { left: 8px; right: 8px; min-width: 0; max-width: 460px; }
-}
-@media (max-width: 360px) {
-  .project-bar .bar-home { justify-content: center; }
   .bar-home-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .bar-home-arrow { display: inline; font-size: 16px; }
 }
@@ -79,7 +78,7 @@
 @media (max-width: 720px) {
   .brand, .toggle-map, .sync-time, .tally-track, .react-flow__minimap { display: none; }
   .bar .toggle { gap: 5px; padding-inline: 6px; }
-  .sync { padding-inline: 6px; }
+  .project-bar .sync { width: var(--touch); justify-content: center; padding-inline: 0; }
   .rail-bar { gap: calc(var(--u) * 2); padding-right: calc(var(--u) * 3); }
   .aspect { padding: 4px 9px; }
   /* The row fades at its right end, to show that it scrolls. */
@@ -183,14 +182,12 @@
   .effort-row:not(.effort-warning) > .effort-timing, .effort-row > .effort-coordinator { display: none; }
   .effort-row > .effort-trigger > .effort-status { min-width: 0; }
   .effort-row.effort-warning .effort-status { white-space: normal; }
-  /* Use the free space at the start of the filter row to extend the phone target. */
-  .rail-bar:has(+ .effort-row:not(.effort-warning)) { padding-inline-start: var(--touch); }
-  .rail-bar + .effort-row:not(.effort-warning) { padding-inline-start: 0; }
+  /* Extend the target into the static tally, clear of the status filters. */
   .rail-bar + .effort-row:not(.effort-warning) > .effort-trigger {
-    position: relative; min-height: 27px; padding-inline-start: 8px;
+    position: relative; min-height: 27px;
   }
   .rail-bar + .effort-row:not(.effort-warning) > .effort-trigger::before {
-    content: ""; position: absolute; inset: -17px auto 0 0; width: var(--touch);
+    content: ""; position: absolute; inset: -17px 0 0 auto; width: var(--touch);
   }
 }
 

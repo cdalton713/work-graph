@@ -56,6 +56,8 @@
   .panel { position: absolute; inset: 0; z-index: 10; width: auto; border-left: 0; }
   .panel-head { padding: 6px 6px 6px 16px; }
   .panel-head .ghost { font-size: 16px; }
+  .panel-head .show-in-graph { flex: none; width: var(--touch); height: var(--touch); padding: 0; font-size: 20px; }
+  .panel-body > .show-in-graph { display: none; }
   .panel-body { flex: 1; padding-bottom: 16px; }
   .link-row { padding-block: 6px; }
   .fields-wg { grid-template-columns: 1fr; }

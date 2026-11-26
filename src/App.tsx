@@ -775,6 +775,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
               <p>View options</p>
               <p>{syncHelp}</p>
             </>}
+            {narrow && (project || missing) && <button type="button" onClick={() => { dismiss(); home(); }}>Overview</button>}
             {(project || missing) && <p>{overviewHelp}</p>}
             {serverVersion && <p>The build of the server: <span className="mono">{status?.version}</span></p>}
             {hover && <button type="button" className="ghost" onClick={() => { dismiss(); setKeys(!keys); }}>{keysHelp}</button>}

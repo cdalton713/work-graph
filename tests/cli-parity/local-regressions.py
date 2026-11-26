@@ -78,7 +78,18 @@ def input_cases(pair):
     pair.compare("log", ".", "--tim")
     pair.compare("log", ".", "-n", "0")
     pair.compare("log", ".", "-n", "oops")
-    pair.compare("log", ".", "-n", "1", "a")
+    # 3.12 changed argparse to accept this trailing positional. Pin the reviewed
+    # 3.11 behavior even on runners with a newer reference interpreter.
+    if sys.version_info < (3, 12):
+        pair.compare("log", ".", "-n", "1", "a")
+    else:
+        root = pair.dirs[1]
+        before = snapshot(root)
+        result = subprocess.run([str(BINARY), "log", ".", "-n", "1", "a"], cwd=root,
+                                env={"HOME": str(root), "WG_CONFIG": "config"}, capture_output=True)
+        assert result.returncode == 2 and not result.stdout
+        assert result.stderr.endswith(b"wg.py: error: unrecognized arguments: a\n")
+        assert snapshot(root) == before
     pair.compare("run", "set", ".", "merge", "invalid")
 
 

@@ -47,7 +47,10 @@ export interface ToCoordinator { changed: Changed; answer: Answer; reply: Reply;
 export interface Hello { plan: string; session: string; host: string; wg: string }
 export interface CoordinatorState { mode: "waiting" | "working"; head: string; lines: { level: string; text: string }[] }
 /** `kind`: an `escalation` is a worker that stopped and that no coordinator read yet. None: a question. */
-export interface Ask { id: string; key: string | null; issue: string | null; from: string; body: string; at: string; kind?: "question" | "escalation" }
+export interface Ask {
+  id: string; key: string | null; issue: string | null; from: string; body: string; at: string; kind?: "question" | "escalation";
+  accountName?: string;
+}
 export interface Progress { key: string; issue: string | null; job: string | null; state: string | null; ci: string | null; evidence: string | null; at: string | null }
 /** `wrote`: wg changed these issues in Linear. It may come without `hello`, on a short connection of any wg command. */
 export interface Wrote { issues: string[] }
@@ -67,6 +70,7 @@ export interface FromCoordinator {
 
 // Server → page.
 export interface CoordinatorPresence {
+  accountName?: string;
   session: string; host: string; plan: string; connected: boolean;
   mode: CoordinatorState["mode"] | null; head: string | null; since: string; lastSeen: string;
   /** `wg next` said `wait paused`: The human paused the effort on the page. */

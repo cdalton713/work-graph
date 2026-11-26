@@ -14,7 +14,7 @@ type Share = { id: string; tenant: string; connection: string; project: string; 
 const roleFor = (kind: ShareKind): MemberRole => kind === "view" ? "viewer" : "collaborator";
 type Member = { id: string; name: string; email: string; role: MemberRole; joinedAt: Date };
 
-export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>) {
+export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: boolean) => Promise<void>) {
   async function lock(query: Query, tenant: string) {
     const [row] = await query<{ owner: string }>("SELECT owner_user_id AS owner FROM tenants WHERE id = $1 FOR NO KEY UPDATE", [tenant]);
     return row?.owner;
@@ -76,14 +76,14 @@ export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>
         }
         return { created, revoked };
       });
-      if (result && Object.keys(result.created).length) await notify(tenant);
+      if (result && Object.keys(result.created).length) await notify(tenant, true);
       return result;
     },
 
     async revoke(project: ProjectScope, kind: ShareKind) {
       const changed = await sql.transaction(async ({ query }) =>
         !!await lock(query, project[0]) && revoke(query, project, kind));
-      if (changed) await notify(project[0]);
+      if (changed) await notify(project[0], true);
       return changed;
     },
 
@@ -95,7 +95,7 @@ export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>
           : await query(`DELETE FROM project_members WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member]);
         return rows.length > 0;
       });
-      if (changed) await notify(project[0]);
+      if (changed) await notify(project[0], true);
       return changed;
     },
 
@@ -136,7 +136,7 @@ export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>
         return { share, project, role, changed: true } as const;
       });
       if (result && result !== "full" && result.changed) {
-        await Promise.all([notify(result.share.tenant), notify(account)]);
+        await Promise.all([notify(result.share.tenant, true), notify(account, true)]);
       }
       return result;
     },

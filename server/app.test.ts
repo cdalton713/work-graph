@@ -3,7 +3,11 @@ import { configureSite, site } from "../src/lib/site.ts";
 import { connectRedis } from "./redis.ts";
 import { localRedis, startLocalRedis } from "./testing/redis.ts";
 import { testTenants } from "./testing/tenants.ts";
-import { createHash } from "node:crypto";
+import { pgliteSql } from "./testing/pglite.ts";
+import { credentialCrypto } from "./db/crypto.ts";
+import { migrate } from "./db/migrations.ts";
+import { dbTenants } from "./db/tenants.ts";
+import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
@@ -1205,6 +1209,95 @@ const rolesHeaders = async (email: string, id?: string) => {
 };
 const rolesPage = (now?: () => number) => createApp(hostedRoles, {
   team: "CD", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth, linkToken: rolesToken, watchMs: 0, now,
+});
+
+it("allows each account to join only its shared projects and closes a removed member's link", async () => {
+  const sql = await pgliteSql();
+  const directory = dbTenants(sql, credentialCrypto({ WG_DATA_KEY: randomBytes(32).toString("base64") }));
+  try {
+    await migrate(sql);
+    const { accounts } = directory;
+    const connection = {
+      workspaceId: "work", linearOrgId: "org", name: "Work", team: "WG", teamLabels: true,
+      credential: { kind: "oauth" as const, key: "access", refreshToken: "refresh", expiresAt: new Date("2030-01-01") },
+    };
+    const create = (human: string) => accounts.createAccount({
+      linearUserId: human, linearOrgId: "org", email: human.toLowerCase() + "@example.com", name: human,
+    }, human, connection);
+    const ada = await create("Ada"), grace = await create("Grace"), viewer = await create("Viewer");
+    const [workspace] = (await accounts.readTenant(ada))!.connections;
+    const scope: [string, string, string] = [ada, workspace.id, "p1"];
+    const links = (await accounts.shares.make(scope, "Project"))!.created;
+    await accounts.shares.join(grace, links.collab!);
+    await accounts.shares.join(viewer, links.view!);
+    const [collab] = await directory.sharedWorkspaces(grace);
+    const [view] = await directory.sharedWorkspaces(viewer);
+    const graceToken = (await accounts.createToken(grace, "coordinator")).token;
+    const viewToken = (await accounts.createToken(viewer, "coordinator")).token;
+    const page = createApp(hostedRoles, { team: "WG", dist, auth: rolesAuth, tenants: directory, watchMs: 0 });
+    const path = (id: string, project = "p1", role = "coordinator") => `/api/link?role=${role}&workspace=${id}&project=${project}`;
+    const headers = (token: string) => ({ ...rolesHost, authorization: "Bearer " + token });
+    const http = serve({ fetch: page.fetch, port: 0, hostname: "127.0.0.1" });
+    page.injectWebSocket(http as never);
+    const sockets: WebSocket[] = [];
+    try {
+      expect((await page.request(path(view.id), { headers: headers(viewToken) })).status).toBe(403);
+      expect((await page.request(path(collab.id), { headers: headers(viewToken) })).status).toBe(400);
+      expect((await page.request(path(collab.id, "other"), { headers: headers(graceToken) })).status).toBe(404);
+      if (!http.listening) await new Promise<void>((resolve) => http.once("listening", resolve));
+      const { port } = http.address() as AddressInfo;
+      const connect = (path: string, headers: Record<string, string>) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, { headers });
+        sockets.push(ws);
+        return ws;
+      };
+      const ws = connect(path(collab.id), headers(graceToken));
+      await new Promise<void>((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
+      ws.send(JSON.stringify({ v: 1, type: "hello", payload: { session: "grace" } }));
+      const ref = { workspace: "work", id: "p1", tenant: ada };
+      await vi.waitFor(async () => expect((await page.link.hub.presence(ref)).coordinators)
+        .toMatchObject([{ accountName: "Grace", connected: true }]));
+      const pageHeaders = { ...await rolesHeaders("grace@example.com", grace), origin: "https://view.example.com" };
+      const memberPage = connect(path(collab.id, "p1", "page"), pageHeaders);
+      const presence = new Promise<unknown>((resolve, reject) => {
+        memberPage.on("message", (raw) => {
+          const frame = JSON.parse(String(raw));
+          if (frame.type === "presence") resolve(frame);
+        });
+        memberPage.once("error", reject);
+      });
+      expect(await presence).toMatchObject({ project: { workspace: collab.id, id: "p1" }, payload: {
+        coordinators: [{ accountName: "Grace" }],
+      } });
+      const command = new Promise<unknown>((resolve) => ws.on("message", (raw) => {
+        const frame = JSON.parse(String(raw));
+        if (frame.type === "command") resolve(frame.payload);
+      }));
+      const next = await page.request("/api/projects/p1/commands", {
+        method: "POST", headers: { ...pageHeaders, "content-type": "application/json", "x-workspace": collab.id },
+        body: JSON.stringify({ name: "next" }),
+      });
+      expect(await next.json()).toMatchObject({ ok: true, queued: 1 });
+      expect(await command).toMatchObject({ name: "next" });
+      const waiting = await page.request("/api/projects/p1/presence", {
+        headers: { ...headers(graceToken), "x-workspace": collab.id },
+      });
+      expect(await waiting.json()).toMatchObject({ waiting: 1 });
+      const member = (await accounts.shares.list(scope))!.members.find(({ name }) => name === "Grace")!;
+      const closed = sockets.map((socket) => new Promise<number>((resolve) => socket.once("close", resolve)));
+      await accounts.shares.changeMember(scope, member.id);
+      expect(await Promise.all(closed)).toEqual([RESTART_CODE, RESTART_CODE]);
+      expect((await page.link.hub.presence(ref)).coordinators).toEqual([]);
+      expect((await page.request(path(collab.id), { headers: headers(graceToken) })).status).toBe(400);
+    } finally {
+      for (const socket of sockets) socket.terminate();
+      http.close();
+      page.link.stop();
+    }
+  } finally {
+    directory.close();
+    await sql.close();
+  }
 });
 
 it("keeps queued commands and status in the request tenant", async () => {

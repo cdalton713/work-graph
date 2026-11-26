@@ -57,6 +57,155 @@ const msg = (type: string, payload: unknown = {}) => JSON.stringify({ v: 1, type
 const hello = (session: string) => msg("hello", { plan: "/plans/a", session, host: "mac", wg: "1" });
 
 describe("LinkHub", () => {
+  it("routes answers to the accounts with a matching ask, or to every account if none match", async () => {
+    const hub = new LinkHub();
+    const room = { ...A, tenant: "owner" };
+    const ada = peer(), grace = peer();
+    const owner = await hub.joinCoordinator(ada, room);
+    const member = await hub.joinCoordinator(grace, room, { account: "member", name: "Grace", workspace: "shared:member-row" });
+    try {
+      await owner.receive(hello("same-session"));
+      await member.receive(hello("same-session"));
+      await owner.receive(msg("asks", { asks: [{ id: "a", issue: "WG-1" }, { id: "b", issue: "WG-2" }] }));
+      await member.receive(msg("asks", { asks: [{ id: "c", issue: "WG-1" }] }));
+      for (const issue of ["WG-1", "WG-2", "WG-3"]) {
+        await hub.publish(room, "answer", { issue, key: null, body: "Answer" });
+      }
+      const issues = (client: ReturnType<typeof peer>) => client.of("answer").map(({ payload }) => (payload as { issue: string }).issue);
+      expect(issues(ada)).toEqual(["WG-1", "WG-2", "WG-3"]);
+      expect(issues(grace)).toEqual(["WG-1", "WG-3"]);
+    } finally {
+      hub.stop();
+    }
+  });
+
+  it("drops an account and closes its sockets without closing the owner", async () => {
+    const shared = memoryLinkState(), bus = memoryLinkBus();
+    const ownerHub = new LinkHub(undefined, undefined, undefined, null, shared, bus);
+    const memberHub = new LinkHub(undefined, undefined, undefined, null, shared, bus);
+    const ref = { ...A, tenant: "owner" };
+    const member = { account: "member", name: "Grace", workspace: "shared:member-row", ownerName: "Ada" };
+    const ada = peer(), grace = peer(), page = peer();
+    try {
+      const owner = await ownerHub.joinCoordinator(ada, ref);
+      const coordinator = await memberHub.joinCoordinator(grace, ref, member);
+      await memberHub.joinPage(page, ref, false, ref.tenant, member);
+      await owner.receive(hello("ada"));
+      await coordinator.receive(hello("grace"));
+      await coordinator.receive(msg("asks", { asks: [{ id: "q", issue: "WG-1" }] }));
+      expect(await ownerHub.asks(ref)).toMatchObject([{ id: "q", accountName: "Grace" }]);
+      await ownerHub.recheckMembers("owner", async () => null);
+      expect(ada.closed).toEqual([]);
+      expect(grace.closed).toContainEqual({ code: RESTART_CODE, reason: "server restart" });
+      expect(page.closed).toContainEqual({ code: RESTART_CODE, reason: "server restart" });
+      expect(await ownerHub.asks(ref)).toEqual([]);
+      expect(await shared.read(ref)).not.toHaveProperty("accounts");
+    } finally {
+      ownerHub.stop();
+      memberHub.stop();
+    }
+  });
+
+  it.each(["memory", ...(testRedis ? ["Redis"] : [])])("keeps shared room audiences and queues apart on %s", async (mode) => {
+    const server = mode === "Redis" ? await startTestRedis() : null;
+    const prefix = `test:${randomUUID()}:`;
+    const redis = server ? connectRedis(server.url, prefix) : null;
+    const state = redis ? redisLinkState(redis, prefix) : memoryLinkState();
+    const bus = redis ? redisLinkBus(redis, prefix) : memoryLinkBus();
+    const ownerHub = new LinkHub(undefined, undefined, undefined, null, state, bus);
+    const memberHub = new LinkHub(undefined, undefined, undefined, null, redis ? redisLinkState(redis, prefix) : state, bus);
+    const ref = { ...A, tenant: "owner-account-id" };
+    const member = { account: "member-account-id", name: "Grace", workspace: "shared:collaborator", ownerName: "Ada" };
+    const view = { account: "viewer-account-id", name: "Viewer", workspace: "shared:viewer" };
+    const ada = peer(), grace = peer(), ownerPage = peer(), memberPage = peer(), viewerPage = peer();
+    const last = (client: ReturnType<typeof peer>, type: string) => client.of(type).at(-1)?.payload;
+    try {
+      const owner = await ownerHub.joinCoordinator(ada, ref);
+      let collaborator = await memberHub.joinCoordinator(grace, ref, member);
+      await ownerHub.joinPage(ownerPage, ref);
+      await memberHub.joinPage(memberPage, ref, false, ref.tenant, member);
+      await memberHub.joinViewer(viewerPage, ref, () => true, false, ref.tenant, view);
+      await owner.receive(hello("session"));
+      await collaborator.receive(hello("session"));
+      for (const [connection, id, at] of [[owner, "owner", "2026-11-20T00:00:00Z"], [collaborator, "member", "2026-11-21T00:00:00Z"]] as const) {
+        await connection.receive(msg("asks", { asks: [{ id }] }));
+        await connection.receive(msg("progress", { nodes: [{ key: "same", state: id, at }, { key: id, state: id, at }] }));
+        await connection.receive(msg("agents", { agents: [{ id }] }));
+      }
+      await vi.waitFor(() => {
+        expect(last(ownerPage, "presence")).toMatchObject({ coordinators: expect.arrayContaining([
+          expect.objectContaining({ accountName: "Ada" }), expect.objectContaining({ accountName: "Grace" }),
+        ]) });
+        for (const page of [ownerPage, memberPage]) {
+          expect(last(page, "asks")).toMatchObject({ asks: [{ id: "owner", accountName: "Ada" }, { id: "member", accountName: "Grace" }] });
+          expect(last(page, "progress")).toMatchObject({ nodes: [{ key: "same", state: "member" }, { key: "owner" }, { key: "member" }] });
+        }
+        expect(last(ownerPage, "agents")).toMatchObject({ agents: [{ id: "owner" }] });
+        expect(last(memberPage, "agents")).toMatchObject({ agents: [{ id: "member" }] });
+        expect(viewerPage.of("asks")).toEqual([]);
+        expect(viewerPage.of("agents")).toEqual([]);
+      });
+      await ownerHub.enqueue(ref, "reply", { ask: "member", key: null, issue: null, body: "Reply" }, "member");
+      const pause = await ownerHub.publish(ref, "command", { name: "pause", key: null, issue: null });
+      await ownerHub.publish(ref, "changed", { by: "page", what: "issue", issues: [] });
+      await vi.waitFor(() => {
+        expect(ada.of("command")).toHaveLength(1);
+        expect(grace.of("command")).toHaveLength(1);
+        expect(ada.of("reply")).toHaveLength(0);
+        expect(grace.of("reply")).toHaveLength(1);
+        expect(ada.of("changed")).toHaveLength(1);
+        expect(grace.of("changed")).toHaveLength(1);
+      });
+      await owner.receive(msg("ack", { ids: [pause.id] }));
+      expect(await ownerHub.waiting(ref)).toBe(0);
+      expect(await memberHub.waiting(ref, member.account)).toBe(2);
+      await collaborator.closed();
+      const dispatch = await ownerHub.enqueue(ref, "command", { name: "dispatch", key: "task", issue: "WG-1" }, undefined, undefined, member);
+      expect(dispatch.waiting).toBe(true);
+      const reconnected = peer();
+      collaborator = await memberHub.joinCoordinator(reconnected, ref, member);
+      await collaborator.receive(hello("session"));
+      await vi.waitFor(() => expect(last(reconnected, "command")).toMatchObject({ name: "dispatch" }));
+      expect(ada.of("command")).toHaveLength(1);
+      for (const client of [ada, grace, ownerPage, memberPage, viewerPage, reconnected]) {
+        expect(JSON.stringify(client.sent)).not.toMatch(/owner-account-id|member-account-id|viewer-account-id|accountId|tenant/);
+      }
+      await ownerHub.recheckMembers(ref.tenant, async (_ref, account) => account === view.account ? "viewer" : null);
+      await vi.waitFor(() => {
+        expect(reconnected.closed).toContainEqual({ code: RESTART_CODE, reason: "server restart" });
+        expect(memberPage.closed).toContainEqual({ code: RESTART_CODE, reason: "server restart" });
+      });
+      expect(ada.closed).toEqual([]);
+      expect(viewerPage.closed).toEqual([]);
+      expect(await memberHub.waiting(ref, member.account)).toBe(0);
+      expect(await state.read(ref)).not.toHaveProperty("accounts");
+    } finally {
+      ownerHub.stop();
+      memberHub.stop();
+      redis?.close();
+      await server?.close();
+    }
+  });
+
+  it("refuses a ninth coordinator account and accepts another session of an existing account", async () => {
+    const hub = new LinkHub();
+    const ref = { ...A, tenant: "owner" };
+    try {
+      await (await hub.joinCoordinator(peer(), ref)).receive(hello("owner"));
+      const member = (index: number) => ({ account: `member-${index}`, name: "Member", workspace: `shared:${index}` });
+      for (let i = 1; i <= 7; i++) await (await hub.joinCoordinator(peer(), ref, member(i))).receive(hello(`session-${i}`));
+      const ninth = peer();
+      await hub.joinCoordinator(ninth, ref, member(8));
+      expect(ninth.closed).toMatchObject([{ code: 1008 }]);
+      const another = peer();
+      await (await hub.joinCoordinator(another, ref, member(1))).receive(hello("another"));
+      expect(another.closed).toEqual([]);
+      expect((await hub.presence(ref)).coordinators).toHaveLength(9);
+    } finally {
+      hub.stop();
+    }
+  });
+
   it("runs socket delivery, heartbeat and timeout in the socket site", async () => {
     const time = fakeTime();
     const sites = new Map([["a", createSite("Ada", "work")], ["b", createSite("Grace", "work")]]);

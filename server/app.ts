@@ -24,12 +24,12 @@ import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
 import { NeedsLinearAccess, sharedLinear, LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
-import { type Connection, LinkHub, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
+import { type Connection, type LinkMember, LinkHub, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
 import { redisLinkState } from "./linkstate-redis.ts";
 import { connectRedis, LINK_PREFIX, RedisCommandFailed, RedisUnavailable } from "./redis.ts";
-import { checkLinkTenant, memoryLinkState, roomKey, type LinkRoomState, type RoomRef } from "./linkstate.ts";
+import { checkLinkTenant, memoryLinkState, roomAccount, roomAccounts, roomKey, type LinkRoomState, type RoomRef } from "./linkstate.ts";
 import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
 import { createSite, DEFAULT_HUMAN } from "../src/lib/site.ts";
@@ -318,10 +318,18 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     store, roomState, redis && !readOnly ? redisLinkBus(redis, linkPrefix) : linkBus,
     { maxAgeMs: linkMaxAgeMs, pongMs: linkPongMs, site: installationSite, tenantSite: (id) => states.get(id)?.site }, rememberEnded,
   );
-  const stopWatching = directory.onChange((id) => {
-    revisions.set(id, ++revision);
-    hub.restartSockets(id);
-    states.delete(id);
+  const stopWatching = directory.onChange((id, membersOnly) => {
+    revision++;
+    if (!membersOnly) {
+      revisions.set(id, revision);
+      hub.restartSockets(id);
+      states.delete(id);
+    }
+    if (linkEnabled && directory.sharedWorkspaces) {
+      void hub.recheckMembers(id, async (ref, account) =>
+        (await directory.sharedWorkspaces!(account)).find((entry) => entry.owner.id === ref.tenant
+          && entry.workspace.id === ref.workspace && entry.projectId === ref.id)?.role ?? null).catch(reportLinkError);
+    }
   });
   const currentRoom = (ref: ProjectRef) => roomRef(ref, scope().tenant);
   const dropIdle = async (id: string) => {
@@ -514,14 +522,17 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   };
   const noticeId = (key: string | undefined, route: string) =>
     key && key.length <= 256 ? digest(JSON.stringify([route, key])).toString("hex") : undefined;
-  const enqueueLink = <T extends keyof ToCoordinator>(ref: ProjectRef, type: T, payload: ToCoordinator[T], answeredAsk?: string, id?: string) =>
-    linkEnabled ? hub.enqueue(currentRoom(ref), type, payload, answeredAsk, id) : Promise.resolve({ queued: 0 });
+  const enqueueLink = <T extends keyof ToCoordinator>(ref: ProjectRef, type: T, payload: ToCoordinator[T], answeredAsk?: string, id?: string, member?: LinkMember): Promise<{ queued: number; waiting?: boolean }> =>
+    linkEnabled ? hub.enqueue(currentRoom(ref), type, payload, answeredAsk, id, member) : Promise.resolve({ queued: 0, waiting: false });
   const pageChanged = async (ref: ProjectRef | null, what: Changed["what"], issues: string[], id?: string) => {
     if (ref) await notify(() => enqueueLink(ref, "changed", { by: "page", what, issues }, undefined, id), undefined);
   };
   // wg doctor uses status. wg wake uses project presence.
   const coordinatorReads = [/^\/api\/status$/, /^\/api\/projects\/[^/]+\/presence$/];
-  const sharedScope = new AsyncLocalStorage<SharedWorkspace>();
+  const linkMember = (entry: SharedWorkspace, account: Tenant): LinkMember => ({
+    account: account.id, name: account.human, workspace: entry.id, ownerName: entry.owner.human,
+  });
+  const sharedScope = new AsyncLocalStorage<SharedWorkspace & { member: LinkMember; coordinator?: boolean }>();
   const sharedEntry = (entry: SharedWorkspace) => ({
     id: entry.id, name: entry.name, owner: entry.owner.human, role: entry.role, projectId: entry.projectId,
   });
@@ -537,12 +548,15 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const host = refusal("GET", header, rules);
     if (host) return c.json({ error: host }, 403);
     const lookupRevision = revision;
-    const session = await readSession(c);
     const read = c.req.method === "GET" || c.req.method === "HEAD";
-    const account = session && await sessionActive(session, read) ? await directory.fromSession(session) : null;
-    const entry = account && !header("authorization") &&
-      (await directory.sharedWorkspaces(account.tenant.id)).find((workspace) => workspace.id === id);
+    const authorization = header("authorization");
+    const coordinator = !!authorization && c.req.method === "GET" && /^\/api\/projects\/[^/]+\/presence$/.test(c.req.path);
+    const session = authorization ? null : await readSession(c);
+    const account = coordinator ? await directory.fromToken(authorization)
+      : session && await sessionActive(session, read) ? (await directory.fromSession(session))?.tenant : null;
+    const entry = account && (await directory.sharedWorkspaces(account.id)).find((workspace) => workspace.id === id);
     if (!account || !entry || lookupRevision !== revision) return c.json(unknownWorkspace(id), 400);
+    if (coordinator && entry.role !== "collaborator") return c.json({ error: "Only collaborators can connect a coordinator." }, 403);
     if (!read && (readOnly || entry.role === "viewer")) return c.json({ error: "this page is read-only" }, 405);
     const reason = refusal(c.req.method, header, rules);
     if (reason) return c.json({ error: reason }, 403);
@@ -559,10 +573,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       await redis.checkWrites();
       await flushLogouts();
     }
-    const writer = account.tenant.workspaces.find((w) => w.organizationId === entry.workspace.organizationId && !w.needsKey);
+    const writer = account.workspaces.find((w) => w.organizationId === entry.workspace.organizationId && !w.needsKey);
     await dropIdle(entry.owner.id);
     await runInTenant(entry.owner, () => linearWorkspace.run(entry.workspace, () =>
-      sharedScope.run(entry, () => sharedLinear.run({ projectId: entry.projectId, writer }, next))), lookupRevision);
+      sharedScope.run({ ...entry, member: linkMember(entry, account), coordinator }, () => sharedLinear.run({ projectId: entry.projectId, writer }, next))), lookupRevision);
   });
   const api = new Hono<{ Variables: { viewer: boolean } }>();
   // The API can change Linear with the user's key. Accept only this page as the caller.
@@ -633,15 +647,16 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (shared) {
       const ref = currentRoom({ workspace: shared.workspace.id, id: shared.projectId });
       const room = await linkRead(() => roomState.read(ref), null);
+      const own = room && !c.var.viewer ? roomAccount(room, shared.member.account) : undefined;
       return c.json({
         version, contract, readOnly: c.var.viewer, link: null,
         workspaces: [sharedEntry(shared)],
         rooms: room ? [{
           workspace: shared.id, project: shared.projectId,
-          coordinators: [...room.coordinators.values()].filter((entry) => entry.socket).length,
+          coordinators: roomAccounts(room).flatMap(([, account]) => [...account.coordinators.values()]).filter((entry) => entry.socket).length,
           pages: [...room.sockets.values()].filter((role) => role === "page").length,
-          queued: c.var.viewer ? 0 : room.queue.length,
-          asks: c.var.viewer ? 0 : room.asks.length,
+          queued: own?.queue.length ?? 0,
+          asks: own?.asks.length ?? 0,
         }] : [],
       });
     }
@@ -817,9 +832,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       await wrote(null, ref.id);
     }
     const enqueue = () => enqueueLink(ref, "command", { name, key: typeof key === "string" ? key : null, issue: identifier },
-      undefined, noticeId(c.req.header("Idempotency-Key"), name));
-    const { queued } = name === "next" ? await enqueue() : await notify(enqueue, { queued: 0 });
-    return c.json({ ok: true, queued });
+      undefined, noticeId(c.req.header("Idempotency-Key"), name), sharedScope.getStore()?.member);
+    const result = name === "next" ? await enqueue() : await notify(enqueue, { queued: 0, waiting: false });
+    return c.json({ ok: true, queued: result.queued, ...(result.waiting ? { waiting: true } : {}) });
   });
   // The link state of a project, for `wg wake` on the human's machine: is a coordinator connected, and do messages
   // wait that only a coordinator can act on. A GET, so the host check above is the only gate; it changes nothing.
@@ -830,11 +845,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       if (!shared) await sharedProject(ref.id, ref.workspace);
       return c.json({ ...await linkRead(() => hub.viewerPresence(currentRoom(ref)), { coordinators: [], queued: 0 }), waiting: 0 });
     }
-    const presence = await linkRead(async () => ({ ...await hub.presence(currentRoom(ref)), waiting: await hub.waiting(currentRoom(ref)) }), {
+    const presence = await linkRead(async () => ({ ...await hub.presence(currentRoom(ref)), waiting: await hub.waiting(currentRoom(ref), shared?.member.account) }), {
       coordinators: [], queued: 0, waiting: 0,
     });
-    if (!shared) return c.json(presence);
-    const asks = await linkRead(async () => (await roomState.read(currentRoom(ref)))?.asks ?? [], []);
+    if (!shared || shared.coordinator) return c.json(presence);
+    const asks = await linkRead(async () => await hub.asks(currentRoom(ref)), []);
     if (!asks.length) return c.json({ ...presence, asks });
     const { data } = await graphs().get(ref.id, { fresh: true });
     const issues = new Set(data.issues.filter((issue) => !issue.external).map((issue) => issue.identifier));
@@ -892,7 +907,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (typeof body !== "string" || !body.trim()) throw new LinearError("reply body is empty", 400);
     const ref = { workspace: linearWorkspace.getStore()!.id, id: c.req.param("id") };
     const ask = linkEnabled ? await hub.ask(currentRoom(ref), c.req.param("ask")) : null;
-    if (!ask) throw new LinearError("no open question with this id: it was answered, or the coordinator has not reported it", 404);
+    if (!ask) throw new LinearError(tenants
+      ? "No open question with this id. It may have been answered, or its coordinator may have left the project."
+      : "no open question with this id: it was answered, or the coordinator has not reported it", 404);
     // Which issues are in the project decides whether the reply is saved in Linear: a stale graph is not enough.
     // A failed refresh stops the route here, and the question stays open.
     const issue = ask.issue ? (await graphs().get(ref.id, { fresh: true })).data.issues.find((i) => i.identifier === ask.issue) : undefined;
@@ -990,21 +1007,29 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const session = role === "page" ? await readSession(c) : null;
     if ((auth || linearAuth || tenants) && role === "page" && (!session || !await sessionActive(session))) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
     const membership = role === "page" ? await directory.fromSession(session) : null;
-    const tenant = tokenTenant ?? membership?.tenant ?? (!tenants ? await directory.byId(CONFIG_TENANT_ID) : null);
-    if (!tenant) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    const account = tokenTenant ?? membership?.tenant ?? (!tenants ? await directory.byId(CONFIG_TENANT_ID) : null);
+    if (!account) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    const requested = c.req.query("workspace") || siteOf(account).defaultWorkspace;
+    const shared = directory.sharedWorkspaces && requested.startsWith("shared:")
+      ? (await directory.sharedWorkspaces(account.id)).find((entry) => entry.id === requested) : undefined;
+    if (directory.sharedWorkspaces && requested.startsWith("shared:") && !shared) return c.json(unknownWorkspace(requested), 400);
+    if (shared?.role === "viewer" && role === "coordinator") return c.json({ error: "Only collaborators can connect a coordinator." }, 403);
+    const tenant = shared?.owner ?? account;
     if (tenants) checkLinkTenant(tenant.id);
-    const viewer = membership?.role === "viewer";
-    const workspace = c.req.query("workspace") || siteOf(tenant).defaultWorkspace;
-    const selected = tenant.workspaces.find((w) => w.id === workspace);
+    const viewer = shared ? shared.role === "viewer" : membership?.role === "viewer";
+    const workspace = shared?.workspace.id ?? requested;
+    const selected = shared?.workspace ?? tenant.workspaces.find((w) => w.id === workspace);
     if (viewer && selected?.rejectApiKey) return c.json({ error: "Workspace not found" }, 404);
     if (selected?.needsKey) throw new LinearSignInRequired();
     if (!selected) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
     const wanted = c.req.query("project");
-    if (!wanted && role === "coordinator") return c.json({ error: "a coordinator names its project" }, 400);
+    if (!wanted && (role === "coordinator" || shared)) return c.json({ error: role === "coordinator" ? "a coordinator names its project" : "this link names its project" }, 400);
     await dropIdle(tenant.id);
-    const id = await runInTenant(tenant, () => linearWorkspace.run(selected, async () =>
-      wanted ? viewer ? await sharedProject(wanted, workspace) : (await resolve(workspace, wanted))?.id : null), lookupRevision);
-    if (wanted && !id) return c.json({ error: `no project "${wanted}" in ${workspace}` }, 404);
+    const id = shared ? (wanted === shared.projectId || wanted?.toLowerCase() === shared.name.toLowerCase() ? shared.projectId : null)
+      : await runInTenant(tenant, () => linearWorkspace.run(selected, async () =>
+        wanted ? viewer ? await sharedProject(wanted, workspace) : (await resolve(workspace, wanted))?.id : null), lookupRevision);
+    if (wanted && !id) return c.json({ error: `no project "${wanted}" in ${requested}` }, 404);
+    c.set("linkMember" as never, (shared ? linkMember(shared, account) : undefined) as never);
     if (redis) await redis.waitReady();
     if (hub.closing || lookupRevision !== revision) return restarting();
     c.set("linkRef" as never, (id ? roomRef({ workspace, id }, tenant) : null) as never);
@@ -1019,12 +1044,20 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const lookupRevision = c.get("linkRevision" as never) as number;
     const tenantId = tenants ? tenant.id : undefined;
     const inSocket = <T>(run: () => T) => requestSite.run(siteOf(tenant), run);
-    const current = () => !tenantChangedSince(tenant.id, lookupRevision);
-    const currentToken = async () => !tenants || (await directory.fromToken(c.req.header("authorization")))?.id === tenant.id;
+    const member = c.get("linkMember" as never) as LinkMember | undefined;
+    const account = member?.account ?? tenant.id;
+    const current = () => !tenantChangedSince(tenant.id, lookupRevision) && !tenantChangedSince(account, lookupRevision);
+    const currentToken = async () => !tenants || (await directory.fromToken(c.req.header("authorization")))?.id === account;
     const role = c.req.query("role");
     const resume = c.req.query("resume") === "1";
     const viewer = c.get("linkViewer" as never) as boolean;
     const session = c.get("linkSession" as never) as Session | null;
+    const currentMember = async () => {
+      if (!member) return true;
+      const entry = (await directory.sharedWorkspaces!(account)).find((entry) => entry.id === member.workspace);
+      return entry?.owner.id === tenant.id && entry.workspace.id === ref?.workspace
+        && entry.projectId === ref.id && entry.role === (viewer ? "viewer" : "collaborator");
+    };
     let connection: Connection | null = null;
     let pending: Promise<void> = Promise.resolve();
     const afterOpen = (action: () => Promise<void> | undefined) => {
@@ -1048,7 +1081,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           }
           if (valid() && (!session || await sessionActive(session))) {
             const membership = await directory.fromSession(session);
-            if (membership?.tenant.id === tenant.id && membership.role === (viewer ? "viewer" : "owner")) return true;
+            if (membership?.tenant.id === account) {
+              if (!member && membership.role === (viewer ? "viewer" : "owner")) return true;
+              if (member) {
+                if (await currentMember()) return true;
+                ws.close(RESTART_CODE, "server restart");
+                return false;
+              }
+            }
           }
           end();
           return false;
@@ -1064,28 +1104,33 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           close: (code?: number, reason?: string) => ws.close(code, reason),
           ping: () => {
             if (session) void verify().then((active) => { if (active) raw.ping(); }).catch(unavailable);
+            else if (member) void currentMember().then((active) => {
+              if (active) raw.ping();
+              else ws.close(RESTART_CODE, "server restart");
+            }).catch(unavailable);
             else raw.ping();
           },
           terminate: () => raw.terminate(),
         };
         pending = runInTenant(tenant, async () => {
-          if (role === "coordinator" && !await currentToken()) return ws.close(RESTART_CODE, "server restart");
+          if (role === "coordinator" && (!await currentToken() || !await currentMember())) return ws.close(RESTART_CODE, "server restart");
           if (session && !await verify()) return;
           if (!current() || !linkAvailable()) return ws.close(RESTART_CODE, "server restart");
-          connection = role === "coordinator" ? await hub.joinCoordinator(peer, ref!)
+          connection = role === "coordinator" ? await hub.joinCoordinator(peer, ref!, member)
             : viewer ? await hub.joinViewer(peer, ref, (project) => {
+              if (member) return project.id === ref?.id && project.workspace === ref.workspace;
               const sharedNames = states.get(tenant.id)?.sharedNames;
               return !!sharedNames && Date.now() - sharedNames.at <= 60_000 && !!sharedNames.list?.projects.some(
                 (p) => p.workspace === project.workspace && p.id === project.id);
-            }, resume, tenantId)
-            : await hub.joinPage(peer, ref, resume, tenantId);
+            }, resume, tenantId, member)
+            : await hub.joinPage(peer, ref, resume, tenantId, member);
           if (role === "coordinator" && current() && telemetry) {
             const selected = tenant.workspaces.find((workspace) => workspace.id === ref!.workspace);
             if (selected) telemetry.emit("coordinator_connected", {}, () => usageScope(tenant, selected), tenant.id,
               ({ workspace }) => firstToday(workspace.organization, ref!.id));
             firstConnection(tenant);
           }
-          if (!current()) {
+          if (!current() || (member && lookupRevision !== revision && !await currentMember())) {
             ws.close(RESTART_CODE, "server restart");
             await connection.closed();
           }
@@ -1094,7 +1139,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         if (redis) raw.on("ping", () => inSocket(() => connection?.pong()));
 
       }),
-      onMessage: (event) => afterOpen(() => current() ? connection?.receive(typeof event.data === "string" ? event.data : String(event.data)) : undefined),
+      onMessage: (event, ws) => afterOpen(async () => {
+        if (!current()) return;
+        if (member && !await currentMember()) return ws.close(RESTART_CODE, "server restart");
+        await connection?.receive(typeof event.data === "string" ? event.data : String(event.data));
+      }),
       onClose: () => afterOpen(() => connection?.closed()),
     };
   }));

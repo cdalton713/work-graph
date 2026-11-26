@@ -46,6 +46,23 @@ describe.skipIf(!testRedis)("Redis link state", () => {
     }
   });
 
+  it("loads and rewrites the legacy service room without adding account fields", async () => {
+    const prefix = `test:${randomUUID()}:`;
+    const ref = { workspace: "work", id: "p1", tenant: "owner" };
+    const key = prefix + 'room:["work","p1","owner"]';
+    const before = '1\n{"ref":{"workspace":"work","id":"p1","tenant":"owner"},"queue":[],"asks":[],"coordinators":[],"sockets":[],"progress":[],"agents":null}';
+    const state = redisLinkState(first, prefix);
+    await first.run((client) => client.set(key, before));
+    await first.run((client) => client.set(prefix + "sequence", "1"));
+    expect(await state.read(ref)).toMatchObject({ ref, queue: [], asks: [], coordinators: new Map() });
+    const ask = { id: "ask", key: null, issue: null, from: "worker", body: "Question", at: "" };
+    await state.setAsks(ref, [ask]);
+    expect(await first.run((client) => client.get(key))).toBe(
+      before.replace(/^1/, "2").replace('"asks":[]', '"asks":' + JSON.stringify([ask]))
+        .replace('"coordinators":[],"sockets":[],"progress":[],"agents":null', '"progress":[],"agents":null,"sockets":[],"coordinators":[]'),
+    );
+  });
+
   it("updates last seen at a heartbeat and marks a coordinator lost after its instance dies", async () => {
     const prefix = `test:${randomUUID()}:`;
     const a = redisLinkState(first, prefix, 300);

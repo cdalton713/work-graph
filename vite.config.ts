@@ -28,5 +28,8 @@ export default defineConfig({
   define: { "import.meta.env.WG_CONTRACT_HASH": JSON.stringify(contractHash) },
   plugins: [react(), compressedAssets()],
   // `pnpm dev` serves the page; the API still comes from `node server/main.ts`.
-  server: { proxy: { "/api": { target: "http://127.0.0.1:4747", changeOrigin: false, headers: { origin: "http://127.0.0.1:4747", host: "127.0.0.1:4747" } } } },
+  server: { proxy: {
+    "/api": { target: "http://127.0.0.1:4747", changeOrigin: false, headers: { origin: "http://127.0.0.1:4747", host: "127.0.0.1:4747" } },
+    "/manifest.json": "http://127.0.0.1:4747",
+  } },
 });

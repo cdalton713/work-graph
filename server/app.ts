@@ -700,7 +700,6 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (reason || readOnly) return c.json({ error: reason ?? "Read only" }, 403);
     const tenant = await directory.fromToken(c.req.header("authorization"));
     if (!tenant) return c.json({ error: "Coordinator token required" }, 401);
-    if (await pushLimit(deviceId(tenant.id))) return c.json({ error: "Too many notices" }, 429);
     const input = await c.req.json().catch(() => null);
     if (!noticeKinds.includes(input?.kind) || typeof input.issue !== "string" || !/^[A-Z][A-Z0-9_]*-[0-9]+$/i.test(input.issue)
       || typeof input.project !== "string" || !input.project || typeof input.workspace !== "string" || !input.workspace) {
@@ -709,6 +708,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (tenants && input.recipient !== undefined) return c.json({ error: "The token identifies the recipient" }, 403);
     const recipient = tenants ? { account: tenant.id } : configRecipient(auth?.owners ?? [], input.recipient);
     if ("error" in recipient) return c.json({ error: recipient.error }, recipient.status);
+    if (await pushLimit(deviceId(recipient.account))) return c.json({ error: "Too many notices" }, 429);
     let project;
     if (input.workspace.startsWith("shared:")) {
       const shared = await (pushSharedWorkspaces ?? directory.sharedWorkspaces)?.(tenant.id);

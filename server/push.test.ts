@@ -146,7 +146,7 @@ test("the notice route binds the token to its project, limits requests and retur
     expect((await request("Bearer test")).status).toBe(202);
     expect(listed).toBe(account.id);
     expect(jobs).toHaveLength(1);
-    for (let i = 3; i < 30; ++i) expect((await request("Bearer test")).status).toBe(202);
+    for (let i = 2; i < 30; ++i) expect((await request("Bearer test")).status).toBe(202);
     expect((await request("Bearer test")).status).toBe(429);
   } finally { finish(); await Promise.all(jobs); app.link.stop(); }
 });
@@ -171,4 +171,32 @@ test.each([
       expect((await app.request("/api/push/notices", { method: "POST", headers: { host } })).status).toBe(503);
     } finally { app.link.stop(); }
   } finally { warning.mockRestore(); }
+});
+
+test("config owners have separate budgets shared by device tests and coordinator notices", async () => {
+  const token = "a-link-secret-of-at-least-32-characters";
+  const owners = ["ada@example.com", "owner@example.com"];
+  const dir = await mkdtemp(join(tmpdir(), "wg-recipients-"));
+  const app = createApp({ port: 443, tailnet: null, hosted: { host } }, {
+    dist: "/unused", team: "WG", auth: { ...auth, owners }, readOnly: false, stateDir: dir, pushEnv: env, linkToken: token, watchMs: 0,
+  });
+  const notice = (recipient?: string) => app.request("/api/push/notices", {
+    method: "POST", headers: { host, authorization: "Bearer " + token, "content-type": "application/json" },
+    body: JSON.stringify({ workspace: "missing", project: "project", kind: "merge", issue: "WG-1", recipient }),
+  });
+  try {
+    const missing = await notice();
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toEqual({ error: "name a recipient: this installation has several owners" });
+    expect((await notice("other@example.com")).status).toBe(403);
+    for (let i = 0; i < 30; i++) expect((await notice(owners[0])).status).toBe(404);
+    expect((await notice(owners[0])).status).toBe(429);
+    expect((await notice(owners[1])).status).toBe(404);
+    const data = Buffer.from(JSON.stringify({ email: owners[0], hd: "example.com", exp: Date.now() / 1000 + 600 })).toString("base64url");
+    const cookie = (await serializeSigned("__Host-wg_session", data, auth.secret, { secure: true, path: "/" })).split(";")[0];
+    const response = await app.request("/api/push/devices/" + "0".repeat(64) + "/test", {
+      method: "POST", headers: { host, cookie, origin: "https://" + host, "content-type": "application/json" },
+    });
+    expect(response.status).toBe(429);
+  } finally { app.link.stop(); await rm(dir, { recursive: true, force: true }); }
 });

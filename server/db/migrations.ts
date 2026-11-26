@@ -119,6 +119,21 @@ const migrations = [
     "CREATE INDEX node_claims_holder ON node_claims (holder_user_id)",
     "CREATE INDEX node_claims_connection ON node_claims (connection_id)",
   ],
+  [
+    `CREATE TABLE project_plans (
+      tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      connection_id uuid NOT NULL REFERENCES linear_connections(id) ON DELETE CASCADE,
+      project_id text NOT NULL,
+      version integer NOT NULL CHECK (version > 0),
+      plan jsonb NOT NULL,
+      keymap jsonb NOT NULL,
+      writer_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+      written_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant_id, connection_id, project_id, version)
+    )`,
+    "CREATE INDEX project_plans_connection ON project_plans (connection_id)",
+    "CREATE INDEX project_plans_writer ON project_plans (writer_user_id)",
+  ],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

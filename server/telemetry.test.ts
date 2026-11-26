@@ -103,3 +103,20 @@ it("warns once when an intake key has no usable session secret", () => {
     }
   } finally { warning.mockRestore(); }
 });
+
+it("sends plan versions as numeric log attributes and keeps them out of metric tags", async () => {
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
+  const jobs: Promise<void>[] = [];
+  const telemetry = createTelemetry(env, "service", (job) => jobs.push(job), fetcher)!;
+  telemetry.emit("plan_written", { version: 3, role: "collaborator" }, () => scope);
+  telemetry.emit("plan_written", { version: -1 }, () => scope);
+  telemetry.emit("plan_conflict", {}, () => scope);
+  await Promise.all(jobs);
+  const [metrics, logs] = fetcher.mock.calls;
+  expect(JSON.parse(metrics[1]!.body as string).series.map(({ tags }: { tags: string[] }) => tags))
+    .toEqual([["mode:service", "role:collaborator"], ["mode:service"], ["mode:service"]]);
+  const [written, invalid, conflict] = JSON.parse(logs[1]!.body as string);
+  expect(written).toMatchObject({ message: "plan_written", version: 3, role: "collaborator" });
+  expect(invalid.version).toBeUndefined();
+  expect(conflict.message).toBe("plan_conflict");
+});

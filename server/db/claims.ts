@@ -1,9 +1,9 @@
-import type { Sql } from "./sql.ts";
+import type { Query, Sql } from "./sql.ts";
 
 export const claimJobs = ["dispatch", "review", "ci", "threads", "restack"] as const;
 export type ClaimJob = typeof claimJobs[number];
 
-type Role = "owner" | "collaborator" | "viewer";
+export type ProjectRole = "owner" | "collaborator" | "viewer";
 export type ClaimScope = {
   project: [tenant: string, connection: string, project: string];
   account: string;
@@ -28,20 +28,27 @@ type Operation = { kind: "list" } | { kind: "release"; node: string }
   | { kind: "post"; node: string; job: ClaimJob; lease: number }
   | { kind: "put"; node: string; lease: number };
 
+// Member changes take the same lock. All project plan and claim writes see the
+// latest membership and serialize on a row that exists before the first write.
+export async function lockProjectActor(query: Query, scope: ClaimScope) {
+  const { project, account, membership } = scope;
+  const [owner] = await query<{ id: string }>(`
+    SELECT t.owner_user_id AS id FROM tenants t JOIN linear_connections l ON l.tenant_id = t.id
+    WHERE t.id = $1 AND l.id = $2 FOR NO KEY UPDATE OF t FOR KEY SHARE OF l`, project.slice(0, 2));
+  if (!owner) return;
+  const [actor] = await query<{ id: string; role: ProjectRole | null }>(`
+    SELECT t.owner_user_id AS id, CASE WHEN t.id = $1 AND $5::uuid IS NULL THEN 'owner' ELSE m.role END AS role
+    FROM tenants t JOIN users u ON u.id = t.owner_user_id
+    LEFT JOIN project_members m ON m.user_id = u.id AND m.id = $5
+      AND m.tenant_id = $1 AND m.connection_id = $2 AND m.project_id = $3
+    WHERE t.id = $4 FOR KEY SHARE OF u`, [...project, account, membership ?? null]);
+  return actor;
+}
+
 export function createClaims(sql: Sql) {
   return (scope: ClaimScope, operation: Operation) => sql.transaction(async ({ query }) => {
-    const { project, account, membership } = scope;
-    // The member routes take the same lock. This serializes the live limit and prevents
-    // a former collaborator from inserting a claim after the member change commits.
-    const [owner] = await query<{ id: string }>(`
-      SELECT t.owner_user_id AS id FROM tenants t JOIN linear_connections l ON l.tenant_id = t.id
-      WHERE t.id = $1 AND l.id = $2 FOR NO KEY UPDATE OF t`, project.slice(0, 2));
-    if (!owner) return { status: 404 } as const;
-    const [actor] = await query<{ id: string; role: Role | null }>(`
-      SELECT t.owner_user_id AS id, CASE WHEN t.id = $1 AND $5::uuid IS NULL THEN 'owner' ELSE m.role END AS role
-      FROM tenants t LEFT JOIN project_members m ON m.user_id = t.owner_user_id AND m.id = $5
-        AND m.tenant_id = $1 AND m.connection_id = $2 AND m.project_id = $3
-      WHERE t.id = $4`, [...project, account, membership ?? null]);
+    const { project } = scope;
+    const actor = await lockProjectActor(query, scope);
     if (!actor?.role) return { status: 404 } as const;
     const { id, role } = actor;
     if (operation.kind === "list") {
@@ -56,6 +63,16 @@ export function createClaims(sql: Sql) {
         AND (c.holder_user_id = $5 OR $6 = 'owner') RETURNING 1`, [...node, id, role]);
       if (removed.length) return { status: 204 } as const;
     } else {
+      const [stored] = await query<{ nodes: { key: string; kind: string }[] }>(`
+        SELECT plan->'nodes' AS nodes FROM project_plans
+        WHERE tenant_id = $1 AND connection_id = $2 AND project_id = $3 ORDER BY version DESC LIMIT 1`, project);
+      if (stored) {
+        const target = stored.nodes.find(({ key }) => key === operation.node);
+        if (!target) return { status: 404 } as const;
+        if (role === "collaborator" && ["merge-point", "ship-point", "ops"].includes(target.kind)) {
+          return { status: 403 } as const;
+        }
+      }
       const written = await query<Claim & { action: "claimed" | "renewed" | "taken_over" }>(`
         WITH prior AS (
           SELECT holder_user_id, job, lease_until FROM node_claims c WHERE ${onProject} AND node_key = $4
@@ -67,7 +84,7 @@ export function createClaims(sql: Sql) {
               OR (SELECT count(*) FROM node_claims c WHERE ${onProject} AND lease_until > now()) < 200)
           ON CONFLICT (tenant_id, connection_id, project_id, node_key) DO UPDATE SET
             holder_user_id = EXCLUDED.holder_user_id,
-            job = CASE WHEN c.holder_user_id = EXCLUDED.holder_user_id THEN c.job ELSE EXCLUDED.job END,
+            job = EXCLUDED.job,
             claimed_at = CASE WHEN c.holder_user_id = EXCLUDED.holder_user_id THEN c.claimed_at ELSE now() END,
             renewed_at = now(), lease_until = EXCLUDED.lease_until
           WHERE c.holder_user_id = EXCLUDED.holder_user_id OR ($7 IS NOT NULL AND c.lease_until <= now())

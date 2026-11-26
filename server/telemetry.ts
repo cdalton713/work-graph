@@ -9,6 +9,8 @@ const sites = new Set([
 const claimFields = { job: claimJobs, role: ["owner", "collaborator"] } as const;
 
 const fields = {
+  plan_written: { version: "positiveInteger", role: claimFields.role },
+  plan_conflict: {},
   node_claimed: claimFields,
   claim_conflict: claimFields,
   sign_up: {},
@@ -34,7 +36,8 @@ const fields = {
 
 type Event = keyof typeof fields;
 type Fields<E extends Event> = E extends Event
-  ? Partial<{ [K in keyof typeof fields[E]]: typeof fields[E][K] extends readonly string[] ? typeof fields[E][K][number] : never }>
+  ? Partial<{ [K in keyof typeof fields[E]]: typeof fields[E][K] extends readonly string[] ? typeof fields[E][K][number]
+    : typeof fields[E][K] extends "positiveInteger" ? number : never }>
   : never;
 export interface UsageWorkspace { id: string; organization: string; configId?: string }
 export interface UsageScope {
@@ -44,7 +47,7 @@ export interface UsageScope {
 }
 type Resolve = () => UsageScope | null | Promise<UsageScope | null>;
 type Claims = (scope: UsageScope) => boolean | Promise<boolean>;
-type Log = Record<string, string>;
+type Log = Record<string, string | number>;
 type Metric = { metric: string; tags: string[]; type: 1; interval: 1; points: [{ timestamp: number; value: number }] };
 type Entry = { tenant: string; cancelled?: boolean; prepare(): Promise<{ metric: Metric; log: Log } | null> };
 
@@ -147,9 +150,11 @@ export function createTelemetry(
     emit<E extends Event>(event: E, input: Fields<NoInfer<E>>, resolve: Resolve, tenant = "", claim?: Claims) {
       if (!Object.hasOwn(fields, event)) return;
       const accepted: Log = {};
-      for (const [field, allowed] of Object.entries(fields[event]) as [string, readonly string[]][]) {
+      for (const [field, allowed] of Object.entries(fields[event]) as [string, readonly string[] | "positiveInteger"][]) {
         const value = (input as Record<string, unknown>)[field];
-        if (typeof value === "string" && allowed.includes(value)) accepted[field] = value;
+        if (allowed === "positiveInteger") {
+          if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) accepted[field] = value;
+        } else if (typeof value === "string" && allowed.includes(value)) accepted[field] = value;
       }
       if (queue.length + active.length === queueLimit) queue.shift();
       const timestamp = Math.floor(now() / 1000);
@@ -157,7 +162,7 @@ export function createTelemetry(
         const scope = await resolve();
         if (this.cancelled || !scope?.enabled || ![scope.workspace.id, scope.workspace.organization, scope.workspace.configId].some((id) => id && workspaceIds.has(id.toLowerCase()))) return null;
         if (claim && !await claim(scope)) return null;
-        const tags = [`mode:${mode}`, ...Object.entries(accepted).map(([name, value]) => `${name}:${value}`)];
+        const tags = [`mode:${mode}`, ...Object.entries(accepted).flatMap(([name, value]) => typeof value === "string" ? [`${name}:${value}`] : [])];
         return {
           metric: { metric: `workgraph.${event}`, type: 1, interval: 1, points: [{ timestamp, value: 1 }], tags },
           log: { message: event, ddsource: "nodejs", service: "workgraph", ddtags: tags.join(","), ...accepted,

@@ -17,7 +17,9 @@ import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from ".
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal, sharedRoutes } from "./access.ts";
 import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
+import { planRoutes } from "./plans.ts";
 import { claimRoutes } from "./claims.ts";
+import type { ClaimScope } from "./db/claims.ts";
 import { shareRoutes, type ShareAccess } from "./shares.ts";
 import { type Auth, type Session, LOGIN_PATH, authRoutes, clearSessionCookie, sessionOf } from "./auth.ts";
 import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
@@ -442,7 +444,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const ms = clock() - start;
     const path = joining ? "/join/[link]" :
       /^\/api\/account(?:\/|$)/.test(c.req.path) ? "/api/account" :
-      /^\/api\/projects\/[^/]+\/claims(?:\/|$)/.test(c.req.path) ? "/api/projects/[project]/claims" : new URL(c.req.url).pathname;
+      /^\/api\/projects\/[^/]+\/claims(?:\/|$)/.test(c.req.path) ? "/api/projects/[project]/claims" :
+      /^\/api\/projects\/[^/]+\/plan(?:\/|$)/.test(c.req.path) ? "/api/projects/[project]/plan" : new URL(c.req.url).pathname;
     if (!(c.error instanceof RedisUnavailable || c.error instanceof RedisCommandFailed)
         && (ms > SLOW_MS || c.res.status >= 500)) console.warn(`wg api: ${c.req.method} ${path} ${c.res.status} ${Math.round(ms)}ms`);
   });
@@ -541,7 +544,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }
   }
 
-  app.route("/api", claimRoutes(accountStore && (async (c) => {
+  const projectWriteAccess = accountStore && (async (c: Context, plan = false) => {
     const header = (name: string) => c.req.header(name);
     const authorization = header("authorization");
     const method = c.req.method;
@@ -554,8 +557,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const membership = session ? await directory.fromSession(session) : null;
     const account = authorization ? await directory.fromToken(authorization) : membership?.tenant;
     if (!account) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
-    if (!read && (readOnly || membership?.role === "viewer" || (!authorization && method !== "DELETE"))) {
-      return c.json({ error: "A coordinator token is required to claim nodes" }, 403);
+    if (!read && (readOnly || membership?.role === "viewer" || (!authorization && (plan || method !== "DELETE")))) {
+      return c.json({ error: plan ? "A coordinator token is required to write plans" : "A coordinator token is required to claim nodes" }, 403);
     }
 
     const id = c.req.param("id")!;
@@ -569,18 +572,25 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const workspace = isShared ? shared?.workspace
       : account.workspaces.find((entry) => entry.id === (selected || account.workspaces[0]?.id));
     const connection = workspace?.connectionId;
-    if (!workspace || !connection || workspace.needsKey || (header("x-project") && header("x-project") !== id)
-      || (!shared && await shareProject(owner, workspace, id) === null)) {
+    if (!workspace || !connection || workspace.needsKey || (header("x-project") && header("x-project") !== id)) {
+      return c.json({ error: "Project not found" }, 404);
+    }
+    const name = shared && (!plan || read) ? shared.name : await shareProject(owner, workspace, id);
+    if (name === null) {
       return c.json({ error: "Project not found" }, 404);
     }
     const accounts = await accountStore();
     if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
     return {
       claims: accounts.claims,
-      scope: { project: [owner.id, connection, id], account: account.id, membership: shared?.id.slice(sharedPrefix.length) },
+      plans: accounts.plans,
+      name,
+      scope: { project: [owner.id, connection, id], account: account.id, membership: shared?.id.slice(sharedPrefix.length) } satisfies ClaimScope,
       usage: () => usageScope(owner, workspace),
     };
-  }), telemetry));
+  });
+  app.route("/api", claimRoutes(projectWriteAccess, telemetry));
+  app.route("/api", planRoutes(projectWriteAccess && ((c) => projectWriteAccess(c, true)), telemetry));
   // wg doctor uses status. wg wake uses project presence.
   const coordinatorReads = [/^\/api\/status$/, /^\/api\/projects\/[^/]+\/presence$/];
   const linkMember = (entry: SharedWorkspace, account: Tenant): LinkMember => ({

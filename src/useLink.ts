@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { type Agents, type Ask, type Envelope, type Presence, type Progress, type ProjectRef, RECONNECT_GRACE_MS, plannedReconnect, plannedRetryAfterFailure, projectKey, reconnectImmediately } from "./lib/link";
+import { type AgentReplyResult, type Agents, type Ask, type Envelope, type Presence, type Progress, type ProjectRef, RECONNECT_GRACE_MS, plannedReconnect, plannedRetryAfterFailure, projectKey, reconnectImmediately } from "./lib/link";
 import { pageLink } from "./lib/site";
 
 export interface LinkState {
@@ -17,10 +17,12 @@ export interface LinkState {
  * The page side of `wg-link/1`: one socket for the open project, or for the overview (`ref` null). It
  * reconnects after a drop. `onChanged` runs when the server says that an issue of the project changed.
  */
-export function useLink(ref: ProjectRef | null, onChanged: () => void): LinkState {
+export function useLink(ref: ProjectRef | null, onChanged: () => void, onAgentReply?: (result: AgentReplyResult) => void): LinkState {
   const [state, setState] = useState<LinkState>({ presence: new Map(), asks: [], progress: [], asksBy: new Map(), agentsBy: new Map(), connected: false });
   const changed = useRef(onChanged);
   changed.current = onChanged;
+  const agentReply = useRef(onAgentReply);
+  agentReply.current = onAgentReply;
   const key = ref ? projectKey(ref) : "";
   useEffect(() => {
     let socket: WebSocket | null = null, timer = 0, stopped = false, delay = 1000;
@@ -49,6 +51,7 @@ export function useLink(ref: ProjectRef | null, onChanged: () => void): LinkStat
         }
         else if (m.type === "progress") setState((s) => ({ ...s, progress: (m.payload as { nodes: Progress[] }).nodes }));
         else if (m.type === "agents") setState((s) => ({ ...s, agentsBy: new Map(s.agentsBy).set(projectKey(m.project), m.payload as Agents) }));
+        else if (m.type === "agent-reply-result") agentReply.current?.(m.payload as AgentReplyResult);
         else if (m.type === "changed") {
           resume = false;
           changed.current();

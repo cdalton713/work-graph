@@ -239,9 +239,9 @@ describe("movesWithAgents", () => {
   const report = (agents: ReturnType<typeof agent>[], sent = "2026-11-20T11:59:30Z") => ({ at: sent, agents });
   it("adds each agent that waits at a prompt as a move first, and marks the move of its issue", () => {
     expect(movesWithAgents([move], report([agent("c", "blocked"), agent("w1", "waiting", "CD-1"), agent("w2", "blocked", "CD-2"), agent("w3", "working", "CD-3"), agent("w4", "done", "CD-4")]), at)).toEqual([
-      { identifier: "coordinator", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", idle: true, pullRequests: [], updatedAt: "2026-11-20T11:50:00Z" },
-      { identifier: "CD-2", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", idle: true, pullRequests: [], updatedAt: "2026-11-20T11:50:00Z" },
-      { ...move, idle: true, why: "Agent waits for your input · Merge #7" },
+      { identifier: "coordinator", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", idle: true, pullRequests: [], updatedAt: "2026-11-20T11:50:00Z", agentWait: agent("c", "blocked") },
+      { identifier: "CD-2", title: "Allow the push?", why: "Agent waits at a prompt in Orca:", idle: true, pullRequests: [], updatedAt: "2026-11-20T11:50:00Z", agentWait: agent("w2", "blocked", "CD-2") },
+      { ...move, idle: true, why: "Agent waits for your input · Merge #7", agentWait: agent("w1", "waiting", "CD-1") },
     ]);
   });
   it("keeps the moves as they are with no report, or with a report that is older than 3 minutes", () => {

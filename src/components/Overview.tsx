@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { inboxReply, latestReplyPrompt, type InboxReply } from "../lib/reply";
+import { agentReplyLine, applyAgentReplyResult, canReplyToAgent, inboxReply, latestReplyPrompt, type AgentReplyReceipt, type InboxReply } from "../lib/reply";
 import { Reply } from "./Reply";
 import { ownerWords } from "../lib/words";
 import { type OverviewData, type OverviewFilter, type OverviewRow, type YourMove, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
 import { ageText, type Signal } from "../lib/graph";
 import { PROJECT_STATES, type ProjectStateName, type Stall, overviewTitle } from "../lib/attention";
-import { type Agents, type Ask, type Presence, agentName, agentState, agentsFresh, agentsShown } from "../lib/link";
+import { type AgentReplyResult, type Agents, type Ask, type Presence, type ProjectRef, agentName, agentNeeds, agentState, agentsFresh, agentsShown, projectKey } from "../lib/link";
+import { site } from "../lib/site";
+import { useLink } from "../useLink";
 import type { Project, ProjectList } from "../lib/types";
 import { CopyButton, Lamp, Picker, PrLinks, Rich } from "./ui";
 
@@ -72,6 +74,18 @@ function InboxAnswer({ target, project, expanded, sent, onSent }: {
   );
 }
 
+type ProjectReply = AgentReplyReceipt & { project: ProjectRef };
+
+function AgentReplyUpdates({ project, onResult }: { project: ProjectRef; onResult: (result: AgentReplyResult) => void }) {
+  // The link replays completed replies on a project socket, including after a reload.
+  useLink(project, () => {}, onResult);
+  return null;
+}
+
+function messageCut(said: string): boolean {
+  return said.endsWith("…") && [...said].length >= 500;
+}
+
 export interface OverviewProps {
   /** The project list alone, until the first overview answer comes. */
   list: OverviewData | ProjectList;
@@ -99,9 +113,34 @@ export interface OverviewProps {
 export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, readOnly = false, initiative = null, onInitiative, states = NO_STATES, onStates, budget = [] }: OverviewProps) {
   const words = ownerWords();
   const stateLabel = (state: ProjectStateName) => state === "waits" ? words.waitsFilter : STATE_DISPLAY[state].label;
+  const viewerWorkspaces = useMemo(() => new Set(given.workspaces.filter((w) => w.role === "viewer").map((w) => w.id)), [given.workspaces]);
+  const sharedWorkspaces = new Set(given.workspaces.filter((w) => w.role).map((w) => w.id));
   const list = useMemo<OverviewData | ProjectList>(() => ("summaries" in given && (asks?.size || agents?.size)
-    ? { ...given, summaries: given.summaries.map((s) => ({ ...s, you: movesWithAgents(movesWithAsks(s.you, asks?.get(summaryKey(s)), s.moveImpacts), agents?.get(summaryKey(s)), now, s.moveImpacts) })) }
-    : given), [given, asks, agents, now]);
+    ? { ...given, summaries: given.summaries.map((s) => {
+      if (readOnly || viewerWorkspaces.has(s.workspace)) return s;
+      return { ...s, you: movesWithAgents(movesWithAsks(s.you, asks?.get(summaryKey(s)), s.moveImpacts), agents?.get(summaryKey(s)), now, s.moveImpacts) };
+    }) }
+    : given), [given, asks, agents, now, readOnly, viewerWorkspaces]);
+  const receiptStore = `wg-agent-replies:${site.user ?? "local"}`;
+  const [receipts, setReceipts] = useState<ProjectReply[]>(() => {
+    try {
+      const saved: unknown = JSON.parse(sessionStorage.getItem(receiptStore) ?? "[]");
+      return Array.isArray(saved) ? saved : [];
+    } catch { return []; }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem(receiptStore, JSON.stringify(receipts)); } catch { /* storage can be disabled */ }
+  }, [receiptStore, receipts]);
+  const pendingProjects = new Map(receipts
+    .filter(({ project, result }) => !readOnly && !result && !sharedWorkspaces.has(project.workspace))
+    .map(({ project }) => [projectKey(project), project]));
+  const receiveResult = (key: string, result: AgentReplyResult) => setReceipts((previous) => {
+    const index = previous.findIndex((receipt) => projectKey(receipt.project) === key && receipt.id === result.id);
+    if (index < 0) return previous;
+    const receipt = previous[index];
+    const updated = applyAgentReplyResult(receipt, result);
+    return updated === receipt ? previous : previous.map((item, i) => i === index ? { ...updated, project: receipt.project } : item);
+  });
   const [filter, setFilter] = useState(stored);
   useEffect(() => {
     try { localStorage.setItem(STORE, JSON.stringify({ ...filter, text: "" })); } catch { /* the filter is a convenience */ }
@@ -124,7 +163,6 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const [expanded, setExpanded] = useState<string | null>(null);
   const [sentIssues, setSentIssues] = useState<Map<string, boolean>>(() => new Map());
   const [sentWorkers, setSentWorkers] = useState<Map<string, SentWorker>>(() => new Map());
-  const readOnlyWorkspaces = new Set(list.workspaces.filter((w) => w.role === "viewer").map((w) => w.id));
   const inbox = useMemo<InboxRow[]>(() => rankMoves<InboxRow>(inboxProjects.flatMap(({ project, summary, stalls }) => [
     ...(summary?.you ?? []).map((move) => ({ project, move, stall: null })),
     ...stalls.map((stall) => ({
@@ -230,7 +268,10 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
 
   const renderRow = ({ project: p, summary: s, attention }: OverviewRow, at: number) => {
       const closed = p.statusType === "completed" || p.statusType === "canceled";
-      const reported = agents?.get(summaryKey(p));
+      const key = summaryKey(p);
+      const reported = !readOnly && !viewerWorkspaces.has(p.workspace ?? "") ? agents?.get(key) : undefined;
+      const owner = !readOnly && !sharedWorkspaces.has(p.workspace ?? "");
+      const project = { id: p.id, workspace: p.workspace ?? site.defaultWorkspace };
       const shown = agentsShown(reported, now);
       const fresh = agentsFresh(reported, now);
       const { state, reason } = attention;
@@ -274,8 +315,11 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
           {shown.length > 0 && (
             <ul className={`ov-agents${fresh ? "" : " is-stale"}`} aria-label={`Agents of ${p.name} in Orca`}>
               {!fresh && <li className="ov-agents-note is-warning">agent view stopped · last report {ageText(now - Date.parse(reported!.at))} · wg agents does not run</li>}
+              {owner && reported?.replies !== true && <li className="ov-agents-note">To turn on replies, set <code>agent_replies</code> to <code>true</code> and run <code>wg agents</code> in your Orca terminal.</li>}
               {shown.map((a) => {
                 const state = agentState(a);
+                const receipt = owner ? receipts.find((r) => projectKey(r.project) === key && r.agent === a.id) : undefined;
+                const status = receipt && agentReplyLine(receipt);
                 return (
                   <li key={a.id}>
                     <details className="ov-agent">
@@ -286,8 +330,18 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                         <span className="ov-agent-age mono">{a.at ? ageText(now - Date.parse(a.at)) : ""}</span>
                         <span className="ov-agent-said">{a.said || "no message yet"}</span>
                       </summary>
-                      <p className="ov-agent-full">{a.said || "no message yet"}</p>
+                      <p className="ov-agent-full">{a.said || "no message yet"}{messageCut(a.said) && <span className="ov-agents-note"> (message cut at 500 characters)</span>}</p>
+                      {agentNeeds(a) && <p className="ov-agent-full">answer this agent in Orca</p>}
+                      {canReplyToAgent(a, reported, now, owner) && (!receipt || receipt.result) &&
+                        <div className="ov-agent-full">
+                          <Reply label="Reply to the agent" placeholder="Write a reply" send={async (body) => {
+                            const { id } = await api.agentReply(project.id, project.workspace, a.id, body);
+                            setReceipts((previous) => [...previous.filter((r) => projectKey(r.project) !== key || r.agent !== a.id),
+                              { id, agent: a.id, project }]);
+                          }} />
+                        </div>}
                     </details>
+                    {status && <p className={`ov-agent-reply-status sig-fg-${status.signal}`} role="status">{status.text}</p>}
                   </li>
                 );
               })}
@@ -299,6 +353,8 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
 
   return (
     <div className="overview" ref={root}>
+      {[...pendingProjects].map(([key, project]) =>
+        <AgentReplyUpdates key={key} project={project} onResult={(result) => receiveResult(key, result)} />)}
       <div className="ov-head">
         <h1>Overview</h1>
         <p className={`ov-sum${waiting.length ? " is-you" : ""}`} role="status">
@@ -319,18 +375,19 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
           <ul>
             {shownInbox.map(({ project: p, move: m, stall }) => {
               const projectKey = summaryKey(p);
-              const target = inboxReply(m, readOnly || readOnlyWorkspaces.has(p.workspace ?? ""));
+              const target = inboxReply(m, readOnly || viewerWorkspaces.has(p.workspace ?? ""));
               const key = target?.kind === "worker" ? `${projectKey}:worker:${target.ask.id}`
                 : target?.kind === "issue" ? `${projectKey}:issue:${target.issueId}`
-                : `${projectKey}:${m.identifier}:${stall?.kind ?? ""}`;
+                : `${projectKey}:${m.agentWait?.id ?? m.identifier}:${stall?.kind ?? ""}`;
               const open = expanded === key;
               const sent = target?.kind === "worker" ? sentWorkers.has(key) : target?.kind === "issue" && (target.sent || sentIssues.has(key));
               const detailId = `inbox-detail-${encodeURIComponent(key)}`;
               const go = () => onOpen(p, stall ? stall.issue : m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier);
-              const age = m.updatedAt ? ageText(now - Date.parse(m.updatedAt)) : null;
+              const stamp = m.agentWait?.at ?? m.updatedAt;
+              const age = stamp ? ageText(now - Date.parse(stamp)) : null;
               // A reason that is the title (a decision: its question) shows once.
               const why = overviewMoveReason(m.why);
-              const title = why.trim() !== m.title.trim() && !why.includes(m.title.trim()) ? m.title : null;
+              const title = m.agentWait?.said !== m.title && why.trim() !== m.title.trim() && !why.includes(m.title.trim()) ? m.title : null;
               const effect = [
                 m.idle && !stall && "agent waits",
                 m.blocks && `holds back ${m.blocks}, ${m.unblocks ?? 0} can start`,
@@ -348,6 +405,11 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                           <span className="inbox-why">{why}</span>
                           {title && <span className="inbox-title">{title}</span>}
                         </span>
+                        {m.agentWait && <>
+                          {m.agentWait.said && <span className="inbox-agent-message">{m.agentWait.said}</span>}
+                          {messageCut(m.agentWait.said) && <span className="inbox-effect">Message cut at 500 characters.</span>}
+                          <span className="inbox-effect">answer this agent in Orca</span>
+                        </>}
                         {effect && <span className="inbox-effect">{effect}</span>}
                         {sent && <span className="inbox-effect sig-fg-done" role="status">sent</span>}
                       </span>

@@ -172,6 +172,14 @@ The default is `false`. Stop the launchd watcher with `wg agents --uninstall` if
 Then run `wg agents` in your own Orca terminal and keep it open. The launchd watcher can show
 agents on the page, but it cannot send replies. Use Orca directly for a prompt with choices.
 
+On the Overview, open the line of a stopped coordinator or worker to read its last message and send a reply.
+A prompt that needs an answer stays in the inbox. Answer that agent in Orca.
+
+The line shows `sent` when the server queues the reply and `delivered` when Orca confirms it.
+If Orca refuses the reply, the line gives the reason. If the line shows `not confirmed`, check Orca
+before you send the reply again. If no watcher takes the reply within two minutes, the line shows
+`not delivered: wg agents does not run`. Reloading the tab keeps the latest reply status.
+
 The watcher checks that the agent is still idle in this effort before it sends Orca mail. This
 check is best effort because Orca can change the agent state before it accepts the mail.
 Mail waits for a running turn to end. A delivered result means that Orca stored the mail.

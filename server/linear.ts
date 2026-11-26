@@ -280,7 +280,7 @@ export const sharedLinear = new AsyncLocalStorage<{ projectId: string; writer?: 
 export class LinearAccessRefused extends Error {}
 
 export async function gql(query: string, variables: Record<string, unknown> = {},
-  options?: { accessMutation: true }): Promise<Data> {
+  options?: { manageAccess: true }): Promise<Data> {
   const mutation = isMutation(query);
   const shared = sharedLinear.getStore();
   const memberWrite = mutation && shared;
@@ -353,8 +353,15 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         /not.?found/i.test(error.extensions?.code ?? "") || /not found/i.test(error.message)))) {
         throw new LinearError("Resource not found in the shared project", 404);
       }
-      if (options?.accessMutation && !rated && response.status < 500 && (response.status === 403 || body?.errors?.length)) {
-        let reason = body?.errors?.[0]?.message || "Linear refused the access change";
+      const denied = options?.manageAccess && body?.errors?.find(({ message, extensions }) => {
+        const code = extensions?.code ?? "";
+        if (/internal|validation|bad_user_input/i.test(code)) return false;
+        return /^(forbidden|unauthorized|permission_denied)$/i.test(code) ||
+          (response.status !== 400 &&
+            /forbidden|(?:not |un)authorized|(?:do not|don't|does not) have (?:the )?permission|insufficient permissions|plan (?:does not|doesn't) (?:permit|allow|support)/i.test(message));
+      });
+      if (options?.manageAccess && !rated && response.status < 500 && (denied || (response.status === 403 && !body?.errors?.length))) {
+        let reason = (denied ?? body?.errors?.[0])?.message || "Linear refused the access change";
         for (const secret of new Set([key, credential, sentCredential])) {
           if (secret) reason = reason.replaceAll(secret, "[redacted]");
         }
@@ -362,7 +369,7 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       }
       const failure: Failure = rated ? "rate" : response.status >= 500 ? "server" : "final";
       const retryAfter = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;
-      return { failure, error: new LinearError(rated ? `Linear rate limit: ${detail}` : `Linear: ${detail}`, rated ? 429 : 502), retryAfter };
+      return { failure, error: new LinearError(rated ? `Linear rate limit: ${detail}` : options?.manageAccess ? "Linear request failed" : `Linear: ${detail}`, rated ? 429 : 502), retryAfter };
     });
     if ("data" in result) return result.data;
     if (tryNumber >= MAX_TRIES || !retryable(result.failure, mutation)) throw result.error;

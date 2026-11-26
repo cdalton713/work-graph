@@ -8,6 +8,7 @@ export type MemberRole = "viewer" | "collaborator";
 export const MAX_PROJECT_MEMBERS = 50;
 
 type ProjectScope = [tenant: string, connection: string, project: string];
+export type LinearIdentity = { email: string; linearUserId: string; linearOrgId: string };
 const scope = "tenant_id = $1 AND connection_id = $2 AND project_id = $3";
 const live = "revoked_at IS NULL";
 type Share = { id: string; tenant: string; connection: string; project: string; name: string; kind: ShareKind };
@@ -60,10 +61,23 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
     },
 
     async accessMember(project: ProjectScope, member: string) {
-      const [row] = await sql.query<{ role: MemberRole; email: string }>(`
-        SELECT m.role, u.email FROM project_members m JOIN users u ON u.id = m.user_id
+      const [row] = await sql.query<LinearIdentity & { role: MemberRole }>(`
+        SELECT m.role, u.email, u.linear_user_id AS "linearUserId", u.linear_org_id AS "linearOrgId" FROM project_members m JOIN users u ON u.id = m.user_id
         WHERE ${scope} AND m.user_id = $4`, [...project, member]);
       return row;
+    },
+
+    async reserveAccessInvite(project: ProjectScope, member: string) {
+      const [row] = await sql.query<{ attempt: string }>(`UPDATE project_members SET access_invited_at = now()
+        WHERE ${scope} AND user_id = $4 AND role = 'collaborator'
+        AND (access_invited_at IS NULL OR access_invited_at <= now() - interval '10 minutes')
+        RETURNING access_invited_at::text AS attempt`, [...project, member]);
+      return row?.attempt;
+    },
+
+    async releaseAccessInvite(project: ProjectScope, member: string, attempt: string) {
+      await sql.query(`UPDATE project_members SET access_invited_at = NULL
+        WHERE ${scope} AND user_id = $4 AND access_invited_at = $5`, [...project, member, attempt]);
     },
 
     async requestAccess(project: ProjectScope, membership: string) {

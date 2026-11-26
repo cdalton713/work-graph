@@ -1259,13 +1259,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         shares: accounts.shares,
         project: [shared.owner.id, connection, shared.projectId],
         membership: shared.id.slice("shared:".length),
-        email: account.user.email,
+        identity: account.user,
         workspace: shared.workspace,
         ownerRun: runLinear(shared.owner, shared.workspace),
         ownRun: writer && runLinear(tenant, writer),
         usage: () => usageScope(shared.owner, shared.workspace),
       };
-    }, telemetry));
+    }, telemetry, clock));
 
     app.route("/api", shareRoutes({
       runLinear,

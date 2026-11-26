@@ -106,9 +106,18 @@ export function shareRoutes({ access, project, limit, pageUrl, telemetry, runLin
     const member = uuid.test(id) ? await account.accounts.shares.accessMember(key, id) : null;
     if (!member) throw missingAccess();
     if (member.role !== "collaborator") throw new LinearError("Only collaborators need Linear access", 403);
-    return addLinearAccess(c, runLinear(account.tenant, workspace), workspace, projectId, member.email, (status) => {
-      if (status === "refused") telemetry?.emit("access_refused", {}, resolve, key[0]);
-      else telemetry?.emit("access_added", { method: status }, resolve, key[0]);
+    const { shares } = account.accounts;
+    return addLinearAccess(c, {
+      run: runLinear(account.tenant, workspace),
+      workspace,
+      project: projectId,
+      identity: member,
+      reserve: () => shares.reserveAccessInvite(key, id),
+      release: (attempt) => shares.releaseAccessInvite(key, id, attempt),
+      record(status) {
+        if (status === "refused") telemetry?.emit("access_refused", {}, resolve, key[0]);
+        else telemetry?.emit("access_added", { method: status }, resolve, key[0]);
+      },
     });
   }));
   async function changeMember(c: Context, edit = false) {

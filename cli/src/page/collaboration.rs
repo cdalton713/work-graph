@@ -864,7 +864,7 @@ struct PullOptions<'a> {
     accept: bool,
     dir: &'a Path,
 }
-fn shell_quote(path: &Path) -> String {
+pub(crate) fn shell_quote(path: &Path) -> String {
     let text = path.to_string_lossy();
     if !text.is_empty()
         && text

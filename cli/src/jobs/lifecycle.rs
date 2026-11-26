@@ -402,12 +402,13 @@ pub(super) fn done(
                 .split_once("::")
                 .map(|(_, p)| Path::new(p))
         })
-        .unwrap_or(ctx.dir);
+        .filter(|p| !p.as_os_str().is_empty());
+    let gh_dir = cwd.unwrap_or(ctx.dir);
     let pr = if let Some(pr) = row["pr"].as_str() {
         pr.to_owned()
     } else {
         let result = verify::gh(
-            cwd,
+            gh_dir,
             &[
                 "pr",
                 "list",
@@ -438,7 +439,7 @@ pub(super) fn done(
         })?;
         pr
     };
-    if let Err(e) = attach(ctx, id, &pr, cwd) {
+    if let Err(e) = attach(ctx, id, &pr, gh_dir) {
         eprintln!(
             "Warning: could not attach PR #{pr} to {}: {e}",
             field(entry, "identifier")?
@@ -460,7 +461,7 @@ pub(super) fn done(
             Some("Merged" | "Done")
         ) && row["parent"] != target
         {
-            let info = verify::gh(cwd, &["pr", "view", &pr, "--json", "baseRefName"])?;
+            let info = verify::gh(gh_dir, &["pr", "view", &pr, "--json", "baseRefName"])?;
             if info["baseRefName"] != target {
                 println!(
                     "FAIL pr: {below_key} below it merged, but the base of PR #{pr} is {}, not {target}: restack it",
@@ -480,7 +481,7 @@ pub(super) fn done(
             println!("the PR below merged: parent {target}, lower origin/{target}");
         }
     }
-    let result = verify::run(ctx, k, cwd)?;
+    let result = verify::run(ctx, k, cwd.unwrap_or(Path::new(".")))?;
     let status = snap.statuses.get(k).map(String::as_str);
     let row = ctx.km()?["run"]["nodes"][k].clone();
     let review_ok = matches!(row["merge_review"].as_str(), Some("clean" | "accepted"))

@@ -196,33 +196,34 @@ pub(super) fn run(ctx: &Context, key: &str, cwd: &Path) -> Result<u8, String> {
             if rec["exit"] == 0 {
                 return Ok(format!("passed on {sha:.10}"));
             }
-            if let Some(why) = row["tests_accepted"]
-                .as_str()
-                .and_then(|s| s.strip_prefix(&format!("{sha}:")))
-                .filter(|s| !s.trim().is_empty())
+            if !rec["exit"].is_null()
+                && let Some(why) = row["tests_accepted"]
+                    .as_str()
+                    .and_then(|s| s.strip_prefix(&format!("{sha}:")))
             {
+                if why.trim().is_empty() {
+                    return Err("acceptance needs a reason".into());
+                }
                 return Ok(format!("accepted: {why}"));
             }
-            Err(format!("command exit: {}", rec["exit"]))
+            Err(format!(
+                "command exit: {}",
+                if rec["exit"].is_null() {
+                    "None".into()
+                } else {
+                    rec["exit"].to_string()
+                }
+            ))
         })(),
     );
     if node["role"] != "integration" {
         check(
             "owns",
             (|| {
-                let files = git(cwd, &["diff", "--name-only", &format!("{lower}...HEAD")])?;
                 if node["owns"].as_array().is_none_or(Vec::is_empty) {
                     return Err("node has no owns".into());
                 }
-                let patterns = ["owns", "shares"]
-                    .into_iter()
-                    .filter_map(|f| node[f].as_array())
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(glob::Pattern::new)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                if files.lines().all(|f| patterns.iter().any(|p| p.matches(f))) {
+                if crate::local::ownership_diff(node, lower, cwd)? {
                     Ok("diff stays in owns/shares".into())
                 } else {
                     Err("files outside owns/shares".into())

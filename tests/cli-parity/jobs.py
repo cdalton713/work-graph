@@ -216,13 +216,35 @@ print(json.dumps(r))
         git("-c","user.name=Example","-c","user.email=local@example.invalid","commit","-qm","change")
         (root/"sha").write_text(git("rev-parse","HEAD"))
         km=read(core/"keymap.json")
-        km["run"]["nodes"]["a"]={"branch":"topic","parent":"main","lower":"main","path":str(work),
+        km["run"]["nodes"]["a"]={"branch":"topic","parent":"main","lower":"main",
                                  "dispatch":"dispatch-id","pr":"1","agent":"codex"}
         write(core/"keymap.json",km)
         issue["state"]["name"]="In Progress"
         run("verify","a",code=1)
         run("evidence","a")
-        assert read(core/"evidence/a.json")["sha"]==(root/"sha").read_text()
+        evidence_file=core/"evidence/a.json"
+        evidence=read(evidence_file)
+        assert evidence["sha"]==(root/"sha").read_text()
+        run_state=read(core/"keymap.json")
+        for reason,exit_code,expected in [("known failure",None,"command exit: None"),
+                                          ("  ",1,"acceptance needs a reason"),
+                                          ("known failure",1,"accepted: known failure")]:
+            run_state["run"]["nodes"]["a"]["tests_accepted"]=evidence["sha"]+":"+reason
+            write(core/"keymap.json",run_state)
+            record=dict(evidence,exit=exit_code)
+            if exit_code is None: del record["exit"]
+            write(evidence_file,record)
+            assert expected in run("verify","a",code=int(expected!="accepted: known failure")).stdout
+        write(evidence_file,evidence)
+        owns=plan["nodes"][0]["owns"]
+        for pattern,shared,expected in [("s***ge",[],None),("outside",["src/**"],"SHARED src/change"),
+                                        ("outside",[],"OUT src/change")]:
+            plan["nodes"][0].update(owns=[pattern],shares=shared)
+            write(core/"plan.json",plan)
+            result=run("verify","a",code=int(expected=="OUT src/change"))
+            if expected:assert expected in result.stdout
+        plan["nodes"][0].update(owns=owns,shares=[])
+        write(core/"plan.json",plan)
         assert "interrupted status update" in run("done","a","--dispatch","dispatch-id",code=2).stderr
         assert issue["state"]["name"]=="In Progress"
         run("done","a","--dispatch","dispatch-id")
@@ -232,6 +254,7 @@ print(json.dumps(r))
         git("update-ref","refs/stax/trunk",blob)
         assert "stax trunk" in run("base").stdout
         km=read(core/"keymap.json")
+        km["run"]["nodes"]["a"]["path"]=str(work)
         km["collab"]={"project":"p","page":"https://page.invalid","workspace":"shared:test","name":"Example",
                       "version":1,"settings":{"workspace":"default","team":"EX","slug":"wf"},
                       "plan_sha":hashlib.sha256((core/"plan.json").read_bytes()).hexdigest()}

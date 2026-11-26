@@ -1,0 +1,5 @@
+Run `sh tests/cli-parity/run.sh` to test the Python reference. Pass the path to a candidate executable as the only argument to test it against the same records. CI and the migration phase evidence command use this entry point.
+
+Each line of `cases.txt` runs in a fresh directory with a synthetic home, plan, old keymap and journal. The tool fixture records external command calls. The suite checks each verb and subcommand against the help inventory. It records the long flags from help, process exit status, output on each stream, and file changes with their permissions. The contract case checks the public JSON and embedded node cards against the page contract.
+
+To record a deliberate contract change, use Python 3.12 and run `sh tests/cli-parity/run.sh --record`. Review the changes to `expected.json` before committing. Add cases for new behaviors alongside the corresponding verb. The service commands include offline failure paths. The Python reference suite exercises additional service behavior.

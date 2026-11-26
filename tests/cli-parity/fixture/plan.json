@@ -1,0 +1,10 @@
+{
+  "effort": {"name": "Example", "workspace": "default", "team": "EX"},
+  "phases": [{"key": "1", "name": "Build", "target": "main"}],
+  "nodes": [
+    {"key": "a", "kind": "task", "phase": "1", "title": "Add a file", "lane": "local", "owns": ["src/**"], "shares": ["README.md"]},
+    {"key": "merge", "kind": "merge-point", "phase": "1", "title": "Merge"},
+    {"key": "ship", "kind": "ship-point", "phase": "1", "title": "Ship"}
+  ],
+  "edges": [{"from": "merge", "to": "a"}, {"from": "ship", "to": "merge"}]
+}

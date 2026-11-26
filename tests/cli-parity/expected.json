@@ -1,0 +1,547 @@
+{
+  "agents --help": [
+    "--approve",
+    "--help",
+    "--install",
+    "--once",
+    "--root",
+    "--uninstall",
+    "--wait"
+  ],
+  "approve --help": [
+    "--help",
+    "--quote"
+  ],
+  "archive --help": [
+    "--apply",
+    "--help"
+  ],
+  "autonomy --help": [
+    "--help"
+  ],
+  "autostart --help": [
+    "--agent",
+    "--effort",
+    "--help",
+    "--install",
+    "--model",
+    "--uninstall"
+  ],
+  "base --help": [
+    "--help",
+    "--phase"
+  ],
+  "check --help": [
+    "--help"
+  ],
+  "claim --help": [
+    "--agent",
+    "--effort",
+    "--help",
+    "--model",
+    "--send",
+    "--takeover",
+    "--work-file"
+  ],
+  "cleanup --help": [
+    "--dry-run",
+    "--help"
+  ],
+  "config --help": [
+    "--help"
+  ],
+  "contract --help": [
+    "--help",
+    "--write"
+  ],
+  "dispatch --help": [
+    "--agent",
+    "--effort",
+    "--help",
+    "--model",
+    "--run",
+    "--worktree"
+  ],
+  "doctor --help": [
+    "--fix",
+    "--help"
+  ],
+  "done --help": [
+    "--dispatch",
+    "--failed",
+    "--help",
+    "--worktree"
+  ],
+  "evidence --help": [
+    "--help"
+  ],
+  "explain --help": [
+    "--help"
+  ],
+  "health --help": [
+    "--due",
+    "--help",
+    "--install",
+    "--report",
+    "--uninstall"
+  ],
+  "join --help": [
+    "--help",
+    "--project",
+    "--repo"
+  ],
+  "leave --help": [
+    "--help"
+  ],
+  "load --help": [
+    "--adopt",
+    "--apply",
+    "--help",
+    "--prune"
+  ],
+  "log --help": [
+    "--help",
+    "--since",
+    "--times"
+  ],
+  "login --help": [
+    "--help",
+    "--token-stdin",
+    "--workspace"
+  ],
+  "logout --help": [
+    "--help"
+  ],
+  "move --help": [
+    "--force",
+    "--help",
+    "--keep-worktree",
+    "--note"
+  ],
+  "next --help": [
+    "--all",
+    "--help",
+    "--interval",
+    "--no-publish",
+    "--wait"
+  ],
+  "owns diff --help": [
+    "--help"
+  ],
+  "owns overlap --help": [
+    "--help"
+  ],
+  "preflight --help": [
+    "--help",
+    "--phase"
+  ],
+  "pull --help": [
+    "--accept-settings",
+    "--force",
+    "--help"
+  ],
+  "ready --help": [
+    "--apply",
+    "--help"
+  ],
+  "review-effort --help": [
+    "--help"
+  ],
+  "run rebuild --help": [
+    "--apply",
+    "--help"
+  ],
+  "run reset --help": [
+    "--help"
+  ],
+  "run set --help": [
+    "--help"
+  ],
+  "run show --help": [
+    "--help",
+    "--json"
+  ],
+  "setup --help": [
+    "--apply",
+    "--help",
+    "--name",
+    "--no-private",
+    "--private",
+    "--team",
+    "--workspace"
+  ],
+  "share --help": [
+    "--help"
+  ],
+  "started --help": [
+    "--help"
+  ],
+  "status --help": [
+    "--help",
+    "--phase"
+  ],
+  "tick --help": [
+    "--channel",
+    "--help",
+    "--install",
+    "--root",
+    "--uninstall"
+  ],
+  "ui --help": [
+    "--help",
+    "--no-open",
+    "--no-tailnet",
+    "--port",
+    "--project",
+    "--workspace"
+  ],
+  "usage --help": [
+    "--all",
+    "--help",
+    "--json",
+    "--since"
+  ],
+  "verify --help": [
+    "--help"
+  ],
+  "wake --help": [
+    "--help"
+  ],
+  "watch --help": [
+    "--all",
+    "--help",
+    "--interval",
+    "--no-publish",
+    "--wait"
+  ],
+  "check effort": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": "",
+    "files": {}
+  },
+  "share effort": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "use a page URL with HTTPS, or configured HTTP on loopback or a tailnet\n",
+    "files": {}
+  },
+  "pull effort --force --accept-settings": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "this effort is not shared; run wg share first\n",
+    "files": {}
+  },
+  "preflight effort --phase missing": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "unknown phase missing\n",
+    "files": {}
+  },
+  "base effort --phase missing": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "unknown phase missing\n",
+    "files": {}
+  },
+  "status effort --phase missing": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "load effort --prune": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "ready effort": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "next effort --interval 0 --no-publish": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "--interval must be a positive number of seconds\n",
+    "files": {}
+  },
+  "watch effort --interval -1 --all": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "--interval must be a positive number of seconds\n",
+    "files": {}
+  },
+  "wake effort": {
+    "exit": 1,
+    "stdout": "skip: Orca cannot be read (orca agent list: command exited 1)\n",
+    "stderr": "",
+    "files": {
+      "home/calls": [
+        "0o644",
+        "orca agent list --json\n"
+      ]
+    }
+  },
+  "health effort --install --due": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: wg health [-h] [--install | --uninstall | --due | --report FILE] dir\nwg.py health: error: argument --due: not allowed with argument --install\n",
+    "files": {}
+  },
+  "autostart effort --install --uninstall": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: wg autostart [-h] [--install | --uninstall] [--agent {codex,claude}]\n                       [--model MODEL] [--effort EFFORT]\n                       dir\nwg.py autostart: error: argument --uninstall: not allowed with argument --install\n",
+    "files": {}
+  },
+  "approve effort missing --quote approved": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "unknown key missing\n",
+    "files": {}
+  },
+  "dispatch effort missing --agent codex": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "claim effort missing ci --send": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "wg claim --send needs --work-file <file> with the work of the job\n",
+    "files": {}
+  },
+  "started effort missing task=one": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "unknown key missing\n",
+    "files": {}
+  },
+  "done effort missing --dispatch id": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "move effort missing Done --keep-worktree": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "unknown key missing\n",
+    "files": {}
+  },
+  "cleanup effort --dry-run": {
+    "exit": 1,
+    "stdout": "1 worktree(s) stay: see the warnings\n",
+    "stderr": "warning: worktree cleanup skipped: no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "archive effort": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "run set effort @effort baseline=pass": {
+    "exit": 0,
+    "stdout": "baseline=pass\n",
+    "stderr": "",
+    "files": {
+      "effort/journal.jsonl": [
+        "0o600",
+        "{\"time\":\"2020-01-01T00:00:00Z\",\"command\":\"run set\",\"key\":\"a\",\"kind\":\"run\",\"changes\":{\"state\":[null,\"idle\"]}}\nbroken old line\n{\"changes\": {\"baseline\": [null, \"pass\"]}, \"command\": \"run set\", \"key\": \"@effort\", \"kind\": \"run\", \"time\": \"<time>\"}\n"
+      ],
+      "effort/keymap.json": [
+        "0o644",
+        "{\n  \"project\": {\n    \"id\": \"project\"\n  },\n  \"milestones\": {\n    \"1\": \"milestone\"\n  },\n  \"nodes\": {\n    \"a\": {\n      \"id\": \"issue-a\",\n      \"identifier\": \"EX-1\"\n    }\n  },\n  \"extra\": {\n    \"keep\": true\n  },\n  \"run\": {\n    \"effort\": {\n      \"baseline\": \"pass\"\n    },\n    \"nodes\": {}\n  }\n}\n"
+      ]
+    }
+  },
+  "run show effort --json": {
+    "exit": 0,
+    "stdout": "{\n  \"effort\": {},\n  \"nodes\": {}\n}\n",
+    "stderr": "",
+    "files": {}
+  },
+  "run reset effort a": {
+    "exit": 0,
+    "stdout": "a: run row removed\n",
+    "stderr": "node card not updated (no Linear key for default: set LINEAR_DEFAULT_API_KEY); the next 'wg load --apply' updates it\n",
+    "files": {
+      "effort/keymap.json": [
+        "0o644",
+        "{\n  \"project\": {\n    \"id\": \"project\"\n  },\n  \"milestones\": {\n    \"1\": \"milestone\"\n  },\n  \"nodes\": {\n    \"a\": {\n      \"id\": \"issue-a\",\n      \"identifier\": \"EX-1\"\n    }\n  },\n  \"extra\": {\n    \"keep\": true\n  },\n  \"run\": {\n    \"effort\": {},\n    \"nodes\": {}\n  }\n}\n"
+      ]
+    }
+  },
+  "run rebuild effort": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "warn: 1 damaged journal line(s) skipped\nthe journal has no baseline line, so it cannot give complete run rows; nothing is changed (recovery.md)\n",
+    "files": {}
+  },
+  "log effort a -n 1": {
+    "exit": 0,
+    "stdout": "2020-01-01T00:00:00Z run set a state - -> idle\n",
+    "stderr": "warn: 1 damaged journal line(s) skipped\n",
+    "files": {}
+  },
+  "usage effort --json --all": {
+    "exit": 0,
+    "stdout": "{\n  \"plan_dir\": \"effort\",\n  \"since\": null,\n  \"sessions\": [],\n  \"roles\": {\n    \"coordinator\": {\n      \"sessions\": 0,\n      \"calls\": 0,\n      \"fresh\": 0,\n      \"cache_write\": 0,\n      \"cache_read\": 0,\n      \"input\": 0,\n      \"output\": 0\n    },\n    \"worker\": {\n      \"sessions\": 0,\n      \"calls\": 0,\n      \"fresh\": 0,\n      \"cache_write\": 0,\n      \"cache_read\": 0,\n      \"input\": 0,\n      \"output\": 0\n    },\n    \"other\": {\n      \"sessions\": 0,\n      \"calls\": 0,\n      \"fresh\": 0,\n      \"cache_write\": 0,\n      \"cache_read\": 0,\n      \"input\": 0,\n      \"output\": 0\n    }\n  },\n  \"total\": {\n    \"sessions\": 0,\n    \"calls\": 0,\n    \"fresh\": 0,\n    \"cache_write\": 0,\n    \"cache_read\": 0,\n    \"input\": 0,\n    \"output\": 0\n  }\n}\n",
+    "stderr": "warn: 1 damaged journal line(s) skipped\n",
+    "files": {}
+  },
+  "evidence effort missing": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "unknown key missing\n",
+    "files": {}
+  },
+  "autonomy effort": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "review-effort effort": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "verify effort missing": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "unknown key missing\n",
+    "files": {}
+  },
+  "owns overlap effort a merge": {
+    "exit": 1,
+    "stdout": "merge: no owns\n",
+    "stderr": "",
+    "files": {}
+  },
+  "owns diff effort missing main": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "unknown key missing\n",
+    "files": {}
+  },
+  "explain unknown-verb": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "unknown verb 'unknown-verb'; wg explain lists the verbs\n",
+    "files": {}
+  },
+  "doctor --invalid-option": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: wg [-h]\n             {check,share,pull,preflight,base,status,load,ready,next,watch,wake,health,autostart,approve,dispatch,claim,started,done,move,cleanup,archive,run,log,usage,evidence,autonomy,review-effort,verify,owns,explain,doctor,setup,config,contract,tick,agents,login,logout,join,leave,ui}\n             ...\nwg: error: unrecognized arguments: --invalid-option\n",
+    "files": {}
+  },
+  "setup --team EX --private": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "no Linear key for default: set LINEAR_DEFAULT_API_KEY\n",
+    "files": {}
+  },
+  "config effort": {
+    "exit": 0,
+    "stdout": "{\n  \"path\": \"<sandbox>/home/config.json\",\n  \"exists\": false,\n  \"rules\": \"<sandbox>/home/.config/work-graph/rules.md\",\n  \"rules_exist\": false,\n  \"wait_status\": \"Needs Human\",\n  \"wait_label\": \"needs-human\",\n  \"config\": {\n    \"human\": \"Human\",\n    \"page_url\": null,\n    \"github_user\": null,\n    \"tick_roots\": [\n      \"~/Projects\"\n    ],\n    \"tick_label\": \"dev.work-graph.tick\",\n    \"test_runner\": null,\n    \"branch_prefix\": \"wg/\",\n    \"release_branch\": \"release\",\n    \"rules\": \"~/.config/work-graph/rules.md\",\n    \"notify\": [],\n    \"agent_replies\": false,\n    \"agent_merge\": [],\n    \"health_interval\": 6,\n    \"health_agent\": \"codex\",\n    \"worker_settings\": {},\n    \"coordinator_settings\": {},\n    \"context_limit\": 250000,\n    \"workspaces\": [\n      {\n        \"id\": \"default\",\n        \"name\": \"Linear\",\n        \"team\": null,\n        \"teams\": null,\n        \"key_env\": [\n          \"LINEAR_API_KEY\"\n        ],\n        \"team_labels\": true\n      }\n    ]\n  },\n  \"agents\": {\n    \"coordinator\": {},\n    \"worker\": {\n      \"agent\": \"codex\"\n    }\n  }\n}\n",
+    "stderr": "",
+    "files": {}
+  },
+  "contract": {
+    "exit": 0,
+    "stdout": "<contract.json>",
+    "stderr": "",
+    "files": {}
+  },
+  "tick --channel none --root empty": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": "",
+    "files": {
+      "home/.local/state/work-graph/tick.json": [
+        "0o600",
+        "{}\n"
+      ],
+      "home/.local/state/work-graph/tick.lock": [
+        "0o600",
+        ""
+      ]
+    }
+  },
+  "agents --once --root empty": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "orca agent list: command exited 1\n",
+    "files": {
+      "home/.local/state/work-graph/agents.lock": [
+        "0o600",
+        ""
+      ],
+      "home/calls": [
+        "0o644",
+        "orca agent list --json\n"
+      ]
+    }
+  },
+  "login invalid --token-stdin": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "use a page URL with HTTPS, or configured HTTP on loopback or a tailnet\n",
+    "files": {}
+  },
+  "logout https://page.invalid": {
+    "exit": 0,
+    "stdout": "There was no saved token for https://page.invalid.\nUse the page settings to revoke the token on the page.\n",
+    "stderr": "",
+    "files": {}
+  },
+  "join invalid --project Example --repo effort": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "use a page URL with HTTPS, or configured HTTP on loopback or a tailnet\n",
+    "files": {}
+  },
+  "leave effort": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "This worktree has no collaborator record.\n",
+    "files": {}
+  },
+  "ui --no-open --port invalid": {
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: wg ui [-h] [--workspace {default}] [--port PORT] [--project PROJECT]\n                [--no-open] [--no-tailnet]\nwg.py ui: error: argument --port: invalid int value: 'invalid'\n",
+    "files": {}
+  },
+  "owns diff effort a main": {
+    "exit": 1,
+    "stdout": "SHARED README.md\nOUT unexpected.txt\n",
+    "stderr": "",
+    "files": {
+      "home/calls": [
+        "0o644",
+        "git diff --name-only main...HEAD\n"
+      ]
+    }
+  },
+  "owns overlap effort a": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": "",
+    "files": {}
+  },
+  "explain dispatch": {
+    "exit": 0,
+    "stdout": "(references/jobs.md)\n## Dispatch\n\nUse one command: `wg dispatch <plan-dir> <key> --run [--agent codex|claude] [--model <id>] [--effort <level>]`. It checks the node: ready (the node below it in the lane is code done), and in the wave. Then it does each step that the printed form below lists: the claim and the move to `In Progress`, the lane parent when `orca worktree list` does not show it, the child worktree and its display name, `st branch track` for a stax branch, the worktree checks, the worker spec, `worker-start --environment local`, and the record of `wg started`. Set the launch flags on this first call. Fields without flags come from the worker role in the plan, then the config. It prints at most 3 lines:\n\n- `claimed <identifier> agent:<agent>`\n- `started <key> dispatch=<id> worktree=<path>`\n- a warning or a `FAIL <step>: <error>` line\n\nThe run row records each step (`step=claim|status|parent|child|track|spec|start|receipt`) before the step starts. The claim goes into the run row before the label and the move, so no worker starts on an issue that is not claimed and `In Progress`. After a `FAIL` line, fix the cause and run the same command again: it continues at the failed step, adds only the label or the move that Linear does not show, finds a worktree that it made before, and takes no second claim. Before a call that can start a worker, a resume checks that Linear shows the claim and `In Progress`, and writes what is missing (another agent's claim stops it). Each check of a step that passed is read-only: `st branch track` runs only while the row is at `track` or before. It uses only worktrees of the coordinator's repository, and it stops before it changes a lane parent that is not under the coordinator, a child that is not under its lane parent, or a worktree on another branch (Orca adds a number to a taken name). Stax tracks the branch when the branch plan says so (also a stacked HOTFIX). When Orca loses the reply of `worker-start`, `wg` records the request id that Orca names (`retry_request`) and keeps it until Orca gives a result; an error of the replay keeps it too, because it does not prove that the first request did nothing. The next `--run` sends the call again only with `--retry-request <id>`, with the spec that it sent first. A refusal of a first call (no request id) starts nothing, so the next `--run` starts again. While a start has no known result, the printed form refuses too (`wg dispatch` and `wg dispatch \u2026 --worktree`): use `--run`, or look in Orca and record the worker with `wg started`. If the outcome is not known (no JSON answer, a timeout) and there is no request id, `step=start` stays and `--run` refuses: look for the worker in Orca, then record it with `wg started`, or start again with `wg run set <plan-dir> <key> step=spec`. `step=receipt`: the worker runs, but the claim comment failed; the next `--run`, or `wg started` with the same dispatch id, writes only the comment. If `wg` cannot save the ids after Orca started the worker, the warning line gives the `wg started` command with those ids: run it.\n\n`--run` refuses outside an Orca terminal (no `ORCA_AGENT_SESSION_ID` and no `ORCA_TERMINAL_HANDLE`), before the claim: there Orca cannot find the caller, and cannot wake the coordinator at `worker_done`. Then use the printed form.\n\n**Printed form.** Without `--run`, `wg dispatch <plan-dir> <key>` adds the claim, moves the issue to `In Progress`, records `state=creating` with the branch names, and prints the Orca commands with every name filled in (ordering.md \"Branches and worktrees\"). Run them in order:\n\n1. The printed `orca worktree create`, `orca worktree set`, and `st branch track` commands. Create the lane parent only when `orca worktree list --json` does not show it, as a child of the `<slug>-core` coordinator (`<core-id>` is its `id`); the core lane uses the coordinator itself. A lane parent with `parentWorktreeId: null` is wrong: move it with `orca worktree set --worktree id:<lane-parent-id> --parent-worktree id:<core-id> --json`.\n2. `wg dispatch <plan-dir> <key> --worktree <child-path>`. It checks the new worktree: the branch name, the base, a clean tree, and the stax parent. Then it writes the worker spec to `<plan-dir>/specs/<key>.md` from [worker-spec.md](worker-spec.md) and prints the `worker-start` command. Fix each `FAIL` line and run it again. A worker starts only from this spec.\n3. The printed `orca orchestration worker-start`, then the printed `wg started <plan-dir> <key> dispatch=<id> task=<id> worktree=<id> run_id=<id>`. It records the ids, sets `state=running`, and comments the claim on the issue.\n\n- If an Orca reply is lost, re-issue the same command with the id from the error (`--retry-request <id>` for `worker-start`); never a fresh start. `worktree create` has no retry id: find the worktree with `orca worktree list --json` before you create it again. With no such id: stop, `wg run set <plan-dir> <key> state=unknown`, and ask the human.\n- Reuse a child worktree for a retry only after Orca shows its last worker exited (recovery.md).\n- Never use `worker-start --worktree new-child`: it cannot set the branch or the parent. Never use `st create`, `st wt create`, or `st lane`.\n- `wg dispatch` prints no `st branch track` for a SYNC branch, a spike branch, or a HOTFIX branch that does not stack (lab result, stax 0.120.0: an untracked non-trunk parent moved onto `main` at the next restack). A HOTFIX of an effort with `stacked_hotfix` stacks like a lane node: both forms track it.\n\nDone when: `wg run show <plan-dir> <key>` shows `state=running` and the dispatch id.\n",
+    "stderr": "",
+    "files": {}
+  }
+}

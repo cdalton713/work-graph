@@ -1,4 +1,5 @@
 """Run the reference and preview in separate, private copies of a synthetic effort."""
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -98,6 +99,27 @@ def review_cases(pair):
     pair.compare("run", "reset", ".", "merge")
 
 
+def unicode_keymap_hashes(pair):
+    for root in pair.dirs:
+        path = root / "keymap.json"
+        data = json.loads(path.read_bytes())
+        data["extra"]["label"] = "café 🎨"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    for args in (("set", ".", "merge", "note=résumé 📝"), ("reset", ".", "merge")):
+        pair.compare("run", *args)
+        files = [(root / "keymap.json").read_bytes() for root in pair.dirs]
+        assert files[0] == files[1]
+        assert hashlib.sha256(files[0]).digest() == hashlib.sha256(files[1]).digest()
+        assert files[0].isascii()
+        result = json.loads(files[0])
+        assert result["extra"]["label"] == "café 🎨"
+        if args[0] == "set":
+            assert result["run"]["nodes"]["merge"]["note"] == "résumé 📝"
+        else:
+            assert "merge" not in result["run"]["nodes"]
+
+
 def graph_cases(pair):
     for d in pair.dirs:
         p = json.loads((d / "plan.json").read_text())
@@ -132,7 +154,7 @@ def rebuild_cases(pair):
     pair.compare("log", ".")
 
 
-for check in (input_cases, review_cases, graph_cases, rebuild_cases):
+for check in (input_cases, review_cases, unicode_keymap_hashes, graph_cases, rebuild_cases):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         check(Pair(root))

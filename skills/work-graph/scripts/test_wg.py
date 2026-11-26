@@ -4798,6 +4798,51 @@ class NotifyTests(unittest.TestCase):
         path.write_text("{}")
         self.assertEqual(wg.read_config(path)["notify"], [])
 
+    def test_page_sends_each_new_issue_and_retries_only_the_failed_entries(self):
+        calls = []
+        def request(page, headers, path, data, timeout):
+            calls.append(data)
+            if len(calls) == 2:
+                raise wg.ReadError("HTTP 503")
+
+        with patch.dict(wg.CONFIG, {"notify": [{"type": "page", "to": "ada@example.com"}]}), \
+                patch.object(wg, "link_token_for", return_value="saved"), \
+                patch.object(wg, "push_page_request", side_effect=request):
+            result, error = self.notify()
+            self.assertEqual(result, "failed")
+            self.assertEqual(error.count("warn notify:"), 1)
+            self.assertEqual(self.notify()[0], None)
+            self.now += timedelta(minutes=5)
+            self.assertEqual(self.notify()[0], "sent")
+            self.assertEqual(self.notify()[0], None)
+        self.assertEqual([(d["kind"], d["issue"]) for d in calls],
+                         [("merge", "CD-1"), ("decision", "CD-2"), ("decision", "CD-2")])
+        self.assertEqual(calls[0], {"kind": "merge", "issue": "CD-1", "project": "proj",
+                                    "workspace": wg.DEFAULT_WORKSPACE_ID, "recipient": "ada@example.com"})
+
+    def test_page_notice_kinds(self):
+        nodes = {"approve": "decision", "deploy": "ops", "build": "task"}
+        km = {"nodes": {"build": {"identifier": "WG-1"}}}
+        for text, kind in [
+            ("wait human approve WG-1: choose", "decision"), ("wait human deploy WG-1: deploy", "decision"),
+            ("do ask-ready build WG-1: #1", "merge"), ("do ask-merge build WG-1: #1", "merge"),
+            ("question WG-1: which base?", "question"), ("escalation build: stopped", "question"),
+            ("wait human build WG-1: check the build", "wait")
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(wg.page_notice_entry(text, nodes, km), {"kind": kind, "issue": "WG-1"})
+
+    def test_page_doctor_reports_setup_and_device_count(self):
+        channel = {"type": "page", "to": "ada@example.com"}
+        with patch.object(wg, "link_token_for", return_value="saved"), patch.object(wg, "push_page_request") as get:
+            for enabled, devices, level in [(False, 0, "FAIL"), (True, 0, "FAIL"), (True, 2, "ok")]:
+                get.return_value = {"enabled": enabled, "devices": devices}
+                self.assertEqual(wg.doctor_push(wg.DEFAULT_WORKSPACE_ID, channel, None)[0], level)
+                self.assertEqual(get.call_args.args[1:4], ({"Authorization": "Bearer saved"},
+                                 "/api/push/status?recipient=ada%40example.com", None))
+        self.assertIsNone(wg.notify_problem([channel]))
+        self.assertIsNotNone(wg.notify_problem([channel | {"token": "private"}]))
+
     def test_the_entries_are_human_waits_asks_and_open_questions(self):
         asks = [{"key": "b", "issue": "CD-2", "body": "Which\nbase?"}]
         self.assertEqual(sorted(wg.notify_entries(self.lines, asks).values()), [

@@ -18,6 +18,7 @@ import { parseCard, statusName } from "../src/lib/graph.ts";
 import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from "../src/lib/link.ts";
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal, sharedRoutes } from "./access.ts";
+import { pushStatus } from "./pushstatus.ts";
 import { configRecipient, sendNotice } from "./pushsend.ts";
 import { noticeKinds } from "../src/lib/types.ts";
 import { deviceId } from "./pushstore.ts";
@@ -693,6 +694,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     waitUntil?.(job);
     return c.json({ accepted: true }, 202);
   }
+  app.get("/api/push/status", pushStatus(rules, directory, readOnly, tenants ? undefined : auth?.owners ?? [], vapid ? pushStore : undefined));
   app.post("/api/push/notices", bodyLimit({ maxSize: 8192 }), async c => {
     c.header("Cache-Control", "no-store");
     if (!vapid || !pushStore) return c.json({ error: "Push is not set up" }, 503);

@@ -232,12 +232,17 @@ def notify_problem(channels):
             names = [channel.get(f) for f in ("url_env", "url_file") if f in channel]
             if "url" in channel or not names or not all(isinstance(n, str) and n for n in names):
                 return f"channel {i}: a webhook needs url_env or url_file (the URL never goes in the config)"
+        elif kind == "page":
+            if channel.keys() - {"type", "to"}:
+                return f"channel {i}: a page channel takes only type and an optional to"
+            if "to" in channel and (not isinstance(channel["to"], str) or not channel["to"].strip()):
+                return f"channel {i}: to must name an owner email"
         elif kind == "command":
             argv = channel.get("argv")
             if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
                 return f"channel {i}: a command needs argv, a list of strings"
         else:
-            return f"channel {i}: type must be webhook or command"
+            return f"channel {i}: type must be page, webhook or command"
     return None
 
 
@@ -7051,6 +7056,8 @@ def health_notice(plan, title, body):
     """Send one notice through each `notify` channel. Failures give one `warn notify:` line; it never raises."""
     deadline, errors = time.monotonic() + NOTIFY_DEADLINE, []
     for channel in CONFIG.get("notify") or []:
+        if channel["type"] == "page":  # Health reports have no issue to open.
+            continue
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -7289,6 +7296,68 @@ def send_command(channel, title, body, link, timeout):
 NOTIFY_SENDERS = {"webhook": send_webhook, "command": send_command}
 
 
+def push_page_connection(workspace, collab):
+    if collab:
+        return collab_page(collab, workspace)
+    page = (workspace_page(workspace) or PAGE_URL).rstrip("/")
+    token = link_token_for(page, workspace)
+    if not token:
+        raise ReadError("run wg login for the workspace page")
+    return page, {"Authorization": f"Bearer {token}"}
+
+
+def push_page_request(page, headers, path, data, timeout):
+    body = json.dumps(data).encode() if data is not None else None
+    request = urllib.request.Request(page + path, data=body, headers=headers | {"Content-Type": "application/json"})
+    try:
+        with urllib.request.build_opener(NoPlanRedirect).open(request, timeout=timeout) as response:
+            if response.status != (202 if body else 200):
+                raise ReadError(f"page returned HTTP {response.status}")
+            return None if body else json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            if error.code == 400 and data is None:
+                raise ReadError("set to in the page channel to select an owner") from None
+            raise ReadError(f"page returned HTTP {error.code}") from None
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        raise ReadError(f"page request failed ({type(error).__name__})") from None
+
+
+def page_notice_entry(text, nodes, km):
+    move, _, detail = text.partition(": ")
+    parts = move.split()
+    if parts and parts[0] in ("question", "escalation") and len(parts) == 2:
+        issue = km["nodes"].get(parts[1], {}).get("identifier") or parts[1]
+        kind = "question"
+    elif len(parts) == 4:
+        _, action, key, issue = parts
+        if action in ("ask-merge", "ask-ready") or detail.startswith(("merge PR #", "mark PR #")):
+            kind = "merge"
+        elif action == "ask" or nodes.get(key) in ("decision", "ops"):
+            kind = "decision"
+        else:
+            kind = "wait"
+    else:
+        raise ReadError("the move has no issue")
+    return {"issue": issue, "kind": kind}
+
+
+def doctor_push(workspace, channel, collab):
+    page, headers = push_page_connection(workspace, collab)
+    path = "/api/push/status"
+    if "to" in channel:
+        path += "?" + urllib.parse.urlencode({"recipient": channel["to"]})
+    result = push_page_request(page, headers, path, None, 5)
+    label = f"page notices for {workspace}"
+    if not isinstance(result, dict) or type(result.get("enabled")) is not bool or type(result.get("devices")) is not int:
+        return "FAIL", f"{label}: invalid status response"
+    if not result["enabled"]:
+        return "FAIL", f"{label}: push is not set up"
+    if result["devices"] < 1:
+        return "FAIL", f"{label}: register a device on the page"
+    return "ok", f"{label}: {result['devices']} registered device(s)"
+
+
 def notify_ids(row, field):
     return {i for i in (row.get(field) or "").split(",") if i}
 
@@ -7332,15 +7401,34 @@ def notify_effort(plan_dir, plan, lines, paused, asks=None):
                 save_keymap(plan_dir, km)
         errors = {}
         for n, new in claims.items():
+            accepted = 0
             kind = channels[n]["type"]
             title = f"work-graph: {len(new)} new move(s) for {HUMAN} in {plan['effort']['name']}"
             try:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ReadError("no time left")
+                if kind == "page":
+                    workspace = plan_workspace(plan)
+                    collab = km.get("collab") or {}
+                    page, headers = push_page_connection(workspace, collab)
+                    target = {"workspace": collab.get("workspace") or workspace,
+                              "project": collab.get("project") or (km.get("project") or {}).get("id") or plan["effort"]["name"]}
+                    if "to" in channels[n]:
+                        target["recipient"] = channels[n]["to"]
+                    nodes = {node["key"]: node["kind"] for node in plan["nodes"]}
+                    for entry in new:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise ReadError("no time left")
+                        data = target | page_notice_entry(entries[entry], nodes, km)
+                        push_page_request(page, headers, "/api/push/notices", data, remaining)
+                        accepted += 1
+                    continue
                 NOTIFY_SENDERS[kind](channels[n], title, "\n".join(entries[i] for i in new), page_link(plan),
                                      remaining)
             except ReadError as e:
+                claims[n] = new[accepted:]
                 errors[n] = f"{kind}: {one_line(e, 200)}"
         if claims:
             with plan_lock(plan_dir):
@@ -7818,6 +7906,8 @@ def notify_agents(plan, entries, record, now=None):
     sent_by, failed_by = record.setdefault("sent", {}), record.setdefault("failed", {})
     errors = []
     for n, channel in enumerate(channels):
+        if channel["type"] == "page":  # Agent activity is separate from human move notices.
+            continue
         sent = set(sent_by.get(str(n), [])) & entries.keys()
         new = [i for i in entries if i not in sent]
         failed = failed_by.get(str(n))
@@ -8640,6 +8730,11 @@ def doctor_lines(plan_dir=None, fix=False):
     if CONFIG.get("page_url"):
         pages.setdefault(PAGE_URL.rstrip("/"), None)
     checks += [(f"link token for {url}", lambda w=w: doctor_link_token(w)) for url, w in pages.items()]
+    for channel in CONFIG.get("notify") or []:
+        if channel["type"] == "page":
+            collab = load_keymap(plan_dir).get("collab") if workspace and plan_dir else None
+            for w in ([workspace] if workspace else WORKSPACES):
+                checks.append((f"page notices for {w}", lambda w=w, c=channel: doctor_push(w, c, collab)))
     checks += [("tick", doctor_tick), ("agents_plugin", doctor_watch)]
     if plan_dir:
         checks.append(("agents", lambda: doctor_agents(plan_dir)))

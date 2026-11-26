@@ -182,6 +182,10 @@ paused effort sends nothing.
 
 Each channel of `notify` is one of these:
 
+- `{"type": "page"}` sends each new move to the workspace page with the coordinator token from `wg login`.
+  The notice shows the project name and opens the issue. The account's settings select which kinds to receive.
+  For a page with several configured owners, set `"to": "ada@example.com"` in the channel. On a hosted
+  account, the token selects the recipient. Run `wg doctor` to check push setup and the registered device count.
 - `{"type": "webhook", "url_env": "…", "url_file": "…"}`: one HTTP POST with the JSON body
   `{"title", "body", "url", "text"}`. `text` holds the full notice, for a Slack-compatible incoming webhook. For a
   plain ntfy topic URL, the headers `X-Template`, `X-Title`, and `X-Message` make ntfy show the title and the body.

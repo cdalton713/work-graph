@@ -96,6 +96,7 @@ print(json.dumps(r))
     issue = {"id":"issue-a","identifier":"EX-1","url":"https://example.invalid/1",
              "state":{"name":"Ready","type":"unstarted"},"team":{"id":"team"},
              "labels":page([]),"relations":page([])}
+    below_issue = dict(issue,id="issue-b",identifier="EX-2",state={"type":"completed","name":"Done"})
     states = page({"id":s,"name":s} for s in ["Ready","In Progress","Done","In Review"])
     comments = []
     errors = []
@@ -116,7 +117,7 @@ print(json.dumps(r))
             if action=="uncertain":return h.reply({})
             return h.reply({"action":action})
         q=data["query"];v=data["variables"]
-        if "issues(first:25" in q:r={"issues":page([issue])}
+        if "issues(first:25" in q:r={"issues":page(i for i in [issue,below_issue] if i["id"] in v["ids"])}
         elif "projectStatuses{" in q:
             status={"id":"planned","type":"planned","createdAt":"group-b"}
             target={"id":"started-b","name":"In Progress","type":"started","createdAt":"group-b"}
@@ -305,6 +306,43 @@ print(json.dumps(r))
         assert len(released)==2 and row()["state"]=="running"
         starts=[a for a in calls() if a[:2]==["orchestration","worker-start"]]
         assert len(starts)==4 and "--retry-request" in starts[-1]
+        # The parent was rewritten and squash-merged after the child forked.
+        fork=git("rev-parse","topic")
+        git("config","user.name","Example")
+        git("config","user.email","local@example.invalid")
+        rewritten=git("commit-tree",git("rev-parse","topic^{tree}"),"-p",base,"-m","rewritten parent")
+        git("update-ref","refs/heads/"+lower,rewritten)
+        squash=git("commit-tree",git("rev-parse","topic^{tree}"),"-p",base,"-m","squash parent")
+        git("push","-q","origin",squash+":refs/heads/main")
+        for name in ["one","two"]:
+            (work/name).write_text(name)
+            git("add",name)
+            git("commit","-qm","child "+name)
+        assert git("merge-base","topic",lower)==base
+        km=read(core/"keymap.json")
+        del km["collab"]
+        km["run"]["nodes"]["below"]={"code_done_head":fork}
+        def instruction(revision):
+            meta={"parentBranchName":lower,"parentBranchRevision":revision}
+            blob=subprocess.check_output(["git","hash-object","-w","--stdin"],cwd=work,
+                                         input=json.dumps(meta).encode()).decode().strip()
+            git("update-ref","refs/branch-metadata/topic",blob)
+            km["run"]["nodes"]["a"]={"branch":"topic","parent":lower,"lower":lower,"pr":"1",
+                                     "agent":"codex","dispatch":"old","path":str(work)}
+            write(core/"keymap.json",km)
+            issue["labels"]=page([])
+            run("claim","a","restack")
+            spec=(core/"specs/a-restack.md").read_text()
+            return spec.split("; refresh: ",1)[1].split(", then st branch reparent",1)[0].split()
+        correct=["git","rebase","--onto","origin/main",fork]
+        emitted=instruction(fork)
+        assert emitted==correct
+        for revision in [rewritten,base,"unavailable"]:
+            assert instruction(revision)==correct[:-1]+[base]
+        git("update-ref","-d","refs/heads/"+lower)
+        assert instruction("unavailable")==correct
+        git(*emitted[1:])
+        assert git("log","--reverse","--format=%s","origin/main..HEAD").splitlines()==["child one","child two"]
         assert not errors,errors
 
 

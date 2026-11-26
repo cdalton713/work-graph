@@ -190,7 +190,7 @@ fn create(
     ])?;
     Ok(result["worktree"].clone())
 }
-fn metadata(path: &Path, branch: &str) -> Value {
+pub(super) fn metadata(path: &Path, branch: &str) -> Value {
     git(
         path,
         &["cat-file", "-p", &format!("refs/branch-metadata/{branch}")],

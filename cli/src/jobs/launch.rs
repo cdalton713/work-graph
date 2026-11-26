@@ -681,6 +681,39 @@ fn write_spec(path: &Path, body: &str) -> Result<(), String> {
     file.persist(path).map_err(|e| e.to_string())?;
     Ok(())
 }
+/// Identify the last parent commit in the child's history, including after the parent was rewritten.
+fn old_parent_tip(
+    dir: &Path,
+    row: &Value,
+    target: &str,
+    below_row: &Value,
+) -> Result<String, String> {
+    let branch = field(row, "branch")?;
+    let parent = field(row, "parent")?;
+    let metadata = worktree::metadata(dir, branch);
+    if let Some(revision) = metadata["parentBranchRevision"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
+        let ancestor = |tip: &str| {
+            Command::new("git")
+                .current_dir(dir)
+                .args(["merge-base", "--is-ancestor", "--", revision, tip])
+                .output()
+                .map(|output| output.status.code())
+                .map_err(|e| e.to_string())
+        };
+        if ancestor(branch)? == Some(0) && ancestor(target)? == Some(1) {
+            return Ok(revision.to_owned());
+        }
+    }
+    git(dir, &["merge-base", "--", branch, parent]).or_else(|_| {
+        let last = field(below_row, "code_done_head")
+            .map_err(|_| format!("no old tip of the merged parent {parent}"))?;
+        git(dir, &["merge-base", "--", branch, last])
+    })
+}
+
 pub(super) fn claim(
     ctx: &Context,
     k: &str,
@@ -828,18 +861,23 @@ pub(super) fn claim(
             )?;
         }
         let sha = git(ctx.dir, &["rev-parse", &format!("origin/{pin}")])?;
-        let merged = worktree::below(ctx.plan, node)
-            .and_then(|b| snap.statuses.get(b["key"].as_str()?))
-            .is_some_and(|s| matches!(s.as_str(), "Merged" | "Done"))
-            && row["parent"] != pin;
+        let below = worktree::below(ctx.plan, node).and_then(|node| node["key"].as_str());
+        let merged_parent = below.filter(|key| {
+            snap.statuses
+                .get(*key)
+                .is_some_and(|s| matches!(s.as_str(), "Merged" | "Done"))
+                && row["parent"] != pin
+        });
         restack = format!(
             "target {pin} at {sha}; parent merged: {}",
-            if merged { "yes" } else { "no" }
+            if merged_parent.is_some() { "yes" } else { "no" }
         );
-        if merged {
-            let old = git(
+        if let Some(below) = merged_parent {
+            let old = old_parent_tip(
                 ctx.dir,
-                &["merge-base", field(row, "branch")?, field(row, "parent")?],
+                row,
+                &format!("origin/{pin}"),
+                &km["run"]["nodes"][below],
             )?;
             restack.push_str(&format!("; refresh: git rebase --onto origin/{pin} {old}, then st branch reparent --parent {pin}"));
             ctx.change(k, "claim", |r| {

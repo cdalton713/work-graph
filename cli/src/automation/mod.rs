@@ -97,7 +97,6 @@ pub(crate) mod machine;
 pub mod manage;
 pub mod precheck;
 mod production;
-mod pull_requests;
 pub mod scheduled;
 mod sender;
 

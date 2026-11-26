@@ -1,5 +1,8 @@
 //! Compute the next coordinator actions from one scoped workflow snapshot.
-use super::{machine::*, production::Effort, pull_requests::PullRequests};
+use super::{
+    machine::*,
+    production::{Effort, PullRequests},
+};
 use crate::{local::satisfied, workflow};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Command, time::Duration};

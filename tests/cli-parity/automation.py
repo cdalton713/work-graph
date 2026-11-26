@@ -38,7 +38,24 @@ from pathlib import Path
 args = sys.argv[1:]
 with Path(os.environ["CALLS"]).open("a") as f:
     print(json.dumps(args), file=f)
-if args[:2] == ["agent", "installed"]:
+if args[0] == "plugin":
+    registry = Path(os.environ["HOME"]) / "registration"
+    old = json.loads(registry.read_text()) if registry.exists() else None
+    if args[1] == "list":
+        result = {"plugins":[old] if old else []}
+    else:
+        folder = Path(old["source"]["reference"] if args[1] == "update" else args[2])
+        digest = (folder / "orca-plugin.json").read_text()
+        if args[1] == "inspect":
+            result = {"contentHash":digest}
+        elif "--approve" not in args or args[args.index("--approve")+1] != digest:
+            print(json.dumps({"ok":False,"error":{"code":"approval_required","data":{"command":"--approve "+digest}}}))
+            sys.exit(3)
+        else:
+            result = {"pluginKey":"fixture.wg-agents","version":digest,
+                      "source":{"reference":str(folder),"contentHash":digest}}
+            registry.write_text(json.dumps(result))
+elif args[:2] == ["agent", "installed"]:
     result = {"agents":[{"id":"codex","default":True}]}
 elif args[:2] == ["worktree", "show"]:
     result = {"worktree":{"id":"core"}}
@@ -116,6 +133,29 @@ print("fixture")
         assert "health_automation" not in row() and row()["health_worktree"] == str(check_tree)
         cli("health", effort, "--due", "--install", code=2)
         cli("watch", effort, "--interval", "-1", code=2)
+
+        managed = home / ".local/share/work-graph"
+        current = managed / "current"
+        launcher = home / ".local/bin/wg"
+        launcher.parent.mkdir(parents=True)
+        launcher.symlink_to(current / "wg")
+        for version in ("one", "two", "one"):
+            generation = managed / "versions" / version
+            if not generation.exists():
+                (generation / "orca-plugin").mkdir(parents=True)
+                shutil.copy2(BIN, generation / "wg")
+                (generation / "orca-plugin/orca-plugin.json").write_text(version)
+            current.unlink(missing_ok=True)
+            current.symlink_to(Path("versions") / version)
+            previously_installed = (home / "registration").exists()
+            assert "--approve " + version in cli("agents", "--install", code=3)
+            assert events()[-1][1] == ("update" if previously_installed else "install")
+            cli("agents", "--install", "--approve", version)
+            registration = json.loads((home / "registration").read_text())
+            assert registration["source"] == {"contentHash":version, "reference":str(current / "orca-plugin")}
+            count = len(events())
+            assert "installed and current" in cli("agents", "--install")
+            assert [args[1] for args in events()[count:]] == ["list", "inspect"]
 
 
 if __name__ == "__main__":

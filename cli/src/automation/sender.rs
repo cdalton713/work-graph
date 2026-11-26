@@ -250,22 +250,51 @@ pub(super) fn roots(settings: &Value, override_roots: &[PathBuf]) -> Result<Vec<
         .map(|p| PathBuf::from(text(p)))
         .collect())
 }
+fn plugin_folder() -> Result<PathBuf> {
+    let home = home()?;
+    let exe = env::current_exe()?.canonicalize()?;
+    let root = home.join(".local/share/work-graph");
+    let current = root.join("current");
+    let launcher = home.join(".local/bin/wg");
+    if std::fs::read_link(launcher).is_ok_and(|target| target == current.join("wg"))
+        && current
+            .join("wg")
+            .canonicalize()
+            .is_ok_and(|target| target == exe)
+        && let (Some(generation), Ok(versions)) =
+            (exe.parent(), root.join("versions").canonicalize())
+        && generation.parent() == Some(versions.as_path())
+    {
+        return Ok(current.join("orca-plugin"));
+    }
+    for path in
+        std::iter::once(exe.clone()).chain([".agents", ".codex", ".claude"].into_iter().filter_map(
+            |base| {
+                home.join(base)
+                    .join("skills/work-graph")
+                    .canonicalize()
+                    .ok()
+            },
+        ))
+    {
+        for ancestor in path.ancestors().skip(1) {
+            let folder = ancestor.join("orca-plugin");
+            if folder.join("orca-plugin.json").is_file() {
+                return Ok(folder);
+            }
+        }
+    }
+    Err("cannot locate the bundled Orca plugin".into())
+}
 pub(super) fn run(args: &Agents) -> Result<u8> {
     let install = Installation::load()?;
     if args.install || args.uninstall {
-        let exe = env::current_exe()?;
-        let mut candidates: Vec<PathBuf> = exe.ancestors().map(|p| p.join("orca-plugin")).collect();
-        for base in [".agents", ".codex", ".claude"] {
-            if let Ok(path) = home()?.join(base).join("skills/work-graph").canonicalize() {
-                candidates.extend(path.ancestors().map(|p| p.join("orca-plugin")))
-            }
-        }
-        let folder = candidates
-            .iter()
-            .find(|p| p.join("orca-plugin.json").is_file())
-            .unwrap_or(&candidates[0]);
         return activity::plugin(
-            folder,
+            &if args.uninstall {
+                PathBuf::new()
+            } else {
+                plugin_folder()?
+            },
             text(&install.config.settings()["tick_label"]),
             args.uninstall,
             args.approve.as_deref(),

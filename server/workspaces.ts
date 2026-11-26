@@ -24,6 +24,7 @@ export interface Workspace {
 
 /** The part of the work-graph config (README "Config") that the server uses. wg.py reads the same file. */
 export interface Config {
+  appName?: string;
   human: string;
   workspaces: Workspace[];
   /** The sign-in of a hosted viewer (config `auth`). None: the page has no sign-in. */
@@ -75,7 +76,8 @@ function readAuth(auth: { domains?: unknown; owners?: unknown }, env: NodeJS.Pro
 export function readConfig(team: string | undefined, env: NodeJS.ProcessEnv = process.env, home = homedir()): Config {
   const dir = join(home, ".config/work-graph");
   const text = env.WG_CONFIG_JSON ?? readText(env.WG_CONFIG ?? join(dir, "config.json"));
-  const data = (text ? JSON.parse(text) : {}) as { human?: string; workspaces?: WorkspaceEntry[]; auth?: { domains?: unknown; owners?: unknown } };
+  const data = (text ? JSON.parse(text) : {}) as { human?: string; workspaces?: WorkspaceEntry[]; auth?: { domains?: unknown; owners?: unknown };
+    app_name?: unknown };
   const entries: WorkspaceEntry[] = data.workspaces?.length ? data.workspaces
     : [{ id: "default", name: "Linear", team: null, key_env: ["LINEAR_API_KEY"], team_labels: true }];
   const workspaces = entries.map((w, at) => {
@@ -87,6 +89,7 @@ export function readConfig(team: string | undefined, env: NodeJS.ProcessEnv = pr
     return { at, workspace: { id: w.id, name: w.name ?? w.id, team: teamKey, key, teamLabels: w.team_labels ?? true, ...(w.share_url ? { shareUrl: w.share_url.replace(/\/+$/, "") } : {}) } };
   });
   return {
+    ...(typeof data.app_name === "string" && data.app_name.trim() ? { appName: data.app_name.trim() } : {}),
     human: data.human ?? DEFAULT_HUMAN,
     workspaces: workspaces.filter(({ at, workspace }) => at === 0 || workspace.key).map(({ workspace }) => workspace),
     ...(data.auth ? { auth: readAuth(data.auth, env) } : {}),

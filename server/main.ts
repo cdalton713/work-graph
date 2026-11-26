@@ -36,6 +36,7 @@ const config = service ? null : readConfig(values.team);
 const linearAuth = service ? readLinearAuth(process.env) : undefined;
 const tenants = linearAuth ? await openServiceTenants(process.env, linearAuth) : undefined;
 const app = createApp(rules, {
+  appName: config?.appName,
   team: config?.workspaces[0].team ?? "", dist, human: config?.human, workspaces: config?.workspaces ?? [], auth: config?.auth,
   linkToken: service ? undefined : process.env.WG_LINK_TOKEN,
   ...(service ? { linearAuth, tenants, readOnly: false } : {}),

@@ -60,6 +60,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 ```json
 {
   "human": "Ada",
+  "app_name": "Example Planner",
   "page_url": "https://wg.example.com",
   "branch_prefix": "wg/",
   "release_branch": "release",
@@ -96,6 +97,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
 | Field | Meaning |
 |---|---|
 | `human` | The person who answers, merges, and deploys. Their wait status is `Needs <human>` (`Needs Ada`), and its label on another team's ticket is `needs-<slug>` (`needs-ada`). |
+| `app_name` | The name of the installed app. The default is `work-graph`. |
 | `page_url` | The hosted page. `wg next` prints links to it. Default: `http://127.0.0.1:4747` (`wg ui`). |
 | `branch_prefix` | The prefix of each branch that `wg` names (`wg/<slug>-core`). |
 | `release_branch` | The target of a HOTFIX/SYNC phase (`skills/work-graph/references/ordering.md`). |

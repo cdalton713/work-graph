@@ -4,9 +4,10 @@
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
   "functions": {
-    "api/index.ts": { "includeFiles": "{skills/work-graph/contract.json,dist/index.html}", "maxDuration": 300 }
+    "api/index.ts": { "includeFiles": "{skills/work-graph/contract.json,dist/index.html,server/manifest.template.json}", "maxDuration": 300 }
   },
   "rewrites": [
+    { "source": "/manifest.json", "destination": "/api" },
     { "source": "/api/(.*)", "destination": "/api" },
     { "source": "/auth/(.*)", "destination": "/api" },
     { "source": "/healthz", "destination": "/api" },

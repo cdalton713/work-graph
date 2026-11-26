@@ -93,7 +93,7 @@ describe("LinkHub", () => {
       await owner.receive(hello("ada"));
       await coordinator.receive(hello("grace"));
       await coordinator.receive(msg("asks", { asks: [{ id: "q", issue: "WG-1" }] }));
-      expect(await ownerHub.asks(ref)).toMatchObject([{ id: "q", accountName: "Grace" }]);
+      expect(await ownerHub.asks(ref)).toMatchObject([{ issue: "WG-1", accountName: "Grace" }]);
       await ownerHub.recheckMembers("owner", async () => null);
       expect(ada.closed).toEqual([]);
       expect(grace.closed).toContainEqual({ code: RESTART_CODE, reason: "server restart" });
@@ -137,7 +137,7 @@ describe("LinkHub", () => {
           expect.objectContaining({ accountName: "Ada" }), expect.objectContaining({ accountName: "Grace" }),
         ]) });
         for (const page of [ownerPage, memberPage]) {
-          expect(last(page, "asks")).toMatchObject({ asks: [{ id: "owner", accountName: "Ada" }, { id: "member", accountName: "Grace" }] });
+          expect(last(page, "asks")).toMatchObject({ asks: [{ id: "owner", accountName: "Ada" }, { accountName: "Grace" }] });
           expect(last(page, "progress")).toMatchObject({ nodes: [{ key: "same", state: "member" }, { key: "owner" }, { key: "member" }] });
         }
         expect(last(ownerPage, "agents")).toMatchObject({ agents: [{ id: "owner" }] });
@@ -145,7 +145,9 @@ describe("LinkHub", () => {
         expect(viewerPage.of("asks")).toEqual([]);
         expect(viewerPage.of("agents")).toEqual([]);
       });
-      await ownerHub.enqueue(ref, "reply", { ask: "member", key: null, issue: null, body: "Reply" }, "member");
+      const question = (await ownerHub.asks(ref)).find((ask) => ask.accountName === "Grace")!;
+      await ownerHub.enqueue(ref, "reply", { ask: question.id, key: null, issue: null, body: "Reply" }, question.id);
+      await vi.waitFor(() => expect(last(grace, "reply")).toMatchObject({ ask: "member" }));
       const pause = await ownerHub.publish(ref, "command", { name: "pause", key: null, issue: null });
       await ownerHub.publish(ref, "changed", { by: "page", what: "issue", issues: [] });
       await vi.waitFor(() => {
@@ -158,6 +160,14 @@ describe("LinkHub", () => {
       });
       await owner.receive(msg("ack", { ids: [pause.id] }));
       expect(await ownerHub.waiting(ref)).toBe(0);
+      expect(await memberHub.waiting(ref, member.account)).toBe(2);
+      await vi.waitFor(() => {
+        expect(last(ownerPage, "presence")).toMatchObject({ queued: 1 });
+        expect(last(memberPage, "presence")).toMatchObject({ queued: 3 });
+      });
+      await collaborator.receive(msg("wrote", { issues: ["WG-1"] }));
+      await vi.waitFor(() => expect(ada.of("changed")).toHaveLength(2));
+      expect(grace.of("changed")).toHaveLength(1);
       expect(await memberHub.waiting(ref, member.account)).toBe(2);
       await collaborator.closed();
       const dispatch = await ownerHub.enqueue(ref, "command", { name: "dispatch", key: "task", issue: "WG-1" }, undefined, undefined, member);
@@ -187,20 +197,67 @@ describe("LinkHub", () => {
     }
   });
 
-  it("refuses a ninth coordinator account and accepts another session of an existing account", async () => {
+  it("reserves room for the owner and bounds coordinator and command accounts together", async () => {
     const hub = new LinkHub();
     const ref = { ...A, tenant: "owner" };
     try {
-      await (await hub.joinCoordinator(peer(), ref)).receive(hello("owner"));
       const member = (index: number) => ({ account: `member-${index}`, name: "Member", workspace: `shared:${index}` });
-      for (let i = 1; i <= 7; i++) await (await hub.joinCoordinator(peer(), ref, member(i))).receive(hello(`session-${i}`));
+      for (let i = 1; i <= 8; i++) await (await hub.joinCoordinator(peer(), ref, member(i))).receive(hello(`session-${i}`));
+      const owner = peer();
+      await (await hub.joinCoordinator(owner, ref)).receive(hello("owner"));
+      expect(owner.closed).toEqual([]);
+      await expect(hub.enqueue(ref, "command", { name: "next", key: null, issue: null }, undefined, undefined, member(9))).rejects.toThrow(/eight/);
       const ninth = peer();
-      await hub.joinCoordinator(ninth, ref, member(8));
+      await hub.joinCoordinator(ninth, ref, member(9));
       expect(ninth.closed).toMatchObject([{ code: 1008 }]);
       const another = peer();
       await (await hub.joinCoordinator(another, ref, member(1))).receive(hello("another"));
       expect(another.closed).toEqual([]);
-      expect((await hub.presence(ref)).coordinators).toHaveLength(9);
+      expect((await hub.presence(ref)).coordinators).toHaveLength(10);
+    } finally {
+      hub.stop();
+    }
+  });
+
+  it("prunes an idle member account and keeps accounts with a page or a queued command", async () => {
+    const state = memoryLinkState();
+    const hub = new LinkHub(undefined, undefined, undefined, null, state);
+    const ref = { ...A, tenant: "owner" };
+    const member = (name: string) => ({ account: name, name, workspace: "shared:" + name });
+    try {
+      for (const name of ["Idle", "Page"]) {
+        const connection = await hub.joinCoordinator(peer(), ref, member(name));
+        await connection.closed();
+      }
+      await hub.joinPage(peer(), ref, false, ref.tenant, member("Page"));
+      await hub.enqueue(ref, "command", { name: "next", key: null, issue: null }, undefined, undefined, member("Queued"));
+      await hub.beat();
+      expect([...(await state.read(ref))!.accounts!.keys()]).toEqual(["Page", "Queued"]);
+    } finally {
+      hub.stop();
+    }
+  });
+
+  it("routes each copy of an ask id back to the account that reported it", async () => {
+    const hub = new LinkHub();
+    const ref = { ...A, tenant: "owner" };
+    try {
+      const clients = [peer(), peer()];
+      for (const [index, name] of ["Grace", "Hal"].entries()) {
+        const connection = await hub.joinCoordinator(clients[index], ref, { account: name, name, workspace: "shared:" + name });
+        await connection.receive(hello(name));
+        await connection.receive(msg("asks", { asks: [{ id: "same", body: name + " asks" }] }));
+      }
+      for (const [index, name] of [[1, "Hal"], [0, "Grace"]] as const) {
+        const ask = (await hub.asks(ref)).find((item) => item.accountName === name)!;
+        expect(ask.id).not.toBe("same");
+        expect(await hub.ask(ref, ask.id)).toMatchObject({ body: name + " asks" });
+        const before = clients[1 - index].of("reply").length;
+        await hub.enqueue(ref, "reply", { ask: ask.id, key: null, issue: null, body: "Reply" }, ask.id);
+        expect(clients[index].of("reply").at(-1)?.payload).toMatchObject({ ask: "same" });
+        expect(clients[1 - index].of("reply")).toHaveLength(before);
+        expect(await hub.ask(ref, ask.id)).toBeNull();
+      }
     } finally {
       hub.stop();
     }

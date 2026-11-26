@@ -54,9 +54,10 @@ export function roomAccount(room: LinkRoom, account?: string): RoomAccount | und
   return account === undefined ? room : room.accounts?.get(account);
 }
 
-export function addRoomAccount(room: LinkRoom, account: string, name: string): MemberAccount {
+export function addRoomAccount(room: LinkRoom, account: string, name: string): MemberAccount | null {
   const existing = room.accounts?.get(account);
   if (existing) { existing.name = name; return existing; }
+  if ((room.accounts?.size ?? 0) >= 8) return null;
   const member = { name, queue: [], asks: [], coordinators: new Map(), progress: [], agents: null };
   (room.accounts ??= new Map()).set(account, member);
   return member;
@@ -207,12 +208,18 @@ export function expireReconnectGrace(room: LinkRoom, now: number): boolean {
 
 export function pruneRoom(room: LinkRoom, cutoff: number): boolean {
   let used = room.sockets.size > 0;
-  for (const [, account] of roomAccounts(room)) {
+  const membersWithSockets = new Set([...room.memberSockets?.values() ?? []].map(({ account }) => account));
+  for (const [id, account] of roomAccounts(room)) {
     for (const [session, coordinator] of account.coordinators) {
       if (!coordinator.socket && Date.parse(coordinator.lastSeen) < cutoff) account.coordinators.delete(session);
     }
     if (account.agents && Date.parse(account.agents.at) < cutoff) account.agents = null;
+    if (id !== undefined && !membersWithSockets.has(id) && !account.coordinators.size && !account.queue.length) {
+      room.accounts!.delete(id);
+      continue;
+    }
     used ||= !!(account.coordinators.size || account.queue.length || account.asks.length || account.agents);
   }
+  if (!room.accounts?.size) { delete room.accounts; delete room.ownerName; }
   return used;
 }

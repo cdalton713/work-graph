@@ -1,7 +1,7 @@
 // The hub of `wg-link/1` (src/lib/link.ts): one room for each project, with its coordinators, its open
 // pages, and the queue of messages for its coordinators. It holds no Linear key and makes no request:
 // app.ts feeds it the changes it sees.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type AgentRow, type CoordinatorPresence, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
   type Presence, type ProjectRef, type ToCoordinator, type ToPage, projectKey, RECYCLE_CODE, RECONNECT_GRACE_MS, RESTART_CODE,
@@ -61,6 +61,20 @@ export const realTimers: Timers = {
   every: (fn, ms) => { const t = setInterval(fn, ms); t.unref(); return () => clearInterval(t); },
   after: (fn, ms) => { const t = setTimeout(fn, ms); t.unref(); return () => clearTimeout(t); },
 };
+export class LinkRoomFull extends Error {
+  constructor() { super("This room already has eight collaborator accounts."); }
+}
+
+const ASK_ID_MAX = 200;
+
+/** Bind a page ask ID to its account without exposing the account ID. */
+function pageAskId(ref: RoomRef, account: string | undefined, id: string): string {
+  if (account === undefined) return id;
+  const digest = createHash("sha256").update(JSON.stringify([roomKey(ref), account, id])).digest("hex");
+  // Keep member aliases outside the range an owner coordinator can use for an unchanged ask ID.
+  return ("member-" + digest).padEnd(ASK_ID_MAX + 1, "-");
+}
+
 export interface LinkMember { account: string; name: string; workspace: string; ownerName?: string }
 
 interface Socket {
@@ -244,7 +258,12 @@ export class LinkHub {
           if (socket.revoked || socket.tenant !== event.tenant) continue;
           const ownAgents = event.message.type !== "agents" || socket.member?.account === event.account;
           if (socket.audience === "page" && ownAgents && (socket.room === key || (!socket.room && event.overview))) {
-            this.sendTo(socket, event.message, event.sequence);
+            const message = event.message.type === "presence" && socket.member ? {
+              ...event.message,
+              payload: { ...(event.message.payload as Presence),
+                queued: event.queuedByAccount?.find(([account]) => account === socket.member?.account)?.[1] ?? 0 },
+            } : event.message;
+            this.sendTo(socket, message, event.sequence);
           } else if (socket.audience === "viewer" && event.viewer && (!socket.room || socket.room === key)
             && !this.closing && socket.allows?.(event.message.project)) {
             this.sendTo(socket, event.viewer, event.sequence);
@@ -559,16 +578,19 @@ export class LinkHub {
   }
 
   private announce(room: LinkRoom): LinkEvent {
-    return this.pages(room, "presence", this.roomPresence(room), true);
+    return {
+      ...this.pages(room, "presence", this.roomPresence(room), true),
+      ...(room.accounts?.size && { queuedByAccount: [...room.accounts].map(([id, account]): [string, number] => [id, account.queue.length]) }),
+    };
   }
 
   /** The coordinators of a project, connected first, and the size of its queue. */
-  async presence(ref: RoomRef): Promise<Presence> {
+  async presence(ref: RoomRef, account?: string): Promise<Presence> {
     const room = await this.shared.read(ref);
-    return room ? this.roomPresence(room) : { coordinators: [], queued: 0 };
+    return room ? this.roomPresence(room, account) : { coordinators: [], queued: 0 };
   }
 
-  private roomPresence(room: LinkRoom): Presence {
+  private roomPresence(room: LinkRoom, account?: string): Presence {
     const now = this.now().getTime();
     const cutoff = now - GONE_MS;
     const coordinators: CoordinatorPresence[] = roomAccounts(room).flatMap(([account, state]) => [...state.coordinators.values()]
@@ -580,7 +602,7 @@ export class LinkHub {
         ...(room.accounts?.size && { accountName: account ? room.accounts.get(account)?.name : room.ownerName }),
       })))
       .sort((a, b) => Number(b.connected) - Number(a.connected) || b.lastSeen.localeCompare(a.lastSeen));
-    return { coordinators, queued: room.queue.length };
+    return { coordinators, queued: roomAccount(room, account)?.queue.length ?? 0 };
   }
 
   /** Presence without coordinator identity, paths, work details, or queue counts. */
@@ -629,7 +651,7 @@ export class LinkHub {
     if (!room.accounts?.size) return room.asks;
     return roomAccounts(room).flatMap(([id, account]) => {
       const accountName = id ? room.accounts?.get(id)?.name : room.ownerName;
-      return account.asks.map((ask) => ({ ...ask, ...(accountName && { accountName }) }));
+      return account.asks.map((ask) => ({ ...ask, id: pageAskId(room.ref, id, ask.id), ...(accountName && { accountName }) }));
     });
   }
 
@@ -679,14 +701,14 @@ export class LinkHub {
     return (await this.enqueue(ref, type, payload)).message;
   }
 
-  async enqueue<T extends keyof ToCoordinator>(ref: RoomRef, type: T, payload: ToCoordinator[T], answeredAsk?: string, id?: string, member?: LinkMember) {
-    const message = this.envelope(ref, type, payload);
-    if (id !== undefined) message.id = id;
+  async enqueue<T extends keyof ToCoordinator>(ref: RoomRef, type: T, payload: ToCoordinator[T], answeredAsk?: string, id?: string, member?: LinkMember, writer?: { account?: string }) {
+    const envelope = this.envelope(ref, type, payload);
+    if (id !== undefined) envelope.id = id;
     const legacy = ref.tenant === undefined;
     const ownCommand = type === "command" && ["next", "dispatch"].includes((payload as ToCoordinator["command"]).name);
     const route = (room: LinkRoom) => {
       const accounts = roomAccounts(room);
-      if (type === "reply") return accounts.filter(([, state]) => state.asks.some((ask) => ask.id === answeredAsk)).slice(0, 1);
+      if (writer) return accounts.filter(([account]) => account !== writer.account);
       if (type === "answer") {
         // Answers identify an issue. Wake every account asking about it, or the whole room
         // if no ask identifies who runs the node.
@@ -699,17 +721,28 @@ export class LinkHub {
       }
       return accounts;
     };
-    const { room, recipients } = legacy
-      ? { room: await this.shared.append(ref, message, answeredAsk), recipients: [undefined] }
+    const { room, recipients, message } = legacy
+      ? { room: await this.shared.append(ref, envelope, answeredAsk), recipients: [undefined], message: envelope }
       : await this.shared.edit(ref, (room) => {
         if (member && ownCommand) {
-          addRoomAccount(room, member.account, member.name);
+          if (!addRoomAccount(room, member.account, member.name)) throw new LinkRoomFull();
           if (member.ownerName) room.ownerName = member.ownerName;
         }
+        if (type === "reply") {
+          const candidates = answeredAsk && answeredAsk.length > ASK_ID_MAX
+            ? room.accounts ?? [] : [[undefined, room]] as const;
+          for (const [account, state] of candidates) {
+            const original = state.asks.find((ask) => pageAskId(room.ref, account, ask.id) === answeredAsk);
+            if (!original) continue;
+            const message = { ...envelope, payload: { ...payload, ask: original.id } };
+            appendMessage(state, message, original.id);
+            return { room, recipients: [account], message };
+          }
+          throw new Error("the coordinator's question is no longer open");
+        }
         const recipients = route(room);
-        if (!recipients.length) throw new Error("the coordinator's question is no longer open");
-        for (const [, account] of recipients) appendMessage(account, message, answeredAsk);
-        return { room, recipients: recipients.map(([id]) => id) };
+        for (const [, account] of recipients) appendMessage(account, envelope, answeredAsk);
+        return { room, recipients: recipients.map(([id]) => id), message: envelope };
       });
     const events = recipients.map((account) => this.queueEvent(room,
       [...roomAccount(room, account)!.coordinators.values()].flatMap(({ socket }) => socket ? [socket] : []), message, false, account));
@@ -755,7 +788,7 @@ export class LinkHub {
       socket.leaseReady = true;
       const events: LinkEvent[] = [];
       for (const room of rooms) {
-        const presence = this.roomPresence(room);
+        const presence = this.roomPresence(room, member?.account);
         const messages: Envelope[] = [this.envelope(room.ref, "presence", allows ? this.redactPresence(presence) : presence)];
         if (!allows) {
           // The overview counts worker questions as moves for the human.
@@ -819,13 +852,8 @@ export class LinkHub {
     });
     try {
       const accepted = await this.shared.edit(ref, (room) => {
-        if (ref.tenant !== undefined) {
-          const connected = new Set([...room.sockets].flatMap(([id, role]) =>
-            role === "coordinator" ? [room.memberSockets?.get(id)?.account] : []));
-          if (connected.size >= 8 && !connected.has(member?.account)) return false;
-        }
         if (member) {
-          addRoomAccount(room, member.account, member.name);
+          if (!addRoomAccount(room, member.account, member.name)) return false;
           if (member.ownerName) room.ownerName = member.ownerName;
           (room.memberSockets ??= new Map()).set(socket.id, { account: member.account, viewer: false });
         }
@@ -833,7 +861,7 @@ export class LinkHub {
         return true;
       });
       if (!accepted) {
-        fail("this room has eight coordinator accounts");
+        fail(new LinkRoomFull().message);
         await connection.closed();
         return connection;
       }
@@ -857,7 +885,7 @@ export class LinkHub {
         const changed = this.envelope<"changed", ToPage["changed"]>(ref, "changed", { by: "coordinator", what: "issue", issues });
         if (ref.tenant !== undefined && (member || (await this.shared.read(ref))?.accounts?.size)) {
           await this.invalidate(ref);
-          await this.publish(ref, "changed", changed.payload);
+          await this.enqueue(ref, "changed", changed.payload, undefined, undefined, undefined, { account: member?.account });
           return;
         }
         // Clear each cache before its pages reload the graph. The coordinator needs no queued copy.
@@ -934,7 +962,7 @@ export class LinkHub {
         if (room) await this.send([this.announce(room)], ref.tenant);
       } else if (type === "asks") {
         const asks = (Array.isArray(payload.asks) ? payload.asks.filter(isObject) : []).slice(0, ASKS_MAX).map((a) => ({
-          id: text(a.id, 200), key: text(a.key, 200) || null, issue: text(a.issue, 50) || null, from: text(a.from, 200), body: text(a.body), at: text(a.at, 50),
+          id: text(a.id, ASK_ID_MAX), key: text(a.key, 200) || null, issue: text(a.issue, 50) || null, from: text(a.from, 200), body: text(a.body), at: text(a.at, 50),
           ...(a.kind === "escalation" ? { kind: "escalation" as const } : {}),
         })).filter((a) => a.id);
         const room = member ? await edit((room) => {

@@ -24,7 +24,7 @@ import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
 import { NeedsLinearAccess, sharedLinear, LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
-import { type Connection, type LinkMember, LinkHub, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
+import { type Connection, type LinkMember, LinkHub, LinkRoomFull, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
 import { redisLinkState } from "./linkstate-redis.ts";
@@ -515,7 +515,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   };
   const notify = async <T, F>(send: () => Promise<T>, fallback: F): Promise<T | F> => {
     try { return await send(); }
-    catch {
+    catch (error) {
+      if (error instanceof LinkRoomFull) throw error;
       console.warn("Linear write saved, but the link notice was lost");
       return fallback;
     }
@@ -845,7 +846,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       if (!shared) await sharedProject(ref.id, ref.workspace);
       return c.json({ ...await linkRead(() => hub.viewerPresence(currentRoom(ref)), { coordinators: [], queued: 0 }), waiting: 0 });
     }
-    const presence = await linkRead(async () => ({ ...await hub.presence(currentRoom(ref)), waiting: await hub.waiting(currentRoom(ref), shared?.member.account) }), {
+    const presence = await linkRead(async () => ({ ...await hub.presence(currentRoom(ref), shared?.member.account), waiting: await hub.waiting(currentRoom(ref), shared?.member.account) }), {
       coordinators: [], queued: 0, waiting: 0,
     });
     if (!shared || shared.coordinator) return c.json(presence);
@@ -1266,6 +1267,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
 
   app.onError((error, c) => {
+    if (error instanceof LinkRoomFull) return c.json({ error: error.message }, 409);
     if (error instanceof NeedsLinearAccess) return c.json({ error: error.message, code: "needs_linear_access" }, 403);
     if (error instanceof LinearSignInRequired) return c.json({ error: error.message, login: LOGIN_PATH }, 401);
     const status = ((error instanceof RedisUnavailable || error instanceof RedisCommandFailed) ? 503 : error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;

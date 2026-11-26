@@ -1,7 +1,7 @@
 import type { Envelope, ProjectRef } from "../src/lib/link.ts";
 
 export type LinkEvent = { tenant?: string } & (
-  | { kind: "pages"; message: Envelope; overview: boolean; account?: string; viewer?: Envelope; sequence?: number }
+  | { kind: "pages"; message: Envelope; overview: boolean; account?: string; queuedByAccount?: [string, number][]; viewer?: Envelope; sequence?: number }
   | { kind: "sockets"; sockets: string[]; messages: Envelope[]; sequence?: number; queue?: boolean; replay?: boolean }
   | { kind: "members-revoked"; sockets: string[] }
   | { kind: "replaced"; socket: string }

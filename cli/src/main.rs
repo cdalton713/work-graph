@@ -52,6 +52,11 @@ fn dispatch(on_io_failure: &dyn Fn(std::io::ErrorKind)) -> ExitCode {
     ) {
         return wg_preview::workflow::command();
     }
+    if let Some(status) =
+        wg_preview::automation::local_command(&std::env::args_os().collect::<Vec<_>>())
+    {
+        return status;
+    }
     if std::env::args_os().nth(1).is_some_and(|v| v == "usage") {
         return wg_preview::usage::command(std::env::args().skip(2));
     }

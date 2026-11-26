@@ -91,3 +91,79 @@ fn enqueue(messages: &mut Vec<Value>, message: Value) {
 
 #[cfg(test)]
 mod tests;
+
+pub mod arguments;
+mod machine;
+pub mod manage;
+pub mod precheck;
+pub mod scheduled;
+
+/// Run machine operations that do not need a live effort connection.
+pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
+    use arguments::{Arguments, Operation};
+    use clap::Parser;
+    use std::process::ExitCode;
+    if !matches!(
+        args.get(1)?.to_str()?,
+        "next" | "watch" | "agents" | "tick" | "autostart" | "health" | "wake"
+    ) {
+        return None;
+    }
+    let parsed = match Arguments::try_parse_from(args) {
+        Ok(args) => args.command,
+        Err(error) => {
+            let code = error.exit_code();
+            let _ = error.print();
+            return Some(ExitCode::from(code as u8));
+        }
+    };
+    let result = (|| -> machine::Result<Option<u8>> {
+        match parsed {
+            Operation::Tick(tick) if tick.install || tick.uninstall => {
+                let config = crate::state::Config::discover()?.report(None)?;
+                scheduled::tick_schedule(
+                    &config["config"],
+                    &std::env::current_exe()?,
+                    &tick.root,
+                    tick.channel.as_deref(),
+                    tick.uninstall,
+                    &mut std::io::stdout().lock(),
+                )?;
+            }
+            Operation::Health(health) if !health.due && health.report.is_none() => {
+                println!(
+                    "{}",
+                    manage::health_schedule(
+                        &health,
+                        &crate::state::Config::discover()?,
+                        &std::env::current_exe()?
+                    )?
+                );
+            }
+            Operation::Autostart(auto) => {
+                println!(
+                    "{}",
+                    manage::autostart(
+                        &auto,
+                        &crate::state::Config::discover()?,
+                        &std::env::current_exe()?
+                    )?
+                );
+            }
+            Operation::Next(next) | Operation::Watch(next)
+                if !next.interval.is_finite() || next.interval <= 0. =>
+            {
+                return Err("--interval must be a positive number of seconds".into());
+            }
+            _ => return Ok(None),
+        }
+        Ok(Some(0))
+    })();
+    match result {
+        Ok(code) => code.map(ExitCode::from),
+        Err(error) => {
+            eprintln!("{error}");
+            Some(ExitCode::from(2))
+        }
+    }
+}

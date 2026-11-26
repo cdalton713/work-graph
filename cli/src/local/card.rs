@@ -24,7 +24,7 @@ pub(super) const PREFIX: &str = "**work-graph node card**";
 pub(super) const FOOTER: &str =
     "Generated from plan.json by \x60wg load\x60. Change plan.json, not this comment.";
 
-pub(super) fn render(n: &Value, entry: &Value, row: &Value) -> (Value, String) {
+pub(crate) fn render(n: &Value, entry: &Value, row: &Value) -> (Value, String) {
     let mut data = json!({"wg":1});
     let mut marker = format!("\x60{}\x60", val(&n["key"]));
     for f in PLAN_FIELDS {
@@ -83,7 +83,7 @@ pub(super) fn render(n: &Value, entry: &Value, row: &Value) -> (Value, String) {
     parts.push(FOOTER.into());
     (data, parts.join("\n\n"))
 }
-pub(super) fn refresh(
+pub(crate) fn refresh(
     n: &Value,
     entry: &mut Value,
     row: &Value,

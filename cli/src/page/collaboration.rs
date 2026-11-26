@@ -1066,3 +1066,14 @@ pub(crate) fn project_claims(
     field(&answer, "role")?;
     Ok(answer)
 }
+
+pub(crate) fn update_claim(installation:&crate::linear::Installation,scope:&str,c:&Value,key:&str,job:Option<&Value>)->Result<()>{
+    let settings=crate::providers::PageSettings(installation).resolve(scope)?;
+    let page=connect(&settings,installation,c,scope)?;
+    let method=if job.is_some(){Method::PUT}else{Method::DELETE};
+    let req=project_request(&page,c,method,&["claims",key])?;
+    let req=if let Some(job)=job{req.header("Content-Type","application/json").body(json!({"job":job}).to_string())}else{req};
+    let (status,_)=response(req)?;
+    if job.is_none() && status==404{return Ok(());}
+    check(status)
+}

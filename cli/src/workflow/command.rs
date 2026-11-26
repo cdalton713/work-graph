@@ -10,6 +10,38 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Verb {
+    Move {
+        dir: PathBuf,
+        key: String,
+        status: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        force: Option<String>,
+        #[arg(long)]
+        keep_worktree: bool,
+    },
+    Approve {
+        dir: PathBuf,
+        #[arg(required = true)]
+        keys: Vec<String>,
+        #[arg(long)]
+        quote: String,
+    },
+    Load {
+        dir: PathBuf,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        prune: bool,
+        #[arg(long)]
+        adopt: bool,
+    },
+    Ready {
+        dir: PathBuf,
+        #[arg(long)]
+        apply: bool,
+    },
     Archive {
         dir: PathBuf,
         #[arg(long)]
@@ -27,7 +59,16 @@ pub fn command() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("{message}");
-            ExitCode::from(2)
+            ExitCode::from(
+                if message.contains(": not moved to ")
+                    || message == "plan.json fails check; fix it first"
+                    || message.starts_with("wg approve takes node keys")
+                {
+                    1
+                } else {
+                    2
+                },
+            )
         }
     }
 }
@@ -35,13 +76,55 @@ pub fn command() -> ExitCode {
 fn execute(verb: Verb) -> Result<(), String> {
     let installation = Installation::load()?;
     let dir = match &verb {
-        Verb::Archive { dir, .. } | Verb::Status { dir, .. } => dir,
+        Verb::Move { dir, .. }
+        | Verb::Approve { dir, .. }
+        | Verb::Load { dir, .. }
+        | Verb::Ready { dir, .. }
+        | Verb::Archive { dir, .. }
+        | Verb::Status { dir, .. } => dir,
     };
     let plan = installation
         .config
         .load_plan(dir)
         .map_err(|e| e.to_string())?;
     match verb {
+        Verb::Move {
+            ref dir,
+            key,
+            status,
+            note,
+            force,
+            keep_worktree,
+        } => super::transition::move_node(
+            dir,
+            &installation,
+            &plan,
+            &key,
+            &status,
+            note.as_deref(),
+            force.as_deref(),
+            keep_worktree,
+        ),
+        Verb::Approve {
+            ref dir,
+            keys,
+            quote,
+        } => super::transition::approve(dir, &installation, &plan, &keys, &quote),
+        Verb::Load {
+            ref dir,
+            apply,
+            prune,
+            adopt,
+        } => super::load::load(dir, &installation, &plan, apply, prune, adopt),
+        Verb::Ready { ref dir, apply } => {
+            let _lock = if apply {
+                Some(crate::state::PlanLock::acquire(dir, None).map_err(|e| e.to_string())?)
+            } else {
+                None
+            };
+            let km = crate::state::load_keymap(dir).map_err(|e| e.to_string())?;
+            ready(dir, &installation, &plan, &km, apply, false)
+        }
         Verb::Archive { apply, .. } => archive(&mut client(&installation, &plan)?, apply),
         Verb::Status { ref dir, phase } => {
             let km = crate::state::load_keymap(dir).map_err(|e| e.to_string())?;
@@ -58,7 +141,7 @@ fn execute(verb: Verb) -> Result<(), String> {
     }
 }
 
-fn archive(linear: &mut Linear, apply: bool) -> Result<(), String> {
+pub(super) fn archive(linear: &mut Linear, apply: bool) -> Result<(), String> {
     let org = linear.request("query{organization{subscription{type}}}", json!({}))?;
     if org["organization"].get("subscription") != Some(&Value::Null) {
         println!("no archive: the workspace has a paid Linear plan");
@@ -110,7 +193,7 @@ fn array<'a>(v: &'a Value, k: &str) -> Result<&'a [Value], String> {
         .map(Vec::as_slice)
         .ok_or_else(|| format!("missing {k} array"))
 }
-fn display(v: &Value) -> String {
+pub(super) fn display(v: &Value) -> String {
     match v {
         Value::Null => "-".into(),
         Value::String(s) if s.is_empty() => "-".into(),
@@ -119,7 +202,7 @@ fn display(v: &Value) -> String {
     }
 }
 
-fn ordered(plan: &Value) -> Result<Vec<&Value>, String> {
+pub(super) fn ordered(plan: &Value) -> Result<Vec<&Value>, String> {
     let nodes = array(plan, "nodes")?;
     let phases = array(plan, "phases")?;
     let edges = array(plan, "edges")?;
@@ -199,6 +282,105 @@ fn print_status(
             display(&n["lane"]),
             extra.join("\t")
         );
+    }
+    Ok(())
+}
+
+pub(super) fn ready(
+    dir: &std::path::Path,
+    installation: &Installation,
+    plan: &Value,
+    km: &Value,
+    apply: bool,
+    quiet: bool,
+) -> Result<(), String> {
+    let snap = snapshot(installation, plan, km)?;
+    let mut linear = client(installation, plan)?;
+    let states = if apply {
+        let team=linear.request("query($k:String!){teams(filter:{key:{eq:$k}}){nodes{id states(first:50){nodes{id name}}}}}",json!({"k":plan["effort"]["team"]}))?;
+        array(&team["teams"]["nodes"][0]["states"], "nodes")?.to_vec()
+    } else {
+        vec![]
+    };
+    let ordered = ordered(plan)?;
+    let nodes: BTreeMap<_, _> = ordered
+        .iter()
+        .filter_map(|n| Some((n["key"].as_str()?, *n)))
+        .collect();
+    for n in ordered {
+        let k = n["key"].as_str().ok_or("missing node key")?;
+        let Some(status) = snap.statuses.get(k) else {
+            continue;
+        };
+        if !matches!(status.as_str(), "Todo" | "Ready") {
+            let wait = format!(
+                "Needs {}",
+                display(&installation.config.settings()["human"])
+            );
+            if !quiet
+                && n["kind"] == "task"
+                && status != &wait
+                && !matches!(
+                    status.as_str(),
+                    "In Progress"
+                        | "In Review"
+                        | "Ready to Merge"
+                        | "Merged"
+                        | "Verifying"
+                        | "Done"
+                        | "Canceled"
+                )
+            {
+                eprintln!("skipped {k}: status {status}");
+            }
+            continue;
+        }
+        let mut clear = true;
+        for edge in array(plan, "edges")?.iter().filter(|e| e["from"] == k) {
+            let b = edge["to"].as_str().ok_or("invalid edge")?;
+            let blocker = nodes.get(b).ok_or("unknown blocker")?;
+            if !crate::local::satisfied(
+                blocker,
+                n,
+                snap.statuses.get(b).map(String::as_str).unwrap_or("?"),
+                km["run"]["nodes"][b]["code_done_head"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty()),
+            ) {
+                clear = false;
+                break;
+            }
+        }
+        let id = &km["nodes"][k];
+        let ident = display(&id["identifier"]);
+        if clear && !quiet {
+            println!(
+                "{k}\t{ident}\t{}\t{}",
+                display(&n["kind"]),
+                display(&n["lane"])
+            );
+        }
+        let want = if clear { "Ready" } else { "Todo" };
+        if apply && status != want && n["eng"].is_null() {
+            let state_id = states
+                .iter()
+                .find(|s| s["name"] == want)
+                .and_then(|s| s["id"].as_str())
+                .ok_or_else(|| format!("workflow has no status {want}"))?;
+            let result = linear.request(
+                "mutation($id:String!,$s:String!){issueUpdate(id:$id,input:{stateId:$s}){success}}",
+                json!({"id":id["id"],"s":state_id}),
+            )?;
+            if result["issueUpdate"]["success"] != true {
+                return Err(format!("{ident}: state update failed"));
+            }
+            if let Err(e) =
+                crate::local::record_status(dir, "ready --apply", &km["run"], k, status, want)
+            {
+                eprintln!("warn: journal: {e}");
+            }
+            eprintln!("  moved {ident} {status} -> {want}");
+        }
     }
     Ok(())
 }

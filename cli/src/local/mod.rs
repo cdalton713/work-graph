@@ -259,3 +259,8 @@ fn execute(args: &[String], cards: Option<&mut dyn CardWriter>) -> Result<u8> {
 pub(crate) fn check_plan(plan: &Value, report: &Value) -> bool {
     graph::check(plan, report) == 0
 }
+
+pub(crate) use contract::satisfied;
+pub(crate) use journal::record_status;
+
+pub(crate) use card::{refresh as refresh_card,render as render_card};

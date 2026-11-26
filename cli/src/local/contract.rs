@@ -44,7 +44,7 @@ fn samples() -> Vec<Value> {
         })
         .collect()
 }
-fn satisfied(blocker: &Value, node: &Value, state: &str, code_done: bool) -> bool {
+pub(crate) fn satisfied(blocker: &Value, node: &Value, state: &str, code_done: bool) -> bool {
     if matches!(state, "Canceled" | "Done") {
         return true;
     }

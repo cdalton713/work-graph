@@ -39,7 +39,7 @@ fn dispatch(on_io_failure: &dyn Fn(std::io::ErrorKind)) -> ExitCode {
             .nth(1)
             .as_deref()
             .and_then(|s| s.to_str()),
-        Some("archive" | "status")
+        Some("archive" | "status" | "ready" | "load" | "move" | "approve")
     ) {
         return wg_preview::workflow::command();
     }

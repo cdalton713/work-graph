@@ -84,3 +84,8 @@
   :is(.account-content, .account-dialog, .signin, .account-bar) a { display: inline-flex; align-items: center; }
   .signin { padding-inline: 12px; }
 }
+
+@media (pointer: coarse) {
+  .starter-form :is(button, input, select, a), .ov-head > button { min-height: 44px; }
+  .starter-form a { display: inline-flex; align-items: center; }
+}

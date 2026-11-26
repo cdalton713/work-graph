@@ -113,7 +113,18 @@ export type AccessGrant = { status: "added" | "invited" | "already_member" | "in
 export type ProjectJoin = { project: string; role: "viewer" | "collaborator" };
 export type ProjectJoinPreview = ProjectJoin & { owner: string };
 
+export interface StarterResult {
+  workspace: string;
+  project: { id: string; url: string };
+  handoff: {
+    plan: { effort: { name: string; workspace: string; team: string } };
+    keymap: { collab?: { page: string } };
+    command: string;
+  };
+}
+
 export interface SiteConfig {
+  createProjects?: boolean;
   telemetry?: boolean;
   human: string; defaultWorkspace: string;
   /** The first 12 hex characters of the SHA-256 of `skills/work-graph/contract.json`, as `wg` computes it. Null: the file is missing. */

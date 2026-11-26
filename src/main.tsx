@@ -30,7 +30,7 @@ if (joinPath) {
       signInSettings.provider = config.signIn;
       pageLink.path = pageLinkPath(config);
       const signIn = !!config.auth && !config.user;
-      const page = signIn ? <SignIn /> : config.signIn === "linear" && config.user && !config.readOnly ? <ServiceApp /> : <App />;
+      const page = signIn ? <SignIn /> : config.signIn === "linear" && config.user && !config.readOnly ? <ServiceApp createProjects={config.createProjects} /> : <App createProjects={config.createProjects} />;
       root.render(<StrictMode>{page}</StrictMode>);
     });
 }

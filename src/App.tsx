@@ -8,6 +8,8 @@ import { BarMenu, useCompactBar } from "./components/BarMenu";
 import { Board } from "./components/Board";
 import { Canvas } from "./components/Canvas";
 import { EffortSheet } from "./components/EffortSheet";
+import { CreateProject, StarterSetup } from "./components/CreateProject";
+import type { StarterResult } from "./lib/types";
 import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
@@ -69,7 +71,7 @@ export function projectFromQuery(directory: ProjectList | null, query: URLSearch
   return { project, missing };
 }
 
-export function ServiceApp() {
+export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}) {
   const installed = isStandalone();
   const compactBar = useCompactBar();
   const [query, navigate] = useQuery();
@@ -109,7 +111,7 @@ export function ServiceApp() {
     lastAccountView.current = accountView;
     if (accountView) pageEvent(accountView, signInWorkspace);
   }, [accountView, signInWorkspace]);
-  if (account && page !== "settings" && !showGuide) return <App service connections={account.connections} openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
+  if (account && page !== "settings" && !showGuide) return <App service createProjects={createProjects} connections={account.connections} openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
   const signOut = <a className="bar-user" href="/auth/logout">Sign out</a>;
   return <div className="app">
     <header className="bar account-bar">
@@ -131,15 +133,18 @@ export function ServiceApp() {
   </div>;
 }
 
-export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, service = false, connections }: {
-  openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
+// Keep setup available across in-page account settings. A new page session starts empty.
+const sessionStarters = new Map<string, StarterResult[]>();
+
+export function App({ createProjects, openSettings, overviewWorkspace = site.defaultWorkspace, service = false, connections }: {
+  createProjects?: boolean; openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
 } = {}) {
   const installed = isStandalone();
   const stage = useRef<HTMLElement>(null);
   const [query, setQuery] = useQuery();
   const overviewInitiatives = useMemo(() => query.getAll("initiative"), [query]);
   const overviewStates = useMemo(() => readProjectStates(query), [query]);
-  const [directory, setDirectory] = useState<ProjectList | null>(null);
+  const [directoryResponse, setDirectory] = useState<ProjectList | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncedAt, setSyncedAt] = useState<Date | null>(null);
@@ -166,6 +171,18 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const version = useRef<HeldGraph | null>(null);
   const generation = useRef(0);
 
+  const [starters, setStarters] = useState<StarterResult[]>(() => (createProjects && site.user && sessionStarters.get(site.user)) || []);
+  const [setup, setSetup] = useState(false);
+  const directory = useMemo(() => {
+    if (!directoryResponse || !starters.length) return directoryResponse;
+    const projects = [...directoryResponse.projects];
+    for (const { workspace, project, handoff } of starters) {
+      if (projects.some(p => p.workspace === workspace && p.id === project.id)) continue;
+      projects.push({ ...project, workspace, name: handoff.plan.effort.name, status: "", statusType: "planned",
+        workspaceName: directoryResponse.workspaces.find(w => w.id === workspace)?.name ?? workspace });
+    }
+    return { ...directoryResponse, projects };
+  }, [directoryResponse, starters]);
   const { project, missing } = useMemo(() => projectFromQuery(directory, query), [directory, query]);
 
   useEffect(() => { api.projects().then((list) => setDirectory((now) => now ?? list)).catch((e) => setError(e.message)); }, []);
@@ -668,6 +685,8 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     })), [directory, listed, yours, initiatives]);
   const openProject = useCallback((p: Project, issue?: string) =>
     setQuery({ workspace: p.workspace ?? site.defaultWorkspace, project: p.id, issue: issue ?? null }, true), [setQuery]);
+  const starter = starters.find(s => s.workspace === project?.workspace && s.project.id === project.id);
+  const setupButton = (dismiss?: () => void) => starter && <button onClick={() => { dismiss?.(); setSetup(true); }}>Coordinator setup</button>;
   const home = () => setQuery({ workspace: null, project: null, issue: null }, true);
   const waitingTotal = [...yours.values()].reduce((a, b) => a + b, 0);
   const total = full?.nodes.length ?? 0;
@@ -777,6 +796,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
           {autonomyPicker}
           {reviewPicker}
           {shareControl()}
+          {setupButton()}
         </>}
         <span className="station-fill" />
         {!narrow && viewer && <span className="bar-viewer" title={nativeBarTitles ? viewerHelp : undefined}>view only</span>}
@@ -792,6 +812,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         )}
         {compactBar ? (
           <BarMenu key={openKey} title={project ? "Project controls" : "More controls"}>{(dismiss) => <>
+            {setupButton(dismiss)}
             {viewer && <p>{viewerHelp}</p>}
             {projectLink && <div className="bar-menu-row"><span>Project link</span><CopyButton text={projectLink} label="Copy the project link" secret /></div>}
             {project && <div className="bar-menu-row"><span>Copy the project name: {project.name}</span><CopyButton text={project.name} label="Copy the project name" /></div>}
@@ -931,9 +952,19 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         <div className="installed-sync-age">{syncAge(project ? syncedAt : overviewSyncedAt, now)}</div>
         <PullRefresh stage={stage} onRefresh={refreshScreen} busy={project ? busy : overviewBusy} />
       </div>}
+      {starter && setup && <StarterSetup handoff={starter.handoff} onClose={() => setSetup(false)} />}
       <main ref={stage} className={`stage${narrow ? ` project-view-${view}` : ""}`}>
         {!project && directory && (
-          <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
+          <Overview createAction={createProjects && !viewer && <CreateProject
+            workspaces={directory.workspaces.filter(w => !w.role && (!connections ||
+              connections.some(c => c.workspace_id === w.id && c.status === "ok" && c.team)))}
+            onCreated={result => {
+              const next = [...starters.filter(s => s.workspace !== result.workspace || s.project.id !== result.project.id), result];
+              if (site.user) sessionStarters.set(site.user, next);
+              setStarters(next);
+              setSetup(true);
+              setQuery({ workspace: result.workspace, project: result.project.id, issue: null }, true);
+            }} />} list={overview ? { ...overview, projects: directory.projects } : directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
             managedPullRefresh={installed}
             budget={budget} states={overviewStates} onStates={(states) => setQuery({ state: states.join(",") || null }, true)}
             initiatives={overviewInitiatives} onInitiatives={(names) => setQuery({ initiative: names }, true)} />

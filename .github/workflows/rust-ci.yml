@@ -1,10 +1,10 @@
 name: Rust preview
 on:
   pull_request:
-    paths: ['cli/**', '.github/workflows/rust-ci.yml']
+    paths: ['cli/**', 'tests/cli-parity/**', 'skills/work-graph/scripts/**', '.github/workflows/rust-ci.yml']
   push:
     branches: [main]
-    paths: ['cli/**', '.github/workflows/rust-ci.yml']
+    paths: ['cli/**', 'tests/cli-parity/**', 'skills/work-graph/scripts/**', '.github/workflows/rust-ci.yml']
 permissions:
   contents: read
 

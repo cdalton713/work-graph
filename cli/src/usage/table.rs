@@ -1,4 +1,6 @@
-use super::{datetime, sum};
+use super::sum;
+use crate::local::time;
+use chrono::DateTime;
 use serde_json::Value;
 
 fn short(n: u64) -> String {
@@ -53,7 +55,8 @@ pub(super) fn print(rows: &[Value], roles: &Value, total: &Value, all: bool) {
         );
         cells.extend(["first", "last"].map(|k| {
             s[k].as_str()
-                .and_then(datetime)
+                .and_then(|s| time::parse(s).ok())
+                .and_then(|t| DateTime::from_timestamp_micros(t.micros + t.offset.unwrap_or(0)))
                 .map_or_else(|| "-".to_owned(), |t| t.format("%m-%d %H:%M").to_string())
         }));
         table.push(cells);

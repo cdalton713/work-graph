@@ -1,4 +1,5 @@
-use super::{Session, epoch};
+use super::Session;
+use crate::local::time;
 use regex::Regex;
 use serde_json::Value;
 use std::{
@@ -45,7 +46,12 @@ fn content<'a>(v: &'a Value, kind: &str) -> Option<&'a str> {
 }
 
 fn included(stamp: &Value, since: Option<i64>) -> bool {
-    since.is_none_or(|t| stamp.as_str().and_then(epoch).is_some_and(|at| at >= t))
+    since.filter(|t| *t != 0).is_none_or(|t| {
+        stamp
+            .as_str()
+            .and_then(|s| time::parse(s).ok())
+            .is_some_and(|at| at.micros != 0 && at.micros >= t)
+    })
 }
 
 pub(super) fn claude(

@@ -736,7 +736,7 @@ pub(super) fn move_node(
             .join(" + ")
     );
     if matches!(want, "Merged" | "Done" | "Canceled")
-        && km["collab"].is_object()
+        && super::shared(&km)
         && let Err(e) = crate::page::update_claim(i, scope, &km["collab"], k, None)
     {
         eprintln!("warn {k}: could not release claim: {e}");

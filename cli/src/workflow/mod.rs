@@ -85,11 +85,11 @@ pub fn current_claims(
     plan: &Value,
     keymap: &Value,
 ) -> Result<Option<Value>, String> {
-    let Some(collab) = keymap.get("collab").filter(|v| !v.is_null()) else {
+    if !shared(keymap) {
         return Ok(None);
     };
     let scope = workspace(installation, plan)?;
-    crate::page::project_claims(installation, scope, collab).map(Some)
+    crate::page::project_claims(installation, scope, &keymap["collab"]).map(Some)
 }
 
 fn workspace<'a>(installation: &'a Installation, plan: &'a Value) -> Result<&'a str, String> {
@@ -125,3 +125,9 @@ fn journal(dir: &std::path::Path, cmd: &str, old: &Value, new: &Value) {
         eprintln!("warn: journal not written ({e})");
     }
 }
+
+fn shared(keymap: &Value) -> bool {
+    keymap["collab"].as_object().is_some_and(|m| !m.is_empty())
+}
+
+mod levels;

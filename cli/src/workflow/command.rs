@@ -10,6 +10,16 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Verb {
+    Autonomy {
+        dir: PathBuf,
+        #[arg(value_parser=["full","standard","supervised"])]
+        level: Option<String>,
+    },
+    ReviewEffort {
+        dir: PathBuf,
+        #[arg(value_parser=["thorough","standard","light"])]
+        level: Option<String>,
+    },
     Move {
         dir: PathBuf,
         key: String,
@@ -76,7 +86,9 @@ pub fn command() -> ExitCode {
 fn execute(verb: Verb) -> Result<(), String> {
     let installation = Installation::load()?;
     let dir = match &verb {
-        Verb::Move { dir, .. }
+        Verb::Autonomy { dir, .. }
+        | Verb::ReviewEffort { dir, .. }
+        | Verb::Move { dir, .. }
         | Verb::Approve { dir, .. }
         | Verb::Load { dir, .. }
         | Verb::Ready { dir, .. }
@@ -93,6 +105,12 @@ fn execute(verb: Verb) -> Result<(), String> {
         .load_plan(dir)
         .map_err(|e| e.to_string())?;
     match verb {
+        Verb::Autonomy { ref dir, level } => {
+            super::levels::Level::Autonomy.run(dir, &installation, &plan, level.as_deref())
+        }
+        Verb::ReviewEffort { ref dir, level } => {
+            super::levels::Level::Review.run(dir, &installation, &plan, level.as_deref())
+        }
         Verb::Move {
             ref dir,
             key,

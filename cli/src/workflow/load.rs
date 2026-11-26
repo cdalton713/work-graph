@@ -252,7 +252,7 @@ pub(super) fn load(
         previous = km.clone();
         Ok(())
     };
-    let shared = apply && km["collab"].is_object();
+    let shared = apply && super::shared(&km);
     let plan_sha = || {
         std::fs::read(dir.join("plan.json"))
             .map(|b| format!("{:x}", Sha256::digest(b)))
@@ -374,9 +374,14 @@ pub(super) fn load(
             .iter()
             .find(|w| w["id"] == scope)
             .is_none_or(|w| w["team_labels"] != false);
-        initiative(
+        sync_label(
             &mut linear,
-            name.trim(),
+            ProjectLabel {
+                group: "initiative",
+                name: name.trim(),
+                noun: "initiative",
+                description: "work-graph: the initiative of each project. Each child label is one initiative.",
+            },
             tid,
             &pid,
             scoped,
@@ -713,15 +718,28 @@ fn create_label(
     }
 }
 
-fn initiative(
+pub(super) struct ProjectLabel<'a> {
+    pub group: &'a str,
+    pub name: &'a str,
+    pub noun: &'a str,
+    pub description: &'a str,
+}
+
+pub(super) fn sync_label(
     l: &mut Linear,
-    name: &str,
+    label: ProjectLabel<'_>,
     tid: &Value,
     pid: &Value,
     scoped: bool,
     apply: bool,
     changes: &mut Vec<String>,
 ) -> Result<(), String> {
+    let ProjectLabel {
+        group: group_name,
+        name,
+        noun,
+        description,
+    } = label;
     let scope = if scoped {
         json!({"team":{"id":{"eq":tid}}})
     } else {
@@ -732,7 +750,7 @@ fn initiative(
         v["isGroup"] == true
             && v["name"]
                 .as_str()
-                .is_some_and(|s| s.eq_ignore_ascii_case("initiative"))
+                .is_some_and(|s| s.eq_ignore_ascii_case(group_name))
     };
     let mut group = found.iter().find(|v| is_group(v)).cloned();
     let mut child = group
@@ -744,17 +762,19 @@ fn initiative(
         })
         .cloned();
     if group.as_ref().is_some_and(|g| g["retiredAt"].is_string()) {
-        return Err("the project label group 'initiative' is retired; restore it in Linear".into());
+        return Err(format!(
+            "the project label group '{group_name}' is retired; restore it in Linear"
+        ));
     }
     if child.as_ref().is_some_and(|v| v["retiredAt"].is_string()) {
         return Err(format!(
-            "the initiative label '{name}' is retired; restore it in Linear or name another initiative"
+            "the {noun} label '{name}' is retired; restore it in Linear or name another {noun}"
         ));
     }
     if group.is_none() {
-        changes.push("create project label group 'initiative'".into());
+        changes.push(format!("create project label group '{group_name}'"));
         if apply {
-            let mut input = json!({"name":"initiative","isGroup":true,"groupType":"singleSelect","description":"work-graph: the initiative of each project. Each child label is one initiative."});
+            let mut input = json!({"name":group_name,"isGroup":true,"groupType":"singleSelect","description":description});
             if scoped {
                 input["teamId"] = tid.clone();
             }
@@ -772,7 +792,7 @@ fn initiative(
             .collect();
         known.sort();
         changes.push(format!(
-            "create initiative '{name}'{}",
+            "create {noun} '{name}'{}",
             if known.is_empty() {
                 String::new()
             } else {
@@ -818,7 +838,7 @@ fn initiative(
         .iter()
         .map(|v| format!(" (was '{}')", display(&v["name"])))
         .collect::<String>();
-    changes.push(format!("set initiative '{name}'{previous}"));
+    changes.push(format!("set {noun} '{name}'{previous}"));
     if apply {
         for v in stale {
             let r = l.request(
@@ -829,7 +849,7 @@ fn initiative(
                 return Err("could not remove project label".into());
             }
         }
-        let child = child.ok_or("missing initiative label")?;
+        let child = child.ok_or("missing project label")?;
         let r = l.request(
             "mutation($id:String!,$l:String!){projectAddLabel(id:$id,labelId:$l){success}}",
             json!({"id":pid,"l":child["id"]}),

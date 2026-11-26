@@ -12,6 +12,7 @@ from unittest.mock import patch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from services import Handler, fixture_service
+from suite import run_case
 
 
 def page(values):
@@ -27,6 +28,8 @@ def scenario(binary, work):
     states = {s: {"id": s, "name": s} for s in ("Todo", "Ready", "In Progress", "Done", "Merged")}
     issues = {}
     labels = {}
+    groups = {}
+    active_labels = set()
     links = {}
     archives = []
     mutations = []
@@ -77,7 +80,26 @@ else:
         req = json.loads(h.rfile.read(int(h.headers["Content-Length"])))
         q = req["query"].replace(" ", "").replace("\n", "")
         v = req["variables"]
-        if "teams(filter:" in q:
+        if "projectLabels(first:" in q:
+            assert v["f"] == {"team": {"id": {"eq": "team"}}}
+            data = {"projectLabels": page(groups.values())}
+        elif "projectLabelCreate(" in q:
+            inp = v["i"]
+            assert inp["teamId"] == "team"
+            uid = str(len(groups) + 1)
+            groups[uid] = {"id": uid, "name": inp["name"], "isGroup": inp.get("isGroup", False),
+                           "parent": groups.get(inp.get("parentId")), "retiredAt": None}
+            data = {"projectLabelCreate": {"projectLabel": {"id": uid}}}
+        elif "project(id:" in q and "labels(first:" in q:
+            data = {"project": {"labels": page(groups[uid] for uid in active_labels)}}
+        elif "projectRemoveLabel(" in q:
+            active_labels.remove(v["l"])
+            data = {"projectRemoveLabel": {"success": True}}
+        elif "projectAddLabel(" in q:
+            assert v["id"] == "p" and v["l"] in groups
+            active_labels.add(v["l"])
+            data = {"projectAddLabel": {"success": True}}
+        elif "teams(filter:" in q:
             data = {"teams": page([{"id": "team", "states": page(states.values())}])}
         elif "team(id:" in q and "labels(" in q:
             data = {"team": {"labels": page(labels.values())}}
@@ -182,6 +204,18 @@ else:
         assert outcomes[-1][2] == "a: Another holds this node now\n" and claim_reads
         del km["collab"]
         (work / "keymap.json").write_text(json.dumps(km))
+        for verb, default, levels in [
+                ("autonomy", "standard", ["full", "supervised", "standard"]),
+                ("review-effort", "thorough", ["light", "standard", "thorough"])]:
+            title = verb.replace("-", " ")
+            assert run(verb) == f"{title} {default}\n"
+            for level in levels:
+                run(verb, level)
+                before = list(mutations)
+                assert run(verb, level) == f"{title} {level}\n"
+                assert run(verb) == f"{title} {level}\n"
+                assert before == mutations
+        assert {groups[uid]["name"] for uid in active_labels} == {"standard", "review:thorough"}
         run("approve", "a", "--quote", "go ahead")
         assert comments[-1].endswith('Their words: "go ahead"')
         for key in ("dirty", "clean"):
@@ -205,6 +239,12 @@ else:
     outcomes.append(("journal", stable([json.loads(s) for s in (work / "journal.jsonl").read_text().splitlines()])))
     return outcomes
 
+
+candidate = str(Path(sys.argv[1]).resolve())
+frozen = json.loads((HERE / "expected.json").read_bytes())
+for case in ["autonomy effort", "review-effort effort", "service | autonomy effort"]:
+    result = run_case([candidate], case.removeprefix("service | ").split(), case.startswith("service | "))
+    assert result == frozen[case], (case, result, frozen[case])
 
 with tempfile.TemporaryDirectory() as root:
     results = []

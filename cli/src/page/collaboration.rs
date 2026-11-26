@@ -1156,7 +1156,7 @@ pub(crate) fn refresh_workflow(
     dir: &Path,
     applying: bool,
 ) -> Result<()> {
-    if !crate::state::load_keymap(dir).map_err(|e| e.to_string())?["collab"].is_object() {
+    if !truthy(&crate::state::load_keymap(dir).map_err(|e| e.to_string())?["collab"]) {
         return Ok(());
     }
     let lock = installation.lock(dir)?;

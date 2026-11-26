@@ -5,6 +5,7 @@ import { Hono } from "hono";
 import { createApp } from "./app.ts";
 import { NEWER_SCHEMA_ERROR } from "./db/migrations.ts";
 import { linkSettings } from "./link.ts";
+import { releaseVersion } from "./sentry.ts";
 import { readConfig } from "./workspaces.ts";
 import { readLinearAuth, serviceSetting } from "./linearauth.ts";
 import { openServiceTenants, type Tenants } from "./tenants.ts";
@@ -89,7 +90,7 @@ export function createVercelApp(env: NodeJS.ProcessEnv) {
       stateDir: env.WG_STATE_DIR || undefined,
       readOnly, watchMs: readOnly ? 0 : undefined,
       contractFile: join(root, "skills/work-graph/contract.json"),
-      version: env.WG_VERSION || env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "dev",
+      version: releaseVersion(env),
     });
   } catch (error) {
     if (!readOnly && error instanceof Error && error.message === "invalid Redis link configuration") return unavailable("WG_REDIS_URL");
@@ -141,7 +142,7 @@ function createVercelService(env: NodeJS.ProcessEnv) {
       flushSentry: true,
       redisUrl: env.WG_REDIS_URL, redisPrefix: env.WG_REDIS_PREFIX || undefined,
       contractFile: join(root, "skills/work-graph/contract.json"),
-      version: env.WG_VERSION || env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "dev",
+      version: releaseVersion(env),
       serviceReady: () => directory().then(() => true, (error: unknown) => {
         const message = error instanceof Error ? error.message : "";
         if (message === NEWER_SCHEMA_ERROR) return "schema-too-new";

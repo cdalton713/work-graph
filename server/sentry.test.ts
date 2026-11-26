@@ -72,7 +72,7 @@ it.each([
 
 it("captures server errors once and skips expected client errors", async () => {
   const captureException = vi.fn();
-  vi.doMock("./sentry.ts", () => ({ sentry: { captureException } }));
+  vi.doMock("./sentry.ts", async (original) => ({ ...await original<typeof import("./sentry.ts")>(), sentry: { captureException } }));
   try {
     const { createApp } = await import("./app.ts");
     const { LinearError } = await import("./linear.ts");
@@ -95,7 +95,7 @@ it("waits for Sentry to flush before the Vercel entry returns", async () => {
   let finish!: () => void;
   const pending = new Promise<void>(resolve => { finish = resolve; });
   const flush = vi.fn(() => pending);
-  vi.doMock("./sentry.ts", () => ({ sentry: { flush } }));
+  vi.doMock("./sentry.ts", async (original) => ({ ...await original<typeof import("./sentry.ts")>(), sentry: { flush } }));
   try {
     const { createVercelApp } = await import("./vercel.ts");
     const { entry } = createVercelApp({
@@ -114,6 +114,49 @@ it("waits for Sentry to flush before the Vercel entry returns", async () => {
   } finally {
     finish();
     vi.doUnmock("./sentry.ts");
+    vi.resetModules();
+  }
+});
+
+it.each([
+  ["release-tag", "123456789abcdef", "release-tag"],
+  [undefined, "123456789abcdef", "1234567"],
+  [undefined, undefined, "dev"],
+])("uses release %s and Vercel commit %s consistently", async (version, commit, expected) => {
+  vi.resetModules();
+  vi.stubEnv("WG_VERSION", version);
+  vi.stubEnv("VERCEL_GIT_COMMIT_SHA", commit);
+  vi.stubEnv("SENTRY_AUTH_TOKEN", "build-token");
+  vi.stubEnv("SENTRY_ORG", "test-org");
+  vi.stubEnv("SENTRY_PROJECT_BROWSER", "browser");
+  const upload = vi.fn(() => []);
+  const init = vi.fn();
+  vi.doMock("@sentry/vite-plugin", () => ({ sentryVitePlugin: upload }));
+  vi.doMock("@sentry/node", () => ({ init, flush: vi.fn() }));
+  const previous = process.listeners("unhandledRejection");
+  try {
+    const { default: configureBuild } = await import("../vite.config.ts");
+    configureBuild({ command: "build", mode: "production" });
+    expect(upload).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ name: expected }) }));
+
+    const env = {
+      WG_VERSION: version, VERCEL_GIT_COMMIT_SHA: commit, WG_SENTRY_DSN: "server", WG_SENTRY_BROWSER_DSN: "browser",
+      WG_HOSTED: "localhost", WG_CONFIG_JSON: JSON.stringify({ workspaces: [{ id: "work", team: "WG" }] }),
+    };
+    const { startSentry } = await import("./sentry.ts");
+    await startSentry(env);
+    expect(init).toHaveBeenCalledWith(expect.objectContaining({ release: expected }));
+    const { createVercelApp } = await import("./vercel.ts");
+    const { app } = createVercelApp(env);
+    const response = await app.request("/api/config", { headers: { host: "localhost" } });
+    expect(await response.json()).toMatchObject({ version: expected, sentry: { release: expected } });
+  } finally {
+    for (const listener of process.listeners("unhandledRejection")) {
+      if (!previous.includes(listener)) process.off("unhandledRejection", listener);
+    }
+    vi.unstubAllEnvs();
+    vi.doUnmock("@sentry/vite-plugin");
+    vi.doUnmock("@sentry/node");
     vi.resetModules();
   }
 });

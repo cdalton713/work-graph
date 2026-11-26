@@ -4,6 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { sentryVitePlugin } from "@sentry/vite-plugin";
+import { releaseVersion } from "./server/sentry.ts";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 
@@ -26,8 +27,8 @@ function compressedAssets(): Plugin {
 }
 
 export default defineConfig(({ command }) => {
-  const { SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT_BROWSER, WG_VERSION } = process.env;
-  const upload = command === "build" && SENTRY_AUTH_TOKEN && SENTRY_ORG && SENTRY_PROJECT_BROWSER;
+  const { SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT_BROWSER } = process.env;
+  const upload = command === "build" && Boolean(SENTRY_AUTH_TOKEN && SENTRY_ORG && SENTRY_PROJECT_BROWSER);
   return {
     define: { "import.meta.env.WG_CONTRACT_HASH": JSON.stringify(contractHash) },
     build: { sourcemap: upload ? "hidden" : false },
@@ -39,7 +40,7 @@ export default defineConfig(({ command }) => {
         org: SENTRY_ORG,
         project: SENTRY_PROJECT_BROWSER,
         telemetry: false,
-        release: { name: WG_VERSION || "dev", setCommits: false },
+        release: { name: releaseVersion(process.env), setCommits: false },
         sourcemaps: { assets: "dist/**/*.js", filesToDeleteAfterUpload: "dist/**/*.map" },
       }),
     ],

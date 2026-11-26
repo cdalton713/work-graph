@@ -404,6 +404,14 @@ Open a project under **Shared projects** in the project menu. Viewers and collab
 can also comment, change issue status and labels, and send commands to the coordinator. To write to Linear,
 a collaborator needs their own connection to the project’s Linear organization. The owner manages project settings and members.
 
+The service stores up to 50 versions of each project plan and keymap. The owner
+uses a coordinator token to store the first version. Owners and collaborators
+can save a new version if the current version still matches. Viewers can read
+the current plan. When a plan exists, only the owner can claim a merge point,
+ship point, or ops node. Use the version number in the response body for
+`If-Match` when you save a new version. If the newest plan removed a node,
+claim renewal returns 404 and the holder must stop work on that node.
+
 ### Parts of the service
 
 - Run the container behind an HTTPS proxy that supports WebSocket upgrades. The server listens on the

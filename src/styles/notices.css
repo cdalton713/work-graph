@@ -7,3 +7,17 @@
   .notices label, .notices button { min-height: 44px; min-width: 44px; }
   .notices input { font-size: 16px; }
 }
+
+.bar-notice-hint { display: flex; justify-content: flex-end; }
+.bar .bar-notice { width: 24px; padding-inline: 0; }
+@media (pointer: coarse) {
+  .bar .bar-notice { min-width: var(--touch); }
+}
+
+/* Keep the sheet anchored at the height of its project controls. Its body scrolls to the notices. */
+.bar-menu:has(> .notices:last-child) { position: relative; }
+.bar-menu > .notices:last-child {
+  position: absolute;
+  inset: calc(100% + 8px) 0 auto;
+  padding-bottom: 12px;
+}

@@ -33,7 +33,7 @@ export function useNoticeStartup() {
   useEffect(() => { if (site.push) void run(readDevice); }, []);
 }
 
-export function Notices({ account = false }: { account?: boolean }) {
+export function Notices({ account = false, openSettings }: { account?: boolean; openSettings?: () => void }) {
   const { state, busy, message } = useSyncExternalStore(subscribe, () => device);
   if (!site.push) return null;
   return <section className={account ? "notices account-card" : "notices"} aria-label="Notice settings">
@@ -42,7 +42,8 @@ export function Notices({ account = false }: { account?: boolean }) {
       disabled={busy || (state !== "on" && state !== "off")}
       onChange={() => void run(state === "on" ? disableDevice : enableDevice)} />Notices on this device</label>
     <p>{state ? states[state] : busy ? "Checking notices…" : "Device status unavailable."}</p>
-    <button disabled={busy || state !== "on"} onClick={() => void run(async () => { await testDevice(); }, "Test notice requested.")}>Send a test notice</button>
+    {openSettings ? <button type="button" onClick={openSettings}>Notice settings</button> :
+      <button disabled={busy || state !== "on"} onClick={() => void run(async () => { await testDevice(); }, "Test notice requested.")}>Send a test notice</button>}
     {message && <p role="status">{message}</p>}
     {!state && !busy && <button onClick={() => void run(readDevice)}>Check again</button>}
     {account && <AccountNotices />}

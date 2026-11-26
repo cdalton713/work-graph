@@ -15,7 +15,7 @@ import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
 import { PullRefresh } from "./components/PullRefresh";
-import { CopyButton, Hint, Lamp, LazyBoundary, LoadError, Picker } from "./components/ui";
+import { CopyButton, Hint, Lamp, LazyBoundary, LoadError, Picker, Sheet } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type GNode, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
 import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
@@ -797,6 +797,8 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const keysControl = hover && (
     <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} aria-label="Keyboard keys" title={nativeBarTitles ? keysHelp : undefined}>?</button>
   );
+  const [noticeSettingsOpen, setNoticeSettingsOpen] = useState(false);
+  const showNoticeSettings = openSettings ?? (() => setNoticeSettingsOpen(true));
   const settings = openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>;
   const signOut = site.user && <a className="bar-user" href="/auth/logout" onClick={() => clearStarterHandoffs(site.user)} title={nativeBarTitles ? signOutHelp : undefined}>Sign out</a>;
   const refreshScreen = useCallback(() => {
@@ -837,7 +839,12 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
           {shareControl()}
           {setupButton()}
         </>}
-        <span className="station-fill" />
+        <span className="station-fill">
+          {site.push && !service && !compactBar && <Hint text="Notices" infoLabel="About notices" className="bar-notice-hint">
+            <button type="button" className="ghost bar-notice" aria-label="Notices" aria-haspopup="dialog"
+              onClick={showNoticeSettings}><span aria-hidden>🔔︎</span></button>
+          </Hint>}
+        </span>
         {!narrow && viewer && <span className="bar-viewer" title={nativeBarTitles ? viewerHelp : undefined}>view only</span>}
         {!narrow && boardControl}
         {!narrow && viewPicker}
@@ -851,7 +858,6 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         )}
         {compactBar ? (
           <BarMenu key={openKey} title={project ? "Project controls" : "More controls"}>{(dismiss) => <>
-            {site.push && <Notices account={!service} />}
             {setupButton(dismiss)}
             {viewer && <p>{viewerHelp}</p>}
             {projectLink && <div className="bar-menu-row"><span>Project link</span><CopyButton text={projectLink} label="Copy the project link" secret /></div>}
@@ -884,17 +890,20 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
             {settings}
             {site.user && <div className="bar-menu-row"><span>{signOutHelp}</span>{signOut}</div>}
             {closeControl && <div className="bar-menu-danger"><p>{closeHelp}</p>{closeControl}</div>}
+            {site.push && <Notices openSettings={() => { dismiss(); showNoticeSettings(); }} />}
           </>}</BarMenu>
         ) : <>
           {serverVersion && <Hint className="bar-version mono" text={`The build of the server: ${status!.version}`}>{serverVersion}</Hint>}
           {keysControl}
-          {site.push && !service && <BarMenu title="Notice settings">{() => <Notices account />}</BarMenu>}
           {settings}
           {signOut}
           {closeControl}
         </>}
       </header>
 
+      {noticeSettingsOpen && <Sheet open title="Notice settings" onClose={() => setNoticeSettingsOpen(false)}>
+        <Notices account />
+      </Sheet>}
       {sharing && sharing === openKey && project && <Share id={project.id}
         workspace={project.workspace} team={connections?.find(({ workspace_id }) => workspace_id === project.workspace)?.team}
         close={() => setSharing(null)} />}

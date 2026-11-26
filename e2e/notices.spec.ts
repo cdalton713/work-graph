@@ -151,3 +151,53 @@ test("the app updates the icon when there are moves", async ({ page }) => {
   await screens.overview(page);
   await expect.poll(() => page.evaluate(() => Number(document.documentElement.dataset.testBadge))).toBeGreaterThan(0);
 });
+
+test("desktop notices preserve project picker widths", async ({ page }, info) => {
+  test.skip(!info.project.name.startsWith("desktop"));
+  const bar = page.locator(".project-bar");
+  const widths = async () => {
+    await expect(bar.getByRole("button", { name: /^Review/ })).toBeVisible();
+    await expect(bar.locator(".sync-time")).toHaveText(/\d+:\d+/);
+    await page.evaluate(() => document.fonts.ready);
+    const pickers = bar.locator(".picker-trigger");
+    await expect(pickers).toHaveCount(4);
+    return pickers.evaluateAll(controls => controls.map(el => el.getBoundingClientRect().width));
+  };
+  for (const width of [1280, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await screens.project(page);
+    const before = await widths();
+    await allowPush(page);
+    await page.reload();
+    const button = bar.getByRole("button", { name: "Notices", exact: true });
+    await expect(button).toBeVisible();
+    await expect(bar.getByTitle("Notices")).toBeVisible();
+    expect(await widths()).toEqual(before);
+    await button.click();
+    await expect(page.getByRole("dialog", { name: "Notice settings" }).getByRole("group", { name: "Account notices" })).toBeVisible();
+    await page.unroute("**/api/config");
+  }
+});
+
+test("phone notices follow the existing project controls", async ({ page }, info) => {
+  test.skip(!info.project.name.startsWith("phone-390"));
+  const sheet = page.getByRole("dialog", { name: "Project controls" });
+  async function positions() {
+    await screens.project(page);
+    await page.locator(".bar").getByRole("button", { name: "More" }).click();
+    await expect(sheet.getByRole("button", { name: /^Review/ })).toBeVisible();
+    await sheet.evaluate(async el => { await Promise.all(el.getAnimations({ subtree: true }).map(animation => animation.finished)); });
+    return Promise.all([/Copy the project link/, /^Autonomy/, /^Review/, /Close project/].map(name =>
+      sheet.getByRole("button", { name }).evaluate(el => el.getBoundingClientRect().top)));
+  }
+  const before = await positions();
+  await allowPush(page);
+  expect(await positions()).toEqual(before);
+  await expect(sheet.getByRole("switch", { name: "Notices on this device" })).toBeVisible();
+  await expect(sheet.getByRole("group", { name: "Account notices" })).toHaveCount(0);
+  await expect(sheet.getByRole("button", { name: "Send a test notice" })).toHaveCount(0);
+  await sheet.getByRole("button", { name: "Notice settings" }).click();
+  const settings = page.getByRole("dialog", { name: "Notice settings" });
+  await expect(settings.getByRole("group", { name: "Account notices" })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "Send a test notice" })).toBeVisible();
+});

@@ -213,34 +213,43 @@ test("an iOS home-screen app signs in and opens a join link without browser help
   await expect(page.getByText(/open this page in your browser/i)).toHaveCount(0);
 });
 
-async function expectBox(locator: Locator, expected: number[]) {
+async function expectBox(
+  locator: Locator,
+  { centerX, centerY, ...fixed }: { x?: number; y?: number; width?: number; centerX?: number; centerY?: number },
+  textDependent: { y?: number; height: number; heightTolerance?: number },
+) {
   await expect(locator).toBeVisible();
-  await expect.poll(async () => {
+  await expect(async () => {
     const { x, y, width, height } = (await locator.boundingBox())!;
-    return [x, y, width, height].map(Math.round);
-  }).toEqual(expected);
+    expect({ x: Math.round(x), y: Math.round(y), width: Math.round(width) }).toMatchObject(fixed);
+    if (centerX !== undefined) expect(Math.abs(x + width / 2 - centerX)).toBeLessThanOrEqual(1);
+    if (centerY !== undefined) expect(Math.abs(y + height / 2 - centerY)).toBeLessThanOrEqual(1);
+    if (textDependent.y !== undefined) expect(Math.abs(y - textDependent.y)).toBeLessThanOrEqual(12);
+    expect(Math.abs(height - textDependent.height)).toBeLessThanOrEqual(textDependent.heightTolerance ?? 12);
+  }).toPass({ timeout: 5000 });
 }
 
 test("account screens keep their desktop layout at 1440 pixels", async ({ page }, info) => {
   test.skip(info.project.name !== "desktop-1440x900");
   expect(await page.evaluate(() => matchMedia("(pointer: fine)").matches)).toBe(true);
-  // Rounded element boxes measured on the base branch at this viewport.
+  // Check fixed geometry exactly and allow for text wrapping across system fonts.
   await page.goto(serviceUrl());
-  await expectBox(page.getByRole("link", { name: /Sign in with/ }), [650, 482, 141, 33]);
+  await expectBox(page.getByRole("link", { name: /Sign in with/ }), { centerX: 720 }, { y: 482, height: 33 });
   await page.goto(serviceUrl() + "/join/example?signed-in=1");
   await expect(page.getByRole("link", { name: "Try signing in again" })).toBeVisible();
-  await expectBox(page.getByRole("heading", { name: "Join project" }), [491, 53, 458, 38]);
-  await expectBox(page.locator(".share-join .account-card"), [470, 32, 500, 141]);
+  await expectBox(page.getByRole("heading", { name: "Join project" }), { x: 491, y: 53, width: 458 }, { height: 38 });
+  await expectBox(page.locator(".share-join .account-card"), { x: 470, y: 32, width: 500 }, { height: 141 });
 
   await screens.settings(page);
-  await expectBox(page.getByRole("heading", { name: "Settings", exact: true }), [280, 76, 880, 38]);
+  await expectBox(page.getByRole("heading", { name: "Settings", exact: true }), { x: 280, y: 76, width: 880 }, { height: 38 });
   await page.getByRole("button", { name: "Attach another workspace" }).click();
-  await expectBox(page.getByRole("dialog"), [500, 309, 440, 282]);
+  // The instructions in this dialog can wrap onto one extra line.
+  await expectBox(page.getByRole("dialog"), { x: 500, width: 440, centerY: 450 }, { height: 282, heightTolerance: 20 });
 
   await screens.setup(page);
   await page.getByRole("button", { name: /Set up wg/ }).click();
-  await expectBox(page.getByRole("heading", { name: "Set up wg" }), [507, 151, 632, 26]);
-  await expectBox(page.locator(".account-command").first(), [507, 399, 632, 252]);
+  await expectBox(page.getByRole("heading", { name: "Set up wg" }), { x: 507, y: 151, width: 632 }, { height: 26 });
+  await expectBox(page.locator(".account-command").first(), { x: 507, width: 632 }, { y: 399, height: 252 });
 
-  await expectBox(await openShare(page), [450, 62, 540, 776]);
+  await expectBox(await openShare(page), { x: 450, width: 540, centerY: 450 }, { height: 776 });
 });

@@ -1,20 +1,28 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { accountApi, ApiError } from "../../api";
 import { validateNewTeam, type Step } from "../../lib/onboarding";
-import type { AccountConnection, AccountTeam, TeamSetupState } from "../../lib/types";
+import type { AccountConnection, AccountTeam, SetupTeam, TeamSetupState } from "../../lib/types";
 import { TeamForm, WorkspaceStatus, type RefreshAccount } from "../Settings";
+import { CopyButton } from "../ui";
 import { StatusFlow } from "./StatusFlow";
 
 function SetupError({ error }: { error: unknown }) {
   if (!error) return null;
+  const body = error instanceof ApiError ? error.body : undefined;
   return <div role="alert" className="account-error">
     {error instanceof Error ? error.message : "Could not check team setup."}
-    {error instanceof ApiError && error.body.fallback && <p>Run this command on your computer.<br /><code>{error.body.fallback}</code></p>}
+    {body?.team && <p>Linear created {body.team.name} ({body.team.key}). Check its visibility before you use it.</p>}
+    {body?.fallback && <>
+      <p>Run this command on your computer.</p>
+      <div className="account-command"><pre>{body.fallback}</pre><CopyButton text={body.fallback} label="Copy fallback command" /></div>
+      <p>After it runs, select the new team under Use an existing team, then choose Check again.</p>
+    </>}
   </div>;
 }
 
-function CreateTeam({ workspace, human, plan, refresh }: {
+function CreateTeam({ workspace, human, plan, refresh, onCreated, onError }: {
   workspace: AccountConnection; human: string; plan: TeamSetupState["plan"]; refresh: RefreshAccount;
+  onCreated: (team: SetupTeam) => void; onError: (error: unknown) => void;
 }) {
   const [teams, setTeams] = useState<AccountTeam[]>([]);
   const [key, setKey] = useState("");
@@ -43,18 +51,22 @@ function CreateTeam({ workspace, human, plan, refresh }: {
     setBusy(true);
     setError(null);
     try {
-      await accountApi.createTeam(workspace.id, { ...team, parent: privateTeam ? parent : null, private: privateTeam });
+      const created = await accountApi.createTeam(workspace.id, { ...team, parent: privateTeam ? parent : null, private: privateTeam });
+      onCreated(created);
       await refresh();
-    } catch (e) { setError(e); } finally { setBusy(false); }
+    } catch (e) { onError(e); } finally { setBusy(false); }
   }}>
-    <h3>Recommended: a private sub-team for agent work</h3>
-    <p>Agent claims, the 13 work-graph statuses, and agent follow-ups stay out of your main team.
-      Only you see the private sub-team. Its parent team can include it in views. You can add people later.</p>
-    {privateTeam ? <label>Parent team<select value={parent} onChange={e => setParent(e.target.value)} required>
+    <h3>Recommended: {privateTeam ? "a private sub-team" : "a team"} for agent work</h3>
+    {privateTeam ? <ul>
+      <li>Agent claims, the 13 work-graph statuses, and agent follow-ups stay out of your main team.</li>
+      <li>Only you see it. Its parent team can still include it in views.</li>
+      <li>You can add people later.</li>
+    </ul> : <p>Your plan does not include private sub-teams. You can create a public team for agent work.</p>}
+    {privateTeam ? <label>Parent team for {workspace.name}<select value={parent} onChange={e => setParent(e.target.value)} required>
       {teams.map(t => <option key={t.key} value={t.key}>{t.name} ({t.key})</option>)}
-    </select></label> : <p>Your plan does not include private sub-teams. You can create a public team.</p>}
-    <label>Key<input required maxLength={7} pattern="[A-Z][A-Z0-9]{0,6}" value={key} onChange={e => setKey(e.target.value.toUpperCase())} /></label>
-    <label>Name<input required maxLength={80} value={name} onChange={e => setName(e.target.value)} /></label>
+    </select></label> : null}
+    <label>Key for {workspace.name}<input required maxLength={7} pattern="[A-Z][A-Z0-9]{0,6}" value={key} onChange={e => setKey(e.target.value.toUpperCase())} /></label>
+    <label>Name for {workspace.name}<input required maxLength={80} value={name} onChange={e => setName(e.target.value)} /></label>
     <div><button disabled={busy || !validateNewTeam(key, name) || (privateTeam && !parent)}>
       {privateTeam ? "Create private sub-team" : "Create team"}</button></div>
     <SetupError error={error} />
@@ -62,14 +74,31 @@ function CreateTeam({ workspace, human, plan, refresh }: {
   </form>;
 }
 
-export function WorkspaceSetup({ workspace, human, step, record, checkKey, refresh }: {
+export function WorkspaceSetup({ workspace, human, step, record, checkKey, refresh, created, onCreated, confirmationRef }: {
   workspace: AccountConnection; human: string; step: Step; checkKey: string; refresh: RefreshAccount;
+  created?: SetupTeam; onCreated: (team: SetupTeam) => void; confirmationRef: (node: HTMLParagraphElement | null) => void;
   record: (key: string, ready: boolean) => void;
 }) {
   const [state, setState] = useState<TeamSetupState>();
   const [error, setError] = useState<unknown>();
   const [attempt, retry] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<unknown>();
+  const [listVersion, reloadTeams] = useState(0);
+  const [added, setAdded] = useState("");
+  const addStatus = useRef<HTMLParagraphElement>(null);
+  const partialTeam = actionError instanceof ApiError ? actionError.body.team : undefined;
+  function checkAgain() {
+    retry(n => n + 1);
+    reloadTeams(n => n + 1);
+  }
+  useEffect(() => {
+    if (!(actionError instanceof ApiError && actionError.body.fallback)) return;
+    const reload = () => reloadTeams(n => n + 1);
+    window.addEventListener("focus", reload);
+    return () => window.removeEventListener("focus", reload);
+  }, [actionError]);
+  useEffect(() => { if (added) addStatus.current?.focus(); }, [added]);
   const { id, team, status } = workspace;
   useEffect(() => {
     if (status !== "ok") return;
@@ -84,22 +113,39 @@ export function WorkspaceSetup({ workspace, human, step, record, checkKey, refre
   if (step !== "teams" && step !== "statuses") return null;
   async function apply() {
     setBusy(true);
-    setError(null);
+    setActionError(null);
+    setAdded("");
     try {
-      await accountApi.applyTeamSetup(id, team);
+      const result = await accountApi.applyTeamSetup(id, team);
       setState(await accountApi.teamSetup(id, team));
-    } catch (e) { setError(e); } finally { setBusy(false); }
+      const warnings = result.warned.length ? " Check in Linear: " + result.warned.join(", ") + "." : "";
+      setAdded(`Added ${result.created.length} items.${warnings}`);
+    } catch (e) { setActionError(e); } finally { setBusy(false); }
   }
   return <article className="account-item">
     <h3>{workspace.name}</h3><WorkspaceStatus workspace={workspace} />
-    <SetupError error={error} />
+    <SetupError error={error || actionError} />
+    {partialTeam && <div><button disabled={busy} onClick={async () => {
+      setBusy(true);
+      try {
+        await accountApi.updateWorkspace(id, { team: partialTeam.key });
+        onCreated(partialTeam);
+        await refresh();
+        checkAgain();
+      } catch (e) { setError(e); } finally { setBusy(false); }
+    }}>Use this team</button></div>}
     {status === "ok" && <>
       {!state && !error && <p role="status">Checking team setup…</p>}
-      {error || (step === "statuses" && state?.team && !ready) ? <div><button onClick={() => retry(n => n + 1)}>Check again</button></div> : null}
+      {(error || actionError || step === "teams" || !ready) ? <div><button disabled={busy} onClick={checkAgain}>Check again</button></div> : null}
       {step === "teams" ? <>
-        {state && <CreateTeam workspace={workspace} human={human} plan={state.plan} refresh={refresh} />}
-        <h3>Use an existing team</h3><TeamForm workspace={workspace} refresh={refresh} />
-      </> : team && state?.team ? <StatusFlow state={state} workspace={workspace} human={human} apply={apply} busy={busy} /> :
+        {created && created.key === team ? <p role="status" tabIndex={-1} ref={confirmationRef}>
+          Created {created.name} ({created.key}), {created.private ? "private" : "public"}{created.parent && ", under " + created.parent.key}. It is now the team for {workspace.name}.
+        </p> : state && <CreateTeam workspace={workspace} human={human} plan={state.plan} refresh={refresh}
+          onCreated={onCreated} onError={e => { setActionError(e); reloadTeams(n => n + 1); }} />}
+        <h3>Use an existing team</h3><TeamForm key={listVersion} workspace={workspace} refresh={refresh} />
+      </> : team && state?.team ? <>
+        {added && <p role="status" tabIndex={-1} ref={addStatus}>{added}</p>}
+        <StatusFlow state={state} workspace={workspace} human={human} apply={apply} busy={busy} /></> :
         <p>Select a team on the Team step.</p>}
     </>}
   </article>;

@@ -44,7 +44,7 @@ function shellArg(value: string): string {
   return /^[a-zA-Z0-9_./:-]+$/.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
 }
 
-export function setupCommands({ connections, pageUrl }: SetupAccount, drafts: NewTeams): string[] {
+export function setupCommands({ connections, pageUrl }: SetupAccount, drafts: NewTeams): [string, ...string[], string] {
   return [
     `wg login ${shellArg(pageUrl)}`,
     ...connections.map(({ id, workspace_id }) => {
@@ -90,4 +90,30 @@ export function pollWhileVisible(
     page.removeEventListener("visibilitychange", sync);
     clearInterval(timer);
   };
+}
+
+export const statusMeanings: Record<string, [string, string]> = {
+  Triage: ["New work needs a decision.", "Worker"],
+  Backlog: ["Work is deferred.", "You"],
+  Todo: ["The issue needs a specification or has open blockers.", "Coordinator"],
+  Ready: ["All blockers are closed. Work can start.", "Coordinator"],
+  "In Progress": ["A worker has started the issue.", "Coordinator"],
+  "Needs {name}": ["Work waits for your answer or action.", "Worker"],
+  "In Review": ["The pull request is open for review.", "Worker"],
+  "Ready to Merge": ["Checks passed and review is complete.", "Worker"],
+  Merged: ["The change is merged and waits for deployment.", "Worker"],
+  Verifying: ["Checks are running after deployment.", "Coordinator"],
+  Done: ["The change meets its acceptance criteria.", "Coordinator"],
+  Canceled: ["Work stopped on this issue.", "You"],
+  Duplicate: ["Another issue tracks the same work.", "Linear"],
+};
+
+export function installBlock(config: string, commands: ReturnType<typeof setupCommands>): string {
+  const setup = commands.slice(1, -1);
+  const loginAndDoctor = commands[0] + " && " + commands.at(-1);
+  // Login reads the token from the terminal. Leave no pasted command after its line.
+  return [
+    "# Add these settings to ~/.config/work-graph/config.json.",
+    ": <<'WG_CONFIG'", config, "WG_CONFIG", "", ...setup, loginAndDoctor,
+  ].join("\n");
 }

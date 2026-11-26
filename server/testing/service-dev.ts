@@ -117,7 +117,7 @@ const setupWorkspaces = new Map<string, {
   teams: PreviewTeam[]; states: Map<string, { name: string; type: string }[]>;
   issueLabels: PreviewLabel[]; projectLabels: PreviewLabel[];
 }>();
-async function newSetupUser(refused: boolean) {
+async function newSetupUser(mode: string) {
   const id = randomUUID();
   const org = { id, name: "Setup workspace", urlKey: "setup-" + id };
   const name = "Alex";
@@ -129,9 +129,11 @@ async function newSetupUser(refused: boolean) {
   });
   const person = { id, name, org, email, key, accountId };
   people.push(person);
-  if (refused) refusedOrganizations.add(id);
+  if (mode === "refused") refusedOrganizations.add(id);
+  if (mode === "refused-private") refusedPrivacy.add(id);
   return person;
 }
+const refusedPrivacy = new Set<string>();
 const refusedOrganizations = new Set<string>();
 const teamMembers = new Set([owner.id]);
 let invitationPending = false;
@@ -175,6 +177,7 @@ globalThis.fetch = async (input, init) => {
   if (query.includes("issues(first:1,includeArchived:true)")) return data({ team: { issues: empty, projects: empty } });
   if (query.includes("teamUpdate(id:")) {
     const team = setup.teams.find(t => t.id === variables.id);
+    if (variables.i.private && refusedPrivacy.has(organization.id)) return new Response(null, { status: 403 });
     if (team && variables.i.private) team.visibility = "private";
     if (team && variables.i.triageEnabled) {
       team.triageEnabled = true;
@@ -252,7 +255,7 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
   if (url.pathname === "/auth/login") {
     const identity = url.searchParams.get("as");
     const setupLogin = url.searchParams.get("setup-user");
-    const person = setupLogin ? await newSetupUser(setupLogin === "refused") : people.find(({ id }) => id === identity) ?? owner;
+    const person = setupLogin ? await newSetupUser(setupLogin) : people.find(({ id }) => id === identity) ?? owner;
     if (identity) await accounts.setOnboarding(person.accountId, undefined, true);
     await previewCoordinators();
     const value = pack({ accountId: person.accountId, email: person.email, id: randomUUID(), exp: Math.floor(Date.now() / 1000) + SESSION_S });

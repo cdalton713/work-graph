@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { configBlock, pollWhileVisible, workspaceKeyLocation, doneSteps, firstStep, setupCommands, validateNewTeam } from "./onboarding";
+import contract from "../../skills/work-graph/contract.json";
+import { installBlock, statusMeanings, configBlock, pollWhileVisible, workspaceKeyLocation, doneSteps, firstStep, setupCommands, validateNewTeam } from "./onboarding";
 import type { OnboardingState, AccountConnection } from "./types";
 
 const complete: OnboardingState = {
@@ -99,6 +100,19 @@ describe("onboarding", () => {
       "wg setup --workspace extra --apply --name 'Ada'\\''s team'",
       "wg doctor",
     ]);
+  });
+
+  it("ends the copied block at the token prompt and runs doctor after login", () => {
+    const commands = setupCommands({ ...account, connections: [home, second] }, {});
+    expect(installBlock("{}", commands).split("\n")).toEqual([
+      "# Add these settings to ~/.config/work-graph/config.json.", ": <<'WG_CONFIG'", "{}", "WG_CONFIG", "",
+      "wg setup --workspace example --apply", "wg setup --workspace extra --apply",
+      "wg login https://example.com && wg doctor",
+    ]);
+  });
+
+  it.each(contract.setup.statuses)("explains $name and identifies who moves it", ({ name }) => {
+    expect(statusMeanings[name]).toEqual([expect.stringMatching(/\S/), expect.stringMatching(/\S/)]);
   });
 
   it("checks the team key and name before they enter the commands", () => {

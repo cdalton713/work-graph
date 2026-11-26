@@ -26,7 +26,10 @@ databaseSuites((open) => {
         (index % 2 ? "Grace" : "Ada") === winner ? 200 : 409));
       expect(bodies.every(({ claim }) => claim.holder === winner && claim.job === "dispatch")).toBe(true);
       const list = await (await owner.request(path)).json();
-      expect(list.claims).toEqual([expect.objectContaining({ node: "build", holder: winner, stale: false })]);
+      expect(list).toEqual({ role: "owner", claims: [expect.objectContaining({ node: "build", holder: winner, stale: false, mine: winner === "Ada" })] });
+      expect(await (await collaborator.request(path, "GET", undefined, scope)).json()).toMatchObject({
+        role: "collaborator", claims: [{ holder: winner, mine: winner === "Grace" }],
+      });
       expect(bodies.filter(({ action }) => action === "claimed")).toHaveLength(1);
       expect(bodies.filter(({ action }) => action === "renewed")).toHaveLength(24);
       for (const account of [owner, collaborator]) {
@@ -48,21 +51,25 @@ databaseSuites((open) => {
       expect((await collaborator.request(node, "POST", job, scope)).status).toBe(200);
       for (const [account, workspace] of [[owner, undefined], [viewer, viewScope]] as const) {
         const response = await account.request(path, "GET", undefined, workspace);
-        expect(await response.json()).toMatchObject({ claims: [{ holder: "Grace", stale: false }] });
+        expect(await response.json()).toMatchObject({ role: workspace ? "viewer" : "owner", claims: [{ holder: "Grace", stale: false, mine: false }] });
       }
       const viewerList = await viewer.request(path, "GET", undefined, viewScope, true);
       expect(await viewerList.json()).toMatchObject({ claims: [{ holder: "Grace" }] });
-      expect((await owner.request(node, "DELETE", undefined, undefined, true)).status).toBe(204);
+      const refused = await owner.request(node, "DELETE", undefined, undefined, true);
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ claim: { holder: "Grace" } });
+      expect((await owner.request(node + "?force=1", "DELETE", undefined, undefined, true)).status).toBe(204);
       expect((await owner.request(node, "POST", job)).status).toBe(200);
-      expect((await collaborator.request(node, "DELETE", undefined, scope)).status).toBe(403);
+      expect((await collaborator.request(node, "DELETE", undefined, scope)).status).toBe(409);
+      expect((await collaborator.request(node + "?force=1", "DELETE", undefined, scope)).status).toBe(409);
       expect((await owner.request(node, "DELETE")).status).toBe(204);
       expect((await collaborator.request(node, "POST", job, scope)).status).toBe(200);
       expect((await owner.request(memberPath, "PATCH", { role: "viewer" }, undefined, true)).status).toBe(204);
-      expect(await (await owner.request(path)).json()).toEqual({ claims: [] });
+      expect(await (await owner.request(path)).json()).toEqual({ role: "owner", claims: [] });
       expect((await owner.request(memberPath, "PATCH", { role: "collaborator" }, undefined, true)).status).toBe(204);
       expect((await collaborator.request(node, "POST", job, scope)).status).toBe(200);
       expect((await owner.request(memberPath, "DELETE", undefined, undefined, true)).status).toBe(204);
-      expect(await (await owner.request(path)).json()).toEqual({ claims: [] });
+      expect(await (await owner.request(path)).json()).toEqual({ role: "owner", claims: [] });
     } finally { await db.close(); }
   }, 30_000);
 
@@ -71,9 +78,19 @@ databaseSuites((open) => {
     try {
       const { owner, collaborator, scope } = await projectFixture(db);
       expect((await owner.request(node, "POST", job)).status).toBe(200);
+      expect((await collaborator.request(node, "POST", { ...job, takeover: true }, scope)).status).toBe(409);
       await db.query("UPDATE node_claims SET lease_until = now() - interval '1 second'");
       expect(await (await owner.request(path)).json()).toMatchObject({ claims: [{ holder: "Ada", stale: true }] });
-      expect(await (await collaborator.request(node, "POST", job, scope)).json()).toMatchObject({ action: "taken_over", claim: { holder: "Grace" } });
+      const attempts = await Promise.all(Array.from({ length: 10 }, () => collaborator.request(node, "POST", job, scope)));
+      for (const attempt of attempts) {
+        expect(attempt.status).toBe(409);
+        expect(await attempt.json()).toMatchObject({ claim: { holder: "Ada", stale: true } });
+      }
+      const takeovers = await Promise.all(Array.from({ length: 10 }, () =>
+        collaborator.request(node, "POST", { ...job, takeover: true }, scope)));
+      const results = await Promise.all(takeovers.map((response) => response.json()));
+      expect(results.filter(({ action }) => action === "taken_over")).toHaveLength(1);
+      expect(results.every(({ claim }) => claim.holder === "Grace")).toBe(true);
       const conflict = await owner.request(node, "PUT", { lease_s: 600 });
       expect(conflict.status).toBe(409);
       expect(await conflict.json()).toMatchObject({ claim: { holder: "Grace" } });
@@ -82,6 +99,28 @@ databaseSuites((open) => {
       const { claim } = await renewed.json();
       expect(Date.parse(claim.leaseUntil) - Date.parse(claim.renewedAt)).toBe(600_000);
       expect((await collaborator.request(node, "DELETE", undefined, scope)).status).toBe(204);
+    } finally { await db.close(); }
+  }, 30_000);
+
+  it("admits one account when two collaborators race to take over a stale claim", async () => {
+    const db = await open();
+    try {
+      const { owner, collaborator, viewer, scope, viewScope } = await projectFixture(db);
+      const membersPath = "/api/projects/project/members/";
+      const { members } = await (await owner.request("/api/projects/project/share", "GET", undefined, undefined, true)).json();
+      const member = members.find(({ name }: { name: string }) => name === "Pat");
+      expect((await owner.request(membersPath + member.id, "PATCH", { role: "collaborator" }, undefined, true)).status).toBe(204);
+      expect((await owner.request(node, "POST", job)).status).toBe(200);
+      await db.query("UPDATE node_claims SET lease_until = now() - interval '1 second'");
+      const input = { ...job, takeover: true };
+      const responses = await Promise.all(Array.from({ length: 20 }, (_, index) => index % 2
+        ? collaborator.request(node, "POST", input, scope) : viewer.request(node, "POST", input, viewScope)));
+      const winner = responses[0].status === 200 ? "Pat" : "Grace";
+      expect(responses.map(({ status }) => status)).toEqual(Array.from({ length: 20 }, (_, index) =>
+        (index % 2 ? "Grace" : "Pat") === winner ? 200 : 409));
+      const bodies = await Promise.all(responses.map((response) => response.json()));
+      expect(bodies.filter(({ action }) => action === "taken_over")).toHaveLength(1);
+      expect(bodies.every(({ claim }) => claim.holder === winner)).toBe(true);
     } finally { await db.close(); }
   }, 30_000);
 

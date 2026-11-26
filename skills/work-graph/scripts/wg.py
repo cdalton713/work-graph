@@ -2980,8 +2980,16 @@ def snapshot(plan_dir, plan, km=None):
     return km, live, nodes, st, deps, run_rows(km)["nodes"]
 
 
-def open_blockers(k, nodes, deps, st, rows):
-    return [d for d in deps[k] if not satisfied(nodes[k], nodes[d], st.get(d, "?"), rows.get(d))]
+def open_blockers(k, nodes, deps, st, rows, shared=None):
+    def evidence(key):
+        row = rows.get(key, {})
+        entry = (shared or {}).get(key, {})
+        if not row.get("pr") and entry.get("branch") and entry.get("pr"):
+            # In Review is the shared record of code done. The other coordinator's head stays local.
+            return {"code_done_head": True}
+        return row
+
+    return [d for d in deps[k] if not satisfied(nodes[k], nodes[d], st.get(d, "?"), evidence(d))]
 
 
 def milestone_blockers(key, nodes, deps, st, rows):
@@ -3245,9 +3253,13 @@ def move(plan_dir, plan, key, status_name, note=None, force=None, keep_worktree=
     if eng and status_name not in ENG_WRITES and status_name != WAIT_STATUS:
         die(f"no ENG status for {status_name}: ask {HUMAN}")
     km = load_keymap(plan_dir)
+    if status_name == "Ready to Merge" and node["kind"] == "task":
+        require_page_claim(plan, km, key)
     entry = km["nodes"].get(key) or die(f"{key}: not loaded")
     ident = entry["identifier"]
     issue = fetch_nodes({"nodes": {key: entry}}).get(entry["id"]) or die(f"{ident}: issue not found")
+    if status_name == "Merged" and node["kind"] == "task" and norm(issue["state"], issue_labels(issue)) not in SETTLED:
+        require_page_claim(plan, km, key)
     notes = []
     if force is None:
         problems, notes = move_guard(plan_dir, plan, km, node, status_name, note, issue)
@@ -3279,6 +3291,8 @@ def move(plan_dir, plan, key, status_name, note=None, force=None, keep_worktree=
             kind="status")
     before = next((status for status, name in ENG_LABELS.items() if name in markers), old)
     print(f"{ident}: {before} -> {' + '.join(filter(None, [want, marker])) or status_name}")
+    if status_name in SETTLED and (collab := km.get("collab")) is not None:
+        release_page_claim(collab, plan_workspace(plan), key)
     if status_name == WAIT_STATUS:
         print(f"page {page_link(plan, ident)}")  # the link to give the human with the question
     if note and note.strip():
@@ -4272,15 +4286,23 @@ def agent_merge_repo(plan_dir):
     return bool(name) and any(m.lower() in (name.lower(), name.split("/")[0].lower()) for m in allowed)
 
 
+CLAIMS_UNAVAILABLE = "claims unavailable"
+
+
 def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
     """One status line; then what the coordinator does now (do), waits for (wait), and must know (note).
 
-    It reads Linear, GitHub, and the run rows, and writes nothing, so a new session can start from it.
+    It reads Linear, GitHub, and the run rows. For a shared effort it also maintains the page claims.
     """
     km, live, nodes, st, deps, rows = inputs if inputs is not None else snapshot(plan_dir, plan)
+    try:
+        gates = collaboration_lines(plan, km, st, live)
+    except (ClaimRefused, PlanPageUnavailable) as error:
+        return CLAIMS_UNAVAILABLE, [("wait", f"claims page: {error}")]
+    shared = km["nodes"] if km.get("collab") is not None else None
     effort = run_rows(km)["effort"]
     level = review_level(km)
-    wave = [k for k in effort.get("wave", "").split(",") if k]
+    wave = [k for k in effort.get("wave", "").split(",") if k and k not in gates]
     agent_merges = []  # read at the first PR that can merge
 
     def coordinator_merges():
@@ -4308,7 +4330,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
     infos = {}
     try:
         # One request reads every PR of the run rows. A PR that it does not return is read alone below.
-        batch = pr_batch([row.get("pr") for row in rows.values() if isinstance(row, dict)], cwd=plan_dir)
+        batch = pr_batch([row.get("pr") for k, row in rows.items() if k not in gates and isinstance(row, dict)], cwd=plan_dir)
     except (ReadError, OSError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
         warn(f"the request for all PRs failed, so each PR is read alone: {e}")
         batch = {}
@@ -4444,7 +4466,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
             add("do", "reconcile", k, f"ENG status {s} has no twin")
         elif not number:
             waiting = s in ("Todo", "Ready")
-            if waiting and open_blockers(k, nodes, deps, st, rows):
+            if waiting and open_blockers(k, nodes, deps, st, rows, shared):
                 pass
             elif n.get("role") == "integration":
                 add("do", "integration", k)  # the coordinator's own work: no worker, no dispatch
@@ -4487,8 +4509,13 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
                   for t, number in phase_tasks(nodes, st, rows, n)]
         return full_suite_problem(plan_dir, plan, n, row, [m for m in merges if m]) if any(merges) else None
 
+    lines.extend(gate for key, gate in gates.items() if key not in nodes and gate[0] == "do")
     for k in order:
         n, s, row = nodes[k], st.get(k), rows.get(k, {})
+        if k in gates:
+            if s not in SETTLED or gates[k][0] == "do":
+                lines.append(gates[k])
+            continue
         if k not in km["nodes"]:
             lines.append(("do", f"load {k} -: not in keymap.json"))
             continue
@@ -4575,7 +4602,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
         return COMPLETE, lines
     mine = [t for t in tasks if str(nodes[t]["phase"]) == str(current["key"])]
     counts = (sum(1 for t in mine if st.get(t) in SETTLED or rows.get(t, {}).get("code_done_head")),
-              sum(1 for t in mine if reviewed(t)), sum(1 for t in mine if st.get(t) in MERGED))
+              sum(1 for t in mine if t not in gates and reviewed(t)), sum(1 for t in mine if st.get(t) in MERGED))
     head = "phase {}: {} task{}, {} code done, {} reviewed, {} merged".format(
         current["key"], len(mine), "" if len(mine) == 1 else "s", *counts)
     return head + (f"; wave {','.join(wave)}" if wave else ""), lines
@@ -4855,7 +4882,170 @@ def plan_writer(data):
     return " ".join("".join(char for char in name if char.isprintable() or char.isspace()).split())
 
 
-def plan_request(collab, workspace, method, body=None, *, history=False):
+class ClaimRefused(ReadError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+def claim_request(collab, workspace, method, key=None, body=None):
+    try:
+        page, headers = collab_page(collab, workspace)
+    except PlanPageUnavailable as error:
+        raise PlanPageUnavailable(f"the claims page is unavailable: {error}") from None
+    project = urllib.parse.quote(collab["project"], safe="")
+    path = f"/api/projects/{project}/claims"
+    if key is not None:
+        path += "/" + urllib.parse.quote(key, safe="")
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(page + path, method=method, headers=headers,
+                                     data=json.dumps(body).encode() if body is not None else None)
+    try:
+        with urllib.request.build_opener(NoPlanRedirect).open(request, timeout=10) as response:
+            return None if response.status == 204 else json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            if error.code >= 500 or error.code == 429:
+                raise PlanPageUnavailable(f"the claims page answered HTTP {error.code}") from None
+            try:
+                result = json.load(error)
+            except ValueError:
+                result = {}
+            detail = result.get("error") or f"the claims page answered HTTP {error.code}"
+            if (held := result.get("claim")) and error.code == 409:
+                detail += f": {held['holder']}, job={held['job']}, lease ends {held['leaseUntil']}"
+                if method == "POST" and held.get("stale"):
+                    detail += "; the lease ended. Ask before using wg claim --takeover"
+            raise ClaimRefused(error.code, detail) from None
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        raise PlanPageUnavailable(f"the claims page did not give a valid answer ({type(error).__name__})") from None
+
+
+def start_page_claim(plan_dir, plan, key, job, *, takeover=False):
+    collab = load_keymap(plan_dir).get("collab")
+    if collab is None:
+        if takeover:
+            raise ReadError("--takeover needs a collaborative effort")
+        return False
+    body = {"job": job}
+    if takeover:
+        body["takeover"] = True
+    result = claim_request(collab, plan_workspace(plan), "POST", key, body)
+    return result.get("action") == "taken_over"
+
+
+def release_page_claim(collab, workspace, key):
+    try:
+        claim_request(collab, workspace, "DELETE", key)
+    except ReadError as error:
+        if isinstance(error, ClaimRefused) and error.status == 404:
+            return True  # The claim is already absent.
+        print(f"warn {key}: could not release claim: {error}", file=sys.stderr)
+        return False
+    return True
+
+
+@contextlib.contextmanager
+def dispatch_lease(plan_dir, plan, km, key):
+    """Release a failed dispatch's reservation, including after an ambiguous POST response."""
+    collab = km.get("collab")
+    retained = False
+
+    def retain():
+        nonlocal retained
+        retained = True
+
+    if collab is None:
+        yield retain
+        return
+    attempted = False
+    try:
+        try:
+            start_page_claim(plan_dir, plan, key, "dispatch")
+        except PlanPageUnavailable:
+            attempted = True
+            raise
+        attempted = True
+        yield retain
+    finally:
+        if attempted and not retained and release_page_claim(collab, plan_workspace(plan), key):
+            print(f"released {key}: dispatch did not complete", file=sys.stderr)
+
+
+def claim_gate_keys(lines):
+    held = {text.rsplit(": job=", 1)[0].rsplit(" ", 1)[-1] for level, text in lines
+            if level == "wait" and text.startswith("collaborator ")}
+    held.update(text.split()[1].rstrip(":") for _, text in lines
+                if text.startswith(("stale ", "owner "))
+                or (text.startswith("reconcile ") and text.split()[1].endswith(":")))
+    return held
+
+
+def claim_loss(held):
+    return f"{held['holder']} holds this node now" if held else "no claim"
+
+
+def require_page_claim(plan, km, key):
+    collab = km.get("collab")
+    if collab is None:
+        return
+    workspace = plan_workspace(plan)
+    claims = claim_request(collab, workspace, "GET")["claims"]
+    held = next((claim for claim in claims if claim["node"] == key), None)
+    if not held or not held["mine"]:
+        raise ReadError(f"{key}: {claim_loss(held)}")
+    claim_request(collab, workspace, "PUT", key, {"job": held["job"]})
+
+
+def collaboration_lines(plan, km, statuses, live):
+    """Return gates by node. Read the project claims once and maintain local claims."""
+    collab = km.get("collab")
+    if collab is None:
+        return {}
+    workspace = plan_workspace(plan)
+    current = claim_request(collab, workspace, "GET")
+    claims = {claim["node"]: claim for claim in current["claims"]}
+    rows = run_rows(km)["nodes"]
+    gates = {}
+    if current["role"] != "owner":
+        gates.update({n["key"]: ("wait", f"owner {n['key']}") for n in plan["nodes"]
+                      if n["kind"] in ("merge-point", "ship-point", "ops")})
+    for key, row in rows.items():
+        entry = km["nodes"].get(key, {})
+        issue = live.get(entry.get("id"), {})
+        label = f"agent:{row.get('agent')}"
+        local_job = row.get("state") in LIVE or any(item["name"] == label for item in claim_labels(issue))
+        if statuses.get(key) not in SETTLED and local_job:
+            held = claims.get(key)
+            if not held or not held["mine"]:
+                gates[key] = ("do", f"reconcile {key}: {claim_loss(held)}")
+    for key, held in claims.items():
+        if held["mine"]:
+            if statuses.get(key) in SETTLED:
+                release_page_claim(collab, workspace, key)
+                continue
+            if not rows.get(key):
+                gates[key] = ("do", f"reconcile {key}: this account holds a claim with no local job")
+                continue
+            try:
+                claim_request(collab, workspace, "PUT", key, {"job": held["job"]})
+            except ClaimRefused as error:
+                if error.status not in (409, 404):
+                    raise
+                gates[key] = ("do", f"reconcile {key}: {error}")
+        elif key in gates:
+            continue
+        elif held["stale"]:
+            end = datetime.fromisoformat(held["leaseUntil"])
+            age = max(0, int((utc_now() - end).total_seconds()))
+            gates[key] = ("note", f"stale {key}: {held['holder']}, lease ended {age}s ago")
+        else:
+            gates[key] = ("wait", f"collaborator {held['holder']} {key}: job={held['job']}")
+    return gates
+
+
+def collab_page(collab, workspace):
     if not collab.get("workspace"):
         raise ReadError("the collaboration record needs a workspace")
     page = login_page_url(collab["page"], workspace)
@@ -4864,11 +5054,15 @@ def plan_request(collab, workspace, method, body=None, *, history=False):
              else read_link_token_file(page_token_path(page)))
     if not token:
         raise PlanPageUnavailable("no page token; run wg login for the page")
+    return page, {"Authorization": f"Bearer {token}", "x-workspace": collab["workspace"]}
+
+
+def plan_request(collab, workspace, method, body=None, *, history=False):
+    page, headers = collab_page(collab, workspace)
     project = urllib.parse.quote(collab["project"], safe="")
     url = f"{page}/api/projects/{project}/plan"
     if history:
         url += "/versions"
-    headers = {"Authorization": f"Bearer {token}", "x-workspace": collab["workspace"]}
     version = collab.get("version")
     if method == "PUT":
         headers["Content-Type"] = "application/json"
@@ -5201,7 +5395,7 @@ def stage_plan_pair(plan_dir, km, plan, prior):
     finish_plan_pair(plan_dir, km)
 
 
-def pull_plan(plan_dir, *, force=False, explicit=False, applying=False, strict=False, accept_settings=False):
+def pull_plan(plan_dir, *, force=False, explicit=False, applying=False, strict=False, accept_settings=False, quiet=False):
     with plan_lock(plan_dir):
         km = load_keymap(plan_dir)
         if not (collab := km.get("collab")):
@@ -5224,7 +5418,8 @@ def pull_plan(plan_dir, *, force=False, explicit=False, applying=False, strict=F
         except PlanPageUnavailable as error:
             if explicit or applying:
                 raise
-            warn_plan(f"{error}; using the local copy")
+            if not quiet:
+                warn_plan(f"{error}; using the local copy")
             return
         if data is None:
             if not applying:
@@ -5294,9 +5489,9 @@ def pull_plan(plan_dir, *, force=False, explicit=False, applying=False, strict=F
             publish_pending_keymap(plan_dir, after)
 
 
-def read_current_plan(plan_dir, *, strict=False, applying=False):
+def read_current_plan(plan_dir, *, strict=False, applying=False, quiet=False):
     if load_keymap(plan_dir).get("collab"):
-        pull_plan(plan_dir, strict=strict, applying=applying)
+        pull_plan(plan_dir, strict=strict, applying=applying, **({"quiet": True} if quiet else {}))
     return load_plan(plan_dir, strict=strict)
 
 
@@ -5917,7 +6112,7 @@ def terminal_lines(plan_dir, lines, everything=False, keys=()):
         verb, (key, _) = line_verb(text), line_key(text, keys)
         if level == "do" and verb in DO_COMMANDS and key and key != "@effort":
             out.append(f"do {text} -> wg " + DO_COMMANDS[verb].format(dir=here, key=shlex.quote(key)))
-        elif everything or level == "do" or (level == "note" and verb in NOTES_SHOWN):
+        elif everything or level == "do" or verb in {"collaborator", "owner", "stale"} or (level == "note" and verb in NOTES_SHOWN):
             out.append(f"{level} {text}")
         elif level == "wait":
             if verb not in waits:
@@ -5950,6 +6145,10 @@ def terminal_lines(plan_dir, lines, everything=False, keys=()):
 # `wg explain <verb>` prints the parts of the skill text that say what to do for a verb of `wg next`.
 # The reference files mark each part: `<!-- explain: verb,verb -->` … `<!-- /explain -->`.
 EXPLAIN = {
+    "claims": "the claims page is unavailable; wait before starting a job",
+    "collaborator": "another coordinator holds the node",
+    "owner": "the project owner handles this node",
+    "stale": "the claim lease ended; ask before taking over",
     "load": "a node of plan.json is not in keymap.json: load the graph",
     "wave": "each node of the last wave is code done: pick the next wave",
     "dispatch": "start the first worker job of a ready node",
@@ -6055,6 +6254,12 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                 # Before next_lines: a new review effort applies to the lines of this same wg next.
                 reviews = review_effort_lines(plan_dir, plan)
                 head, lines = next_lines(plan_dir, plan, tolerant=wait)
+                if head == CLAIMS_UNAVAILABLE:
+                    print(f"wait {lines[0][1]}", flush=True)
+                    return 0
+                held_keys = claim_gate_keys(lines)
+                extra = [line for line in extra if not (line[1].startswith("dispatch ")
+                         and line_key(line[1], held_keys)[0])]
                 lines = paused_lines(plan_dir, plan, extra + lines) + page_contract_note(plan_dir, plan) + health_lines(plan_dir)
                 if head != COMPLETE:
                     lines = autonomy_lines(plan_dir, plan) + reviews + lines
@@ -6844,8 +7049,9 @@ def tick_members(inputs, lines, triage):
     km, live, nodes, statuses, _, _ = inputs
     said = node_next(lines, nodes)
     members = dict(triage)
+    held = claim_gate_keys(lines)
     for key, status in statuses.items():
-        if key not in nodes or status in {"Done", "Canceled"}:
+        if key not in nodes or key in held or status in {"Done", "Canceled"}:
             continue
         entry = km["nodes"][key]
         reasons = [part for part in said.get(key, "").splitlines()
@@ -6868,6 +7074,8 @@ def tick_refresh(plan_dir, plan, km, record, notify=False):
         if key not in statuses:
             raise ReadError(f"{key}: ship point is missing from the keymap or Linear")
     complete = all(statuses[key] in {"Done", "Canceled"} for key in ships)
+    if complete and km.get("collab") is not None:
+        collaboration_lines(plan, km, statuses, inputs[1])
     if complete and record.get("complete"):
         return "complete", None
     triage = {}
@@ -6875,6 +7083,8 @@ def tick_refresh(plan_dir, plan, km, record, notify=False):
         head, lines, members = COMPLETE, [], {}
     else:
         head, lines = next_lines(plan_dir, plan, inputs=inputs, triage=triage)
+        if head == CLAIMS_UNAVAILABLE:
+            raise ReadError(lines[0][1])
         members = tick_members(inputs, lines, triage)
     skipped = publish(plan_dir, plan, head, lines, expected=km)
     if skipped:
@@ -8069,13 +8279,23 @@ def cleanup_worktrees(plan_dir, plan, keys=None, settled=None, dry_run=False):
 
 
 def cleanup_command(plan_dir, plan, dry_run):
+    if not dry_run and (collab := load_keymap(plan_dir).get("collab")) is not None:
+        workspace = plan_workspace(plan)
+        try:
+            claims = claim_request(collab, workspace, "GET")["claims"]
+        except ReadError as error:
+            print(f"warn cleanup: could not list claims: {error}", file=sys.stderr)
+        else:
+            for held in claims:
+                if held["mine"]:
+                    release_page_claim(collab, workspace, held["node"])
     kept = cleanup_worktrees(plan_dir, plan, dry_run=dry_run)
     if kept:
         print(f"{kept} worktree(s) stay: see the warnings")
     return int(bool(kept))
 
 
-def branch_plan(plan, key, nodes, deps, st, rows, recorded=None):
+def branch_plan(plan, key, nodes, deps, st, rows, recorded=None, shared=None):
     """The names of a new node's worktree and branch, and the branch that it starts from (ordering.md).
 
     `recorded` is the run row of a claim that exists: its branch, parent, and lower stay as they are.
@@ -8106,11 +8326,15 @@ def branch_plan(plan, key, nodes, deps, st, rows, recorded=None):
     elif st.get(below) == "Canceled":
         die(f"{key}: {below} below it in the lane is Canceled (recovery.md Replan, Drop)", 1)
     else:
-        lower = parent = rows.get(below, {}).get("branch") or die(f"{key}: {below} below it has no branch in its run row", 1)
+        parent = (shared or {}).get(below, {}).get("branch") or rows.get(below, {}).get("branch")
+        if not parent:
+            die(f"{key}: {below} below it has no branch in its run row"
+                + (" or the shared keymap" if shared is not None else ""), 1)
+        lower = parent
     return names | {"branch": f"{BRANCH_PREFIX}{names['child']}", "lower": lower, "parent": parent, "stax": True}
 
 
-def first_claim(plan_dir, plan, key, settings, snap, names, quiet=False, warnings=None):
+def check_first_claim(plan_dir, plan, key, snap, quiet=False):
     """The checks and the claim of a node's first job.
 
     The run row records the claim (`step=claim`) before the label and the move, so a call that stops in between
@@ -8125,7 +8349,7 @@ def first_claim(plan_dir, plan, key, settings, snap, names, quiet=False, warning
         problems.append(f"{key}: the run row has state={row.get('state', '-')} branch={row.get('branch', '-')}")
     if st.get(key) not in ("Todo", "Ready"):
         problems.append(f"{key}: the status is {st.get(key)}, not Todo or Ready")
-    blockers = open_blockers(key, nodes, deps, st, rows)
+    blockers = open_blockers(key, nodes, deps, st, rows, km["nodes"] if km.get("collab") is not None else None)
     if blockers:
         problems.append(f"{key}: open blockers: {', '.join(blockers)}")
     if key not in run_rows(km)["effort"].get("wave", "").split(","):
@@ -8141,6 +8365,11 @@ def first_claim(plan_dir, plan, key, settings, snap, names, quiet=False, warning
     held = claim_labels(live[entry["id"]])
     if held:
         die(f"{ident}: {held[0]['name']} holds the claim; find its job with wg run show", 1)
+
+
+def first_claim(plan_dir, plan, key, settings, snap, names, quiet=False, warnings=None):
+    km, _, _, _, _, rows = snap
+    row = rows[key]
     row.update(state="creating", job="dispatch", step="claim",
                branch=names["branch"], parent=names["parent"], lower=names["lower"])
     row.update(settings)
@@ -8219,7 +8448,8 @@ def dispatch(plan_dir, plan, key, agent, worktree, model=None, effort=None):
     mine = row.get("job") == "dispatch" and row.get("state") in ("creating", "starting")
     here = shlex.quote(str(Path(plan_dir).resolve()))
     # A retry prints the names of the claim, also when the node below merged or was canceled in between.
-    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None)
+    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None,
+                        shared=km["nodes"] if km.get("collab") is not None else None)
     if mine:
         pending_start(key, row, here)
     if worktree:
@@ -8227,6 +8457,7 @@ def dispatch(plan_dir, plan, key, agent, worktree, model=None, effort=None):
             die(f"{key}: run 'wg dispatch {plan_dir} {key}' first (state={row.get('state', '-')})", 1)
         if row.get("step") in ("claim", "status"):
             die(f"{key}: the claim is not complete: run 'wg dispatch {plan_dir} {key}' again", 1)
+        require_page_claim(plan, km, key)
         path = Path(worktree).resolve()
         problems = worktree_problems(node, row, path, names["stax"], plan_dir)
         if problems:
@@ -8246,32 +8477,37 @@ def dispatch(plan_dir, plan, key, agent, worktree, model=None, effort=None):
               f"worktree=<worktree id> run_id=<run_id>")
         return 0
     if not mine:
-        first_claim(plan_dir, plan, key, resolve_agent(plan, "worker", agent, model, effort), snap, names)
-    elif row.get("step") in ("claim", "status"):
-        claim_steps(plan_dir, plan, key, snap)
-    lane_base = names["lower"] if names["lower"].startswith("origin/") else f"origin/{phase_of(plan, node)['target']}"
-    out = [f"branch {names['branch']} on {names['lower']}"
-           + (f", stax parent {names['parent']}" if names["stax"] else ", not tracked by stax"),
-           "Run these in order. Each <...> is an id or a path from Orca's output:",
-           "  orca worktree list --json    # find "]
-    core = f"{plan['effort']['slug']}-core"
-    # Orca shows the coordinator with the name of the Linear project (wg load), so find it by its path.
-    if names["stack"] == core:
-        out[-1] += f"the parent worktree: the coordinator (path {here})"
-    else:
-        # A lane parent nests under the coordinator, so each effort is one tree in Orca (ordering.md).
-        out[-1] += f"the parent worktree {names['stack']} and the coordinator (path {here})"
-        out.append(f"  orca worktree create --name {names['stack']} --branch {BRANCH_PREFIX}{names['stack']} "
-                   f"--parent-worktree id:<core-id> --base-branch {lane_base} --setup skip --json"
-                   f"    # only when {names['stack']} is missing")
-    out += [f"  orca worktree create --name {names['child']} --branch {names['branch']} "
-            f"--base-branch {names['lower']} --parent-worktree id:<parent-id> --setup run --json",
-            f"  orca worktree set --worktree id:<child-id> --display-name {shlex.quote(names['display'])} --json"]
-    if names["stax"]:
-        out.append(f"  (cd \"<child-path>\" && st branch track --parent {shlex.quote(names['parent'])})")
-    out.append(f"  {wg_command()} dispatch {here} {key} --worktree \"<child-path>\"")
-    print("\n".join(out))
-    return 0
+        check_first_claim(plan_dir, plan, key, snap)
+    settings = resolve_agent(plan, "worker", agent, model, effort) if not mine else None
+    with dispatch_lease(plan_dir, plan, km, key) as retain:
+        if not mine:
+            first_claim(plan_dir, plan, key, settings, snap, names)
+        elif row.get("step") in ("claim", "status"):
+            claim_steps(plan_dir, plan, key, snap)
+        lane_base = names["lower"] if names["lower"].startswith("origin/") else f"origin/{phase_of(plan, node)['target']}"
+        out = [f"branch {names['branch']} on {names['lower']}"
+               + (f", stax parent {names['parent']}" if names["stax"] else ", not tracked by stax"),
+               "Run these in order. Each <...> is an id or a path from Orca's output:",
+               "  orca worktree list --json    # find "]
+        core = f"{plan['effort']['slug']}-core"
+        # Orca shows the coordinator with the name of the Linear project (wg load), so find it by its path.
+        if names["stack"] == core:
+            out[-1] += f"the parent worktree: the coordinator (path {here})"
+        else:
+            # A lane parent nests under the coordinator, so each effort is one tree in Orca (ordering.md).
+            out[-1] += f"the parent worktree {names['stack']} and the coordinator (path {here})"
+            out.append(f"  orca worktree create --name {names['stack']} --branch {BRANCH_PREFIX}{names['stack']} "
+                       f"--parent-worktree id:<core-id> --base-branch {lane_base} --setup skip --json"
+                       f"    # only when {names['stack']} is missing")
+        out += [f"  orca worktree create --name {names['child']} --branch {names['branch']} "
+                f"--base-branch {names['lower']} --parent-worktree id:<parent-id> --setup run --json",
+                f"  orca worktree set --worktree id:<child-id> --display-name {shlex.quote(names['display'])} --json"]
+        if names["stax"]:
+            out.append(f"  (cd \"<child-path>\" && st branch track --parent {shlex.quote(names['parent'])})")
+        out.append(f"  {wg_command()} dispatch {here} {key} --worktree \"<child-path>\"")
+        print("\n".join(out))
+        retain()
+        return 0
 
 
 # ---------------------------------------------------------------- one-command jobs (--run, --send)
@@ -8552,10 +8788,12 @@ def first_job(plan_dir, plan, key, agent, model, effort, warnings):
     here = shlex.quote(str(Path(plan_dir).resolve()))
     receipt_due = row.get("state") == "running" and row.get("step") == "receipt"
     mine = row.get("job") == "dispatch" and (row.get("state") in ("creating", "starting") or receipt_due)
-    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None)
+    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None,
+                        shared=km["nodes"] if km.get("collab") is not None else None)
     continues = f"wg dispatch {here} {key} --run continues there"
     claim_pending = mine and row.get("step") in ("claim", "status")
     if mine and receipt_due:
+        require_page_claim(plan, km, key)
         try:
             row = finish_receipt(plan_dir, plan, key)
         except (ReadError, OSError) as e:
@@ -8564,81 +8802,100 @@ def first_job(plan_dir, plan, key, agent, model, effort, warnings):
             return 1
         print(f"started {key} dispatch={row['dispatch']} worktree={row.get('path', '-')}")
         return 0
-    try:
-        if not mine:
-            first_claim(plan_dir, plan, key, resolve_agent(plan, "worker", agent, model, effort),
-                        snap, names, quiet=True, warnings=warnings)
-        elif row.get("step") in ("claim", "status"):
-            claim_steps(plan_dir, plan, key, snap, quiet=True, warnings=warnings)
-    except (ReadError, OSError, subprocess.SubprocessError) as e:
-        print_fail(run_row(load_keymap(plan_dir), key).get('step', 'claim'), e)
-        warnings.append(continues)
-        return 1
-    row = run_row(load_keymap(plan_dir), key)
-    step = row.get("step") or "parent"
-    if step == "start" and not row.get("retry_request"):
-        unknown_start(key, step, here)
-    if mine and not claim_pending:
-        # A resume: before an Orca call that can start a worker, Linear must show this claim and In Progress.
-        held = {label["name"] for label in claim_labels(issue)}
-        if f"agent:{row['agent']}" not in held or st.get(key) != "In Progress":
-            try:
-                update_row(plan_dir, key, step="claim")
+    if not mine:
+        check_first_claim(plan_dir, plan, key, snap, quiet=True)
+    settings = resolve_agent(plan, "worker", agent, model, effort) if not mine else None
+    with dispatch_lease(plan_dir, plan, km, key) as retain:
+        try:
+            if not mine:
+                first_claim(plan_dir, plan, key, settings,
+                            snap, names, quiet=True, warnings=warnings)
+            elif row.get("step") in ("claim", "status"):
                 claim_steps(plan_dir, plan, key, snap, quiet=True, warnings=warnings)
-            except (ReadError, OSError, subprocess.SubprocessError) as e:
-                print_fail(run_row(load_keymap(plan_dir), key).get("step", "claim"), e)
-                warnings.append(continues)
-                return 1
-            update_row(plan_dir, key, step=step)
-    row = update_row(plan_dir, key, step=step)
-    try:
-        if RUN_STEPS.index(step) <= RUN_STEPS.index("child") or not (row.get("worktree") and row.get("path")):
-            row = first_worktree(plan_dir, plan, key, names, row)
-        path = Path(row["path"])
-        if not row.get("retry_request"):  # a lost start reply: the worktree steps are done
-            # Read-only checks of the checkout; only a call that has not passed `track` may change stax.
-            problem = repo_problem(key, path, plan_dir) or branch_problem(key, path, row["branch"])
-            if problem:
-                raise ReadError(problem)
-            if RUN_STEPS.index(row.get("step") or "track") <= RUN_STEPS.index("track"):
-                row = update_row(plan_dir, key, step="track")
-                if names["stax"] and (branch_metadata(path, row["branch"]) or {}).get("parentBranchName") != row["parent"]:
-                    tracked = command("st", "branch", "track", "--parent", row["parent"], cwd=path)
-                    if tracked.returncode:
-                        raise ReadError(f"st branch track: {command_error(tracked)}")
-                row = update_row(plan_dir, key, step="spec")
-    except (ReadError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
-        print_fail(run_row(load_keymap(plan_dir), key).get('step', step), e)
-        warnings.append(continues)
-        return 1
-    try:
-        if not row.get("retry_request"):
-            problems = worktree_problems(node, row, path, names["stax"], plan_dir)
-            if problems:
-                print_fail("spec", "; ".join(problems))
-                warnings.append(f"{entry['identifier']}: no worker spec; {continues}")
-                return 1
-            row = update_row(plan_dir, key, state="starting")
-        if warning := write_worker_settings(path, row.get("agent", agent)):
-            warnings.append(warning)
-        sent = Path(plan_dir).resolve() / "specs" / f"{key}.md"
-        if row.get("retry_request") and sent.is_file():  # the spec of an unresolved request stays as it was sent
-            spec = sent
-            title = f"{entry['identifier']}: {node.get('title') or issue.get('title', key)}"
-        else:
-            spec, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
-    except (ReadError, OSError) as e:
-        print_fail("spec", e)
-        warnings.append(continues)
-        return 1
-    args = ["orchestration", "worker-start", "--spec-file", str(spec), "--task-title", title,
-            "--worktree", f"id:{row['worktree']}", "--agent", row.get("agent", agent), "--environment", "local"]
-    args += model_args(row)
-    row = start_and_record(plan_dir, plan, key, "start", args, row, warnings, {})
-    if row is None:
-        return 1
-    print(f"started {key} dispatch={row['dispatch']} worktree={row['path']}")
-    return 0
+        except (ReadError, OSError, subprocess.SubprocessError) as e:
+            print_fail(run_row(load_keymap(plan_dir), key).get('step', 'claim'), e)
+            warnings.append(continues)
+            return 1
+        row = run_row(load_keymap(plan_dir), key)
+        step = row.get("step") or "parent"
+        if step == "start" and not row.get("retry_request"):
+            unknown_start(key, step, here)
+        if mine and not claim_pending:
+            # A resume: before an Orca call that can start a worker, Linear must show this claim and In Progress.
+            held = {label["name"] for label in claim_labels(issue)}
+            if f"agent:{row['agent']}" not in held or st.get(key) != "In Progress":
+                try:
+                    update_row(plan_dir, key, step="claim")
+                    claim_steps(plan_dir, plan, key, snap, quiet=True, warnings=warnings)
+                except (ReadError, OSError, subprocess.SubprocessError) as e:
+                    print_fail(run_row(load_keymap(plan_dir), key).get("step", "claim"), e)
+                    warnings.append(continues)
+                    return 1
+                update_row(plan_dir, key, step=step)
+        row = update_row(plan_dir, key, step=step)
+        try:
+            if RUN_STEPS.index(step) <= RUN_STEPS.index("child") or not (row.get("worktree") and row.get("path")):
+                below = lane_below(key, nodes, deps)
+                shared_branch = km["nodes"].get(below, {}).get("branch") if km.get("collab") is not None else None
+                if shared_branch == names["lower"] and not rows.get(below, {}).get("branch"):
+                    fetch_shared_parent(plan_dir, shared_branch)
+                row = first_worktree(plan_dir, plan, key, names, row)
+            path = Path(row["path"])
+            if not row.get("retry_request"):  # a lost start reply: the worktree steps are done
+                # Read-only checks of the checkout; only a call that has not passed `track` may change stax.
+                problem = repo_problem(key, path, plan_dir) or branch_problem(key, path, row["branch"])
+                if problem:
+                    raise ReadError(problem)
+                if RUN_STEPS.index(row.get("step") or "track") <= RUN_STEPS.index("track"):
+                    row = update_row(plan_dir, key, step="track")
+                    if names["stax"] and (branch_metadata(path, row["branch"]) or {}).get("parentBranchName") != row["parent"]:
+                        tracked = command("st", "branch", "track", "--parent", row["parent"], cwd=path)
+                        if tracked.returncode:
+                            raise ReadError(f"st branch track: {command_error(tracked)}")
+                    row = update_row(plan_dir, key, step="spec")
+        except (ReadError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
+            print_fail(run_row(load_keymap(plan_dir), key).get('step', step), e)
+            warnings.append(continues)
+            return 1
+        try:
+            if not row.get("retry_request"):
+                problems = worktree_problems(node, row, path, names["stax"], plan_dir)
+                if problems:
+                    print_fail("spec", "; ".join(problems))
+                    warnings.append(f"{entry['identifier']}: no worker spec; {continues}")
+                    return 1
+                row = update_row(plan_dir, key, state="starting")
+            if warning := write_worker_settings(path, row.get("agent", agent)):
+                warnings.append(warning)
+            sent = Path(plan_dir).resolve() / "specs" / f"{key}.md"
+            if row.get("retry_request") and sent.is_file():  # the spec of an unresolved request stays as it was sent
+                spec = sent
+                title = f"{entry['identifier']}: {node.get('title') or issue.get('title', key)}"
+            else:
+                spec, title = dispatch_spec(plan_dir, plan, node, entry, issue, row)
+        except (ReadError, OSError) as e:
+            print_fail("spec", e)
+            warnings.append(continues)
+            return 1
+        args = ["orchestration", "worker-start", "--spec-file", str(spec), "--task-title", title,
+                "--worktree", f"id:{row['worktree']}", "--agent", row.get("agent", agent), "--environment", "local"]
+        args += model_args(row)
+        row = start_and_record(plan_dir, plan, key, "start", args, row, warnings, {})
+        if row is None:
+            return 1
+        print(f"started {key} dispatch={row['dispatch']} worktree={row['path']}")
+        retain()
+        return 0
+
+
+def fetch_shared_parent(plan_dir, branch):
+    ref = f"refs/heads/{branch}"
+    git_output("check-ref-format", ref, cwd=plan_dir)
+    if not command("git", "show-ref", "--verify", "--quiet", ref, cwd=plan_dir).returncode:
+        return
+    remote = f"refs/remotes/origin/{branch}"
+    git_output("fetch", "--no-tags", "--no-recurse-submodules", "origin", f"{ref}:{remote}", cwd=plan_dir)
+    git_output("branch", "--track", "--", branch, remote, cwd=plan_dir)
 
 
 def first_worktree(plan_dir, plan, key, names, row):
@@ -8942,7 +9199,7 @@ def restack_line(plan_dir, plan, node, row, nodes, deps, st):
 
 
 @journaled("claim")
-def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=None, effort=None):
+def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=None, effort=None, *, takeover=False):
     """Start a follow-up job on a node: the checks, the claim, the job header.
 
     The job `dispatch` continues a node that has a branch and no PR: an adopted node, or a first job that failed.
@@ -8958,6 +9215,9 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=Non
             die(f"--work-file: {e}")
         if not work:
             die(f"--work-file {work_file} is empty")
+    if not takeover:
+        require_page_claim(plan, load_keymap(plan_dir), key)
+    taken_over = start_page_claim(plan_dir, plan, key, job, takeover=takeover)
     km, live, nodes, st, deps, rows = snapshot(plan_dir, plan)
     node = nodes.get(key) or die(f"unknown key {key}")
     entry = km["nodes"].get(key) or die(f"{key}: not loaded")
@@ -9007,6 +9267,9 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=Non
         # `wg done` sets the parent when the PR's base is the target.
         row["lower"] = f"origin/{bottom_base(node, phase_of(plan, node)['target'])}"
     if not resume:
+        if taken_over and (old_claim := claim_labels(issue)):
+            issue_update(entry["id"], {"removedLabelIds": [label["id"] for label in old_claim]})
+            issue = fetch_nodes({"nodes": {key: entry}})[entry["id"]]
         held = claim_labels(issue)
         if send and held:  # the same refusal as take_claim, before the run row changes
             die(f"{ident}: {held[0]['name']} holds the claim; find its job with wg run show", 1)
@@ -9093,6 +9356,7 @@ def parse_fields(assignments):
 @journaled("started")
 def started(plan_dir, plan, key, assignments):
     """The worker job started: record its Orca ids and comment the claim."""
+    require_page_claim(plan, load_keymap(plan_dir), key)
     row = record_started(plan_dir, plan, key, parse_fields(assignments))
     print(" ".join(pairs(row)))
     return 0
@@ -9128,7 +9392,8 @@ def attach_pr(issue_id, pr, cwd):
 
 @journaled("done")
 def done(plan_dir, plan, key, failed=None, worktree=None, dispatch_id=None):
-    """A worker job on this node is over, or its PR head moved: release the claim, then check code done."""
+    """A worker job on this node is over, or its PR head moved: clear the job label, then check code done."""
+    require_page_claim(plan, load_keymap(plan_dir), key)
     km, live, nodes, st, deps, rows = snapshot(plan_dir, plan)
     node = nodes.get(key) or die(f"unknown key {key}")
     entry = km["nodes"].get(key) or die(f"{key}: not loaded")
@@ -9357,6 +9622,7 @@ def cli_parser():
     c.add_argument("job", choices=JOBS)
     add_agent_flags(c)
     c.add_argument("--send", action="store_true", help="send the job in Orca and record the receipt (an Orca terminal only)")
+    c.add_argument("--takeover", action="store_true", help="take a claim whose lease ended")
     c.add_argument("--work-file", help="a file with the work of this job; its text goes at the end of the job spec")
     s = add(sub, "started")
     s.add_argument("key")
@@ -9483,7 +9749,8 @@ def run_command(ns, d, plan, given):
     if ns.cmd == "claim":
         if ns.send and not ns.work_file:
             die("wg claim --send needs --work-file <file> with the work of the job")
-        return claim(d, plan, ns.key, ns.job, ns.agent, ns.send, ns.work_file, ns.model, ns.effort)
+        options = {"takeover": True} if ns.takeover else {}
+        return claim(d, plan, ns.key, ns.job, ns.agent, ns.send, ns.work_file, ns.model, ns.effort, **options)
     if ns.cmd == "started":
         return started(d, plan, ns.key, ns.fields)
     if ns.cmd == "done":
@@ -9578,8 +9845,9 @@ def main_command(argv):
             return ui(ns.port, ns.project, ns.no_open, ns.no_tailnet, ns.workspace)
         writes = ns.cmd in KEYMAP_WRITERS or (ns.cmd == "run" and ns.mode in ("set", "reset", "rebuild"))
         with plan_lock(ns.dir) if writes else contextlib.nullcontext():
+            options = {"quiet": True} if ns.cmd in ("next", "watch") else {}
             plan = (load_plan(ns.dir) if ns.cmd == "check"
-                    else read_current_plan(ns.dir, applying=ns.cmd == "load" and ns.apply))
+                    else read_current_plan(ns.dir, applying=ns.cmd == "load" and ns.apply, **options))
             return run_plan_command(ns, plan, given)
     except (ReadError, OSError, ValueError, subprocess.SubprocessError) as e:
         die(str(e))

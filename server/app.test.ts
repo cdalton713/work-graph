@@ -1371,7 +1371,8 @@ it.each(localRedis ? ["memory", "redis"] : ["memory"])("delivers stored project 
 
       expect((await owner.request(projectClaim, "POST", claimJob)).status).toBe(200);
       await db.query("UPDATE node_claims SET lease_until = now() - interval '1 second'");
-      expect(await (await claim("POST")).json()).toMatchObject({ action: "taken_over" });
+      expect(await (await collaborator.request(projectClaim, "POST", { ...claimJob, takeover: true }, scope)).json())
+        .toMatchObject({ action: "taken_over" });
       await vi.waitFor(() => expect(a.changes).toEqual([issue, issue, issue]));
       expect((await claim("POST", projectClaim.replace("/build", "/check"))).status).toBe(200);
       expect((await savePlan(2)).status).toBe(200);
@@ -1384,7 +1385,7 @@ it.each(localRedis ? ["memory", "redis"] : ["memory"])("delivers stored project 
       expect((await owner.request(memberPath, "PATCH", { role: "viewer" }, undefined, true)).status).toBe(204);
       await vi.waitFor(() => expect(ownerPage.changes.slice(6)).toEqual([issue, changed()]));
       expect(a.changes).toEqual([issue, issue, issue, changed()]);
-      expect(await (await owner.request(projectClaim.replace("/build", ""))).json()).toEqual({ claims: [] });
+      expect(await (await owner.request(projectClaim.replace("/build", ""))).json()).toEqual({ role: "owner", claims: [] });
       expect((await owner.request(memberPath, "PATCH", { role: "collaborator" }, undefined, true)).status).toBe(204);
       expect((await claim("POST")).status).toBe(200);
       expect((await owner.request(memberPath, "DELETE", undefined, undefined, true)).status).toBe(204);
@@ -1422,7 +1423,7 @@ it("keeps successful claim and plan writes when the notice store fails", async (
       expect(await (await owner.request(projectPlan)).json()).toEqual({ version: 1, ...storedPlan });
       expect(await (await owner.request(projectClaim.replace("/build", ""))).json())
         .toMatchObject({ claims: [{ node: "build" }] });
-      expect((await collaborator.request(projectClaim, "DELETE", undefined, scope)).status).toBe(403);
+      expect((await collaborator.request(projectClaim, "DELETE", undefined, scope)).status).toBe(409);
       expect((await owner.request(projectClaim, "DELETE")).status).toBe(204);
       for (const path of [projectClaim, projectClaim.replace("/build", "/check")]) {
         expect((await collaborator.request(path, "POST", claimJob, scope)).status).toBe(200);

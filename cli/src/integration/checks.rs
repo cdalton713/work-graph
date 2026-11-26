@@ -35,13 +35,43 @@ fn workflow_checks(
     plan: &Value,
     lines: &mut Lines,
 ) -> Result<(), String> {
-    let mut api = workflow::client(install, plan)?;
+    let mut api = workflow::client(install, plan)?.for_diagnostics();
     api.request("{ viewer { id } }", json!({}))?;
     let team = plan["effort"]["team"].as_str().ok_or("missing team")?;
+    let setup = if !state::load_keymap(dir).map_err(|e| e.to_string())?["collab"].is_null() {
+        format!(
+            "wg setup --workspace {} --apply",
+            machine::quote(machine::text(&plan["effort"]["workspace"]))
+        )
+    } else {
+        "wg setup".into()
+    };
+    team_checks(
+        &mut api,
+        team,
+        machine::text(&install.config.settings()["human"]),
+        &setup,
+        lines,
+    )
+}
+
+pub(crate) fn team_checks(
+    api: &mut workflow::Linear,
+    team: &str,
+    human: &str,
+    setup: &str,
+    lines: &mut Lines,
+) -> Result<(), String> {
     let result=api.request("query($k:String!){teams(filter:{key:{eq:$k}}){nodes{id states(first:50){nodes{id name}}}}}",json!({"k":team}))?;
-    let id = result["teams"]["nodes"][0]["id"]
-        .as_str()
-        .ok_or_else(|| format!("team {team} not found. Run wg setup."))?;
+    let Some(id) = result["teams"]["nodes"][0]["id"].as_str() else {
+        finding(
+            lines,
+            "FAIL",
+            "linear",
+            format!("team {team} not found. Run wg setup."),
+        );
+        return Ok(());
+    };
     let labels=api.pages("query($id:String!,$after:String){team(id:$id){labels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}}",json!({"id":id}),"/team/labels")?;
     let mut missing: BTreeSet<_> = ["agent:codex", "agent:claude", "agent:coordinator"]
         .into_iter()
@@ -65,9 +95,6 @@ fn workflow_checks(
     let contract: Value =
         serde_json::from_str(include_str!("../../../skills/work-graph/contract.json"))
             .map_err(|e| e.to_string())?;
-    let human = install.config.settings()["human"]
-        .as_str()
-        .unwrap_or("Human");
     let expected: Vec<_> = contract["setup"]["statuses"]
         .as_array()
         .unwrap()
@@ -88,14 +115,6 @@ fn workflow_checks(
             missing.insert(name.clone());
         }
     }
-    let setup = if !state::load_keymap(dir).map_err(|e| e.to_string())?["collab"].is_null() {
-        format!(
-            "wg setup --workspace {} --apply",
-            machine::quote(machine::text(&plan["effort"]["workspace"]))
-        )
-    } else {
-        "wg setup".into()
-    };
     if missing.is_empty() {
         finding(
             lines,
@@ -114,12 +133,58 @@ fn workflow_checks(
             ),
         )
     }
-    match api.pages("query($id:String!,$after:String){team(id:$id){states(first:100,after:$after){nodes{id name type} pageInfo{hasNextPage endCursor}}}}",json!({"id":id}),"/team/states"){
-        Err(e)=>finding(lines,"warn","linear",format!("{team} could not check status types. Run wg setup. {e}")),
-        Ok(states)=>{
-            let absent:BTreeSet<_>=optional.into_iter().filter(|n|!states.iter().any(|s|s["name"]==*n)).collect();
-            if !absent.is_empty(){finding(lines,"warn","linear",format!("{team} missing {}. Run wg setup.",absent.into_iter().collect::<Vec<_>>().join(", ")))}
-            for (name,kind) in expected{if let Some(s)=states.iter().find(|s|s["name"]==name)&&s["type"]!=kind {finding(lines,"warn","linear",format!("{team} {name} has type {}, expected {kind}. Run wg setup.",machine::text(&s["type"])))}}
+    let states = match api.pages(
+        "query($id:String!,$after:String){team(id:$id){states(first:100,after:$after){nodes{id name type} pageInfo{hasNextPage endCursor}}}}",
+        json!({"id": id}),
+        "/team/states",
+    ) {
+        Ok(states) => states,
+        Err(e) => {
+            finding(lines, "warn", "linear", format!("{team} could not check status types. Run wg setup. {e}"));
+            return Ok(());
+        }
+    };
+    let absent: BTreeSet<_> = optional
+        .into_iter()
+        .filter(|n| !states.iter().any(|s| s["name"] == *n))
+        .collect();
+    if !absent.is_empty() {
+        finding(
+            lines,
+            "warn",
+            "linear",
+            format!(
+                "{team} missing {}. Run wg setup.",
+                absent.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+    for (name, kind) in expected {
+        if let Some(state) = states.iter().find(|s| s["name"] == name)
+            && state["type"] != kind
+        {
+            // Only workflow state types are suitable for display in diagnostics.
+            let actual = state["type"]
+                .as_str()
+                .filter(|v| {
+                    matches!(
+                        *v,
+                        "triage"
+                            | "backlog"
+                            | "unstarted"
+                            | "started"
+                            | "completed"
+                            | "canceled"
+                            | "duplicate"
+                    )
+                })
+                .unwrap_or("unknown");
+            finding(
+                lines,
+                "warn",
+                "linear",
+                format!("{team} {name} has type {actual}, expected {kind}. Run wg setup."),
+            );
         }
     }
     Ok(())
@@ -279,7 +344,8 @@ pub(crate) fn preflight(
                     "FAIL",
                     "trunk",
                     format!(
-                        "{title}, but the stax trunk is {trunk} and {branch} is not an imported, frozen stax branch"
+                        "{title}, but the stax trunk is {trunk} and {branch} is not an imported, frozen stax branch\n  ask {} to run, in the checkout that holds {branch}: st get {branch} --parent {trunk} --no-checkout --downstack --no-restack && st freeze {branch}",
+                        machine::text(&cfg["config"]["human"])
                     ),
                 );
                 continue;
@@ -341,49 +407,25 @@ pub(super) fn doctor(
         .collect::<Vec<_>>();
     let plan = dir.map(|p| install.config.load_plan(p));
     let mut lines = vec![];
-    if let Some(result) = &plan {
-        match result {
-            Ok(p) => {
-                let errors = crate::local::plan_findings(
-                    p,
-                    &install.config.report(None).map_err(|e| e.to_string())?,
-                );
-                if errors.is_empty() {
-                    finding(&mut lines, "ok", "plan", "wg check is clean")
-                } else {
-                    finding(&mut lines, "FAIL", "plan", errors.join("; "))
-                }
-            }
-            Err(e) => finding(&mut lines, "FAIL", "plan", e),
-        }
-    }
-    lines.extend(diagnostics::collect(
-        dir,
-        &roots,
-        chrono::Utc::now().timestamp(),
-        |km| {
-            let plan = plan
-                .as_ref()
-                .and_then(|r| r.as_ref().ok())
-                .ok_or("cannot read plan")?;
-            let snapshot = workflow::snapshot(install, plan, km)?;
-            let mut issues = std::collections::BTreeMap::new();
-            for (key, status) in snapshot.statuses {
-                let id = km["nodes"][&key]["id"].as_str().ok_or("missing issue id")?;
-                let labels = snapshot.live[id]["labels"]["nodes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|l| l["name"].as_str().map(str::to_owned))
-                    .collect();
-                issues.insert(id.into(), MappedIssue { status, labels });
-            }
-            Ok(issues)
-        },
-    ));
     let mut dirs = machine::plans(&roots).map_err(|e| e.to_string())?;
     if let Some(dir) = dir {
         dirs.insert(dir.canonicalize().unwrap_or_else(|_| dir.into()));
+    }
+    if config["context_limit"] == 0
+        && config["coordinator_settings"]
+            .as_object()
+            .is_none_or(|settings| {
+                settings
+                    .values()
+                    .all(|v| v.as_object().is_none_or(|map| map.is_empty()))
+            })
+    {
+        finding(
+            &mut lines,
+            "ok",
+            "settings",
+            "off (no coordinator_settings, context_limit 0)",
+        );
     }
     for dir in dirs {
         if !dir.join("plan.json").is_file() || !dir.join("keymap.json").is_file() {
@@ -412,5 +454,50 @@ pub(super) fn doctor(
             }
         }
     }
+    if let Some(result) = &plan {
+        match result {
+            Ok(p) => {
+                let errors = crate::local::plan_findings(
+                    p,
+                    &install.config.report(None).map_err(|e| e.to_string())?,
+                );
+                if errors.is_empty() {
+                    finding(&mut lines, "ok", "plan", "wg check is clean")
+                } else {
+                    finding(&mut lines, "FAIL", "plan", errors.join("; "))
+                }
+            }
+            Err(e) => finding(&mut lines, "FAIL", "plan", e),
+        }
+    }
+    let lines = diagnostics::collect_ordered(
+        install,
+        dir,
+        plan.as_ref().and_then(|r| r.as_ref().ok()),
+        &roots,
+        chrono::Utc::now().timestamp(),
+        lines,
+        |km| {
+            let plan = plan
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .ok_or("cannot read plan")?;
+            let snapshot = workflow::snapshot_using(install, km, || {
+                Ok(workflow::client(install, plan)?.for_diagnostics())
+            })?;
+            let mut issues = std::collections::BTreeMap::new();
+            for (key, status) in snapshot.statuses {
+                let id = km["nodes"][&key]["id"].as_str().ok_or("missing issue id")?;
+                let labels = snapshot.live[id]["labels"]["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|l| l["name"].as_str().map(str::to_owned))
+                    .collect();
+                issues.insert(id.into(), MappedIssue { status, labels });
+            }
+            Ok(issues)
+        },
+    );
     Ok(report(lines))
 }

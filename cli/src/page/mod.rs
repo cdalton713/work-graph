@@ -294,6 +294,7 @@ pub(crate) use collaboration::{acquire_claim, refresh_workflow, shell_quote};
 
 /// Read-only probes use the same URL policy, credential scope and TLS roots as login.
 pub(crate) struct DiagnosticPage(Page);
+pub(crate) const DEFAULT_PAGE: &str = "http://127.0.0.1:4747";
 
 impl DiagnosticPage {
     pub(crate) fn new(
@@ -303,15 +304,61 @@ impl DiagnosticPage {
         shared: bool,
     ) -> Result<Self> {
         let mut settings = crate::providers::PageSettings(install).resolve(scope)?;
-        settings
-            .page
-            .get_or_insert_with(|| "http://127.0.0.1:4747".into());
+        settings.page.get_or_insert_with(|| DEFAULT_PAGE.into());
         let mut page = Page::new(&settings, Some(url))?;
         page.token =
             page_credential(&settings, url, scope, shared, install)?.map(|c| c.into_header());
         Ok(Self(page))
     }
 
+    pub(crate) fn top_level(install: &crate::linear::Installation, url: &str) -> Result<Self> {
+        let mut settings = crate::providers::PageSettings(install).resolve("")?;
+        let configured = install.config.settings()["page_url"]
+            .as_str()
+            .unwrap_or(DEFAULT_PAGE)
+            .trim_end_matches('/');
+        settings.page = Some(configured.into());
+        let mut page = Page::new(&settings, Some(url))?;
+        let source = if configured == url {
+            crate::providers::page_key(
+                std::path::Path::new(&std::env::var_os("HOME").ok_or("missing home directory")?),
+                &serde_json::json!({"id":"default"}),
+            )?
+        } else {
+            crate::PageCredential::Missing
+        };
+        let token = match source {
+            crate::PageCredential::Missing => {
+                read_page_source(&auth::token_path(&settings, url)?)?.into_token()
+            }
+            source => source.into_token(),
+        };
+        page.token = token.map(|c| c.into_header());
+        Ok(Self(page))
+    }
+    pub(crate) fn safe_field(&self, field: &Value) -> String {
+        let mut value = field
+            .as_str()
+            .unwrap_or("None")
+            .lines()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Some(secret) = self
+            .0
+            .token
+            .as_ref()
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .filter(|s| !s.is_empty())
+        {
+            value = value.replace(secret, "[redacted]");
+        }
+        value
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(120)
+            .collect()
+    }
     pub(crate) fn read(&self, path: &str, scope: Option<&str>) -> Result<Value> {
         let mut request = self.0.request(reqwest::Method::GET, path);
         if let Some(scope) = scope {

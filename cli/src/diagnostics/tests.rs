@@ -34,16 +34,19 @@ fn doctor_findings_change_health_when_a_missing_worker_directory_is_repaired() {
     fs::write(&report, r#"{"findings":[]}"#).unwrap();
     let check = |status: &str| {
         let mut findings = Findings::read(&report).unwrap();
+        let mut checks =
+            services::inspect(Some(&dir), &state::Config::discover().unwrap()).unwrap();
+        checks.extend(effort(&dir, 1700000000, |_| {
+            Ok(BTreeMap::from([(
+                "issue".into(),
+                MappedIssue {
+                    status: status.into(),
+                    labels: vec![],
+                },
+            )]))
+        }));
         findings
-            .collect_diagnostics(&dir, &[], 1700000000, false, |_| {
-                Ok(BTreeMap::from([(
-                    "issue".into(),
-                    MappedIssue {
-                        status: status.into(),
-                        labels: vec![],
-                    },
-                )]))
-            })
+            .include_checks(&checks, &dir, 1700000000, false)
             .unwrap();
         findings
     };

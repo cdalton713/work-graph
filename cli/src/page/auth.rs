@@ -53,7 +53,7 @@ pub(super) fn validated_url(raw: &str, settings: &Settings) -> Result<Url> {
     Ok(url)
 }
 
-fn token_path(settings: &Settings, raw: &str) -> Result<PathBuf> {
+pub(super) fn token_path(settings: &Settings, raw: &str) -> Result<PathBuf> {
     let uri: http::Uri = raw.parse().map_err(|_| "invalid page URL")?;
     let authority = uri.authority().ok_or("invalid page URL")?;
     let host = authority

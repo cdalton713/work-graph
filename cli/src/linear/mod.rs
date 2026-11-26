@@ -38,6 +38,7 @@ impl Timing for SystemTiming {
 pub struct Client<'a, S, H, T> {
     pub settings: S,
     pub rate_limits: BTreeMap<String, String>,
+    diagnostic: bool,
     credential: Credential,
     transport: &'a H,
     timing: &'a T,
@@ -149,11 +150,17 @@ where
             })?;
         Ok(Self {
             settings,
+            diagnostic: false,
             credential,
             transport,
             timing,
             rate_limits: BTreeMap::new(),
         })
+    }
+
+    pub(crate) fn for_diagnostics(mut self) -> Self {
+        self.diagnostic = true;
+        self
     }
 
     pub fn request(&mut self, doc: &str, variables: Value) -> Result<Value, String> {
@@ -197,7 +204,15 @@ where
                             ),
                         };
                         let detail = String::from_utf8_lossy(&bytes[..bytes.len().min(500)]);
-                        (kind, format!("Linear HTTP {status}: {detail}"), wait)
+                        (
+                            kind,
+                            if self.diagnostic {
+                                format!("Linear HTTP {status}")
+                            } else {
+                                format!("Linear HTTP {status}: {detail}")
+                            },
+                            wait,
+                        )
                     } else {
                         let mut body: Value = serde_json::from_slice(bytes)
                             .map_err(|e| format!("Invalid Linear response: {e}"))?;
@@ -208,7 +223,15 @@ where
                                 .ok_or_else(|| "Linear response has no data".into());
                         }
                         let detail: String = body["errors"].to_string().chars().take(800).collect();
-                        (classify(&body), format!("Linear error: {detail}"), wait)
+                        (
+                            classify(&body),
+                            if self.diagnostic {
+                                "Linear query failed".into()
+                            } else {
+                                format!("Linear error: {detail}")
+                            },
+                            wait,
+                        )
                     }
                 }
             };

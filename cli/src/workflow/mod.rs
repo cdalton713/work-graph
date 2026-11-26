@@ -49,11 +49,19 @@ pub fn snapshot(
     plan: &Value,
     keymap: &Value,
 ) -> Result<Snapshot, String> {
+    snapshot_using(installation, keymap, || client(installation, plan))
+}
+
+pub(crate) fn snapshot_using(
+    installation: &Installation,
+    keymap: &Value,
+    connect: impl FnOnce() -> Result<Linear, String>,
+) -> Result<Snapshot, String> {
     let nodes = keymap["nodes"]
         .as_object()
         .filter(|m| !m.is_empty())
         .ok_or("keymap.json has no nodes; run wg.py load --apply first")?;
-    let mut client = client(installation, plan)?;
+    let mut client = connect()?;
     let ids = nodes
         .values()
         .map(|node| node["id"].as_str().ok_or("missing issue id"))
@@ -100,7 +108,7 @@ fn workspace<'a>(installation: &'a Installation, plan: &'a Value) -> Result<&'a 
         .ok_or_else(|| "missing workspace".into())
 }
 
-type Linear = Client<'static, Value, LinearHttp, SystemTiming>;
+pub(crate) type Linear = Client<'static, Value, LinearHttp, SystemTiming>;
 
 pub(crate) fn client(installation: &Installation, plan: &Value) -> Result<Linear, String> {
     Client::connect(

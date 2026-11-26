@@ -67,3 +67,35 @@ fn installed_resources_and_legacy_commands() {
             .success()
     );
 }
+
+#[test]
+fn ui_help_with_invalid_config() {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join("config.json");
+    fs::write(&config, "invalid").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_wg-preview"))
+        .env_clear()
+        .env("HOME", home.path())
+        .env("WG_CONFIG", &config)
+        .args(["ui", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("--no-tailnet"));
+}
+
+#[test]
+fn compare_public_diagnostics_to_python() {
+    assert!(
+        Command::new("python3")
+            .arg("-IB")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../tests/cli-parity/doctor-review.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_wg-preview"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}

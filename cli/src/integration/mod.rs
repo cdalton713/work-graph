@@ -9,7 +9,7 @@ use std::{
 mod checks;
 pub(crate) mod resources;
 mod ui;
-pub(crate) use checks::preflight;
+pub(crate) use checks::{preflight, team_checks};
 
 #[derive(Parser)]
 struct Arguments {
@@ -107,13 +107,19 @@ pub fn command(args: impl Iterator<Item = OsString>) -> Option<ExitCode> {
         _ => return None,
     };
     let help = if verb == "ui" {
-        let cfg = crate::state::Config::discover().ok()?;
-        let names = cfg.settings()["workspaces"]
-            .as_array()?
-            .iter()
-            .filter_map(|v| v["id"].as_str())
-            .collect::<Vec<_>>()
-            .join(",");
+        let names = crate::state::Config::discover()
+            .ok()
+            .and_then(|cfg| {
+                Some(
+                    cfg.settings()["workspaces"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|v| v["id"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            })
+            .unwrap_or_else(|| "default".into());
         help.replace("{default}", &format!("{{{names}}}"))
     } else {
         help.to_owned()
@@ -140,6 +146,7 @@ pub fn command(args: impl Iterator<Item = OsString>) -> Option<ExitCode> {
                     .unwrap_or_default();
                 eprintln!(
                     "{}\nwg.py: error: unrecognized arguments: {unknown}",
+                    // Parser errors retain the frozen legacy usage line.
                     include_str!("help/root.txt")
                         .split("\n\n")
                         .next()

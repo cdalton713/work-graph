@@ -114,6 +114,10 @@ def scenario(root):
             data = {"issueArchive": {"success": True}}
         elif "teams(filter:" in q:
             data = {"teams": {"nodes": [{"id": "team", "states": {"nodes": [{"name": "Triage", "id": "triage"}]}}]}}
+        elif "issueLabels(first:" in q:
+            data = {"issueLabels":page([{"name":"agent:"+role, "id":role, "team":None} for role in ("codex","claude","coordinator")])}
+        elif "team(id:" in q and "states(" in q:
+            data = {"team":{"states":page([{"name":"Triage","id":"triage","type":"triage"}])}}
         elif "team(id:" in q:
             data = {"team": {"labels": {"nodes": [{"name": "health", "id": "label"}], "pageInfo": {"hasNextPage": False}}}}
         elif "issues(first:5," in q:
@@ -159,7 +163,7 @@ def scenario(root):
         env["WG_LINK"] = "on"
         out = run("doctor", plan)
         assert "ok page notices for default: 1 registered device(s)" in out
-        assert "ok link: accepts a connection" in out and frames == [8], (out, frames)
+        assert "ok link: wss://page.invalid/api/link accepts a connection" in out and frames == [8], (out, frames)
         assert "diagnostic-token" not in out
         refuse_link = True
         reject_token = True
@@ -167,7 +171,7 @@ def scenario(root):
         out = run("doctor", plan, code=1)
         assert "FAIL link: link answered HTTP 403" in out
         assert "FAIL link token for https://page.invalid" in out
-        assert "FAIL page: page contract differs" in out and "diagnostic-token" not in out
+        assert "FAIL page contract: deploy the page (the server has other, wg has " in out and "diagnostic-token" not in out
         assert frames == [8]
         refuse_link = reject_token = False
         contract = original_contract

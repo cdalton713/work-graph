@@ -87,7 +87,11 @@ fn agent_service(dir: &Path, config_path: &Path) -> Result<(String, String)> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => return Err(e.into()),
     };
-    let stamp = machine::read_state(&activity::stamp_path(dir)?)?;
+    let stamp = if dir.try_exists()? {
+        machine::read_state(&activity::stamp_path(dir)?)?
+    } else {
+        Value::Null
+    };
     let message = format!(
         "agents: service {}; last send: {}",
         if running { "running" } else { "stopped" },

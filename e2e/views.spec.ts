@@ -148,3 +148,50 @@ test("desktop keeps the board, canvas and issue panel side by side", async ({ pa
   expect(panelBox.x).toBe(canvasBox.x + canvasBox.width);
   expect(panelBox.x + panelBox.width).toBe(1440);
 });
+
+test("phone view switch closes an open panel and returns to the project entry", async ({ page }, info) => {
+  test.skip(info.project.name !== "phone-390x844");
+  await page.goto("/");
+  await page.goto(projectPath);
+  const board = page.locator(".board");
+  const graph = page.locator(".react-flow");
+  const panel = page.locator(".panel");
+  const controls = page.getByRole("group", { name: "Project view" });
+  await board.getByRole("button", { name: /WG-1\b/ }).tap();
+  await expect(panel).toBeVisible();
+  await controls.getByRole("button", { name: "Graph" }).tap();
+  await expect(panel).toBeHidden();
+  await expect(graph).toBeVisible();
+  await expect(page).toHaveURL(/\?project=fixture$/);
+
+  await page.goForward();
+  await expect(panel).toBeVisible();
+  await controls.getByRole("button", { name: "List" }).tap();
+  await expect(panel).toBeHidden();
+  await expect(board).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL("/");
+});
+
+test("showing a filtered issue in the graph keeps the saved runner filter", async ({ page }, info) => {
+  test.skip(info.project.name !== "phone-390x844");
+  const filterKey = "wg:claims:default:fixture";
+  await page.addInitScript((key) => localStorage.setItem(key, "mine"), filterKey);
+  await page.goto(projectPath);
+  await expect(page.locator(".board")).toBeVisible();
+  await page.locator(".bar").getByRole("button", { name: "More", exact: true }).tap();
+  const menu = page.getByRole("dialog", { name: "Project controls" });
+  await menu.getByRole("button", { name: /^View/ }).tap();
+  const option = page.getByRole("option", { name: /Open issues only/ });
+  await option.tap();
+  await expect(option).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: "Done", exact: true }).tap();
+  await menu.getByRole("button", { name: "Close", exact: true }).tap();
+
+  const board = page.locator(".board");
+  await board.getByRole("searchbox").fill("WG-11");
+  await board.getByRole("button", { name: /WG-11\b/ }).tap();
+  await page.getByRole("button", { name: "Show in graph" }).tap();
+  await expect(page.locator(".react-flow .station.is-selected").getByText("WG-11", { exact: true })).toBeVisible();
+  expect(await page.evaluate((key) => localStorage.getItem(key), filterKey)).toBe("mine");
+});

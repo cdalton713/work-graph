@@ -287,6 +287,8 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     if (project && !document.hidden) void load(project);
   });
   const claims = sharedProject && claimData?.key === openKey ? claimData?.result : undefined;
+  const [showAllRunners, setShowAllRunners] = useState(false);
+  useEffect(() => setShowAllRunners(false), [openKey]);
   const [filterChoice, setFilterChoice] = useState<{ key: string; value: ClaimFilter } | null>(null);
   const storedFilter = useMemo(() => {
     try { return openKey ? parseClaimFilter(localStorage.getItem(`wg:claims:${openKey}`)) : "all"; }
@@ -294,10 +296,11 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   }, [openKey]);
   const marks = useMemo(() => claimMarks(claims?.claims ?? []), [claims]);
   const canFilterClaims = !!claims && (claims.claims.length ? claims.claims.some((claim) => claim.mine !== undefined) : claims.role !== undefined);
-  const claimFilter = canFilterClaims ? (filterChoice?.key === openKey ? filterChoice!.value : storedFilter) : "all";
+  const claimFilter = canFilterClaims && !showAllRunners ? (filterChoice?.key === openKey ? filterChoice!.value : storedFilter) : "all";
   const chooseClaimFilter = (value: ClaimFilter) => {
     if (!openKey) return;
     try { localStorage.setItem(`wg:claims:${openKey}`, value); } catch { /* The filter still works on this page. */ }
+    setShowAllRunners(false);
     setFilterChoice({ key: openKey, value });
   };
   // A worker's question is a move of the human's: it counts in "Your move", the picker, and the badge.
@@ -486,14 +489,18 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     }
   }, [full, narrow, query, setQuery]);
 
+  const showView = (next: ProjectView) => {
+    if (query.has("issue")) select(null);
+    setView(next);
+  };
+
   const showInGraph = () => {
     if (!selected || !openKey) return;
     if (!graph?.byId.has(selected.id)) {
       setOpenOnly(false);
-      chooseClaimFilter("all");
+      if (!includeClaim(selected)) setShowAllRunners(true);
     }
-    select(null);
-    setView("graph");
+    showView("graph");
     setGraphTrace({ project: openKey, id: selected.id });
     setFocus({ id: selected.id, tick: Date.now() });
   };
@@ -905,7 +912,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             onDispatch={canCommand ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer} limitedEdits={collaborator}
             onGo={pick} />
         )}
-        {narrow && full && <ViewSwitch view={view} onChange={setView} />}
+        {narrow && full && <ViewSwitch view={view} onChange={showView} />}
       </main>
     </div>
   );

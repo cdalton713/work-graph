@@ -47,7 +47,7 @@ where
         "issueLabel",
         id,
         false,
-        &Value::Null,
+        &contract["workspace_issue_labels"],
         &contract["workspace_label_groups"],
     )?;
     setup.label_scope(

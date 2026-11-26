@@ -214,6 +214,11 @@ fn contract_write_uses_the_selected_checkout() {
             if python {
                 expected = bytes;
             } else {
+                let contract: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    contract["setup"]["workspace_issue_labels"],
+                    serde_json::json!(["answered"])
+                );
                 assert_eq!(bytes, expected);
             }
             fs::remove_file(&path).unwrap();

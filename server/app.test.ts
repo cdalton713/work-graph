@@ -1250,6 +1250,10 @@ it("allows each account to join only its shared projects and closes a removed me
       expect(await (await get("p2", ownerHeaders)).json()).not.toHaveProperty("waitNames");
       expect(await (await get("p1", { ...await rolesHeaders("grace@example.com", grace), "x-workspace": collab.id })).json()).toMatchObject({ waitNames: ["Ada", "Grace Hopper"] });
       expect(await (await app().request("/api/projects/p1/graph", { headers: local })).json()).not.toHaveProperty("waitNames");
+      await accounts.setHuman(grace, "Ada");
+      expect(await (await get("p1", ownerHeaders)).json()).toMatchObject({ waitNames: ["Ada"] });
+      expect(await (await get("p1", { ...await rolesHeaders("grace@example.com", grace), "x-workspace": collab.id })).json())
+        .toMatchObject({ waitNames: ["Ada"] });
       await accounts.setHuman(grace, "Grace");
       expect((await page.request(path(view.id), { headers: headers(viewToken) })).status).toBe(403);
       expect((await page.request(path(collab.id), { headers: headers(viewToken) })).status).toBe(400);

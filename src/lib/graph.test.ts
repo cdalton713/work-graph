@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { CARD_PREFIX, agentStep, ageText, boardGroups, boardOrder, startNode, buildGraph, cardText, isClaim, moveWarnings, parseCard, parseStatus, projectGroups, reach, reduceEdges, reviewMark, reviewOf, runTime, satisfied, shapeKey, soakLeft, statusName, statusTiming, toggleReviewed, trace, yourMove } from "./graph";
 import type { GraphData, Issue, IssueRef, State } from "./types";
-import { DEFAULT_HUMAN, configureSite, site } from "./site";
+import { DEFAULT_HUMAN, configureSite, createSite, site } from "./site";
 
 const state = (name: string, type: State["type"] = "unstarted"): State => ({ id: name, name, type, color: "#000" });
 const DONE = state("Done", "completed");
@@ -42,6 +42,16 @@ describe("parseCard", () => {
 });
 
 describe("buildGraph", () => {
+  it("groups the viewer's wait status under Your move and another person's under Waiting", () => {
+    const graph = buildGraph({ ...data([
+      issue("a", { state: state("Needs Ada", "started") }),
+      issue("b", { labels: [{ id: "wait", name: "needs-grace", color: "", group: null }], card: card({ next: "wait human" }) }),
+    ], []), waitNames: ["Ada", "Grace"] }, { site: createSite("Ada", "work") });
+    expect(graph.byId.get("b")).toMatchObject({ status: "Needs Grace", signal: "stop", waitsOnOther: "Grace" });
+    const groups = boardGroups(graph);
+    expect(groups.find(({ id }) => id === "you")?.nodes.map(({ id }) => id)).toEqual(["a"]);
+    expect(groups.find(({ id }) => id === "waiting")?.nodes.map(({ id }) => id)).toEqual(["b"]);
+  });
   it("makes one edge for a relation that both issues report", () => {
     const a = issue("a"), b = issue("b");
     const d = data([a, b], [["a", "b"]]);

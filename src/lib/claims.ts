@@ -28,10 +28,13 @@ export function matchesClaim(claim: Claim | undefined, filter: ClaimFilter): boo
   return filter === "all" || claim?.mine === (filter === "mine");
 }
 
-export function claimMarks(claims: Claim[], now: number): Map<string, ClaimMark> {
+export function canReleaseClaim(claim: Claim | undefined, role: ProjectClaims["role"]): boolean {
+  return role === "owner" && claim?.mine === false && claim.stale === true;
+}
+
+export function claimMarks(claims: Claim[]): Map<string, ClaimMark> {
   return new Map(claims.map((claim) => [claim.node, {
     ...claim,
     initials: claim.holder.trim().split(/\s+/u).slice(0, 2).map((word) => Array.from(word)[0]).join("").toLocaleUpperCase() || "?",
-    stale: claim.stale || Date.parse(claim.leaseUntil) <= now,
   }]));
 }

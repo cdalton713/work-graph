@@ -21,7 +21,7 @@ import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
 import type { Account, AccountConnection, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
 import { useLink } from "./useLink";
-import { claimMarks, matchesClaim, parseClaimFilter, type ClaimFilter, type ProjectClaims } from "./lib/claims";
+import { canReleaseClaim, claimMarks, matchesClaim, parseClaimFilter, type ClaimFilter, type ProjectClaims } from "./lib/claims";
 
 const POLL_MS = 15_000;
 /** The overview loads a graph for each open project, so it polls less often than one graph. */
@@ -278,7 +278,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     try { return openKey ? parseClaimFilter(localStorage.getItem(`wg:claims:${openKey}`)) : "all"; }
     catch { return "all"; }
   }, [openKey]);
-  const marks = useMemo(() => claimMarks(claims?.claims ?? [], now), [claims, now]);
+  const marks = useMemo(() => claimMarks(claims?.claims ?? []), [claims]);
   const canFilterClaims = !!claims && (claims.claims.length ? claims.claims.some((claim) => claim.mine !== undefined) : claims.role !== undefined);
   const claimFilter = canFilterClaims ? (filterChoice?.key === openKey ? filterChoice!.value : storedFilter) : "all";
   const chooseClaimFilter = (value: ClaimFilter) => {
@@ -449,6 +449,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     const wanted = query.get("issue");
     return full?.nodes.find((n) => n.issue.identifier === wanted) ?? null;
   }, [full, query]);
+  const selectedClaim = selected?.card?.key ? marks.get(selected.card.key) : undefined;
   const lastNode = useRef<string | null>(null);
   const selectedId = selected && openKey ? `${openKey}:${selected.id}` : null;
   useEffect(() => {
@@ -759,8 +760,8 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             focus={focus} showMap={map} onSelect={select} onHover={setHoverId} />
         )}
         {selected && full && data && (
-          <Panel node={selected} claim={selected.card?.key ? marks.get(selected.card.key) : undefined}
-            onRelease={claims?.role === "owner" && !viewer && linkRef ? async (node) => {
+          <Panel node={selected} claim={selectedClaim}
+            onRelease={!viewer && linkRef && canReleaseClaim(selectedClaim, claims?.role) ? async (node) => {
               await api.releaseClaim(linkRef.id, linkRef.workspace, node);
               refreshClaims.current();
             } : undefined} now={now} graph={full} data={data} asks={asks.filter((a) => a.issue === selected.issue.identifier)}

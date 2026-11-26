@@ -39,6 +39,16 @@ test("the local service starts on loopback, serves service config, and stops", a
     const response = await fetch(url + "/api/config");
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ auth: true, signIn: "linear", user: null });
+    const viewer = await fetch(url + "/auth/login?as=pat", { redirect: "manual" });
+    const viewerCookie = viewer.headers.get("set-cookie")!.split(";")[0];
+    const viewerDirectory = await (await fetch(url + "/api/projects", { headers: { cookie: viewerCookie } })).json();
+    const viewerWorkspace = viewerDirectory.workspaces.find(({ role }: { role?: string }) => role === "viewer");
+    const viewerGraph = await fetch(url + "/api/projects/project/graph", {
+      headers: { cookie: viewerCookie, "x-workspace": viewerWorkspace.id },
+    });
+    expect(viewerGraph.status).toBe(200);
+    expect(await viewerGraph.json()).toMatchObject({ waitNames: ["Ada", "Grace"] });
+
     const signedIn = await fetch(url + "/auth/login", { redirect: "manual" });
     expect(signedIn.status).toBe(302);
     const cookie = signedIn.headers.get("set-cookie")!.split(";")[0];
@@ -46,6 +56,12 @@ test("the local service starts on loopback, serves service config, and stops", a
     expect(await account.json()).toMatchObject({ human: "Ada", pageUrl: url, onboarding: { name: false } });
     const projects = await fetch(url + "/api/projects", { headers: { cookie } });
     expect(await projects.json()).toMatchObject({ projects: [{ id: "project", name: "Example project", workspace: "example" }] });
+    const claimsPath = url + "/api/projects/project/claims";
+    const ownerHeaders = { cookie, "x-workspace": "example" };
+    expect(await (await fetch(claimsPath, { headers: ownerHeaders })).json()).toMatchObject({
+      role: "owner",
+      claims: [{ node: "check", mine: false, stale: true }, { node: "example", mine: true, stale: false }],
+    });
     const share = await fetch(url + "/api/projects/project/share", { headers: { cookie, "x-workspace": "example" } });
     const shareData = await share.json();
     expect(shareData).toMatchObject({
@@ -67,6 +83,15 @@ test("the local service starts on loopback, serves service config, and stops", a
     const directory = await fetch(url + "/api/projects", { headers: { cookie: collaboratorCookie } });
     const shared = (await directory.json()).workspaces.find((workspace: { role?: string }) => workspace.role === "collaborator");
     const sharedHeaders = { cookie: collaboratorCookie, "x-workspace": shared.id };
+    expect(await (await fetch(claimsPath, { headers: sharedHeaders })).json()).toMatchObject({
+      role: "collaborator",
+      claims: [{ node: "check", mine: true }, { node: "example", mine: false }],
+    });
+    const release = (headers: Record<string, string>, force: string) => fetch(claimsPath + "/check" + force, {
+      method: "DELETE", headers: { ...headers, origin: url, "content-type": "application/json" },
+    });
+    expect((await release(ownerHeaders, "")).status).toBe(409);
+    expect((await release(ownerHeaders, "?force=1")).status).toBe(204);
     const access = await fetch(url + "/api/projects/project/access", { headers: sharedHeaders });
     expect(await access.json()).toMatchObject({ status: "not_member", team: "WG", accessRequestedAt: member.accessRequestedAt });
     const graph = await fetch(url + "/api/projects/project/graph", { headers: sharedHeaders });

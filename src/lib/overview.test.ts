@@ -157,6 +157,10 @@ describe("movesWithAsks", () => {
       { ...move, why: "Worker asks · Merge #7" },
     ]);
   });
+  it("keeps questions without an account name and omits questions for another person", () => {
+    expect(movesWithAsks([], [ask("q1", "CD-1"), { ...ask("q2", "CD-2"), accountName: "Grace" }])
+      .map(({ identifier }) => identifier)).toEqual(["CD-1"]);
+  });
   it("names an escalation that no coordinator read", () => {
     expect(movesWithAsks([move], [{ ...ask("e1", "CD-2", "Base differs"), kind: "escalation" as const }, { ...ask("e2", "CD-1"), kind: "escalation" as const }]).map((m) => m.why))
       .toEqual(["Worker escalates:", "Worker escalates · Merge #7"]);

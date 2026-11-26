@@ -3,9 +3,9 @@ import { Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
-import { parseSigned, serializeSigned } from "hono/utils/cookie";
+import { serializeSigned } from "hono/utils/cookie";
 import { createApp } from "../app.ts";
-import { localUrl, pack, unpack, SESSION_COOKIE, SESSION_S } from "../auth.ts";
+import { localUrl, pack, SESSION_COOKIE, SESSION_S } from "../auth.ts";
 import { credentialCrypto } from "../db/crypto.ts";
 import { migrate } from "../db/migrations.ts";
 import { dbTenants } from "../db/tenants.ts";
@@ -85,7 +85,7 @@ await sql.query(`UPDATE project_members SET access_requested_at = now() - interv
 await accounts.shares.revoke([...scope], "view");
 for (const [person, node, job] of [[owner, "example", "dispatch"], [collaborator, "check", "review"]] as const) {
   await accounts.claims({ project: [...scope], account: person.accountId,
-    ...(person === collaborator && { membership: membership.id }) }, { kind: "post", node, job, lease: 3600 });
+    ...(person === collaborator && { membership: membership.id }) }, { kind: "post", node, job, lease: 3600, takeover: false });
 }
 await sql.query(`UPDATE node_claims SET claimed_at = now() - interval '1 hour',
   renewed_at = now() - interval '30 minutes', lease_until = now() - interval '1 minute'
@@ -162,6 +162,7 @@ globalThis.fetch = async (input, init) => {
   }
   if (query.includes("teams(first:10")) return data({ teams: { nodes: [{ ...exampleTeam, states: { nodes: [started, ...issues.map((item) => item.state)] }, members: empty }] } });
   if (query.includes("issueLabels(")) return data({ issueLabels: empty });
+  if (query.includes("issues(first:1,")) return data({ issues: empty, comments: empty, project: { documents: empty } });
   if (query.includes("project(id:")) {
     return data({ viewer: linearViewer, project: visible && variables.id === project.id ? { ...graphProject, issues: { nodes: issues, pageInfo } } : null });
   }
@@ -194,8 +195,7 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
   const headers = new Headers(request.headers);
   const accountRead = url.pathname === "/api/account" && request.method === "GET";
   const shareWrite = request.method === "POST" && /^\/api\/projects\/[^/]+\/share(?:\/[^/]+(?:\/rotate)?)?$/.test(url.pathname);
-  const claimsRead = request.method === "GET" && url.pathname === "/api/projects/project/claims";
-  if (accountRead || shareWrite || claimsRead) headers.delete("accept-encoding");
+  if (accountRead || shareWrite) headers.delete("accept-encoding");
   headers.set("host", host);
   if (headers.get("origin") === url.origin) headers.set("origin", origin);
   const cookie = /(?:^|;\s*)wg_preview_session=([^;]+)/.exec(headers.get("cookie") ?? "")?.[1];
@@ -209,15 +209,6 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
     const useLoopback = (link: { url?: string }) => link.url ? { url: link.url.replace(origin, url.origin) } : link;
     const local = body.view && body.collab ? { view: useLoopback(body.view), collab: useLoopback(body.collab) } : useLoopback(body);
     return Response.json(local, { headers: response.headers });
-  }
-  if (claimsRead && response.ok) {
-    const body = await response.json();
-    // The preview can run against either version of the claims endpoint.
-    const session = unpack((await parseSigned(request.headers.get("cookie") ?? "", auth.secret)).wg_preview_session);
-    const role = session?.accountId === owner.accountId ? "owner" : session?.accountId === collaborator.accountId ? "collaborator" : "viewer";
-    const name = role === "owner" ? owner.name : role === "collaborator" ? collaborator.name : null;
-    return Response.json({ role, claims: body.claims.map((claim: { holder: string; mine?: boolean }) =>
-      ({ ...claim, mine: claim.mine ?? claim.holder === name })) });
   }
   if (response.headers.get("location") === origin + "/") response.headers.set("location", "/");
   if (response.headers.get("set-cookie")?.includes(`__Host-${SESSION_COOKIE}=`)) {

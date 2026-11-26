@@ -161,7 +161,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
         {claim && <div className={`notice${claim.stale ? " is-warning" : ""}`}>
           <div>{claim.holder} · {claim.job} · since <time dateTime={claim.claimedAt}>{new Date(claim.claimedAt).toLocaleString()}</time></div>
           {claim.stale && <div>⚠ No sign of {claim.holder}'s coordinator since <time dateTime={claim.renewedAt}>{new Date(claim.renewedAt).toLocaleString()}</time></div>}
-          {claim.stale && claim.mine === false && onRelease && <button type="button" className="ghost" disabled={releasing} onClick={() => void release()}>
+          {onRelease && <button type="button" className="ghost" disabled={releasing} onClick={() => void release()}>
             {releasing ? "Releasing…" : "Release"}
           </button>}
         </div>}

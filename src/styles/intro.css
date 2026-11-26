@@ -1,0 +1,37 @@
+.intro { container-type: inline-size; display: grid; gap: 8px; }
+.intro-details summary { cursor: pointer; padding-block: 12px; }
+.intro ol.intro-track {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0;
+  list-style: none; padding: 12px; margin: 0 0 4px;
+  background: var(--cab-2); border: 1px solid var(--rail-2); border-radius: var(--r-2);
+}
+.intro-track li {
+  position: relative; display: grid; grid-template-rows: 32px auto;
+  justify-items: center; text-align: center; gap: 4px; color: var(--ink-2);
+}
+.intro-track li::before {
+  content: ""; position: absolute; top: 15px; inset-inline: 0;
+  height: 2px; background: var(--track);
+}
+.intro-track li:first-child::before { inset-inline-start: 50%; }
+.intro-track li:last-child::before { inset-inline-end: 50%; }
+.intro-track svg { position: relative; width: 40px; height: 32px; background: var(--cab-2); }
+.intro-track path { stroke: var(--track); stroke-width: 2; fill: none; }
+.intro-track circle { fill: var(--lamp-ready); }
+.intro-track li:nth-child(3) circle { fill: var(--lamp-running); }
+.intro-track li:last-child circle { fill: var(--lamp-done); }
+.intro-track span { padding-inline: 4px; }
+
+.intro-track small { display: block; margin-top: 4px; }
+
+@container (max-width: 32rem) {
+  .intro ol.intro-track { grid-template-columns: 1fr; }
+  .intro-track li {
+    grid-template: minmax(44px, auto) / 40px 1fr; align-items: center;
+    justify-items: start; text-align: start;
+  }
+  .intro-track li::before { inset: 0 auto 0 19px; width: 2px; height: auto; }
+  .intro-track li:first-child::before { inset-inline-start: 19px; top: 50%; }
+  .intro-track li:last-child::before { bottom: 50%; }
+  .intro-track svg { transform: rotate(90deg); }
+}

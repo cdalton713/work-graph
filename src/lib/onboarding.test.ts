@@ -13,6 +13,14 @@ const account = { human: "Ada", pageUrl: "https://example.com", connections: [ho
 const second = { ...home, id: "second", workspace_id: "extra", team: "", position: 1 };
 
 describe("onboarding", () => {
+  it("opens Welcome until the account has confirmed setup progress", () => {
+    const fresh = { ...complete, name: false, token: false, connected: false };
+    expect(firstStep(fresh)).toBe("welcome");
+    expect(firstStep({ ...fresh, name: true })).toBe("setup");
+    expect(firstStep({ ...fresh, token: true })).toBe("name");
+    expect(firstStep({ ...fresh, connected: true })).toBe("name");
+  });
+
   it.each([
     ["name", "name"], ["workspaces", "workspaces"], ["teams", "teams"],
     ["token", "setup"], ["connected", "connect"],
@@ -22,7 +30,7 @@ describe("onboarding", () => {
 
   it("shows the server's progress and closes the guide when skipped or complete", () => {
     const state = { ...complete, name: false, token: false, skipped: true };
-    expect(doneSteps(state)).toEqual({ name: false, workspaces: true, teams: true, setup: false, connect: true });
+    expect(doneSteps(state)).toEqual({ welcome: true, name: false, workspaces: true, teams: true, setup: false, connect: true });
     expect(firstStep(state)).toBeNull();
     expect(firstStep(complete)).toBeNull();
     expect(firstStep({ ...state, skipped: false })).toBe("name");

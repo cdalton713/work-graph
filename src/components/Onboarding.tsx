@@ -4,6 +4,7 @@ import { accountApi } from "../api";
 import { configBlock, doneSteps, firstStep, pollWhileVisible, setupCommands, steps, workspaceKeyLocation, type NewTeam, type NewTeams, type Step } from "../lib/onboarding";
 import type { Account } from "../lib/types";
 import { AccountError, NameForm, TeamForm, TokenForm, useAccountAction, WorkspaceKeyForm, WorkspaceStatus, type RefreshAccount } from "./Settings";
+import { Intro } from "./Intro";
 import { CopyButton } from "./ui";
 
 const readme = "https://github.com/cdalton713/work-graph";
@@ -91,6 +92,7 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
         <section className="account-card" aria-labelledby="setup-step-heading">
           <h2 ref={heading} id="setup-step-heading" tabIndex={-1}>{label}</h2>
           <div className="account-step" key={step}>
+            {step === "welcome" && <Intro />}
             {step === "name" && <NameForm human={account.human} refresh={refresh} next={() => setStep("workspaces")} />}
             {step === "workspaces" && <>
               {account.connections.map((workspace) => <article className="account-item" key={workspace.id}>

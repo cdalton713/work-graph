@@ -8297,6 +8297,147 @@ class CollaborativePlanTests(DirTests):
         self.enable_claims()
         return patch.object(wg, "fetch_nodes", return_value={key: live_issue("Ready") for key in self.km["nodes"]})
 
+    def join_fixture(self):
+        self.page_status = {"human": wg.HUMAN, "workspaces": [
+            {"id": "shared:member", "projectId": "project", "name": "Example",
+             "owner": "Ada", "role": "collaborator"}]}
+        self.p["effort"].update(workspace="work", team=wg.WORKSPACES["work"]["team"])
+        self.data = {"plan": self.p, "keymap": {"project": {"id": "project"}, "nodes": {}}}
+        self.version = 1
+
+    def join_cli(self, *args, code=2):
+        return self.call(wg.main, ["wg", "join", self.url, *args], code=code)
+
+    def test_join_refuses_browser_link_without_showing_token(self):
+        _, err = self.call(wg.main, ["wg", "join", self.url + "/join/example-secret"], code=2)
+        self.assertIn("browser", err)
+        self.assertNotIn("example-secret", err)
+        self.assertEqual(self.requests, [])
+
+    def test_join_needs_own_token_and_a_shared_project(self):
+        self.page_status = {"human": wg.HUMAN, "workspaces": []}
+        with patch.dict(os.environ, {wg.link_token_env("work"): ""}):
+            _, err = self.join_cli()
+        self.assertIn("Settings", err)
+        self.assertIn(f"wg login {self.url}", err)
+        self.assertEqual(self.requests, [])
+        _, err = self.join_cli()
+        self.assertIn("collab link", err)
+
+    def test_join_lists_multiple_projects_and_refuses_viewer(self):
+        self.join_fixture()
+        self.page_status["workspaces"].append({
+            "id": "shared:other", "projectId": "other", "name": "Other",
+            "owner": "Grace", "role": "viewer"})
+        out, _ = self.join_cli()
+        self.assertIn("Example", out)
+        self.assertIn("Other", out)
+        self.assertIn("Grace", out)
+        _, err = self.join_cli("--project", "Other")
+        self.assertIn("read-only", err)
+        self.assertTrue(all(path == "/api/status" for _, path, _, _ in self.requests))
+
+    def test_join_linear_guidance(self):
+        self.join_fixture()
+        for key in ("", "example-secret"):
+            with self.subTest(key=bool(key)), patch.object(wg, "key_source", return_value=(key, None)), \
+                 patch.object(wg, "gql", return_value={"teams": {"nodes": []}, "project": None}):
+                out, _ = self.join_cli()
+            self.assertIn('"key_env": []', out)
+            self.assertIn('"team": ' + json.dumps(self.p["effort"]["team"]), out)
+            self.assertIn(wg.key_env_name("work"), out)
+            self.assertIn("work-linear-api-key", out)
+            self.assertEqual("Request access" in out, bool(key))
+            self.assertNotIn("example-secret", out)
+
+    def test_join_checks_name_and_prints_orca_command_outside_orca(self):
+        self.join_fixture()
+        self.page_status["human"] = "Another Human"
+        with patch.object(wg, "key_source", return_value=("own-key", None)), \
+             patch.object(wg, "gql", return_value=self.join_linear()), \
+             patch.object(wg, "git_output", return_value=str(self.d)), \
+             patch.object(wg, "orca_caller", return_value=False):
+            _, err = self.join_cli()
+            self.assertIn("differs from config human", err)
+            self.page_status["human"] = wg.HUMAN
+            out, _ = self.join_cli("--repo", str(self.d))
+        self.assertIn("worktree create --name example-core", out)
+        self.assertIn("wg join", out)
+
+    def test_join_reuses_clean_worktree_and_refuses_dirty_worktree(self):
+        self.join_fixture()
+        core = self.d / "example-core"
+        core.mkdir()
+        branch = wg.BRANCH_PREFIX + "example-core"
+        entry = f"worktree {core}\0HEAD abc\0branch refs/heads/{branch}\0\0"
+        with patch.object(wg, "key_source", return_value=("own-key", None)), \
+             patch.object(wg, "gql", return_value=self.join_linear()), \
+             patch.object(wg, "orca_caller", return_value=False), \
+             patch.object(wg, "created_tree") as create, \
+             patch.object(wg, "preflight", return_value=0), \
+             patch.object(wg, "next_command", return_value=0), \
+             patch.object(wg, "git_output", side_effect=[str(self.d), entry, "?? notes"]):
+            _, err = self.join_cli()
+            self.assertIn("has local changes", err)
+            self.assertEqual(list(core.iterdir()), [])
+            with patch.object(wg, "git_output", side_effect=[str(self.d), entry, ""]):
+                self.join_cli(code=0)
+        create.assert_not_called()
+        self.assertTrue((core / "keymap.json").exists())
+
+    def join_linear(self):
+        return {"teams": {"nodes": [{"id": "team"}]},
+                "project": {"id": "project", "name": "Example", "teams": {"nodes": [{"id": "team"}]}}}
+
+    def test_join_worktree_and_leave(self):
+        self.join_fixture()
+        core = self.d / "example-core"
+        core.mkdir()
+        branch = wg.BRANCH_PREFIX + "example-core"
+        tree = {"id": "repo::core", "path": str(core), "branch": branch}
+
+        def git(*args, cwd=None):
+            return {("rev-parse", "--show-toplevel"): str(self.d),
+                    ("worktree", "list", "--porcelain", "-z"): "",
+                    ("rev-parse", "--git-common-dir"): str(self.d / ".git"),
+                    ("branch", "--show-current"): branch,
+                    ("status", "--porcelain", "--untracked-files=normal"): ""}[args]
+
+        with patch.object(wg, "key_source", return_value=("own-key", None)), \
+             patch.object(wg, "gql", return_value=self.join_linear()), \
+             patch.object(wg, "git_output", side_effect=git), \
+             patch.object(wg, "orca_caller", return_value=True), \
+             patch.object(wg, "created_tree", return_value=tree) as create, \
+             patch.object(wg, "preflight", return_value=0) as preflight, \
+             patch.object(wg, "next_command", return_value=0) as next_command:
+            out, _ = self.join_cli("--repo", str(self.d), code=0)
+        create.assert_called_once()
+        preflight.assert_called_once()
+        next_command.assert_called_once()
+        self.assertIn("The owner keeps merge points, ship points, and deploys", out)
+        self.assertEqual((core / "PLAN.md").read_text(), "# Example by Ada\n")
+        self.assertEqual(wg.load_plan(core), self.p)
+        km = wg.load_keymap(core)
+        self.assertEqual(km["project"], {"id": "project"})
+        self.assertEqual(km["collab"]["workspace"], "shared:member")
+        url, project, _, _ = wg.link_target(core, wg.load_plan(core))
+        self.assertEqual(url, self.url.replace("http:", "ws:") +
+                         "/api/link?role=coordinator&workspace=shared%3Amember&project=project")
+        self.assertEqual(project, "project")
+
+        self.claims["claims"] = [{"node": "a", "mine": True}, {"node": "mp", "mine": False}]
+        self.claim_responses["DELETE"] = (503, {"error": "unavailable"})
+        _, err = self.call(wg.main, ["wg", "leave", str(core)], code=2)
+        self.assertIn("Some claims could not be released", err)
+        self.assertIn("collab", wg.load_keymap(core))
+        self.requests.clear()
+        self.claim_responses.clear()
+        out, _ = self.call(wg.main, ["wg", "leave", str(core)])
+        self.assertIn("membership", out)
+        self.assertNotIn("collab", wg.load_keymap(core))
+        self.assertEqual([path for method, path, _, _ in self.requests if method == "DELETE"],
+                         ["/api/projects/project/claims/a"])
+
     def test_refused_local_dispatch_does_not_claim(self):
         with self.dispatch_fixture(wave=""):
             out, _ = self.call(wg.dispatch, self.d, self.p, "a", "codex", None, code=1)

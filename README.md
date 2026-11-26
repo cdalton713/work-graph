@@ -602,6 +602,10 @@ shared, and they can change nothing. Your own page stays where it is, and each c
   with the **Share** button on the full page, or in Linear. The button uses the workspace's `share_url`
   if set. On a full page with sign-in, it otherwise uses that page's address. A full page without sign-in
   needs `share_url` to show the button. The viewer must name the workspace with the same `id`.
+  For a collaborator invitation, open the link in a browser, sign in, and press **Join**.
+  Then run `wg login <page-url>` and `wg join <page-url>` with the page address.
+  Run `wg leave <plan-dir>` to release your claims and remove local collaboration.
+  End your membership on the page. See [Collaboration](skills/work-graph/references/collab.md).
 - **When a share ends.** The viewer decides from its newest project list from Linear. It reads the list for each
   overview poll of each open page, and again when its copy is 60 s old. So a project that loses the label leaves
   the viewer at the next list, in at most 60 s. Each server process has its own list: where a host runs more than

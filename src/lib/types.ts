@@ -205,7 +205,7 @@ export interface AccountTeam {
 
 export interface SetupTeam extends AccountTeam {
   private: boolean;
-  parent: string | null;
+  parent: AccountTeam | null;
 }
 
 export interface SetupTeamInput extends AccountTeam {
@@ -219,7 +219,15 @@ export interface SetupItem {
 }
 
 export interface TeamSetupState {
-  team: SetupTeam;
-  statuses: SetupItem[];
-  labels: SetupItem[];
+  team: SetupTeam | null;
+  plan: { privateTeams: boolean; subTeams: boolean };
+  fallback: string;
+  statuses: (SetupItem & { type: string; detail?: string })[];
+  labels: (SetupItem & { scope: "team" | "workspace" | "project"; group?: string; detail?: string })[];
+}
+
+export interface TeamSetupResult {
+  created: string[];
+  warned: string[];
+  state: TeamSetupState;
 }

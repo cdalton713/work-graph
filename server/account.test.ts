@@ -44,7 +44,7 @@ databaseSuites((open) => {
       const { cookie } = await t.owner("owner");
       const { connections } = await (await t.request(root, cookie)).json();
       const path = attach + "/" + connections[0].id + "/teams";
-      const parent = { id: "parent", key: "ORG" };
+      const parent = { id: "parent", key: "ORG", name: "Parent" };
       let team: Record<string, unknown> | undefined;
       let creates = 0;
       vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
@@ -53,7 +53,7 @@ databaseSuites((open) => {
         if (query.includes("teamCreate(")) {
           creates++;
           expect(variables.i.parentId).toBe(parent.id);
-          team = { id: "child", key: "WG", name: "Work", visibility: "public", parent };
+          team = { id: "child", key: "NEW", name: "Work", visibility: "public", parent };
           return new Response(null, { status: 503 });
         } else if (query.includes("teamUpdate(")) {
           expect(variables.i).toEqual({ private: true });
@@ -67,13 +67,53 @@ databaseSuites((open) => {
         }
         return Response.json({ data });
       });
-      const input = { key: "WG", name: "Work", parent: "ORG", private: true };
+      const input = { key: "NEW", name: "Work", parent: "ORG", private: true };
       const refused = await t.request(path, cookie, "POST", input);
-      expect(refused.status).toBe(409);
-      expect((await refused.json()).error).toContain("wg setup");
+      expect(refused.status).toBe(502);
       const retry = await t.request(path, cookie, "POST", input);
-      expect(await retry.json()).toMatchObject({ key: "WG", name: "Work", private: true, parent: "ORG" });
+      expect(await retry.json()).toMatchObject({ key: "NEW", name: "Work", private: true, parent: { key: "ORG", name: "Parent" } });
       expect(creates).toBe(1);
+      expect((await (await t.request(root, cookie)).json()).connections[0].team).toBe("NEW");
+    } finally { await t.close(); }
+  });
+
+  it("returns a copyable fallback on refusal and stops writing", async () => {
+    const t = await setup();
+    try {
+      const { cookie } = await t.owner("owner");
+      const { connections } = await (await t.request(root, cookie)).json();
+      const path = attach + "/" + connections[0].id + "/teams";
+      const input = { key: "WG", name: "--apply", private: true };
+      const fallback = "wg setup --workspace work --team WG --name=--apply --private --apply";
+      for (const [response, reason] of [
+        [Response.json({ errors: [{ message: "original test-access", extensions: {
+          type: "forbidden", userPresentableMessage: "No permission for test-access", code: "FORBIDDEN",
+        } }] }), "No permission for [redacted]"],
+        [new Response(null, { status: 403 }), "HTTP 403"],
+        [Response.json({ errors: [{ message: "Feature not accessible" }] }), "Feature not accessible"],
+      ] as const) {
+        const fetch = vi.fn().mockResolvedValueOnce(Response.json({ data: { teams: { nodes: [] } } }))
+          .mockResolvedValueOnce(response);
+        vi.stubGlobal("fetch", fetch);
+        const refused = await t.request(path, cookie, "POST", input);
+        expect(refused.status).toBe(403);
+        expect(await refused.json()).toEqual({ error: "Linear refused: " + reason, fallback });
+        expect(fetch).toHaveBeenCalledTimes(2);
+      }
+      expect(t.output.join(" ")).toContain("original [redacted]");
+      expect(t.output.join(" ")).not.toContain("test-access");
+      const created = { id: "new", key: "WG", name: "--apply", visibility: "public", parent: null };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({ data: { teams: { nodes: [] } } }))
+        .mockResolvedValueOnce(Response.json({ data: { teamCreate: { success: true, team: created } } }))
+        .mockResolvedValueOnce(new Response(null, { status: 403 })));
+      const partial = await t.request(path, cookie, "POST", input);
+      expect(partial.status).toBe(409);
+      expect(await partial.json()).toMatchObject({ fallback, team: { key: "WG", private: false }, error: expect.stringContaining("private") });
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(null, { status: 429, headers: { "Retry-After": "90" } })));
+      const limited = await t.request(path, cookie, "POST", input);
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get("Retry-After")).toBe("90");
     } finally { await t.close(); }
   });
 
@@ -92,7 +132,9 @@ databaseSuites((open) => {
         const { query, variables } = JSON.parse(String(init.body));
         let data;
         if (query.includes("teams(filter")) {
-          data = { teams: page([{ id: "team", key: "WG", name: "Work", visibility: "public", triageEnabled: true }]) };
+          data = { teams: page(variables.key === "WG" ? [{ id: "team", key: "WG", name: "Work", visibility: "public", triageEnabled: true }] : []) };
+        } else if (query.includes("subscription")) {
+          data = { organization: { subscription: { type: "business_monthly_16" } } };
         } else if (query.includes("states(first")) {
           data = { team: { states: page(states) } };
         } else if (query.includes("Create(input:")) {
@@ -111,20 +153,29 @@ databaseSuites((open) => {
         }
         return Response.json({ data });
       });
+      const absent = await (await t.request(path.replace("/WG/", "/NEW/"), cookie)).json();
+      expect(absent.team).toBeNull();
+      expect([...absent.statuses, ...absent.labels].every(item => item.state === "missing")).toBe(true);
       const initial = await (await t.request(path, cookie)).json();
+      expect(initial).toMatchObject({ fallback: "wg setup --workspace work --team WG --name=Work --apply", plan: { privateTeams: true, subTeams: true } });
       expect(initial.statuses).toEqual(expect.arrayContaining([
-        { name: "Ready", state: "warn" }, { name: "Done", state: "warn" }, { name: "Todo", state: "missing" },
+        { name: "Ready", type: "unstarted", state: "warn", detail: expect.stringContaining("ready") },
+        { name: "Done", type: "completed", state: "warn", detail: expect.stringContaining("started") },
+        { name: "Todo", type: "unstarted", state: "missing" },
+        { name: "Duplicate", type: "duplicate", state: "warn", detail: expect.stringContaining("Linear manages") },
       ]));
       expect(writes).toEqual([]);
       const applied = await (await t.request(path, cookie, "POST")).json();
-      expect(applied.statuses).toContainEqual({ name: "Needs " + human, state: "exists" });
-      expect(applied.labels).toContainEqual({ name: "agent:codex", state: "exists" });
+      expect(applied.created).toEqual(expect.arrayContaining(["Needs " + human, "agent:codex"]));
+      expect(applied.warned).toEqual(expect.arrayContaining(["Ready", "Done", "Duplicate"]));
+      expect(applied.state.statuses).toContainEqual({ name: "Needs " + human, type: "started", state: "exists" });
+      expect(applied.state.labels).toContainEqual({ name: "agent:codex", scope: "workspace", group: "agent", state: "exists" });
       expect(labels.find(l => l.name === "ops")?.team).toEqual({ id: "team" });
       expect(labels.find(l => l.name === "agent:codex")).toMatchObject({
         team: null, parent: { id: labels.find(l => l.name === "agent")!.id },
       });
       const count = writes.length;
-      expect(await (await t.request(path, cookie, "POST")).json()).toEqual(applied);
+      expect(await (await t.request(path, cookie, "POST")).json()).toEqual({ ...applied, created: [] });
       expect(writes).toHaveLength(count);
       expect(writes).not.toContain("Ready");
       expect(writes).not.toContain("Done");
@@ -381,8 +432,8 @@ databaseSuites((open) => {
         const { connections } = await (await t.request(root, cookie)).json();
         const path = attach + "/" + connections[0].id + "/teams";
         const calls = t.fetch.mock.calls.length;
-        for (const endpoint of [path, path + "/WG/setup"]) {
-          const response = await viewer.request(endpoint, { method: "POST", headers: { host, cookie, origin: "https://" + host } });
+        for (const [method, endpoint] of [["POST", path], ["POST", path + "/WG/setup"], ["GET", path + "/WG/setup"]]) {
+          const response = await viewer.request(endpoint, { method, headers: { host, cookie, origin: "https://" + host } });
           expect(response.status).toBe(403);
         }
         expect(t.fetch.mock.calls).toHaveLength(calls);

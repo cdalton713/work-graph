@@ -2,16 +2,16 @@ import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { createAccounts } from "./db/accounts.ts";
-import { LinearError, readLinearTeams } from "./linear.ts";
+import { LinearAccessRefused, LinearError, readLinearTeams } from "./linear.ts";
 import { RedisCommandFailed, RedisUnavailable, type RedisLink } from "./redis.ts";
 import { LinearSignInRequired, revokeLinearToken } from "./linearauth.ts";
 import type { Session } from "./auth.ts";
 import type { Telemetry, UsageScope } from "./telemetry.ts";
 import type { Tenant } from "./tenants.ts";
-
+import type { SetupTeamInput } from "../src/lib/types.ts";
 import type { Workspace } from "./workspaces.ts";
 import type { InWorkspace } from "./linearaccess.ts";
-import { createSetupTeam, teamSetup } from "./teamsetup.ts";
+import { createSetupTeam, PrivateTeamFailed, setupCommand, teamSetup } from "./teamsetup.ts";
 
 type Accounts = ReturnType<typeof createAccounts>;
 type Account = NonNullable<Awaited<ReturnType<Accounts["readTenant"]>>>;
@@ -147,7 +147,9 @@ export function accountRoutes(options: Options) {
     if (error instanceof LinearSignInRequired) return c.json({ error: "Sign in with Linear to restore this workspace" }, 409);
     if (error instanceof LinearError) {
       const status = error.status;
+      if (status === 429 && error.retryAfter) c.header("Retry-After", error.retryAfter);
       switch (status) {
+        case 502: return c.json({ error: error.message }, 502);
         case 400: case 403: case 404: case 409: case 429: return c.json({ error: error.message }, status);
         case 401: return c.json({ error: "Linear refused the workspace key" }, 400);
       }
@@ -316,31 +318,34 @@ export function accountRoutes(options: Options) {
   });
 
   const setupAttempt = attemptLimit(options, "account-team-setup:");
+  const setupReadAttempt = attemptLimit(options, "account-team-setup-read:", windowMs, 120);
   const teamKey = (value: unknown) => {
     if (typeof value !== "string" || !/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(value)) {
       throw new LinearError("Enter a valid team key", 400);
     }
     return value.toUpperCase();
   };
-  const shellArg = (value: string) => /^[a-z0-9_-]+$/i.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
   async function setup<T>(c: Context<{ Variables: Scope & { account: Account } }>, key: string,
-    extra: string, perform: (row: Connection) => Promise<T>) {
+    input: SetupTeamInput | null, perform: (row: Connection, workspace: Workspace) => Promise<T>) {
     const { tenant, account } = c.var;
     const row = findConnection(account.connections, c.req.param("id") ?? "");
     const workspace = tenant.workspaces.find(w => w.id === row.workspaceId);
     if (!workspace?.key || workspace.needsKey || row.status !== "ok") {
       throw new LinearError("This workspace needs a new credential", 409);
     }
-    const retry = await setupAttempt(account.id);
+    const limit = c.req.method === "GET" ? setupReadAttempt : setupAttempt;
+    const retry = await limit(account.id);
     if (retry > 0) {
       c.header("Retry-After", String(Math.ceil(retry / 1000)));
       throw new LinearError("Too many team setup requests. Try again later.", 429);
     }
+    const fallback = setupCommand(row.workspaceId, key, input);
     try {
-      return await options.runLinear(tenant, workspace)(() => perform(row));
+      return c.json(await options.runLinear(tenant, workspace)(() => perform(row, workspace)));
     } catch (error) {
-      if (error instanceof LinearError && [404, 409].includes(error.status)) throw error;
-      throw new LinearError(`Linear did not confirm team setup. Run wg setup --workspace ${shellArg(row.workspaceId)} --team ${key}${extra}`, 409);
+      if (error instanceof PrivateTeamFailed) return c.json({ error: error.message, fallback, team: error.team }, 409);
+      if (error instanceof LinearAccessRefused) return c.json({ error: "Linear refused: " + error.message, fallback }, 403);
+      throw error;
     }
   }
 
@@ -351,14 +356,22 @@ export function accountRoutes(options: Options) {
     const parent = input.parent == null ? null : teamKey(input.parent);
     const privacy = input.private;
     if (!name || typeof privacy !== "boolean") throw new LinearError("Enter a team name and private setting", 400);
-    const args = ` --name ${shellArg(name)}${parent ? " --parent " + parent : ""}${privacy ? " --private" : ""} --apply`;
-    return c.json(await setup(c, key, args, () => createSetupTeam({ key, name, parent, private: privacy })));
+    const requested = { key, name, parent, private: privacy };
+    return setup(c, key, requested, async (row, workspace) => {
+      const team = await createSetupTeam(requested);
+      const checkedKey = workspace.oauthKey ? await workspace.oauthKey() : workspace.key;
+      await c.var.accounts.updateConnectionSettings(c.var.account.id, row.id, { team: team.key }, checkedKey);
+      return team;
+    });
   });
 
   routes.on(["GET", "POST"], "/workspaces/:id/teams/:key/setup", async c => {
     const key = teamKey(c.req.param("key"));
     const apply = c.req.method === "POST";
-    return c.json(await setup(c, key, apply ? " --apply" : "", row => teamSetup(key, c.var.account.human, row.teamLabels, apply)));
+    return setup(c, key, null, async row => {
+      const result = await teamSetup(key, c.var.account.human, row.teamLabels, apply, row.workspaceId);
+      return apply ? result : result.state;
+    });
   });
 
   routes.get("/workspaces/:id/teams", async (c) => {

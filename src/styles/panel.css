@@ -102,6 +102,13 @@
 .panel-more .pr-row { flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .panel-pr-title { flex-basis: 100%; overflow-wrap: anywhere; }
 
+@media (pointer: coarse) {
+  .form-viewport-covered .panel-actions { display: none; }
+}
+@media (pointer: coarse) and (max-height: 460px) {
+  .panel:has(.text-send :focus) .panel-actions { display: none; }
+}
+
 @media (max-width: 1279px), (pointer: coarse) {
   .panel, .panel-more { overflow-wrap: anywhere; }
   .panel-body { min-width: 0; }

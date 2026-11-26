@@ -48,3 +48,5 @@ pub trait HttpTransport {
 
     fn send(&self, request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, Self::Error>;
 }
+
+pub mod state;

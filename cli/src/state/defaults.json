@@ -1,0 +1,33 @@
+{
+  "human": "Human",
+  "page_url": null,
+  "github_user": null,
+  "tick_roots": [
+    "~/Projects"
+  ],
+  "tick_label": "dev.work-graph.tick",
+  "test_runner": null,
+  "branch_prefix": "wg/",
+  "release_branch": "release",
+  "rules": "~/.config/work-graph/rules.md",
+  "notify": [],
+  "agent_replies": false,
+  "agent_merge": [],
+  "health_interval": 6,
+  "health_agent": "codex",
+  "worker_settings": {},
+  "coordinator_settings": {},
+  "context_limit": 250000,
+  "workspaces": [
+    {
+      "id": "default",
+      "name": "Linear",
+      "team": null,
+      "teams": null,
+      "key_env": [
+        "LINEAR_API_KEY"
+      ],
+      "team_labels": true
+    }
+  ]
+}

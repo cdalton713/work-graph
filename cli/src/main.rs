@@ -5,6 +5,42 @@ const USAGE: &str = "Usage: wg-preview --version";
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     match (args.next().as_deref(), args.next()) {
+        (Some(verb), dir) if verb == "config" && args.next().is_none() => {
+            let config = match wg_preview::state::Config::discover() {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if dir
+                .as_deref()
+                .is_some_and(|arg| arg == "--help" || arg == "-h")
+            {
+                println!(
+                    "usage: wg.py config [-h] [dir]\n\npositional arguments:\n  dir\n\noptions:\n  -h, --help  show this help message and exit"
+                );
+                return ExitCode::SUCCESS;
+            }
+            match config.report(
+                dir.as_deref()
+                    .filter(|p| !p.is_empty())
+                    .map(std::path::Path::new),
+            ) {
+                Ok(report) => {
+                    if let Err(e) =
+                        wg_preview::state::write_pretty_json(std::io::stdout().lock(), &report)
+                    {
+                        eprintln!("{e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
         (Some(flag), None) if flag == "--version" => {
             println!(
                 "wg-preview {} {}",

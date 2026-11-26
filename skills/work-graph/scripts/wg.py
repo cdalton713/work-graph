@@ -277,10 +277,10 @@ REVIEWING = {"In Review", "Ready to Merge"}
 WAIT_STATUS = f"Needs {HUMAN}"  # the status of an issue that waits on the human
 
 
-def setup_status_types():
+def setup_status_types(wait_status=None):
     return {
         "Triage": "triage", "Backlog": "backlog", "Todo": "unstarted", "Ready": "unstarted",
-        "In Progress": "started", WAIT_STATUS: "started", "In Review": "started",
+        "In Progress": "started", (wait_status or WAIT_STATUS): "started", "In Review": "started",
         "Ready to Merge": "started", "Merged": "started", "Verifying": "started",
         "Done": "completed", "Canceled": "canceled", "Duplicate": "duplicate",
     }
@@ -1686,9 +1686,19 @@ def team_info(team_key):
         after = info["endCursor"]
 
 
+def setup_labels_contract():
+    return {
+        "team_issue_labels": [*KIND_LABEL.values(), REVIEWED_LABEL, ANSWERED_LABEL],
+        "workspace_label_groups": {"agent": list(AGENT_LABELS)},
+        "project_label_groups": {INITIATIVE_GROUP: [], AUTONOMY_GROUP: list(AUTONOMY_LEVELS),
+                                 REVIEW_GROUP: [review_label(level) for level in REVIEW_LEVELS]},
+        "project_labels": [PAUSED_LABEL, "shared"],
+    }
+
+
 def setup_team(key):
     teams = gql("""query($k:String!){ teams(filter:{key:{eq:$k}}){
-                   nodes{id visibility triageEnabled} } }""", {"k": key})["teams"]["nodes"]
+                   nodes{id visibility triageEnabled parent{key}} } }""", {"k": key})["teams"]["nodes"]
     return teams[0] if teams else None
 
 
@@ -1917,12 +1927,34 @@ def setup_command(ns):
         team = setup_team(team_key)
         new_team = team is None
         report(f"team {team_key}", "missing" if new_team else "exists")
+        parent = None
+        if ns.parent:
+            parent_key = ns.parent.upper()
+            if new_team:
+                parent = setup_team(parent_key)
+                if not parent:
+                    raise ReadError(f"parent {parent_key} does not exist or is not visible.")
+                report(f"parent {parent_key}", "exists")
+            else:
+                current = (team.get("parent") or {}).get("key")
+                if current == parent_key:
+                    report(f"parent {parent_key}", "exists")
+                else:
+                    report(f"parent {parent_key}", "warn", f" (current parent: {current or 'none'})")
         if new_team and ns.apply:
             if not ns.name:
                 raise ReadError(f"team {team_key} needs a name. Supply --name <team name>.")
+            item = {"key": team_key, "name": ns.name}
+            if parent:
+                item["parentId"] = parent["id"]
             team = setup_mutation("teamCreate", """mutation($i:TeamCreateInput!){
-                teamCreate(input:$i){success team{id visibility triageEnabled}} }""",
-                {"i": {"key": team_key, "name": ns.name}})["team"]
+                teamCreate(input:$i){success team{id visibility triageEnabled parent{key}}} }""",
+                {"i": item})["team"]
+            if parent:
+                actual = (team.get("parent") or {}).get("key")
+                if actual != parent_key:
+                    raise ReadError(f"Linear created team {team_key} with parent {actual or 'none'}; "
+                                    f"expected parent {parent_key}. Check the team in Linear.")
         if ns.private and (not team or team["visibility"] != "private"):
             report(f"private visibility for team {team_key}", "missing")
             if ns.apply:
@@ -1934,12 +1966,11 @@ def setup_command(ns):
         setup_workflow(team, ns.apply, report)
         team_id = team["id"] if team else None
         scoped = bool(config["team_labels"])
-        setup_label_scope("issueLabel", team_id, (), (*KIND_LABEL.values(), REVIEWED_LABEL, ANSWERED_LABEL),
-                          ns.apply, report, team_scoped=True)
-        setup_label_scope("issueLabel", team_id, (("agent", AGENT_LABELS),), (), ns.apply, report, team_scoped=False)
-        groups = ((INITIATIVE_GROUP, ()), (AUTONOMY_GROUP, AUTONOMY_LEVELS),
-                  (REVIEW_GROUP, tuple(review_label(level) for level in REVIEW_LEVELS)))
-        setup_label_scope("projectLabel", team_id, groups, (PAUSED_LABEL, "shared"),
+        labels = setup_labels_contract()
+        setup_label_scope("issueLabel", team_id, (), labels["team_issue_labels"], ns.apply, report, team_scoped=True)
+        setup_label_scope("issueLabel", team_id, labels["workspace_label_groups"].items(), (),
+                          ns.apply, report, team_scoped=False)
+        setup_label_scope("projectLabel", team_id, labels["project_label_groups"].items(), labels["project_labels"],
                           ns.apply, report, team_scoped=scoped)
         if not missing:
             print("nothing is missing")
@@ -2950,6 +2981,10 @@ def contract():
         "version": 3,
         "kinds": sorted(KINDS),
         "kind_labels": sorted(KIND_LABEL.values()),
+        "setup": {
+            "statuses": [{"name": name, "type": kind} for name, kind in setup_status_types("Needs {name}").items()],
+            **setup_labels_contract(),
+        },
         "status_aliases": ALIAS,
         "human": {"default": CONTRACT_HUMAN, "status": "Needs {name}", "label": "needs-{slug}", "wait": "wait human",
                   "slug": "lowercase; each run of other characters than a-z and 0-9 is one -; no - at the ends"},
@@ -10382,6 +10417,8 @@ def cli_parser():
     setup.add_argument("--workspace", default=DEFAULT_WORKSPACE_ID)
     setup.add_argument("--team")
     setup.add_argument("--name")
+    setup.add_argument("--parent", metavar="KEY",
+                       help="parent team key: a new team is created under it; an existing team's parent is checked")
     setup.add_argument("--private", action=argparse.BooleanOptionalAction, default=False)
     setup.add_argument("--apply", action="store_true")
     sub.add_parser("config", help="print the config of this machine (no keys) and the local rules file").add_argument("dir", nargs="?")

@@ -29,6 +29,11 @@ fn rotation_requires_a_release_signed_by_the_current_key() {
     let pinned = public_key(&key(&old)).unwrap();
     let manifest = verify_manifest(&pinned, &bridge, &signature, "1.2.3", target).unwrap();
     let successor = public_key(&manifest.public_key).unwrap();
+    let self_signed = next.sign(&bridge).to_bytes();
+    assert!(verify_manifest(&pinned, &bridge, &self_signed, "1.2.3", target).is_err());
+    let mut damaged = signature;
+    damaged[0] ^= 1;
+    assert!(verify_manifest(&pinned, &bridge, &damaged, "1.2.3", target).is_err());
     let release = make("1.2.4");
     let signed = next.sign(&release).to_bytes();
     assert!(verify_manifest(&successor, &release, &signed, "1.2.4", target).is_ok());
@@ -63,6 +68,8 @@ fn publication_checks_native_results_and_signs_the_tested_bytes() {
     );
     let read = |name: &str| std::fs::read(dir.path().join(name)).unwrap();
     let root = public_key(std::str::from_utf8(&read("root.hex")).unwrap()).unwrap();
+    let next = String::from_utf8(read("successor.hex")).unwrap();
+    assert_ne!(public_key(&next).unwrap(), root);
     for target in wg_preview::release::TARGETS {
         let prefix = format!("signed/wg-v1.2.3-{target}");
         let manifest = verify_manifest(
@@ -73,6 +80,22 @@ fn publication_checks_native_results_and_signs_the_tested_bytes() {
             target,
         )
         .unwrap();
+        assert_eq!(manifest.public_key, next);
+        let binary = dir.path().join(target).join("wg");
+        wg_preview::release::verify_digest(
+            std::fs::File::open(&binary).unwrap(),
+            &manifest.files["wg"],
+        )
+        .unwrap();
+        let output = std::process::Command::new(binary)
+            .arg("--release-key")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            manifest.public_key
+        );
         let archive = read(&format!("{prefix}.tar.gz"));
         wg_preview::release::verify_digest(archive.as_slice(), &manifest.sha256).unwrap();
         assert!(wg_preview::release::verify_digest(&b"other"[..], &manifest.sha256).is_err());

@@ -70,6 +70,11 @@ jobs:
         with:
           pattern: release-*
           path: artifacts
+      - name: Build the release signer
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          cargo +1.98.1 build --locked --manifest-path packaging/releases/signer/Cargo.toml --target-dir "$RUNNER_TEMP/signer"
+          echo "WG_RELEASE_SIGNER=$RUNNER_TEMP/signer/debug/wg-release-signer" >> "$GITHUB_ENV"
       - name: Verify parity evidence and sign the four checked manifests
         env:
           WG_CURRENT_PUBLIC_KEY: ${{ vars.WG_CURRENT_PUBLIC_KEY }}

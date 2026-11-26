@@ -5,13 +5,8 @@ tag=$1
 artifacts=$2
 output=$3
 umask 077
-key_dir=$(mktemp -d)
-trap 'rm -rf "$key_dir"' EXIT
-printf '%s\n' "$WG_SIGNING_KEY" > "$key_dir/private.pem"
+private_key=$WG_SIGNING_KEY
 unset WG_SIGNING_KEY
-openssl pkey -in "$key_dir/private.pem" -pubout -outform DER -out "$key_dir/public.der"
-# RFC 8410 SubjectPublicKeyInfo for Ed25519, followed by the 32 raw key bytes.
-test "$(xxd -p -c 100 "$key_dir/public.der")" = "302a300506032b6570032100$WG_CURRENT_PUBLIC_KEY"
 mkdir "$output"
 for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
   directory="$artifacts/release-$target"
@@ -20,8 +15,5 @@ for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu
   for ext in tar.gz json parity.json parity.log; do
     cp "$directory/$name.$ext" "$output/"
   done
-  openssl pkeyutl -sign -rawin -inkey "$key_dir/private.pem" \
-    -in "$output/$name.json" -out "$output/$name.sig"
-  openssl pkeyutl -verify -rawin -pubin -keyform DER -inkey "$key_dir/public.der" \
-    -in "$output/$name.json" -sigfile "$output/$name.sig"
+  printf '%s\n' "$private_key" | "$WG_RELEASE_SIGNER" "$output/$name.json" > "$output/$name.sig"
 done

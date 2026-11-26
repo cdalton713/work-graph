@@ -27,7 +27,7 @@ Call `verify_digest` on the compressed archive using the authenticated `sha256`.
 
 ## Signing and recovery
 
-In the protected release environment, set `WG_CURRENT_PUBLIC_KEY` to the current raw public key in lowercase hexadecimal. Set the secret `WG_SIGNING_KEY` to its Ed25519 private key in unencrypted PKCS#8 PEM format. Keep private keys in protected secret storage. Only the signing step reads the secret. The workflow checks its public key against the protected pin.
+In the protected release environment, set `WG_CURRENT_PUBLIC_KEY` to the current raw public key in lowercase hexadecimal. Set the secret `WG_SIGNING_KEY` to its Ed25519 private key in unencrypted PKCS#8 PEM format. Keep private keys in protected secret storage. The workflow builds the release signer from its own Cargo lockfile before it reads the secret. The signing step passes the PEM to the signer on standard input. The signer checks its public key against the protected pin and writes the 64 signature bytes to standard output. The managed CLI ships separately.
 
 The workflow builds with a fixed Rust version, pinned actions, and `Cargo.lock`. Each native runner extracts its own archive, checks the embedded key and version, and runs `sh tests/cli-parity/run.sh` with the absolute path to the extracted executable. Publication requires a successful matrix and a second check of the four archives, tagged resources and evidence. A failed parity run retains its exit code and log in the workflow artifacts.
 

@@ -9,6 +9,7 @@ import { ageText, compareMoves, type Signal } from "../lib/graph";
 import { PROJECT_STATES, type ProjectStateName, type Stall, overviewTitle } from "../lib/attention";
 import { type AgentReplyResult, type Agents, type Ask, type Presence, type ProjectRef, agentName, agentNeeds, agentState, agentsFresh, agentsShown, presenceText, projectKey } from "../lib/link";
 import { site } from "../lib/site";
+import { useNarrow } from "../lib/screen";
 import { useLink } from "../useLink";
 import type { Comment, Project, ProjectList } from "../lib/types";
 import { CopyButton, Hint, Lamp, Picker, PrLinks, Rich } from "./ui";
@@ -29,7 +30,7 @@ const STATE_DISPLAY = {
   stalled: { label: "Stalled", signal: "stop" },
   waits: { signal: "stop" },
   moving: { label: "Moving", signal: "running" },
-  idle: { label: "Idle by design", signal: "idle" },
+  idle: { label: "Not running", signal: "idle" },
 } satisfies Record<ProjectStateName, { label?: string; signal: Signal }>;
 
 function stored(): OverviewFilter {
@@ -153,6 +154,9 @@ export interface OverviewProps {
  * `/` finds a project, the arrow keys move, Enter opens.
  */
 export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, readOnly = false, initiative = null, onInitiative, states = NO_STATES, onStates, budget = [] }: OverviewProps) {
+  const narrow = useNarrow();
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filterButton = useRef<HTMLButtonElement>(null);
   const words = ownerWords();
   const stateLabel = (state: ProjectStateName) => state === "waits" ? words.waitsFilter : STATE_DISPLAY[state].label;
   const viewerWorkspaces = useMemo(() => new Set(given.workspaces.filter((w) => w.role === "viewer").map((w) => w.id)), [given.workspaces]);
@@ -235,10 +239,14 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const inboxCounts = { all: inboxRows.length, questions: 0, stalls: 0, actions: 0 };
   for (const row of inboxRows) inboxCounts[inboxCategory(row)]++;
   const emptyInbox = INBOX_FILTERS.find(({ id }) => id === category)!.empty;
+  const hasInboxItems = inboxRows.length > 0;
   const categoryRows = category === "all" ? inboxRows : inboxRows.filter((row) => inboxCategory(row) === category);
   const shownInbox = new Set((allMoves ? categoryRows : categoryRows.slice(0, INBOX)).map(inboxKey));
-  const workspaceName = list.workspaces.find((w) => w.id === filter.workspace)?.name;
-  const scope = [workspaceName ?? "All workspaces", initiative === null ? "All initiatives" : initiative || "No initiative"].join(" · ");
+  const workspaceName = list.workspaces.find((w) => w.id === filter.workspace)?.name ?? filter.workspace;
+  const initiativeName = initiative === null ? null : initiative || "No initiative";
+  const scope = [workspaceName ?? "All workspaces", initiativeName ?? "All initiatives"].join(" · ");
+  const filterScope = [workspaceName, initiativeName, ...states.map(stateLabel), filter.closed && "Includes closed"]
+    .filter(Boolean).join(" · ");
   useEffect(() => {
     const previous = document.title;
     document.title = overviewTitle(inboxRows.length);
@@ -370,6 +378,13 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
 
   const multi = list.workspaces.length > 1;
   const closedCount = list.projects.filter((p) => p.statusType === "completed" || p.statusType === "canceled").length;
+  const hasFilters = !!(filter.workspace || initiative !== null || states.length || filter.closed || filter.text);
+  const clearFilters = () => {
+    (filterButton.current ?? find.current)?.focus();
+    setFilter(START);
+    if (initiative !== null) onInitiative?.(null);
+    if (states.length) onStates?.([]);
+  };
 
   const renderRow = ({ project: p, summary: s, attention }: OverviewRow, at: number) => {
       const closed = p.statusType === "completed" || p.statusType === "canceled";
@@ -504,21 +519,21 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       </div>
       {missing && <p className="empty" role="status">{missing}</p>}
 
-      <section className="inbox" ref={inboxRoot} aria-label="Inbox">
-        <h2 className="inbox-head">Inbox <span className="inbox-note">{scope}</span></h2>
-        <div className="inbox-filters" role="group" aria-label="Inbox category">
+      <section className={hasInboxItems ? "inbox" : "inbox is-empty"} ref={inboxRoot} aria-label="Inbox">
+        {hasInboxItems && <h2 className="inbox-head">Inbox <span className="inbox-note">{scope}</span></h2>}
+        {hasInboxItems && <div className="inbox-filters" role="group" aria-label="Inbox category">
           {INBOX_FILTERS.map(({ id, label }) => (
             <button key={id} type="button" className={`toggle${id === category ? " is-on" : ""}`} aria-pressed={id === category}
               onClick={() => { setCategory(id); setAllMoves(false); }}>
               {label} <span className="mono">{inboxCounts[id]}</span>
             </button>
           ))}
-        </div>
+        </div>}
         {categoryRows.length === 0 && <p className="inbox-empty" role="status">
           {loading && !("summaries" in list) ? "Loading the inbox…"
-            : <>{emptyInbox}{incomplete && " Project data is incomplete."}</>}
+            : <>{hasInboxItems ? emptyInbox : INBOX_FILTERS[0].empty}{incomplete && " Project data is incomplete."}</>}
         </p>}
-        <ul>
+        <ul hidden={!hasInboxItems}>
           {inboxRows.map((row) => {
             const { project: p, move: m, stall } = row;
             const key = inboxKey(row);
@@ -610,46 +625,56 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             onKeyDown={(e) => { if (e.key === "Escape") { set({ text: "" }); e.currentTarget.blur(); } }} />
           {!filter.text && <kbd aria-hidden>/</kbd>}
         </div>
-        {multi && (
-          <div className="ov-seg" role="group" aria-label="Workspace">
-            {[{ id: null, name: "All" }, ...list.workspaces].map((w) => (
-              <button type="button" key={w.id ?? "all"} className={filter.workspace === w.id ? "is-on" : ""} aria-pressed={filter.workspace === w.id}
-                onClick={() => set({ workspace: w.id })}>{w.name}</button>
-            ))}
-          </div>
-        )}
-        {grouped && onInitiative && (
-          <Picker value={initiative === null ? ["*"] : [`=${initiative}`]} onChange={([id]) => onInitiative(id === "*" ? null : id.slice(1))}
-            title="Show one initiative" options={[
-              { id: "*", label: "All initiatives" },
-              ...names.map((n) => ({ id: `=${n}`, label: n })),
-              { id: `=${NO_INITIATIVE}`, label: "No initiative" },
-            ]}>
-            <span className={initiative === null ? "" : "ov-init-on"}>{initiative === null ? "All initiatives" : initiative || "No initiative"}</span><span className="caret">▾</span>
-          </Picker>
-        )}
-        {onStates && <div className="ov-state-filters" role="group" aria-label="Project state">
-          {PROJECT_STATES.map((state) => {
-            const selected = states.includes(state);
-            return (
-              <button type="button" key={state} className={`toggle${selected ? " is-on" : ""}`} aria-pressed={selected}
-                onClick={() => onStates(PROJECT_STATES.filter((value) => value === state ? !selected : states.includes(value)))}>
-                {stateLabel(state)} <span className="mono">{counts[state]}</span>
-              </button>
-            );
-          })}
+        {narrow && <button ref={filterButton} className="ov-filter-toggle" type="button"
+          aria-expanded={filtersOpen} aria-controls="overview-filter-options" onClick={() => setFiltersOpen(!filtersOpen)}>
+          Filters <span className="caret" aria-hidden="true">{filtersOpen ? "▴" : "▾"}</span>
+        </button>}
+        {narrow && hasFilters && <div className="ov-filter-scope">
+          {!filtersOpen && <span>{filterScope || scope}</span>}
+          <button type="button" className="ghost" onClick={clearFilters}>Clear filters</button>
         </div>}
-        {closedCount > 0 && (
-          <Hint text="Also show the completed and canceled projects." infoLabel="About closed projects">
-            <button type="button" className={`toggle${filter.closed ? " is-on" : ""}`} aria-pressed={filter.closed} onClick={() => set({ closed: !filter.closed })}>Closed <span className="mono">{closedCount}</span></button>
-          </Hint>
-        )}
+        <div className="ov-filter-options" id="overview-filter-options" hidden={narrow && !filtersOpen}>
+          {multi && (
+            <div className="ov-seg" role="group" aria-label="Workspace">
+              {[{ id: null, name: "All" }, ...list.workspaces].map((w) => (
+                <button type="button" key={w.id ?? "all"} className={filter.workspace === w.id ? "is-on" : ""} aria-pressed={filter.workspace === w.id}
+                  onClick={() => set({ workspace: w.id })}>{w.name}</button>
+              ))}
+            </div>
+          )}
+          {grouped && onInitiative && (
+            <Picker value={initiative === null ? ["*"] : [`=${initiative}`]} onChange={([id]) => onInitiative(id === "*" ? null : id.slice(1))}
+              title="Show one initiative" options={[
+                { id: "*", label: "All initiatives" },
+                ...names.map((n) => ({ id: `=${n}`, label: n })),
+                { id: `=${NO_INITIATIVE}`, label: "No initiative" },
+              ]}>
+              <span className={initiative === null ? "" : "ov-init-on"}>{initiative === null ? "All initiatives" : initiative || "No initiative"}</span><span className="caret">▾</span>
+            </Picker>
+          )}
+          {onStates && <div className="ov-state-filters" role="group" aria-label="Project state">
+            {PROJECT_STATES.map((state) => {
+              const selected = states.includes(state);
+              return (
+                <button type="button" key={state} className={`toggle${selected ? " is-on" : ""}`} aria-pressed={selected}
+                  onClick={() => onStates(PROJECT_STATES.filter((value) => value === state ? !selected : states.includes(value)))}>
+                  {stateLabel(state)} <span className="mono">{counts[state]}</span>
+                </button>
+              );
+            })}
+          </div>}
+          {closedCount > 0 && (
+            <Hint text="Also show the completed and canceled projects." infoLabel="About closed projects">
+              <button type="button" className={`toggle${filter.closed ? " is-on" : ""}`} aria-pressed={filter.closed} onClick={() => set({ closed: !filter.closed })}>Closed <span className="mono">{closedCount}</span></button>
+            </Hint>
+          )}
+        </div>
       </div>
 
       {list.workspaces.filter((w) => w.error).map((w) => <p key={w.id} className="empty" role="status">{w.error}</p>)}
       {!list.projects.length && !list.workspaces.some((w) => w.error) && <p className="empty">No projects. `wg load` makes one from plan.json.</p>}
       {list.projects.length > 0 && !rows.length && (
-        <p className="empty">No project matches. <button type="button" className="ghost" onClick={() => { setFilter(START); onInitiative?.(null); onStates?.([]); }}>Clear the filters</button></p>
+        <p className="empty">No project matches. {!narrow && <button type="button" className="ghost" onClick={clearFilters}>Clear the filters</button>}</p>
       )}
 
       {grouped ? sections.map((section) => {

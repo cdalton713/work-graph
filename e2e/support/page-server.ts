@@ -120,6 +120,10 @@ setTransport({
       return data({ teams: { nodes: [{ ...team, states: { nodes: states }, members: empty }] } });
     }
     if (query.includes("issueLabels(")) return data({ issueLabels: empty });
+    if (variables.projectId === project.id && query.includes("updatedAt:{gt:$t}")) {
+      const changed = issues.find(issue => issue.updatedAt > variables.t);
+      return data({ issues: { nodes: changed ? [{ id: changed.id }] : [] }, comments: empty, project: { documents: empty } });
+    }
     if (query.includes("project(id:") && variables.id === panelProject.id) return data({
       viewer: { id: "ada" },
       project: { ...panelProject, projectMilestones: empty, documents: empty,

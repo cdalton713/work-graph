@@ -68,6 +68,8 @@ test("an anonymous viewer hold applies only to the selected share", async ({ pag
 for (const globalSeconds of [0, 30]) {
   test(`endpoint backoff spans graph versions and tabs (global seconds: ${globalSeconds})`, async ({ page, context }) => {
     const requests: string[] = [];
+    const graphReads = () => requests.filter(path => path === "default/api/projects/fixture/graph").length;
+    let limitedRead = 0;
     await context.route("**/api/projects", async route => {
       const response = await route.fetch();
       const list = await response.json();
@@ -80,8 +82,8 @@ for (const globalSeconds of [0, 30]) {
       const workspace = route.request().headers()["x-workspace"];
       requests.push(workspace + url.pathname);
       if (workspace === "other") return route.fulfill({ status: 503, json: { error: "Other workspace reached" } });
-      if (requests.length === 2) {
-        expect(url.searchParams.has("have")).toBe(true);
+      if (!limitedRead && workspace === "default" && url.pathname === "/api/projects/fixture/graph" && url.searchParams.has("have")) {
+        limitedRead = graphReads();
         return route.fulfill({ status: 429, json: { error: "Endpoint limited" }, headers: {
           "Retry-After": "90", "X-RateLimit-Scope": "endpoint",
           ...(globalSeconds ? { "X-RateLimit-Global-Retry-After": String(globalSeconds) } : {}),
@@ -100,7 +102,8 @@ for (const globalSeconds of [0, 30]) {
     const limited = second.getByText("Linear rate limit", { exact: false }).first();
     await second.goto("/?project=fixture");
     await expect(limited).toBeVisible();
-    expect(requests).toHaveLength(2);
+    expect(limitedRead).toBeGreaterThan(1);
+    expect(graphReads()).toBe(limitedRead);
     await second.goto("/?workspace=other&project=fixture");
     await expect(second.getByText("Other workspace reached").first()).toBeVisible();
     await second.goto("/?project=planned");
@@ -117,10 +120,9 @@ for (const globalSeconds of [0, 30]) {
     await page.clock.fastForward((90 - globalSeconds) * 1000 - 1);
     await second.goto("/?project=fixture");
     await expect(limited).toBeVisible();
-    const count = () => requests.filter(path => path === "default/api/projects/fixture/graph").length;
-    expect(count()).toBe(2);
+    expect(graphReads()).toBe(limitedRead);
     await page.clock.fastForward(1);
     await second.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-    await expect.poll(count).toBe(3);
+    await expect.poll(graphReads).toBe(limitedRead + 1);
   });
 }

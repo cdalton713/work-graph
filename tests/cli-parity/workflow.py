@@ -22,6 +22,7 @@ def page(values):
 def scenario(binary, work):
     plan = json.loads((HERE / "fixture/plan.json").read_bytes())
     plan["effort"]["slug"] = "wf"
+    plan["nodes"][0]["lane"] = "core"
     plan["nodes"].reverse()
     (work / "plan.json").write_text(json.dumps(plan))
     subprocess.run(["git", "init", "-q", str(work)], check=True)
@@ -36,13 +37,14 @@ def scenario(binary, work):
     comments = []
     fail_relation_once = True
     claim_reads = []
-    paths = {k: work / k for k in ("clean", "dirty", "unrelated")}
+    paths = {k: work / k for k in ("clean", "dirty", "unrelated", "custom-coordinator-path")}
     for path in paths.values():
         path.mkdir()
         subprocess.run(["git", "init", "-q", str(path)], check=True)
     (paths["dirty"] / "pending").write_text("user data")
     trees = [{"id": k, "path": str(p), "isMainWorktree": False, "branch": k,
               "childWorktreeIds": []} for k, p in paths.items()]
+    trees[-1]["branch"] = "refs/heads/wg/wf-core"
     inventory = work / "trees.json"
     inventory.write_text(json.dumps(trees))
     tool = work / "orca"
@@ -218,12 +220,27 @@ else:
         assert {groups[uid]["name"] for uid in active_labels} == {"standard", "review:thorough"}
         run("approve", "a", "--quote", "go ahead")
         assert comments[-1].endswith('Their words: "go ahead"')
+        if len(binary) == 1:
+            # A persisted row can identify the coordinator by its custom path alone.
+            original = (work / "keymap.json").read_bytes()
+            saved_journal = (work / "journal.jsonl").read_bytes()
+            km = json.loads(original)
+            km.setdefault("run", {}).setdefault("nodes", {}).setdefault("a", {})["path"] = str(paths["custom-coordinator-path"])
+            (work / "keymap.json").write_text(json.dumps(km))
+            old_state = issues["3"]["state"]
+            run("move", "a", "Done", "--force", "fixture")
+            assert "removed worktree" not in outcomes.pop()[1]
+            assert not json.loads((work / "keymap.json").read_bytes())["run"]["nodes"]["a"].get("worktree_removed")
+            issues["3"]["state"] = old_state
+            archives.clear()
+            (work / "keymap.json").write_bytes(original)
+            (work / "journal.jsonl").write_bytes(saved_journal)
         for key in ("dirty", "clean"):
             km = json.loads((work / "keymap.json").read_bytes())
             km.setdefault("run", {}).setdefault("nodes", {}).setdefault("a", {})["worktree"] = key
             (work / "keymap.json").write_text(json.dumps(km))
             run("move", "a", "Done", "--force", "fixture")
-        assert sorted(r["id"] for r in json.loads(inventory.read_text())) == ["dirty", "unrelated"]
+        assert sorted(r["id"] for r in json.loads(inventory.read_text())) == ["custom-coordinator-path", "dirty", "unrelated"]
         assert (paths["dirty"] / "pending").read_text() == "user data"
         assert archives == ["3"]
         run("archive", "--apply")

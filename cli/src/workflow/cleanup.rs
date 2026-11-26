@@ -58,8 +58,19 @@ fn remove(tree: &Tree, label: &str, dry: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn removable(tree: &Tree, core: &Path) -> bool {
-    !tree.is_main_worktree && tree.path.canonicalize().is_ok_and(|p| p != core)
+fn short_branch(tree: &Tree) -> Option<&str> {
+    tree.branch
+        .as_deref()
+        .map(|s| s.strip_prefix("refs/heads/").unwrap_or(s))
+}
+
+fn removable(tree: &Tree, plan_dir: &Path, coordinator_branch: Option<&str>) -> bool {
+    !tree.is_main_worktree
+        && !coordinator_branch.is_some_and(|name| short_branch(tree) == Some(name))
+        && tree
+            .path
+            .canonicalize()
+            .is_ok_and(|root| !plan_dir.starts_with(root))
 }
 
 /// A targeted move supplies the node and its confirmed new status. A cleanup command
@@ -132,6 +143,12 @@ fn cleanup(
         };
         lanes.entry(stack).or_default().push(k);
     }
+    let prefix = installation.config.settings()["branch_prefix"]
+        .as_str()
+        .ok_or("missing branch prefix")?;
+    let coordinator_branch = plan["effort"]["slug"]
+        .as_str()
+        .map(|slug| format!("{prefix}{slug}-core"));
     let mut kept = 0;
     let before = km.clone();
     let mut changed = false;
@@ -154,7 +171,7 @@ fn cleanup(
             .or_else(|| trees.iter().position(|w| Some(w.path.as_path()) == path));
         let stamp = if let Some(index) = index {
             let tree = &trees[index];
-            if !removable(tree, &core) {
+            if !removable(tree, &core, coordinator_branch.as_deref()) {
                 continue;
             }
             let result = if matches!(
@@ -183,9 +200,6 @@ fn cleanup(
             changed = true;
         }
     }
-    let prefix = installation.config.settings()["branch_prefix"]
-        .as_str()
-        .ok_or("missing branch prefix")?;
     for (lane, members) in lanes {
         if target.is_some_and(|(k, _)| !members.contains(&k))
             || !members.iter().all(|k| {
@@ -198,15 +212,10 @@ fn cleanup(
             continue;
         }
         let branch = format!("{prefix}{lane}");
-        let Some(tree) = trees.iter().find(|w| {
-            w.branch
-                .as_deref()
-                .map(|s| s.strip_prefix("refs/heads/").unwrap_or(s))
-                == Some(&branch)
-        }) else {
+        let Some(tree) = trees.iter().find(|w| short_branch(w) == Some(&branch)) else {
             continue;
         };
-        if !removable(tree, &core)
+        if !removable(tree, &core, coordinator_branch.as_deref())
             || trees
                 .iter()
                 .any(|w| tree.child_worktree_ids.contains(&w.id))

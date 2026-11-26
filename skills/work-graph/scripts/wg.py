@@ -11,6 +11,8 @@ that Python, and without it `wg next` polls Linear.
   wg preflight <dir> [--phase P]
   wg base      <dir> [--phase P]
   wg load      <dir> [--apply] [--prune] [--adopt]
+  wg share     <dir>
+  wg pull      <dir> [--force]
   wg ready     <dir> [--apply]
   wg status    <dir> [--phase P]
   wg next      <dir> [--wait] [--interval <seconds>] [--no-publish]
@@ -357,6 +359,10 @@ def load_plan(plan_dir, *, strict=False):
         if strict:
             raise FileNotFoundError(message) from None
         die(message)
+    return normalize_plan(plan)
+
+
+def normalize_plan(plan):
     plan.setdefault("edges", [])
     workspace = WORKSPACES[plan_workspace(plan)]
     if workspace["team"]:
@@ -441,12 +447,14 @@ def load_keymap(plan_dir):
     return km
 
 
-def save_keymap(plan_dir, km):
+def save_keymap(plan_dir, km, *, sync=True):
     p = keymap_path(plan_dir)
     try:
         before = json.loads(p.read_text()) if p.exists() and p.stat().st_size else {}
     except (OSError, ValueError):
         before = None  # a damaged file: its rows are not known, so no change can be journaled
+    if sync and before and before.get("collab"):
+        sync_shared_keymap(plan_dir, before, km)
     save_json(p, km)
     if before is not None:
         journal_keymap(plan_dir, before, km)
@@ -2048,7 +2056,7 @@ def sync_card(n, entry, apply, changes, row=None, strict=False):
     card = (entry or {}).get("card")
     body = node_card(n, card_row(entry, row))
     sha = hashlib.sha256(body.encode()).hexdigest()
-    if card and card["sha"] == sha:
+    if card and card.get("sha") == sha:
         return False
     changes.append(f"card {n['key']}: {'update' if card else 'create'}")
     if not apply:
@@ -2643,6 +2651,15 @@ def load(plan_dir, plan, apply, prune, adopt=False):
         print("\n".join(errs))
         die("plan.json fails check; fix it first", 1)
     km = load_keymap(plan_dir)
+    collab = km.get("collab") if apply else None
+    raw = (Path(plan_dir) / "plan.json").read_bytes() if collab else None
+    if raw is not None and normalize_plan(json.loads(raw)) != plan:
+        raise ReadError("plan.json changed during wg load; check the change and run wg load --apply again")
+
+    def save_progress():
+        if not collab:
+            save_keymap(plan_dir, km)
+
     eff = plan["effort"]
     team_id, states, labels = team_info(plan_team(plan))
     nodes = {n["key"]: n for n in plan["nodes"]}
@@ -2672,9 +2689,10 @@ def load(plan_dir, plan, apply, prune, adopt=False):
                     {"i": {"name": eff["name"], "teamIds": [team_id],
                            "description": eff.get("summary", f"work-graph effort {eff.get('slug', '')}")[:255]}})
             km["project"] = p["projectCreate"]["project"]
-            save_keymap(plan_dir, km)
-    name_coordinator(plan_dir, eff["name"], apply, changes)
-    set_core_settings(plan_dir, apply, changes)
+            save_progress()
+    if not collab:
+        name_coordinator(plan_dir, eff["name"], apply, changes)
+        set_core_settings(plan_dir, apply, changes)
     if eff.get("initiative"):
         sync_initiative(team_id, (km.get("project") or {}).get("id"), eff["initiative"].strip(), apply, changes,
                         team_scoped=team_labels(plan))
@@ -2703,7 +2721,7 @@ def load(plan_dir, plan, apply, prune, adopt=False):
                                "description": f"target {ph.get('target', 'main')} · ship to {ph.get('ship_env', '?')}"
                                               + (f" · soak {ph['soak']}" if ph.get("soak") else "")}})
                 km["milestones"][k] = m["projectMilestoneCreate"]["projectMilestone"]["id"]
-                save_keymap(plan_dir, km)
+                save_progress()
     for lab in sorted(({KIND_LABEL[n["kind"]] for n in nodes.values() if n["kind"] in KIND_LABEL} | {REVIEWED_LABEL})
                       - set(labels)):
         changes.append(f"create label {lab!r}")
@@ -2726,7 +2744,7 @@ def load(plan_dir, plan, apply, prune, adopt=False):
                 if apply:
                     entry = {"id": issue["id"], "identifier": issue["identifier"]}
                     km["nodes"][k] = entry
-                    save_keymap(plan_dir, km)
+                    save_progress()
         if issue and not n.get("eng"):
             project_id = (km.get("project") or {}).get("id")
             fields = {}
@@ -2754,11 +2772,11 @@ def load(plan_dir, plan, apply, prune, adopt=False):
             i = gql("""mutation($i:IssueCreateInput!){ issueCreate(input:$i){ issue{id identifier} } }""",
                     {"i": inp})["issueCreate"]["issue"]
             km["nodes"][k] = {"id": i["id"], "identifier": i["identifier"]}
-            save_keymap(plan_dir, km)
+            save_progress()
 
     for k, n in nodes.items():
         if k not in conflicts and sync_card(n, km["nodes"].get(k), apply, changes, rows.get(k)):
-            save_keymap(plan_dir, km)
+            save_progress()
 
     if not apply:
         known = {k for k in nodes if k in km["nodes"]}
@@ -2776,9 +2794,18 @@ def load(plan_dir, plan, apply, prune, adopt=False):
         for k in orphans:
             km["nodes"].pop(k, None)
             rows.pop(k, None)
-        save_keymap(plan_dir, km)
-    print("\n".join(changes) or "no changes to nodes")
+        save_progress()
+    if not collab:
+        print("\n".join(changes) or "no changes to nodes")
     _sort(km, plan, nodes)
+    if collab:
+        if hashlib.sha256(raw).hexdigest() != plan_file_sha(plan_dir):
+            raise ReadError("plan.json changed during wg load; check the change and run wg load --apply again")
+        push_plan(km, collab, plan_workspace(plan), raw)
+        save_keymap(plan_dir, km, sync=False)
+        name_coordinator(plan_dir, eff["name"], apply, changes)
+        set_core_settings(plan_dir, apply, changes)
+        print("\n".join(changes) or "no changes to nodes")
     return 0
 
 
@@ -4795,6 +4822,254 @@ def link_token_for(url, workspace=None):
     return token
 
 
+class PlanPageUnavailable(ReadError):
+    pass
+
+
+class PlanVersionConflict(ReadError):
+    def __init__(self, data):
+        super().__init__(f"the server has plan v{data.get('version')} by {plan_writer(data)}; "
+                         "run wg pull, compare both changes, and run wg load --apply again")
+
+
+class NoPlanRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def plan_writer(data):
+    return " ".join(str(data.get("writer") or "an unknown writer").split())
+
+
+def plan_request(collab, workspace, method, body=None, *, history=False):
+    if not collab.get("workspace"):
+        raise ReadError("the collaboration record needs a workspace")
+    page = login_page_url(collab["page"], workspace)
+    configured = (workspace_page(workspace) or PAGE_URL or "").rstrip("/")
+    token = (link_token_for(page, workspace) if page == configured
+             else read_link_token_file(page_token_path(page)))
+    if not token:
+        raise PlanPageUnavailable("no page token; run wg login for the page")
+    project = urllib.parse.quote(collab["project"], safe="")
+    url = f"{page}/api/projects/{project}/plan"
+    if history:
+        url += "/versions"
+    headers = {"Authorization": f"Bearer {token}", "x-workspace": collab["workspace"]}
+    version = collab.get("version")
+    if method == "PUT":
+        headers["Content-Type"] = "application/json"
+        headers["If-Match" if version else "If-None-Match"] = f'"{version}"' if version else "*"
+    elif version and not history:
+        headers["If-None-Match"] = f'"{version}"'
+    request = urllib.request.Request(url, headers=headers, method=method,
+                                     data=json.dumps(body).encode() if body is not None else None)
+    try:
+        with urllib.request.build_opener(NoPlanRedirect).open(request, timeout=10) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            if error.code == 304 and method == "GET":
+                return None
+            if error.code == 412 and method == "PUT":
+                raise PlanVersionConflict(json.load(error)) from None
+            if error.code >= 500 or error.code == 429:
+                raise PlanPageUnavailable(f"the plan page answered HTTP {error.code}") from None
+            raise ReadError(f"the plan page answered HTTP {error.code}") from None
+    except (OSError, http.client.HTTPException) as error:
+        raise PlanPageUnavailable(f"the plan page did not answer ({type(error).__name__})") from None
+
+
+def shared_keymap(km):
+    shared = {field: km[field] for field in ("project", "milestones") if field in km}
+    if (doc := km.get("status_doc")) and doc.get("id"):
+        shared["status_doc"] = {"id": doc["id"]}
+    shared["nodes"] = {}
+    for key, entry in km.get("nodes", {}).items():
+        fields = {field: entry[field] for field in ("id", "identifier", "branch", "pr") if field in entry}
+        if (card := entry.get("card")) and card.get("id"):
+            fields["card"] = {"id": card["id"]}
+        shared["nodes"][key] = fields
+    return shared
+
+
+def plan_file_sha(plan_dir):
+    return hashlib.sha256((Path(plan_dir) / "plan.json").read_bytes()).hexdigest()
+
+
+def push_plan(km, collab, workspace, raw):
+    plan = json.loads(raw)
+    plan.setdefault("edges", [])
+    answer = plan_request(collab, workspace, "PUT", {"plan": plan, "keymap": shared_keymap(km)})
+    km["collab"] = collab | {"version": answer["version"], "plan_sha": hashlib.sha256(raw).hexdigest()}
+
+
+def share_plan(plan_dir):
+    km = load_keymap(plan_dir)
+    if km.get("collab"):
+        print("the effort is already shared")
+        return 0
+    project = (km.get("project") or {}).get("id")
+    if not project:
+        raise ReadError("run wg load --apply before wg share")
+    plan = load_plan(plan_dir)
+    workspace = plan_workspace(plan)
+    collab = {"page": login_page_url(None, workspace), "workspace": workspace, "project": project}
+    share_branch_and_pr({}, km)
+    raw = (Path(plan_dir) / "plan.json").read_bytes()
+    push_plan(km, collab, workspace, raw)
+    save_keymap(plan_dir, km)
+    print(f"shared plan v{km['collab']['version']}")
+    return 0
+
+
+def remote_plan(collab, workspace, *, force=False):
+    data = plan_request(collab | ({"version": None} if force else {}), workspace, "GET")
+    if data is None:
+        return None
+    if (not isinstance(data, dict) or type(data.get("version")) is not int
+            or not isinstance(data.get("plan"), dict) or not isinstance(data.get("keymap"), dict)):
+        raise ReadError("the page returned an invalid plan")
+    if (data["keymap"].get("project") or {}).get("id") != collab["project"]:
+        raise ReadError("the shared keymap has the wrong project id")
+    return data
+
+
+def plan_revision_writer(data, collab, workspace):
+    if not data.get("writer"):
+        try:
+            history = plan_request(collab, workspace, "GET", history=True)
+            data = next((row for row in history["versions"] if row["version"] == data["version"]), data)
+        except (ReadError, KeyError, TypeError, ValueError):
+            pass
+    return plan_writer(data)
+
+
+def replace_shared_keymap(km, incoming):
+    result = dict(km)
+    shared = shared_keymap(incoming)
+    result.update(project=shared["project"], milestones=shared.get("milestones", {}), nodes=shared["nodes"])
+    doc = {field: km["status_doc"][field] for field in ("sha", "at") if field in km.get("status_doc", {})}
+    doc.update(shared.get("status_doc", {}))
+    if doc:
+        result["status_doc"] = doc
+    else:
+        result.pop("status_doc", None)
+    for key, entry in result["nodes"].items():
+        old = km["nodes"].get(key, {})
+        if "published" in old:
+            entry["published"] = old["published"]
+        card = old.get("card", {})
+        if entry.get("card") == {"id": card.get("id")} and "sha" in card:
+            entry["card"]["sha"] = card["sha"]
+    return result
+
+
+def share_branch_and_pr(before, km):
+    old_run = before.get("run", {}).get("nodes", {})
+    for key, row in km.get("run", {}).get("nodes", {}).items():
+        if key in km["nodes"]:
+            for field in ("branch", "pr"):
+                if row.get(field) and row[field] != old_run.get(key, {}).get(field):
+                    km["nodes"][key][field] = row[field]
+
+
+def apply_keymap_changes(before, after, remote, conflict):
+    """Carry the local field changes onto a newer keymap for the same plan."""
+    result = dict(remote)
+    missing = object()
+    for key in before.keys() | after.keys():
+        old, new, current = (mapping.get(key, missing) for mapping in (before, after, remote))
+        if old == new:
+            continue
+        if all(isinstance(value, dict) for value in (old, new, current)):
+            result[key] = apply_keymap_changes(old, new, current, conflict)
+        elif current != old and current != new:
+            raise conflict
+        elif new is missing:
+            result.pop(key, None)
+        else:
+            result[key] = new
+    return result
+
+
+def sync_shared_keymap(plan_dir, before, km):
+    collab = before["collab"]
+    share_branch_and_pr(before, km)
+    old, new = shared_keymap(before), shared_keymap(km)
+    if old == new:
+        return
+    raw = (Path(plan_dir) / "plan.json").read_bytes()
+    if hashlib.sha256(raw).hexdigest() != collab.get("plan_sha"):
+        raise ReadError("plan.json has local changes; run wg load --apply before publishing keymap changes")
+    plan = json.loads(raw)
+    plan.setdefault("edges", [])
+    workspace = plan_workspace(plan)
+    try:
+        push_plan(km, collab, workspace, raw)
+    except PlanVersionConflict as conflict:
+        data = remote_plan(collab, workspace)
+        if not data or data["plan"] != plan:
+            raise
+        incoming = shared_keymap(data["keymap"])
+        merged = replace_shared_keymap(km, apply_keymap_changes(old, new, incoming, conflict))
+        push_plan(merged, collab | {"version": data["version"]}, workspace, raw)
+        print(f"note plan v{data['version']} by {plan_revision_writer(data, collab, workspace)}")
+        km.clear()
+        km.update(merged)
+
+
+def pull_plan(plan_dir, *, force=False, explicit=False, applying=False, strict=False):
+    with plan_lock(plan_dir):
+        km = load_keymap(plan_dir)
+        if not (collab := km.get("collab")):
+            if explicit:
+                raise ReadError("this effort is not shared; run wg share first")
+            return
+        try:
+            if not force:
+                local = load_plan(plan_dir, strict=strict)
+            else:
+                local = json.loads((Path(plan_dir) / "plan.json").read_bytes())
+            workspace = plan_workspace(local)
+        except (OSError, ValueError, AttributeError):
+            if not force:
+                raise
+            workspace = collab["workspace"] if collab["workspace"] in WORKSPACES else DEFAULT_WORKSPACE_ID
+        try:
+            data = remote_plan(collab, workspace, force=force)
+        except PlanPageUnavailable as error:
+            if explicit or applying:
+                raise
+            print(f"warn plan: {error}; using the local copy", file=sys.stderr)
+            return
+        if data is None:
+            if explicit:
+                print(f"plan v{collab['version']} is current")
+            return
+        writer = plan_revision_writer(data, collab, workspace)
+        dirty = not (Path(plan_dir) / "plan.json").exists() or plan_file_sha(plan_dir) != collab.get("plan_sha")
+        version = data["version"]
+        if dirty and not force:
+            raise ReadError(f"the server has plan v{version} by {writer}; save your change, "
+                            f"run wg pull {shlex.quote(str(plan_dir))} --force, and make your change again")
+        if applying:
+            raise ReadError(f"the server has plan v{version} by {writer}; run wg pull, then run wg load --apply again")
+        plan_workspace(data["plan"])
+        after = replace_shared_keymap(km, data["keymap"])
+        save_json(Path(plan_dir) / "plan.json", data["plan"])
+        after["collab"] = collab | {"version": version, "plan_sha": plan_file_sha(plan_dir)}
+        save_keymap(plan_dir, after, sync=False)
+        if dirty:
+            print("discarded local plan changes")
+        print(f"note plan v{version} by {writer}")
+
+
+def read_current_plan(plan_dir, *, strict=False, applying=False):
+    if load_keymap(plan_dir).get("collab"):
+        pull_plan(plan_dir, strict=strict, applying=applying)
+    return load_plan(plan_dir, strict=strict)
+
+
 def retry_page_request(request, response_error):
     """Retry only 503. response_error extracts the HTTP status and headers for this transport."""
     for attempt in range(4):
@@ -6381,7 +6656,7 @@ def tick_refresh(plan_dir, plan, km, record, notify=False):
 
 
 def tick_effort(plan_dir, state, save, sender, notify=False):
-    plan = load_plan(plan_dir, strict=True)
+    plan = read_current_plan(plan_dir, strict=True)
     km = load_keymap(plan_dir)
     project = (km.get("project") or {}).get("id")
     if not project or not km["nodes"]:
@@ -6666,7 +6941,10 @@ def watch_poll(memory, state, roots=None, clock=time.monotonic):
     found, changed = [], False
     for path in tick_plans(roots):
         try:
-            plan, km = load_plan(path), load_keymap(path)
+            plan, km = read_current_plan(path), load_keymap(path)
+        except ReadError as error:
+            print(f"warn agents: {path}: {error}", file=sys.stderr)
+            continue
         except (SystemExit, OSError, ValueError):
             continue
         project = (km.get("project") or {}).get("id")
@@ -7165,7 +7443,7 @@ def doctor_lines(plan_dir=None, fix=False):
     loaded = {}
 
     def plan_check():
-        plan = load_plan(plan_dir, strict=True)
+        plan = read_current_plan(plan_dir, strict=True)
         plan_workspace(plan)
         errors = check(plan)
         loaded["plan"] = plan
@@ -8806,6 +9084,8 @@ def cli_parser():
         return p
 
     add(sub, "check")
+    add(sub, "share")
+    add(sub, "pull").add_argument("--force", action="store_true")
     for name in ("preflight", "base", "status"):
         add(sub, name).add_argument("--phase")
     load_parser = add(sub, "load")
@@ -9029,7 +9309,7 @@ def main(argv):
         if ns.cmd == "logout":
             return page_logout(ns.page_url)
         if ns.cmd == "config":
-            return show_config(load_plan(ns.dir, strict=True) if ns.dir else None)
+            return show_config(read_current_plan(ns.dir, strict=True) if ns.dir else None)
         if ns.cmd == "explain":
             return explain_command(ns.verb)
         if ns.cmd == "doctor":
@@ -9044,25 +9324,36 @@ def main(argv):
             return 0
         if ns.cmd == "usage":  # reads transcripts only: no plan lock, no Linear, no write to flush
             return usage_command(ns.dir, ns.json, ns.since, ns.all)
+        if ns.cmd == "share":
+            with plan_lock(ns.dir):
+                return share_plan(ns.dir)
+        if ns.cmd == "pull":
+            pull_plan(ns.dir, force=ns.force, explicit=True)
+            return 0
         if ns.cmd == "tick":
             return tick_command(ns)
         if ns.cmd == "agents":
             return watch_command(ns)
         if ns.cmd == "ui":
             return ui(ns.port, ns.project, ns.no_open, ns.no_tailnet, ns.workspace)
-        plan = load_plan(ns.dir)
         writes = ns.cmd in KEYMAP_WRITERS or (ns.cmd == "run" and ns.mode in ("set", "reset", "rebuild"))
-        token = LINEAR_WORKSPACE.set(plan_workspace(plan))
-        named = _JOURNAL_COMMAND.set(command_name(ns))
-        try:
-            with plan_lock(ns.dir) if writes else contextlib.nullcontext():
-                return run_command(ns, ns.dir, plan, given)
-        finally:
-            flush_writes(ns.dir, plan)
-            _JOURNAL_COMMAND.reset(named)
-            LINEAR_WORKSPACE.reset(token)
+        with plan_lock(ns.dir) if writes else contextlib.nullcontext():
+            plan = (load_plan(ns.dir) if ns.cmd == "check"
+                    else read_current_plan(ns.dir, applying=ns.cmd == "load" and ns.apply))
+            return run_plan_command(ns, plan, given)
     except (ReadError, OSError, ValueError, subprocess.SubprocessError) as e:
         die(str(e))
+
+
+def run_plan_command(ns, plan, given):
+    token = LINEAR_WORKSPACE.set(plan_workspace(plan))
+    named = _JOURNAL_COMMAND.set(command_name(ns))
+    try:
+        return run_command(ns, ns.dir, plan, given)
+    finally:
+        flush_writes(ns.dir, plan)
+        _JOURNAL_COMMAND.reset(named)
+        LINEAR_WORKSPACE.reset(token)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import type { Comment, GraphData, Issue, IssuePatch, IssueRef, Label, Milestone,
 import { serverSite } from "./site.ts";
 import { ANSWERED_LABEL, AUTONOMY_GROUP, type AutonomyLevel, autonomyOf, PAUSED_LABEL, pausedOf, SHARED_LABEL, sharedOf } from "../src/lib/autonomy.ts";
 import { REVIEW_GROUP, type ReviewEffort, reviewLabel, reviewOf } from "../src/lib/review.ts";
-import { linearWorkspace } from "./workspaces.ts";
+import { linearWorkspace, type Workspace } from "./workspaces.ts";
 import { LinearSignInRequired } from "./linearauth.ts";
 
 const ENDPOINT = "https://api.linear.app/graphql";
@@ -271,13 +271,23 @@ export async function readLinearTeams(key: string, kind: "api_key" | "oauth", id
   }
 }
 
+export class NeedsLinearAccess extends LinearError {
+  constructor() { super("Connect your Linear account and get write access to this project in Linear.", 403); }
+}
+
+export const sharedLinear = new AsyncLocalStorage<{ projectId: string; writer?: Workspace }>();
+
 export async function gql(query: string, variables: Record<string, unknown> = {}): Promise<Data> {
-  const { key, kind, oauthKey, needsKey, rejectApiKey } = workspaceOf();
+  const mutation = isMutation(query);
+  const shared = sharedLinear.getStore();
+  const memberWrite = mutation && shared;
+  const workspace = memberWrite ? shared.writer : workspaceOf();
+  if (!workspace || (memberWrite && workspace.needsKey)) throw new NeedsLinearAccess();
+  const { key, kind, oauthKey, needsKey, rejectApiKey } = workspace;
   currentCache();
   serverSite();
   if (needsKey) throw new LinearSignInRequired();
   if (!key) throw new LinearError("LINEAR_API_KEY is not set", 500);
-  const mutation = isMutation(query);
   const init = (credential: string): RequestInit => ({
     method: "POST",
     headers: { Authorization: kind === "oauth" ? `Bearer ${credential}` : credential, "Content-Type": "application/json" },
@@ -288,7 +298,14 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
   for (let tryNumber = 1; ; tryNumber++) {
     // The slot is held for one try only, not during the delay before the next try.
     const result = await slot(async (): Promise<{ data: Data } | { failure: Failure; error: LinearError; retryAfter: string | null }> => {
-      const credential = oauthKey ? await oauthKey() : key;
+      const credentialFor = async (rejected?: string) => {
+        try { return oauthKey ? await oauthKey(rejected) : key; }
+        catch (error) {
+          if (memberWrite && error instanceof LinearSignInRequired) throw new NeedsLinearAccess();
+          throw error;
+        }
+      };
+      const credential = await credentialFor();
       const failed = (error: unknown) => {
         const result = transportFailure(error);
         return kind === "oauth" || rejectApiKey ? { ...result, error: new LinearError("Linear request failed") } : result;
@@ -300,15 +317,16 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       if ("failure" in response) return response;
       if (response.status === 401 && oauthKey) {
         await response.body?.cancel().catch(() => {});
-        response = await send(await oauthKey(credential));
+        response = await send(await credentialFor(credential));
         if ("failure" in response) return response;
       }
       if (response.status === 401 && rejectApiKey) {
         await response.body?.cancel().catch(() => {});
         await rejectApiKey();
+        if (memberWrite) throw new NeedsLinearAccess();
         throw new LinearKeyRequired();
       }
-      keepBudget(response.headers);
+      if (!memberWrite) keepBudget(response.headers);
       let body: { data?: Data; errors?: GraphQLError[] } | null;
       try {
         body = await response.json();
@@ -322,6 +340,14 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       if (response.ok && body && !body.errors) return { data: body.data };
       const detail = (kind !== "oauth" && !rejectApiKey ? body?.errors?.map((e) => e.message).join("; ") : undefined) ?? `HTTP ${response.status}`;
       const rated = response.status === 429 || !!body?.errors?.some((e) => e.extensions?.code === "RATELIMITED");
+      if (memberWrite && !rated && response.status < 500 &&
+          (response.status === 401 || response.status === 403 || response.status === 404 || body?.errors?.some((error) =>
+            /forbidden|unauthenticated|unauthorized|permission|not.?found/i.test(error.extensions?.code ?? "") ||
+            /permission|forbidden|unauthorized|not authorized|authentication|entity not found/i.test(error.message)))) throw new NeedsLinearAccess();
+      if (shared && !mutation && (response.status === 404 || body?.errors?.some((error) =>
+        /not.?found/i.test(error.extensions?.code ?? "") || /not found/i.test(error.message)))) {
+        throw new LinearError("Resource not found in the shared project", 404);
+      }
       const failure: Failure = rated ? "rate" : response.status >= 500 ? "server" : "final";
       const retryAfter = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;
       return { failure, error: new LinearError(rated ? `Linear rate limit: ${detail}` : `Linear: ${detail}`, rated ? 429 : 502), retryAfter };
@@ -818,6 +844,8 @@ async function writable(issueId: string, team: string): Promise<Writable> {
     throw error;
   }
   const issue = data.issue as Writable | null;
+  const shared = sharedLinear.getStore();
+  if (shared && issue?.project?.id !== shared.projectId) throw new LinearError("no issue with this id in the shared project", 404);
   if (!issue) throw new LinearError(`issue ${issueId} not found`, 404);
   if (issue.team.key !== team) throw new LinearError(`this issue is not in team ${team}: it is read-only here`, 403);
   return issue;
@@ -869,7 +897,9 @@ export async function updateIssue(issueId: string, { baseDescription, note, ...p
     { id: issueId, i: patch },
   );
   if (!data.issueUpdate.success) throw new LinearError("Linear did not apply the update");
-  return completeIssue(data.issueUpdate.issue, current.issue.project?.id);
+  const issue = await completeIssue(data.issueUpdate.issue, current.issue.project?.id);
+  return sharedLinear.getStore() ? { ...issue, blocks: issue.blocks.filter((ref) => ref.inProject),
+    blockedBy: issue.blockedBy.filter((ref) => ref.inProject) } : issue;
 }
 
 const COMMENT = "id body createdAt user{name displayName avatarUrl} botActor{name} parent{id}";

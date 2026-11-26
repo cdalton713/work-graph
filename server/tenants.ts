@@ -13,7 +13,17 @@ export interface Tenant {
 export type TenantRole = "owner" | "viewer";
 type Lookup<T> = T | null | Promise<T | null>;
 
+export interface SharedWorkspace {
+  id: string;
+  name: string;
+  projectId: string;
+  role: import("./db/shares.ts").MemberRole;
+  owner: Tenant;
+  workspace: Workspace;
+}
+
 export interface Tenants {
+  sharedWorkspaces?(account: string): Promise<SharedWorkspace[]>;
   signIn?: ReturnType<typeof import("./db/accounts.ts").createAccounts>["signIn"];
   accountStore?: () => Lookup<ReturnType<typeof import("./db/accounts.ts").createAccounts>>;
   fromSession(session: Session | null): Lookup<{ tenant: Tenant; role: TenantRole }>;

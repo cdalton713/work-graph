@@ -1,3 +1,4 @@
+import type { Ask, Presence } from "./lib/link";
 import type { AutonomyLevel } from "./lib/autonomy";
 import type { ReviewEffort } from "./lib/review";
 import { pageEvent, type PageEvent } from "./lib/telemetry";
@@ -13,7 +14,7 @@ let reloading = false;
 
 async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace, event?: PageEvent): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "x-workspace": workspace };
-  if (openProject) headers["x-project"] = openProject;
+  if (openProject && !(site.user && workspace.startsWith("shared:"))) headers["x-project"] = openProject;
   const method = init?.method?.toUpperCase() ?? "GET";
   if (method !== "GET" && method !== "HEAD") {
     // Keep the same headers if this request is retried.
@@ -77,6 +78,7 @@ export const api = {
   overview: () => call<OverviewData>("overview"),
   /** The graph with its version, or null when the page already has version `have`. */
   graph: (projectId: string, have?: string, workspace?: string) => call<(GraphData & { version: string }) | null>(`projects/${projectId}/graph${have ? `?have=${have}` : ""}`, undefined, workspace),
+  sharedPresence: (id: string, workspace: string) => call<Presence & { asks?: Ask[] }>(`projects/${id}/presence`, undefined, workspace),
   /** A command for the coordinator of the project. */
   command: (projectId: string, command: { name: "next" | "dispatch" | "pause" | "resume"; key?: string; issue?: string }, workspace?: string) =>
     call<{ ok: boolean; queued: number }>(`projects/${projectId}/commands`, { method: "POST", body: JSON.stringify(command) }, workspace, "command_written"),

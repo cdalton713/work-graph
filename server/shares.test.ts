@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join as filePath, sep } from "node:path";
 import { serializeSigned } from "hono/utils/cookie";
 import { afterEach, expect, it, vi } from "vitest";
+import { sharedRoutes } from "./access.ts";
 import { createApp } from "./app.ts";
 import { credentialCrypto } from "./db/crypto.ts";
 import { migrate } from "./db/migrations.ts";
@@ -23,24 +24,54 @@ databaseSuites((open) => {
   it("issues links once, scopes owner actions, and preserves membership on revocation", async () => {
     const db = await open();
     await migrate(db);
-    const tenants = dbTenants(db, credentialCrypto({ WG_DATA_KEY: Buffer.alloc(32).toString("base64") }), { linearAuth: auth });
+    let time = Date.now();
+    const tenants = dbTenants(db, credentialCrypto({ WG_DATA_KEY: Buffer.alloc(32).toString("base64") }), { linearAuth: auth, now: () => time });
     const dist = await mkdtemp(filePath(tmpdir(), "wg-join-"));
     await writeFile(filePath(dist, "index.html"), "<html>Example</html>");
-    let time = Date.now();
+    let rejectWrite: Response | undefined;
     let slow = false;
+    const calls: { query: string; key: string | null }[] = [];
+    const empty = { nodes: [], pageInfo: { hasNextPage: false } };
+    const issue = {
+      id: "inside", identifier: "WG-1", title: "An issue", url: "https://example.com/issue", description: null,
+      priority: 0, updatedAt: "2026-01-01", team: { id: "team", key: "WG" },
+      state: { id: "started", name: "In Progress", type: "started", color: "" },
+      project: { id: "project" }, labels: empty, comments: { ...empty, nodes: [{
+        id: "card", body: "**work-graph node card**\n\n```json\n{\"wg\":1,\"key\":\"node\",\"kind\":\"task\"}\n```",
+      }] }, relations: empty, inverseRelations: empty, attachments: empty,
+    };
     const app = createApp(rules, { ...options, dist: dist + sep, linearAuth: auth, tenants, now: () => time += slow ? 6_000 : 0 });
     const output: string[] = [];
     for (const level of ["log", "warn", "error"] as const) vi.spyOn(console, level).mockImplementation((...args) => output.push(args.join(" ")));
     vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
-      const { variables } = JSON.parse(String(init.body));
+      const { query, variables } = JSON.parse(String(init.body));
+      calls.push({ query, key: new Headers(init.headers).get("authorization") });
+      if (query.includes("commentCreate") && rejectWrite) {
+        return rejectWrite;
+      }
+      if (query.includes("commentCreate")) return Response.json({ data: { commentCreate: { success: true,
+        comment: { id: "new-comment", body: variables.i.body, createdAt: "2026-01-01", user: { name: "Grace" } } } } });
+      if (query.includes("issueUpdate")) return Response.json({ data: { issueUpdate: { success: true, issue } } });
+      if (query.includes("issueLabels")) return Response.json({ data: { issueLabels: empty } });
+      if (query.includes("issue(id:")) return Response.json({ data: { issue: {
+        ...issue, project: { id: variables.id === "inside" ? "project" : "private" }, comments: empty,
+      } } });
+      if (query.includes("viewer{id}")) return Response.json({ data: { viewer: { id: "ada" },
+        project: { id: "project", name: "Example", projectMilestones: { nodes: [] } } } });
+      if (query.includes("issues(first:25")) return Response.json({ data: { project: { issues: { ...empty, nodes: [issue] } } } });
+      if (query.includes("issues(first:")) return Response.json({ data: { issues: empty, comments: empty, project: { documents: empty } } });
+      if (query.includes("teams(first:10")) return Response.json({ data: { teams: empty } });
+      if (query.includes("teams(first:")) return Response.json({ data: { teams: { nodes: [{ projects: { nodes: [
+        { id: "private", name: "Private" },
+      ], pageInfo: { hasNextPage: false } } }] } } });
       return Response.json({ data: { project: variables.id === "project" ? { id: "project", name: "Example" } : null } });
     });
-    async function account(user: string) {
+    async function account(user: string, org = "org") {
       const accountId = await tenants.accounts.signIn({
-        linearUserId: user, linearOrgId: "org", name: user, email: user + "@example.com",
+        linearUserId: user, linearOrgId: org, name: user, email: user + "@example.com",
       }, {
-        workspaceId: "work", linearOrgId: "org", name: "Work", team: "WG", teamLabels: false,
-        credential: { kind: "oauth", key: "access", refreshToken: "refresh", expiresAt: new Date(Date.now() + 3600_000) },
+        workspaceId: "work", linearOrgId: org, name: "Work", team: "WG", teamLabels: false,
+        credential: { kind: "oauth", key: user + "-access", refreshToken: "refresh", expiresAt: new Date(Date.now() + 3600_000) },
       });
       const packed = Buffer.from(JSON.stringify({
         accountId, id: randomUUID(), email: user + "@example.com", exp: Math.floor(Date.now() / 1000) + 600,
@@ -52,9 +83,12 @@ databaseSuites((open) => {
       }) };
     }
     try {
+      const classified = app.routes.filter(({ method, path }) => method !== "ALL" && path.startsWith("/api/"))
+        .map(({ method, path }) => `${method} ${path}`);
+      expect([...new Set(classified)].sort()).toEqual(Object.keys(sharedRoutes).sort());
       const owner = await account("Ada");
-      const member = await account("Sam");
-      const other = await account("Pat");
+      const member = await account("Grace");
+      const other = await account("Pat", "other-org");
       const memberRoute = "/api/projects/project/members/" + randomUUID();
       const minted = await tenants.accounts.createToken(owner.accountId, "Coordinator");
       const ownerWrites = [[share, "POST"], [share + "/view/rotate", "POST"], [share + "/view", "DELETE"],
@@ -108,9 +142,82 @@ databaseSuites((open) => {
       expect(await (await joinAs(member, view)).json()).toEqual({ project: "Example", owner: "Ada", role: "viewer" });
       expect((await (await owner.request(share)).json()).members).toEqual([]);
       expect(await (await join(view)).json()).toMatchObject({ project: "Example", role: "viewer" });
+      const memberStatus = await (await member.request("/api/status")).json();
+      const shared = memberStatus.workspaces.find(({ id }: { id: string }) => id.startsWith("shared:"));
+      expect(shared).toMatchObject({ name: "Example", owner: "Ada", role: "viewer", projectId: "project" });
+      const headers = { "x-workspace": shared.id };
+      const summary = { id: shared.id, name: "Example", owner: "Ada", role: "viewer", projectId: "project" };
+      const status = await (await member.request("/api/status", "GET", undefined, headers)).json();
+      expect(status.workspaces).toEqual([summary]);
+      expect(status).not.toHaveProperty("cache");
+      expect((await member.request("/api/config", "GET", undefined, headers)).status).toBe(404);
+      expect((await member.request("/api/link?workspace=personal", "GET", undefined, headers)).status).toBe(404);
+      expect((await member.request("/api/projects/project/graph", "GET", undefined, { ...headers, "x-project": "private" })).status).toBe(404);
+      expect((await member.request("/api/issues/inside/comments", "POST", { body: "Read only" }, headers)).status).toBe(405);
+      expect((await member.request("/api/issues/inside", "PATCH", { stateId: "started" }, headers)).status).toBe(405);
+      expect((await member.request("/api/projects/project/asks/ask1/reply", "POST", { body: "Read only" }, headers)).status).toBe(405);
+      for (const path of ["/api/projects", "/api/overview"]) {
+        const list = await (await member.request(path, "GET", undefined, headers)).json();
+        expect(list.workspaces).toEqual([summary]);
+        expect(list.projects.map(({ id }: { id: string }) => id)).toEqual(["project"]);
+      }
+      const graph = await member.request("/api/projects/project/graph", "GET", undefined, headers);
+      expect(graph.status).toBe(200);
+      expect(await graph.json()).toMatchObject({ workspace: shared.id, project: { id: "project" } });
+      expect((await member.request("/api/projects/project/commands", "POST", { name: "next" }, headers)).status).toBe(405);
+      expect((await member.request("/api/projects/private/graph", "GET", undefined, headers)).status).toBe(404);
+      expect((await other.request("/api/projects/project/graph", "GET", undefined, headers)).status).toBe(400);
+      const tokenStatus = await app.request("/api/status", { headers: { host, ...headers, authorization: "Bearer " + minted.token } });
+      expect(tokenStatus.status).toBe(400);
+
       expect((await member.request(share)).status).toBe(404);
       expect((await member.request(share + "/view/rotate", "POST")).status).toBe(404);
       expect((await member.request(share + "/collab", "DELETE")).status).toBe(404);
+      expect(await (await join(collab)).json()).toMatchObject({ role: "collaborator" });
+      const comments = "/api/issues/inside/comments";
+      calls.length = 0;
+      expect((await member.request(comments, "GET", undefined, headers)).status).toBe(200);
+      expect((await member.request(comments, "POST", { body: "A comment" }, headers)).status).toBe(200);
+      expect(calls.filter(({ query }) => query.startsWith("mutation")).map(({ key }) => key)).toEqual(["Bearer Grace-access"]);
+      expect(calls.filter(({ query }) => query.startsWith("query")).every(({ key }) => key === "Bearer Ada-access")).toBe(true);
+      for (const message of ["Forbidden", "Entity not found"]) {
+        rejectWrite = Response.json({ errors: [{ message }] });
+        const refused = await member.request(comments, "POST", { body: "Refused" }, headers);
+        expect(refused.status).toBe(403);
+        expect(await refused.json()).toMatchObject({ code: "needs_linear_access" });
+      }
+      rejectWrite = Response.json({ errors: [{ message: "Entity not found" }] }, { status: 503 });
+      expect((await member.request(comments, "POST", { body: "Outage" }, headers)).status).toBe(502);
+      rejectWrite = undefined;
+      expect((await member.request("/api/issues/outside", "PATCH", { stateId: "started" }, headers)).status).toBe(404);
+      expect((await member.request("/api/issues/outside/comments", "GET", undefined, headers)).status).toBe(404);
+      expect((await member.request("/api/issues/outside/comments", "POST", { body: "Outside" }, headers)).status).toBe(404);
+      expect((await member.request("/api/account", "GET", undefined, headers)).status).toBe(404);
+      for (const path of ["close", "autonomy", "review-effort", "share"]) {
+        expect((await member.request("/api/projects/project/" + path, "POST", {}, headers)).status).toBe(403);
+      }
+      expect((await member.request("/api/projects/project/commands", "POST", { name: "pause" }, headers)).status).toBe(403);
+      expect((await member.request("/api/projects/project/commands", "POST", { name: "next" }, headers)).status).toBe(200);
+      for (const patch of [{ stateId: "started" }, { labelIds: ["label"] }]) {
+        expect((await member.request("/api/issues/inside", "PATCH", patch, headers)).status).toBe(200);
+        expect(calls.findLast(({ query }) => query.startsWith("mutation"))?.key).toBe("Bearer Grace-access");
+      }
+      expect((await member.request("/api/issues/inside", "PATCH", { title: "Changed" }, headers)).status).toBe(403);
+      expect((await member.request("/api/projects/project/commands", "POST", { name: "dispatch", key: "other", issue: "WG-1" }, headers)).status).toBe(404);
+      expect((await member.request("/api/projects/project/commands", "POST", { name: "dispatch", key: "node", issue: "WG-1" }, headers)).status).toBe(200);
+      const ref = { tenant: owner.accountId, workspace: "work", id: "project" };
+      const coordinator = await app.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, ref);
+      await coordinator.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "test", plan: "example" } }));
+      await coordinator.receive(JSON.stringify({ v: 1, type: "asks", payload: { asks: [
+        { id: "ask1", key: "node", issue: "WG-1", from: "worker", body: "Which page?" },
+      ] } }));
+      await app.link.hub.joinCoordinator({ send: () => {}, close: () => {} }, { ...ref, id: "private" });
+      const scopedStatus = await (await member.request("/api/status", "GET", undefined, headers)).json();
+      expect(scopedStatus.rooms).toMatchObject([{ workspace: shared.id, project: "project", asks: 1 }]);
+      const presence = await (await member.request("/api/projects/project/presence", "GET", undefined, headers)).json();
+      expect(presence.asks).toMatchObject([{ id: "ask1", issue: "WG-1" }]);
+      expect((await member.request("/api/projects/project/asks/ask1/reply", "POST", { body: "The project page." }, headers)).status).toBe(200);
+      expect(calls.findLast(({ query }) => query.startsWith("mutation"))?.key).toBe("Bearer Grace-access");
       const memberShare = await member.request(share, "POST");
       expect(memberShare.status).toBe(200);
       const memberLink = token((await memberShare.json()).view.url);
@@ -121,7 +228,24 @@ databaseSuites((open) => {
       expect((await joinAs(other, memberLink)).status).toBe(404);
       expect(await db.query("SELECT id FROM shares WHERE connection_id = $1", [connection.id])).toEqual([]);
       expect(await db.query("SELECT user_id FROM project_members WHERE connection_id = $1", [connection.id])).toEqual([]);
-      expect(await (await join(collab)).json()).toMatchObject({ role: "collaborator" });
+      expect((await joinAs(other, collab, true)).ok).toBe(true);
+      const otherList = await (await other.request("/api/status")).json();
+      const otherShared = otherList.workspaces.find(({ id }: { id: string }) => id.startsWith("shared:"));
+      const before = calls.length;
+      const denied = await other.request(comments, "POST", { body: "Missing access" }, { "x-workspace": otherShared.id });
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toMatchObject({ code: "needs_linear_access" });
+      expect(calls.slice(before).some(({ query }) => query.startsWith("mutation"))).toBe(false);
+      await tenants.accounts.addConnection(other.accountId, {
+        workspaceId: "attached", linearOrgId: "org", name: "Attached", team: "WG", teamLabels: false,
+        credential: { kind: "api_key", key: "other-api-key" },
+      });
+      rejectWrite = Response.json({ errors: [{ message: "Unauthorized" }] }, { status: 401 });
+      const invalidKey = await other.request(comments, "POST", { body: "Refused key" }, { "x-workspace": otherShared.id });
+      expect(invalidKey.status).toBe(403);
+      expect(await invalidKey.json()).toMatchObject({ code: "needs_linear_access" });
+      rejectWrite = undefined;
+
       expect(await (await join(view)).json()).toMatchObject({ role: "collaborator" });
       expect((await joinAs(owner, view, true)).ok).toBe(true);
       const rotated = await owner.request(share + "/view/rotate", "POST");
@@ -148,13 +272,24 @@ databaseSuites((open) => {
         }
       }
       const { members } = JSON.parse(text);
-      expect(members).toMatchObject([{ name: "Sam", email: "Sam@example.com", role: "collaborator" }]);
-      const memberPath = "/api/projects/project/members/" + members[0].id;
+      const grace = members.find(({ name }: { name: string }) => name === "Grace");
+      expect(grace).toMatchObject({ email: "Grace@example.com", role: "collaborator" });
+      const memberPath = "/api/projects/project/members/" + grace.id;
       expect((await member.request(memberPath, "DELETE")).status).toBe(404);
       expect((await other.request(memberPath, "DELETE")).status).toBe(404);
+      expect((await member.request(memberPath, "DELETE", undefined, headers)).status).toBe(403);
+      const silent = { "x-workspace": otherShared.id };
+      expect((await other.request("/api/status", "GET", undefined, silent)).status).toBe(200);
+      await db.query("DELETE FROM project_members WHERE id = $1", [otherShared.id.slice("shared:".length)]);
+      time += 9_999;
+      expect((await other.request("/api/status", "GET", undefined, silent)).status).toBe(200);
+      time++;
+      expect((await other.request("/api/status", "GET", undefined, silent)).status).toBe(400);
       expect((await owner.request(memberPath, "PATCH", { role: "viewer" })).status).toBe(204);
       expect((await (await owner.request(share)).json()).members[0].role).toBe("viewer");
+      expect((await member.request(comments, "POST", { body: "Role changed" }, headers)).status).toBe(405);
       expect((await owner.request(memberPath, "DELETE")).status).toBe(204);
+      expect((await member.request("/api/projects", "GET", undefined, headers)).status).toBe(400);
       for (let i = 0; i < 2; i++) expect((await join(fresh)).ok).toBe(true);
       expect((await join(fresh)).status).toBe(429);
       const changes: string[] = [];
@@ -171,7 +306,15 @@ databaseSuites((open) => {
       [createHash("sha256").update(fresh).digest("hex"), fill.map(({ id }) => id)]);
       expect((await joinAs(other, fresh, true)).status).toBe(409);
       expect((await (await owner.request(share)).json()).members).toHaveLength(50);
+      const otherProject = "second";
+      const ownerConnection = (await tenants.accounts.readTenant(owner.accountId))!.connections[0].id;
+      const scope: [string, string, string] = [owner.accountId, ownerConnection, otherProject];
+      const newLinks = await tenants.accounts.shares.make(scope, "Second");
+      expect((await joinAs(other, newLinks!.created.view!, true)).status).toBe(200);
+      const secondList = await (await other.request("/api/status")).json();
+      const second = secondList.workspaces.find(({ projectId }: { projectId: string }) => projectId === otherProject);
       await tenants.accounts.deleteAccount(owner.accountId);
+      expect((await other.request("/api/status", "GET", undefined, { "x-workspace": second.id })).status).toBe(400);
       expect(await db.query("SELECT id FROM shares")).toEqual([]);
       expect(await db.query("SELECT user_id FROM project_members")).toEqual([]);
     } finally {

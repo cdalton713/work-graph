@@ -45,7 +45,12 @@ export interface Project {
   /** The project has the plain label `shared`: the viewer shows it. */
   shared?: boolean;
 }
-export interface WorkspaceSummary {
+export interface SharedWorkspaceInfo {
+  owner: string;
+  role: "viewer" | "collaborator";
+  projectId: string;
+}
+export interface WorkspaceSummary extends Partial<SharedWorkspaceInfo> {
   id: string; name: string; error?: string;
   /** The address of the read-only viewer of this workspace (config `share_url`). None: the page has no Share button. */
   shareUrl?: string;
@@ -120,8 +125,8 @@ export interface ServerStatus {
   /** Seconds since the server started. */
   uptime: number;
   /** For each workspace, the values of its last Linear response; null before the first response. Times are epoch ms. */
-  workspaces: { id: string; name: string; requestsRemaining: number | null; requestsLimit: number | null; requestsReset: number | null;
-    complexityRemaining: number | null; complexityReset: number | null; at: number | null }[];
+  workspaces: (WorkspaceSummary & { requestsRemaining: number | null; requestsLimit: number | null; requestsReset: number | null;
+    complexityRemaining: number | null; complexityReset: number | null; at: number | null })[];
   /** How many project graphs the caches hold. */
   cache: number;
   rooms: RoomCounts[];

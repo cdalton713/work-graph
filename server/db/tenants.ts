@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { LINK_PREFIX, type RedisLink } from "../redis.ts";
-import type { Tenant, Tenants } from "../tenants.ts";
+import type { SharedWorkspace, Tenant, Tenants } from "../tenants.ts";
 import { refreshLinearToken, type LinearAuth, type OAuthCredential } from "../linearauth.ts";
 import { createAccounts } from "./accounts.ts";
 import { credentialCrypto, type CredentialCrypto } from "./crypto.ts";
@@ -38,14 +38,22 @@ export async function openTenants(url: string, env: NodeJS.ProcessEnv, options?:
   }
 }
 
-export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = LINK_PREFIX, linearAuth, now = Date.now }: DatabaseTenantOptions = {}) {
+export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = LINK_PREFIX, linearAuth, now = () => Date.now() }: DatabaseTenantOptions = {}) {
   const cache = new Map<string, { expires: number; tenant: Promise<Tenant | null> }>();
+  const memberships = new Map<string, {
+    expires: number;
+    owners?: Set<string>;
+    rows: ReturnType<ReturnType<typeof import("./shares.ts").createShares>["memberships"]>;
+  }>();
   const listeners = new Set<(id: string) => void>();
   const source = randomUUID();
   const refreshing = new Map<string, Promise<OAuthCredential>>();
 
   function invalidate(id: string) {
     cache.delete(id);
+    for (const [account, entry] of memberships) {
+      if (account === id || !entry.owners || entry.owners.has(id)) memberships.delete(account);
+    }
     for (const listener of listeners) {
       try { listener(id); } catch { console.error("Tenant change notice could not be delivered"); }
     }
@@ -93,9 +101,9 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
   async function byId(id: string): Promise<Tenant | null> {
     if (!uuid.test(id)) return null;
     const key = id.toLowerCase();
-    const now = Date.now();
+    const time = now();
     const cached = cache.get(key);
-    if (cached && cached.expires > now) return cached.tenant;
+    if (cached && cached.expires > time) return cached.tenant;
     cache.delete(key);
     if (cache.size >= CACHE_LIMIT) {
       const oldest = cache.keys().next().value;
@@ -105,7 +113,7 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
       if (cache.get(key)?.tenant === tenant) cache.delete(key);
       throw error;
     });
-    cache.set(key, { expires: now + CACHE_MS, tenant });
+    cache.set(key, { expires: time + CACHE_MS, tenant });
     return tenant;
   }
 
@@ -123,6 +131,32 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
       return id ? byId(id) : null;
     },
     byId,
+    async sharedWorkspaces(account) {
+      if (!uuid.test(account)) return [];
+      const time = now();
+      let cached = memberships.get(account);
+      if (!cached || cached.expires <= time) {
+        memberships.delete(account);
+        if (memberships.size >= CACHE_LIMIT) memberships.delete(memberships.keys().next().value!);
+        const rows = accounts.shares.memberships(account).then((found) => {
+          const current = memberships.get(account);
+          if (current?.rows === rows) current.owners = new Set(found.map(({ ownerId }) => ownerId));
+          return found;
+        }).catch((error) => {
+          if (memberships.get(account)?.rows === rows) memberships.delete(account);
+          throw error;
+        });
+        cached = { expires: time + CACHE_MS, rows };
+        memberships.set(account, cached);
+      }
+      const resolved = await Promise.all((await cached.rows).map(async (row): Promise<SharedWorkspace | null> => {
+        const owner = await byId(row.ownerId);
+        const workspace = owner?.workspaces.find((entry) => entry.connectionId === row.connectionId);
+        if (!owner || !workspace || workspace.needsKey) return null;
+        return { id: "shared:" + row.id, name: row.name, projectId: row.projectId, role: row.role, owner, workspace };
+      }));
+      return resolved.filter((entry): entry is SharedWorkspace => entry !== null);
+    },
     onChange(listener) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
@@ -130,6 +164,7 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
     close() {
       stop?.();
       cache.clear();
+      memberships.clear();
       listeners.clear();
     },
   } satisfies Tenants & { accounts: typeof accounts; close(): void };

@@ -27,6 +27,7 @@ export interface PanelProps {
   agent?: AgentRow;
   /** The viewer: the panel shows the issue with no control that writes. */
   readOnly?: boolean;
+  limitedEdits?: boolean;
 }
 
 /** `note` says how many of these relations still hold, in the words of the canvas key. */
@@ -45,7 +46,7 @@ function Links({ title, ids, graph, onGo, note, clear }: { title: string; ids: s
   );
 }
 
-export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress, agent, readOnly = false }: PanelProps) {
+export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress, agent, readOnly = false, limitedEdits = false }: PanelProps) {
   const { issue, card } = node;
   const elapsed = runTime(card, now);
   const team = data.teams[issue.teamId];
@@ -156,7 +157,7 @@ export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError,
         )}
         {asks && asks.length > 0 && <Asks asks={asks} projectId={data.project.id} workspace={data.workspace} now={now} onError={onError} />}
         {/* `wg load` sets the title of a node from plan.json, so the title of a node is not changed here. */}
-        <textarea className="title-input" rows={2} value={title} readOnly={locked || !!card}
+        <textarea className="title-input" rows={2} value={title} readOnly={locked || limitedEdits || !!card}
           title={card && !locked ? "plan.json has the title of a wg node. Change it there, then run `wg load --apply`." : undefined} onChange={(e) => setTitle(e.target.value)} onBlur={saveTitle}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }} />
 
@@ -182,14 +183,14 @@ export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError,
           </dd>
           <dt>Priority</dt>
           <dd>
-            <Picker disabled={locked} value={[String(issue.priority)]} onChange={([p]) => patch({ priority: Number(p) }, { priority: Number(p) })}
+            <Picker disabled={locked || limitedEdits} value={[String(issue.priority)]} onChange={([p]) => patch({ priority: Number(p) }, { priority: Number(p) })}
               options={PRIORITY.map((label, i) => ({ id: String(i), label }))}>
               {PRIORITY[issue.priority] ?? "No priority"}
             </Picker>
           </dd>
           <dt>Assignee</dt>
           <dd>
-            <Picker disabled={locked} value={[issue.assignee?.id ?? "none"]}
+            <Picker disabled={locked || limitedEdits} value={[issue.assignee?.id ?? "none"]}
               onChange={([id]) => patch({ assigneeId: id === "none" ? null : id }, { assignee: team?.members.find((m) => m.id === id) ?? null })}
               options={[{ id: "none", label: "No assignee" }, ...(team?.members ?? []).map((m) => ({ id: m.id, label: m.name, hint: m.id === data.viewerId ? "you" : undefined }))]}>
               {issue.assignee?.name ?? "No assignee"}
@@ -286,7 +287,7 @@ export function Panel({ node, now, graph, data, onPatch, onGo, onClose, onError,
 
         <section>
           <h3>Description
-            {!locked && draft === null && <button type="button" className="ghost" onClick={() => { setBase(issue.description); setDraft(issue.description); }}>Edit</button>}
+            {!locked && !limitedEdits && draft === null && <button type="button" className="ghost" onClick={() => { setBase(issue.description); setDraft(issue.description); }}>Edit</button>}
           </h3>
           {draft === null ? (issue.description ? <Rich text={issue.description} /> : <p className="empty">No description.</p>) : (
             <>

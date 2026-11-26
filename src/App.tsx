@@ -222,13 +222,32 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   // page or in Linear at once instead of at the next poll.
   useEffect(() => { setOpenProject(project?.id ?? null); }, [openKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const linkRef = useMemo(() => (project ? { workspace: project.workspace ?? site.defaultWorkspace, id: project.id } : null), [openKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  const link = useLink(linkRef, () => { if (project && !document.hidden) void load(project); });
+  const entry = directory?.workspaces.find(({ id }) => id === project?.workspace);
+  const sharedRole = entry?.role;
+  const link = useLink(sharedRole ? null : linkRef, () => { if (project && !document.hidden) void load(project); });
   // A worker's question is a move of the human's: it counts in "Your move", the picker, and the badge.
   const yours = useMemo(() => new Map((overview?.summaries ?? []).map((s) => [summaryKey(s), movesWithAgents(movesWithAsks(s.you, link.asksBy.get(summaryKey(s))), link.agentsBy.get(summaryKey(s)), now).length])), [overview, link.asksBy, link.agentsBy, now]);
-  const asked = useMemo(() => new Set(link.asks.flatMap((a) => (a.issue ? [a.issue] : []))), [link.asks]);
-  const presence = linkRef ? link.presence.get(summaryKey(linkRef)) : undefined;
+  const [sharedPresence, setSharedPresence] = useState<{ key: string; data: Awaited<ReturnType<typeof api.sharedPresence>> } | null>(null);
+  useEffect(() => {
+    if (sharedRole !== "collaborator" || !linkRef || !openKey) return;
+    let active = true;
+    const poll = () => {
+      if (document.hidden) return;
+      void api.sharedPresence(linkRef.id, linkRef.workspace)
+        .then((data) => { if (active) setSharedPresence({ key: openKey, data }); })
+        .catch(() => { if (active) setSharedPresence(null); });
+    };
+    poll();
+    const timer = window.setInterval(poll, POLL_MS);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [sharedRole, linkRef, openKey]);
+  const projectPresence = sharedPresence?.key === openKey && sharedRole === "collaborator" ? sharedPresence.data : undefined;
+  const asks = sharedRole ? projectPresence?.asks ?? [] : link.asks;
+  const asked = useMemo(() => new Set(asks.flatMap((a) => (a.issue ? [a.issue] : []))), [asks]);
+  const presence = projectPresence ?? (linkRef ? link.presence.get(summaryKey(linkRef)) : undefined);
   const agents = linkRef ? link.agentsBy.get(summaryKey(linkRef)) : undefined;
-  const viewer = site.readOnly;
+  const viewer = site.readOnly || sharedRole === "viewer";
+  const collaborator = sharedRole === "collaborator";
   const coordinator = useMemo(() => (linkRef ? presenceText(presence, now, agents, viewer) : null), [presence, linkRef, now, agents, viewer]);
   const stale = useMemo(() => (project ? staleBanner(data, now) : null), [project, data, now]);
   const budget = useMemo(() => budgetWarnings(status, now), [status, now]);
@@ -249,13 +268,13 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
       setError(`${cmd.name}: ${(e as Error).message}`);
     }
   }, [project, coordinator]);
-  const canCommand = canCommandCoordinator(viewer, coordinator);
+  const canCommand = !viewer && (collaborator || canCommandCoordinator(viewer, coordinator));
   const commands = canCommand && (
     <span className="effort-commands">
       {commandNote && <span className="effort-note" role="status">{commandNote}</span>}
       <button type="button" className="ghost" onClick={() => void command({ name: "next" }, "wg next runs again.")} title="The coordinator reads Linear and publishes again at once.">Run wg next now</button>
-      <button type="button" className="ghost" onClick={() => void command({ name: paused ? "resume" : "pause" }, paused ? "Resumed." : "Paused.")}
-        title={paused ? "The coordinator acts again." : "The coordinator stops acting: wg next holds each action until you resume."}>{paused ? "Resume" : "Pause"}</button>
+      {!sharedRole && <button type="button" className="ghost" onClick={() => void command({ name: paused ? "resume" : "pause" }, paused ? "Resumed." : "Paused.")}
+        title={paused ? "The coordinator acts again." : "The coordinator stops acting: wg next holds each action until you resume."}>{paused ? "Resume" : "Pause"}</button>}
     </span>
   );
 
@@ -483,17 +502,17 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const initiatives = useMemo(() => (directory?.projects ?? []).some((p) => p.initiative), [directory]);
   // One group per workspace and initiative, open projects first; the projects with no initiative come last in
   // their workspace. The lamp is the status; the text names it only when it is not In Progress.
-  const projectOptions = useMemo(() => (directory?.workspaces ?? []).flatMap(({ id, name }) => [...listed.open, ...listed.closed]
+  const projectOptions = useMemo(() => (directory?.workspaces ?? []).flatMap(({ id, name, role, owner }) => [...listed.open, ...listed.closed]
     .filter((p) => p.workspace === id)
     .map((p, at) => ({ p, at }))
     .sort((a, b) => Number(!a.p.initiative) - Number(!b.p.initiative) || (a.p.initiative ?? "").localeCompare(b.p.initiative ?? "") || a.at - b.at)
     .map(({ p }) => {
       const closed = p.statusType === "completed" || p.statusType === "canceled";
       const mine = yours.get(summaryKey(p)) ?? 0;
-      const hint = [mine ? `${mine} ${words.forOwner}` : "", p.statusType === "started" ? "" : p.status].filter(Boolean).join(" · ");
+      const hint = [owner, mine ? `${mine} ${words.forOwner}` : "", p.statusType === "started" ? "" : p.status].filter(Boolean).join(" · ");
       return {
         id: `${p.workspace}:${p.id}`, label: p.name, dim: closed,
-        group: [directory && directory.workspaces.length > 1 ? name : "", p.initiative ?? (initiatives ? "No initiative" : "")].filter(Boolean).join(" · ") || undefined,
+        group: role ? "Shared projects" : [directory && directory.workspaces.length > 1 ? name : "", p.initiative ?? (initiatives ? "No initiative" : "")].filter(Boolean).join(" · ") || undefined,
         hint: hint || undefined, lead: <Lamp signal={mine ? "stop" : PROJECT_LAMP[p.statusType] ?? "idle"} />,
       };
     })), [directory, listed, yours, initiatives]);
@@ -522,21 +541,21 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
           <span className="bar-project">{project ? [project.workspaceName, project.initiative, project.name].filter(Boolean).join(" / ") : (directory ? "Open a project" : "Loading projects…")}</span><span className="caret">▾</span>
         </Picker>
         {project && <CopyButton text={project.name} label="Copy the project name" />}
-        {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
+        {!sharedRole && project && project.statusType !== "completed" && project.statusType !== "canceled" && (
           <Picker wide value={[autonomy]} onChange={([level]) => void setAutonomy(level as AutonomyLevel)} disabled={autonomyBusy || viewer}
             title={`Autonomy level: what the coordinator may do without ${words.owner}.${project.autonomy ? "" : " No label on the project: standard."} A change tells the coordinator at once.`}
             options={AUTONOMY_LEVELS.map((level) => ({ id: level, label: level, hint: AUTONOMY_HINTS[level] }))}>
             <span className={`bar-autonomy auto-${autonomy}`}>{autonomyBusy ? "Autonomy…" : <>Autonomy <b>{autonomy}</b></>}</span><span className="caret">▾</span>
           </Picker>
         )}
-        {project && project.statusType !== "completed" && project.statusType !== "canceled" && (
+        {!sharedRole && project && project.statusType !== "completed" && project.statusType !== "canceled" && (
           <Picker wide value={[review]} onChange={([level]) => void setReviewEffort(level as ReviewEffort)} disabled={reviewBusy || viewer}
             title={`Review effort: how much review each PR gets.${project.review ? "" : " No label on the project: thorough."} A change tells the coordinator at once.`}
             options={REVIEW_LEVELS.map((level) => ({ id: level, label: level, hint: REVIEW_HINTS[level] }))}>
             <span className={`bar-review review-${review}`}>{reviewBusy ? "Review…" : <>Review <b>{review}</b></>}</span><span className="caret">▾</span>
           </Picker>
         )}
-        {!viewer && project && shareLink && (project.shared ? (
+        {!viewer && !sharedRole && project && shareLink && (project.shared ? (
           <span className="bar-share" title="Each account that may sign in to the viewer can read this project there. It cannot change it.">
             <b>Shared</b><CopyButton text={shareLink} label="Copy the viewer link" />
             <button type="button" className="ghost" disabled={shareBusy} onClick={() => void setShared(false)} title="Remove this project from the viewer.">Stop</button>
@@ -545,7 +564,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
           <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void setShared(true)}
             title="Show this project on the read-only viewer, for each account that may sign in there. The link to copy shows here then.">{shareBusy ? "Sharing…" : "Share"}</button>
         ))}
-        {!viewer && service && project && (
+        {!viewer && !sharedRole && service && project && (
           <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void makeShareLinks()}>
             {shareBusy ? "Sharing…" : "Share"}
           </button>
@@ -589,7 +608,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         {openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>}
         {site.user && <a className="bar-user" href="/auth/logout" title={`Signed in as ${site.user}. Select to sign out.`}>Sign out</a>}
         {/* Apart from the view toggles: it changes every issue of the project in Linear. */}
-        {!viewer && project && project.statusType !== "completed" && project.statusType !== "canceled" && (
+        {!viewer && !sharedRole && project && project.statusType !== "completed" && project.statusType !== "canceled" && (
           <button type="button" className="ghost bar-close" disabled={closing || busy} onClick={() => void closeProject()}
             title="Mark every issue in this project Done and complete the project.">{closing ? "Closing…" : "Close project"}</button>
         )}
@@ -628,10 +647,10 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
           Run wg next with the wg of this repository.
         </div>
       )}
-      {!timing && coordinator && (
+      {!timing && (coordinator || commands) && (
         <div className="effort">
           <span className="effort-mark">wg next</span><span className="effort-status" />
-          <span className={`effort-age coord-${coordinator.state}`} title={coordinator.title}>{coordinator.text}</span>
+          {coordinator && <span className={`effort-age coord-${coordinator.state}`} title={coordinator.title}>{coordinator.text}</span>}
           {commands}
         </div>
       )}
@@ -684,10 +703,10 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             focus={focus} showMap={map} onSelect={select} onHover={setHoverId} />
         )}
         {selected && full && data && (
-          <Panel node={selected} now={now} graph={full} data={data} asks={link.asks.filter((a) => a.issue === selected.issue.identifier)}
+          <Panel node={selected} now={now} graph={full} data={data} asks={asks.filter((a) => a.issue === selected.issue.identifier)}
             progress={link.progress.find((p) => p.issue === selected.issue.identifier)}
             agent={agentsFresh(agents, now) ? agents.agents.find((a) => a.issue === selected.issue.identifier) : undefined}
-            onDispatch={canCommand ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer}
+            onDispatch={canCommand ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer} limitedEdits={collaborator}
             onGo={(id) => { select(id); setFocus({ id, tick: Date.now() }); }} />
         )}
       </main>

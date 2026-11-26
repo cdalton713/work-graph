@@ -22,9 +22,9 @@ const fields = {
   share_revoked: {},
   member_joined: { role: ["viewer", "collaborator"] },
   member_removed: {},
-  page_view: { page: ["overview", "project", "settings", "onboarding"], role: ["owner", "viewer"] },
-  node_opened: { role: ["owner", "viewer"] },
-  page_write: { kind: ["comment", "status", "answer", "command"], role: ["owner", "viewer"] },
+  page_view: { page: ["overview", "project", "settings", "onboarding"], role: ["owner", "viewer", "collaborator"] },
+  node_opened: { role: ["owner", "viewer", "collaborator"] },
+  page_write: { kind: ["comment", "status", "answer", "command"], role: ["owner", "viewer", "collaborator"] },
 } as const;
 
 type Event = keyof typeof fields;

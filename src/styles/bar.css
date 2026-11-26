@@ -84,6 +84,7 @@
   .aspect { padding: 4px 9px; }
   /* The row fades at its right end, to show that it scrolls. */
   .aspects { mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent); }
+  .aspects::after { content: ""; flex: 0 0 20px; }
 }
 
 /* What wg next last said about the effort, and how old that is. */
@@ -146,3 +147,49 @@
 
 .claim-filter { display: flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--ink-3); }
 .claim-filter select { color: var(--ink-1); background: var(--cab-1); border: 1px solid var(--rail); font: inherit; }
+
+.aspect-hint { flex: none; }
+.effort-trigger, .effort-trigger:hover:not(:disabled) {
+  display: flex; flex: 1; align-items: baseline; gap: inherit; min-width: 0;
+  text-align: left; padding: 0; border: 0; background: transparent; color: inherit; font: inherit;
+}
+.effort-trigger:focus-visible { outline-offset: 2px; }
+.effort-warning { overflow-wrap: anywhere; }
+.effort-details { display: grid; gap: 8px; overflow-wrap: anywhere; }
+.effort-details p, .effort-details ul { margin: 0; }
+.effort-details ul { padding-inline-start: 20px; white-space: pre-wrap; }
+.effort-details li + li { margin-top: 6px; }
+.effort-details .effort-commands { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
+.effort-details .effort-commands button.ghost { min-width: var(--touch); min-height: var(--touch); padding-inline: 12px; font-size: 13px; }
+.effort-details .effort-commands :is(.effort-note, p) { display: block; flex-basis: 100%; }
+
+@media (max-width: 1279px), (pointer: coarse) {
+  .rail-bar { flex: none; height: var(--touch); border-bottom: 0; box-shadow: inset 0 -1px var(--rail); }
+  .aspects :is(.aspect, button.ghost) { min-width: var(--touch); min-height: var(--touch); }
+  .claim-filter select { min-width: var(--touch); min-height: var(--touch); }
+  .effort-row > .effort-commands { display: none; }
+  .effort-row { padding-block: 0; align-items: center; }
+  .effort-trigger, .effort-trigger:hover:not(:disabled) { align-items: center; min-height: var(--touch); }
+}
+
+@media (pointer: coarse) {
+  .claim-filter select { font-size: 16px; }
+  .tally-track { display: none; }
+}
+
+@media (max-width: 720px) {
+  .effort-row { flex-wrap: nowrap; }
+  .effort-coordinator-lamp { display: flex; }
+  .effort-row:not(.effort-warning) > .effort-timing, .effort-row > .effort-coordinator { display: none; }
+  .effort-row > .effort-trigger > .effort-status { min-width: 0; }
+  .effort-row.effort-warning .effort-status { white-space: normal; }
+  /* Use the free space at the start of the filter row to extend the phone target. */
+  .rail-bar:has(+ .effort-row:not(.effort-warning)) { padding-inline-start: var(--touch); }
+  .rail-bar + .effort-row:not(.effort-warning) { padding-inline-start: 0; }
+  .rail-bar + .effort-row:not(.effort-warning) > .effort-trigger {
+    position: relative; min-height: 27px; padding-inline-start: 8px;
+  }
+  .rail-bar + .effort-row:not(.effort-warning) > .effort-trigger::before {
+    content: ""; position: absolute; inset: -17px auto 0 0; width: var(--touch);
+  }
+}

@@ -173,11 +173,15 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
           onChange={(e) => setTitle(e.target.value)} onBlur={saveTitle}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }} />;
 
+  const agentDetails = agent && (
+    <><b>Agent in Orca:</b> {agent.agent} {agentState(agent).text}{agent.at ? ` · ${ageText(now - Date.parse(agent.at))}` : ""}</>
+  );
+
   const pullRequests = (
     <div className="prs">
       {issue.pullRequests.map((pr) => {
         const row = <div className="pr-row">
-          <span className="mono">#{pr.number}</span><span className="pr-status">{pr.status}</span><PrLinks pr={pr} />
+          <span className="mono">#{pr.number}</span><span className="pr-status">{pr.status}</span><PrLinks pr={pr} linkHints />
           {phone && pr.title && <span className="panel-pr-title">{pr.title}</span>}
         </div>;
         return pr.title && !phone
@@ -217,9 +221,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
         )}
         {agent && (
           <p className={`notice panel-agent${agentNeeds(agent) ? " is-warning" : ""}`}>
-            <Hint text={agent.title} infoLabel="About the agent">
-              <b>Agent in Orca:</b> {agent.agent} {agentState(agent).text}{agent.at ? ` · ${ageText(now - Date.parse(agent.at))}` : ""}
-            </Hint>
+            {agent.title ? <Hint text={agent.title} infoLabel="About the agent">{agentDetails}</Hint> : agentDetails}
             {agent.said && <span className="panel-agent-said">{agent.said}</span>}
           </p>
         )}

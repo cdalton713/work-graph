@@ -46,7 +46,18 @@ export function CopyButton({ text, label, className, secret }: { text: string; l
 }
 
 /** The two places to open a pull request: GitHub, and Linear's review page when Linear has it. */
-export function PrLinks({ pr, compact }: { pr: PullRequest; compact?: boolean }) {
+export function PrLinks({ pr, compact, linkHints }: { pr: PullRequest; compact?: boolean; linkHints?: boolean }) {
+  if (linkHints) return (
+    <span className="pr-links">
+      <Hint text={`Open #${pr.number} in GitHub`} infoLabel="About the GitHub link">
+        <a href={pr.url} target="_blank" rel="noopener noreferrer">{compact ? "GitHub" : "GitHub ↗"}</a>
+      </Hint>
+      {pr.reviewUrl && <Hint text={`Open #${pr.number} in Linear review`} infoLabel="About the Linear review link">
+        <a href={pr.reviewUrl} target="_blank" rel="noopener noreferrer">{compact ? "Linear" : "Linear review ↗"}</a>
+      </Hint>}
+    </span>
+  );
+
   return (
     <span className="pr-links">
       <a href={pr.url} target="_blank" rel="noopener noreferrer" title={`Open #${pr.number} in GitHub`}>{compact ? "GitHub" : "GitHub ↗"}</a>

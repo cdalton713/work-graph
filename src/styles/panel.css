@@ -11,6 +11,7 @@
 .count-note::before { content: "·"; margin-right: 8px; color: var(--ink-4); }
 .count-note.is-clear { color: var(--track-clear); }
 .title-input { width: calc(100% + 12px); field-sizing: content; min-height: 30px; resize: none; background: none; border: 1px solid transparent; border-radius: var(--r-1); padding: 4px 6px; margin: -4px -6px; font-size: 16px; font-weight: 600; line-height: 1.3; }
+.panel-title-hint:not(.hint) { display: flex; flex-direction: column; }
 .title-input:hover:not(:read-only), .title-input:focus { border-color: var(--rail-2); background: var(--inset); outline: 0; }
 .fields { display: grid; grid-template-columns: 84px 1fr; gap: 8px 12px; margin: 0; align-items: center; }
 .fields dt { color: var(--ink-3); font-size: 12px; }
@@ -117,7 +118,7 @@
   .panel .picker-trigger, .panel .picker-label { white-space: normal; max-width: 100%; }
   .panel .picker-list { max-width: min(250px, calc(100vw - 128px)); }
   .panel .chip { max-width: 100%; }
-  .panel .pr-row, .panel .pr-links, .panel .row, .panel .comment header { flex-wrap: wrap; }
+  .panel .pr-row, .panel .pr-links, .panel-more .pr-links, .panel .row, .panel .comment header { flex-wrap: wrap; }
   .panel .pr-status, .panel-more .pr-status { white-space: normal; }
   .panel .rich table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
   .panel .rich pre { max-width: 100%; }

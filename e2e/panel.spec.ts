@@ -4,16 +4,16 @@ import { projectPath, test } from "./support/screens.ts";
 
 test.use({ reducedMotion: "reduce" });
 
-async function openPanel(page: Page, issue: string) {
+async function openPanel(page: Page, issue: string, path = "/?project=panel") {
   await page.addInitScript(() => localStorage.setItem("wg-board", "off"));
-  await page.goto(`${projectPath}&issue=WG-${issue}`);
+  await page.goto(`${path}&issue=WG-${issue}`);
   const panel = page.locator(".panel");
   await expect(panel.getByRole("link", { name: `Open WG-${issue} in Linear` })).toBeVisible();
   return panel;
 }
 
 async function addActions(page: Page) {
-  await page.route("**/api/projects/fixture/graph*", async (route) => {
+  await page.route("**/api/projects/panel/graph*", async (route) => {
     const response = await route.fetch();
     if (response.status() !== 200) return route.fulfill({ response });
     const graph: GraphData = await response.json();
@@ -24,14 +24,18 @@ async function addActions(page: Page) {
     }];
     await route.fulfill({ response, json: graph });
   });
-  const at = "2026-01-01T00:00:00Z";
+  const at = new Date().toISOString();
   await page.routeWebSocket(/\/api\/link\?/, (socket) => {
     const url = new URL(socket.url());
-    if (url.searchParams.get("project") !== "fixture") return;
-    const project = { workspace: "default", id: "fixture" };
+    if (url.searchParams.get("project") !== "panel") return;
+    const project = { workspace: "default", id: "panel" };
     socket.send(JSON.stringify({ type: "presence", project, payload: { coordinators: [
       { connected: true, mode: "waiting", lastSeen: at, host: "example.com", plan: "example" },
     ], queued: 0 } }));
+    socket.send(JSON.stringify({ type: "agents", project, payload: { at, agents: [
+      { id: "worker", role: "worker", key: "panel-task", issue: "WG-14",
+        agent: "Worker", state: "running", title: "", said: "", at },
+    ] } }));
     socket.send(JSON.stringify({ type: "asks", project, payload: { asks: [
       { id: "question", key: "panel-task", issue: "WG-14", at, body: "What did you find?" },
     ] } }));
@@ -41,6 +45,8 @@ async function addActions(page: Page) {
 test("the panel keeps issue actions within reach", async ({ page }, testInfo) => {
   await addActions(page);
   const panel = await openPanel(page, "14");
+  await expect(panel.getByText("Agent in Orca:")).toBeVisible();
+  await expect(panel.getByRole("button", { name: "About the agent" })).toHaveCount(0);
   const actions = panel.locator(".panel-actions");
   const phone = testInfo.project.name.startsWith("phone-");
   if (phone) {
@@ -59,13 +65,16 @@ test("the panel keeps issue actions within reach", async ({ page }, testInfo) =>
     const more = page.getByRole("dialog", { name: "More issue actions" });
     await expect(more.getByRole("link", { name: /GitHub/ })).toHaveAttribute("href", "https://example.com/pull/42");
     await expect(more.getByRole("link", { name: /Linear review/ })).toHaveAttribute("href", "https://example.com/review/42");
+    await expect(more.locator(".pr-links [title]")).toHaveCount(0);
+    await more.getByRole("button", { name: "About the GitHub link" }).tap();
+    await expect(more.getByRole("tooltip")).toHaveText("Open #42 in GitHub");
     await expect(more.getByText("Check the result")).toBeVisible();
     await more.getByRole("button", { name: "Answer" }).tap();
     await expect(more).toBeHidden();
     await expect(panel.getByRole("textbox", { name: "Reply to the worker" })).toBeFocused();
 
-    const command = page.waitForRequest("**/api/projects/fixture/commands*");
-    await page.route("**/api/projects/fixture/commands*", (route) => route.fulfill({ json: { ok: true, queued: 0 } }));
+    const command = page.waitForRequest("**/api/projects/panel/commands*");
+    await page.route("**/api/projects/panel/commands*", (route) => route.fulfill({ json: { ok: true, queued: 0 } }));
     await actions.getByRole("button", { name: "Dispatch", exact: true }).tap();
     expect((await command).postDataJSON()).toEqual({ name: "dispatch", key: "panel-task", issue: "WG-14" });
   } else {
@@ -106,13 +115,13 @@ test("panel fields, station details, links and Markdown fit the screen", async (
   await page.route("**/api/account", (route) => route.fulfill({
     json: { human: "Ada", connections: [], tokens: [], onboarding: { skipped: true } },
   }));
-  await page.route("**/api/projects/fixture/graph*", async (route) => {
+  await page.route("**/api/projects/panel/graph*", async (route) => {
     const response = await route.fetch();
     if (response.status() !== 200) return route.fulfill({ response });
     const graph: GraphData = await response.json();
     await route.fulfill({ response, json: { ...graph, workspace: "default", waitNames: ["Ada"] } });
   });
-  await page.route("**/api/projects/fixture/claims*", (route) => route.fulfill({ json: {
+  await page.route("**/api/projects/panel/claims*", (route) => route.fulfill({ json: {
     role: "owner",
     claims: [{ node: "panel-task", holder: "Ada", job: "build", claimedAt: "2026-01-01T00:00:00Z",
       renewedAt: "2026-01-01T00:00:00Z", leaseUntil: "2099-01-01T00:00:00Z", stale: false }],
@@ -181,4 +190,23 @@ test("panel pickers name the field on phones", async ({ page }, testInfo) => {
       await expect(panel.getByRole("listbox")).toBeHidden();
     }
   }
+});
+
+test("the title hint preserves desktop panel boxes", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("desktop-"), "Requires a mouse");
+  const panel = await openPanel(page, "1", projectPath);
+  await expect(panel.getByText("No comments.")).toBeVisible();
+  const { withHint, withoutHint } = await panel.locator(".panel-title-hint").evaluate((hint) => {
+    const title = hint.firstElementChild!;
+    const body = hint.parentElement!;
+    const boxes = () => [title, ...body.querySelectorAll(".fields, .wg"), body]
+      .map((element) => element.getBoundingClientRect().toJSON());
+    const withHint = boxes();
+    hint.replaceWith(title);
+    const withoutHint = boxes();
+    title.replaceWith(hint);
+    hint.append(title);
+    return { withHint, withoutHint };
+  });
+  expect(withHint).toEqual(withoutHint);
 });

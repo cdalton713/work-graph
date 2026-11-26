@@ -41,6 +41,7 @@ const issues = states.map((state, order) => {
   };
 });
 
+const panelProject = { ...project, id: "panel", name: "Panel project", url: "https://example.com/panel" };
 const wideLine = "long-value-".repeat(28);
 const panelMarkdown = `\`\`\`text
 ${wideLine}
@@ -51,11 +52,11 @@ ${wideLine}
 | ${wideLine} | ${wideLine} |
 `;
 const blocker = {
-  ...issues[2], id: "panel-blocker", identifier: "WG-13",
+  ...issues[2], project: panelProject, id: "panel-blocker", identifier: "WG-13",
   title: `Blocker ${wideLine}`, sortOrder: 12,
 };
 const panelIssue = {
-  ...issues[5], id: "panel-task", identifier: "WG-14",
+  ...issues[5], project: panelProject, id: "panel-task", identifier: "WG-14",
   title: "Panel actions", sortOrder: 13, description: panelMarkdown,
   labels: { nodes: [{ id: "worker", name: "agent:worker", color: "#4466aa" }], pageInfo },
   inverseRelations: { nodes: [{ type: "blocks", issue: blocker }], pageInfo },
@@ -72,7 +73,7 @@ ${JSON.stringify({
   }], pageInfo },
 };
 const panelIssues = [blocker, panelIssue, {
-  ...issues[5], id: "panel-ops", identifier: "WG-15", title: "Check the rollout", sortOrder: 14,
+  ...issues[5], project: panelProject, id: "panel-ops", identifier: "WG-15", title: "Check the rollout", sortOrder: 14,
   comments: { nodes: [{
     id: "panel-ops-card", createdAt: updatedAt, user: null,
     body: "**work-graph node card**\n\n\`\`\`json\n{\"wg\":1,\"key\":\"panel-ops\",\"kind\":\"ops\"}\n\`\`\`",
@@ -85,14 +86,14 @@ setTransport({
     const { query, variables } = JSON.parse(String(init.body));
     const data = (value: object) => Response.json({ data: value });
     if (query.includes("projects(first:50")) {
-      return data({ teams: { nodes: [{ projects: { nodes: projects, pageInfo } }] } });
+      return data({ teams: { nodes: [{ projects: { nodes: [...projects, panelProject], pageInfo } }] } });
     }
     if (query.includes("teams(first:10")) {
       return data({ teams: { nodes: [{ ...team, states: { nodes: states }, members: empty }] } });
     }
     if (query.includes("issueLabels(")) return data({ issueLabels: empty });
     if (query.includes("issue(id:") && variables.id === panelIssue.id) {
-      return data({ issue: { project, comments: { nodes: [{
+      return data({ issue: { project: panelProject, comments: { nodes: [{
         id: "panel-comment", createdAt: updatedAt, user: { name: "Ada" }, body: panelMarkdown,
       }], pageInfo } } });
     }
@@ -100,10 +101,10 @@ setTransport({
       return data({ issue: { project, comments: empty } });
     }
     if (query.includes("project(id:")) {
-      if (variables.id === project.id) return data({
+      if (variables.id === panelProject.id) return data({
         viewer: { id: "ada" },
-        project: { ...project, projectMilestones: empty, documents: empty,
-          issues: { nodes: [...issues, ...panelIssues], pageInfo } },
+        project: { ...panelProject, projectMilestones: empty, documents: empty,
+          issues: { nodes: panelIssues, pageInfo } },
       });
       const entry = projects.find(({ id }) => id === variables.id);
       return data({

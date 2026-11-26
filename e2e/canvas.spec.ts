@@ -18,11 +18,20 @@ async function centre(page: Page) {
   });
 }
 
+async function touchInput(page: Page) {
+  const session = await page.context().newCDPSession(page);
+  return (type: "touchStart" | "touchMove" | "touchEnd", ...points: { x: number; y: number }[]) =>
+    session.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((point, id) => ({ ...point, id })) });
+}
+
 test("the first view fits the current wave on touch screens", async ({ page, hasTouch }) => {
   test.skip(!hasTouch);
   await expect(station(page, 35)).toBeInViewport({ ratio: 1 });
   await expect(station(page, 36)).toBeInViewport({ ratio: 1 });
   const pane = (await page.locator(".react-flow").boundingBox())!;
+  const first = (await station(page, 35).boundingBox())!;
+  const last = (await station(page, 36).boundingBox())!;
+  expect((first.y + last.y + last.height) / 2).toBeCloseTo(pane.y + pane.height / 2, 0);
   expect(pane.x + pane.width).toBeLessThanOrEqual(page.viewportSize()!.width);
 });
 
@@ -32,9 +41,7 @@ test("drag and pinch work from a station without moving the page", async ({ page
   await expect(node).toBeInViewport({ ratio: 1 });
   const box = (await node.boundingBox())!;
   const x = box.x + box.width / 2, y = box.y + box.height / 2;
-  const session = await page.context().newCDPSession(page);
-  const touch = (type: "touchStart" | "touchMove" | "touchEnd", ...points: { x: number; y: number }[]) =>
-    session.send("Input.dispatchTouchEvent", { type, touchPoints: points.map((point, id) => ({ ...point, id })) });
+  const touch = await touchInput(page);
   const before = await centre(page);
   const pagePosition = () => page.evaluate(() => [window.scrollX, window.scrollY, window.visualViewport!.scale]);
   const initialPage = await pagePosition();
@@ -50,6 +57,36 @@ test("drag and pinch work from a station without moving the page", async ({ page
   await touch("touchEnd");
   await expect.poll(async () => (await centre(page)).zoom).toBeGreaterThan(before.zoom);
   expect(await pagePosition()).toEqual(initialPage);
+  await expect(page.locator(".react-flow__renderer")).toHaveCSS("touch-action", "none");
+});
+
+test("a station at the right edge stays visible when its panel opens", async ({ page }, info) => {
+  test.skip(!info.project.name.startsWith("tablet-"));
+  const node = station(page, 35);
+  const panel = page.locator(".panel");
+  const graph = page.locator(".react-flow");
+  await expect(node).toBeInViewport({ ratio: 1 });
+  const pane = (await graph.boundingBox())!;
+  const box = (await node.boundingBox())!;
+  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const distance = pane.x + pane.width - 10 - box.x - box.width;
+  const touch = await touchInput(page);
+  await touch("touchStart", start);
+  await touch("touchMove", { x: start.x + distance / 2, y: start.y });
+  await touch("touchMove", { x: start.x + distance, y: start.y });
+  await touch("touchEnd");
+  await expect.poll(async () => {
+    const moved = (await node.boundingBox())!;
+    return pane.x + pane.width - moved.x - moved.width;
+  }).toBeCloseTo(10, 0);
+  await node.tap();
+  await expect(panel).toContainText("Graph issue 35");
+  await expect(node).toBeInViewport({ ratio: 0.99 });
+  await expect.poll(async () => {
+    const current = (await node.boundingBox())!;
+    const aside = (await panel.boundingBox())!;
+    return current.x + current.width - aside.x;
+  }).toBeLessThanOrEqual(0);
 });
 
 test("double tap zooms to a station and fits the graph from the pane", async ({ page, hasTouch }) => {

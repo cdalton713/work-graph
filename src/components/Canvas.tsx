@@ -2,7 +2,7 @@ import { BaseEdge, Controls, type Edge, type EdgeProps, getViewportForBounds, Ha
 import { type CSSProperties, type MouseEvent, memo, useEffect, useMemo, useRef, useState } from "react";
 import { type GEdge, type GNode, type Graph, reviewMark, runTime, satisfied, soakLeft, startNode, trace } from "../lib/graph";
 import { EDGE_TAP_REACH, type Layout, NODE_H, NODE_W, type Point, arrow, roundedPath, routeAt } from "../lib/layout";
-import { PHONE_MAX_WIDTH } from "../lib/screen";
+import { PHONE_MAX_WIDTH, TABLET_OR_WIDER } from "../lib/screen";
 import { Lamp, Sheet } from "./ui";
 
 import type { ClaimMark } from "../lib/claims";
@@ -266,15 +266,20 @@ function Flow({ graph, marks, now, edges: shown, layout, selectedId, hoverId, st
     const element = pane.current;
     if (!element) return;
     let previous = element.getBoundingClientRect();
+    let windowWidth = window.innerWidth, windowHeight = window.innerHeight;
     const observer = new ResizeObserver(() => {
       const area = element.getBoundingClientRect();
       if (!area.width || !area.height) return;
-      if (coarsePointer() && previous.width && previous.height) {
+      // The window can turn or resize. A panel opening only changes the pane.
+      const windowChanged = windowWidth !== window.innerWidth || windowHeight !== window.innerHeight;
+      if (windowChanged && coarsePointer() && previous.width && previous.height) {
         const dx = (area.width - previous.width) / 2, dy = (area.height - previous.height) / 2;
         const { x, y, zoom } = flow.getViewport();
         if (dx || dy) void flow.setViewport({ x: x + dx, y: y + dy, zoom });
       }
       previous = area;
+      windowWidth = window.innerWidth;
+      windowHeight = window.innerHeight;
     });
     observer.observe(element);
     return () => observer.disconnect();
@@ -287,7 +292,8 @@ function Flow({ graph, marks, now, edges: shown, layout, selectedId, hoverId, st
   // view, and only as far as it needs, so the user keeps the place in the graph.
   useEffect(() => {
     // A pick from the board or the panel centres the node (the effect below). Do not move it again here.
-    if (coarsePointer() || (focus?.id === selectedId && Date.now() - focus.tick < 1000)) return;
+    if (focus?.id === selectedId && Date.now() - focus.tick < 1000) return;
+    if (coarsePointer() && !matchMedia(TABLET_OR_WIDER).matches) return;
     const frame = requestAnimationFrame(() => {
       const at = selectedId && layout.positions.get(selectedId), area = pane.current?.getBoundingClientRect();
       if (!at || !area) return;

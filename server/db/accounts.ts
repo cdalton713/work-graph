@@ -4,6 +4,7 @@ import type { Workspace } from "../workspaces.ts";
 import { LinearSignInRequired, type OAuthCredential } from "../linearauth.ts";
 import { coordinatorToken, tokenHash, type CredentialCrypto } from "./crypto.ts";
 import type { Query, Sql } from "./sql.ts";
+import { createClaims } from "./claims.ts";
 import { createShares } from "./shares.ts";
 
 export const MAX_CONNECTIONS = 10;
@@ -114,6 +115,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
 
   return {
     shares: createShares(sql, notify),
+    claims: createClaims(sql),
     async signIn(user: User, first: NewConnection, observed?: (id: string, created: boolean, enabled: boolean) => void) {
       const tenant = await sql.transaction(async ({ query }) => {
         // A concurrent first callback waits on the unique identity. For an existing

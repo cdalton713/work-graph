@@ -17,6 +17,7 @@ import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from ".
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal, sharedRoutes } from "./access.ts";
 import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
+import { claimRoutes } from "./claims.ts";
 import { shareRoutes, type ShareAccess } from "./shares.ts";
 import { type Auth, type Session, LOGIN_PATH, authRoutes, clearSessionCookie, sessionOf } from "./auth.ts";
 import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
@@ -440,7 +441,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await next();
     const ms = clock() - start;
     const path = joining ? "/join/[link]" :
-      /^\/api\/account(?:\/|$)/.test(c.req.path) ? "/api/account" : new URL(c.req.url).pathname;
+      /^\/api\/account(?:\/|$)/.test(c.req.path) ? "/api/account" :
+      /^\/api\/projects\/[^/]+\/claims(?:\/|$)/.test(c.req.path) ? "/api/projects/[project]/claims" : new URL(c.req.url).pathname;
     if (!(c.error instanceof RedisUnavailable || c.error instanceof RedisCommandFailed)
         && (ms > SLOW_MS || c.res.status >= 500)) console.warn(`wg api: ${c.req.method} ${path} ${c.res.status} ${Math.round(ms)}ms`);
   });
@@ -528,6 +530,57 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const pageChanged = async (ref: ProjectRef | null, what: Changed["what"], issues: string[], id?: string) => {
     if (ref) await notify(() => enqueueLink(ref, "changed", { by: "page", what, issues }, undefined, id), undefined);
   };
+  async function shareProject(tenant: Tenant, workspace: Workspace, id: string) {
+    try {
+      const data = await runInTenant(tenant, () => linearWorkspace.run(workspace,
+        () => gql("query($id:String!){project(id:$id){id name}}", { id })));
+      return data.project?.id === id && typeof data.project.name === "string" ? data.project.name : null;
+    } catch (error) {
+      if (error instanceof LinearError && (error.status === 403 || error.status === 404)) return null;
+      throw error;
+    }
+  }
+
+  app.route("/api", claimRoutes(accountStore && (async (c) => {
+    const header = (name: string) => c.req.header(name);
+    const authorization = header("authorization");
+    const method = c.req.method;
+    const read = method === "GET" || method === "HEAD";
+    const reason = authorization && !header("origin")
+      ? linkRefusal("coordinator", header, rules) : refusal(method, header, rules);
+    if (reason) return c.json({ error: reason }, 403);
+    const signed = authorization ? null : await readSession(c);
+    const session = signed && await sessionActive(signed, read) ? signed : null;
+    const membership = session ? await directory.fromSession(session) : null;
+    const account = authorization ? await directory.fromToken(authorization) : membership?.tenant;
+    if (!account) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+    if (!read && (readOnly || membership?.role === "viewer" || (!authorization && method !== "DELETE"))) {
+      return c.json({ error: "A coordinator token is required to claim nodes" }, 403);
+    }
+
+    const id = c.req.param("id")!;
+    const selected = header("x-workspace");
+    const sharedPrefix = "shared:";
+    const isShared = selected?.startsWith(sharedPrefix);
+    const shared = isShared
+      ? (await directory.sharedWorkspaces?.(account.id))?.find((entry) => entry.id === selected && entry.projectId === id)
+      : undefined;
+    const owner = shared?.owner ?? account;
+    const workspace = isShared ? shared?.workspace
+      : account.workspaces.find((entry) => entry.id === (selected || account.workspaces[0]?.id));
+    const connection = workspace?.connectionId;
+    if (!workspace || !connection || workspace.needsKey || (header("x-project") && header("x-project") !== id)
+      || (!shared && await shareProject(owner, workspace, id) === null)) {
+      return c.json({ error: "Project not found" }, 404);
+    }
+    const accounts = await accountStore();
+    if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
+    return {
+      claims: accounts.claims,
+      scope: { project: [owner.id, connection, id], account: account.id, membership: shared?.id.slice(sharedPrefix.length) },
+      usage: () => usageScope(owner, workspace),
+    };
+  }), telemetry));
   // wg doctor uses status. wg wake uses project presence.
   const coordinatorReads = [/^\/api\/status$/, /^\/api\/projects\/[^/]+\/presence$/];
   const linkMember = (entry: SharedWorkspace, account: Tenant): LinkMember => ({
@@ -1174,16 +1227,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     app.route("/api", shareRoutes({
       access, pageUrl, telemetry,
       limit: attemptLimit({ now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX }, "join-attempts:"),
-      async project(tenant, workspace, id) {
-        try {
-          const data = await runInTenant(tenant, () => linearWorkspace.run(workspace,
-            () => gql("query($id:String!){project(id:$id){id name}}", { id })));
-          return data.project?.id === id && typeof data.project.name === "string" ? data.project.name : null;
-        } catch (error) {
-          if (error instanceof LinearError && (error.status === 403 || error.status === 404)) return null;
-          throw error;
-        }
-      },
+      project: shareProject,
     }));
   } else {
     const missing = (c: Context) => c.json({ error: "Share route not found" }, 404);

@@ -103,6 +103,22 @@ const migrations = [
   [
     `ALTER TABLE project_members ADD COLUMN id uuid NOT NULL DEFAULT gen_random_uuid() UNIQUE`,
   ],
+  [
+    `CREATE TABLE node_claims (
+      tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      connection_id uuid NOT NULL REFERENCES linear_connections(id) ON DELETE CASCADE,
+      project_id text NOT NULL,
+      node_key text NOT NULL CHECK (node_key ~ '^[a-z0-9-]{1,40}$'),
+      holder_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      job text NOT NULL CHECK (job IN ('dispatch', 'review', 'ci', 'threads', 'restack')),
+      claimed_at timestamptz NOT NULL DEFAULT now(),
+      renewed_at timestamptz NOT NULL DEFAULT now(),
+      lease_until timestamptz NOT NULL,
+      PRIMARY KEY (tenant_id, connection_id, project_id, node_key)
+    )`,
+    "CREATE INDEX node_claims_holder ON node_claims (holder_user_id)",
+    "CREATE INDEX node_claims_connection ON node_claims (connection_id)",
+  ],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

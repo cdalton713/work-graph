@@ -181,6 +181,9 @@ export async function teamSetup(key: string, human: string, teamLabels: boolean,
     for (const name of issue ? spec.team_issue_labels : spec.project_labels) {
       await ensure(name, issue || teamLabels, false, null);
     }
+    if (issue) {
+      for (const name of spec.workspace_issue_labels) await ensure(name, false, false, null);
+    }
     const groups = issue ? spec.workspace_label_groups : spec.project_label_groups;
     for (const [name, children] of Object.entries(groups)) {
       const scoped = !issue && teamLabels;

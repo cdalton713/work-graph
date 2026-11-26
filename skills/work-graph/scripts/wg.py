@@ -1693,7 +1693,8 @@ def team_info(team_key):
 
 def setup_labels_contract():
     return {
-        "team_issue_labels": [*KIND_LABEL.values(), REVIEWED_LABEL, ANSWERED_LABEL],
+        "team_issue_labels": [*KIND_LABEL.values(), REVIEWED_LABEL],
+        "workspace_issue_labels": [ANSWERED_LABEL],
         "workspace_label_groups": {"agent": list(AGENT_LABELS)},
         "project_label_groups": {INITIATIVE_GROUP: [], AUTONOMY_GROUP: list(AUTONOMY_LEVELS),
                                  REVIEW_GROUP: [review_label(level) for level in REVIEW_LEVELS]},
@@ -1973,7 +1974,7 @@ def setup_command(ns):
         scoped = bool(config["team_labels"])
         labels = setup_labels_contract()
         setup_label_scope("issueLabel", team_id, (), labels["team_issue_labels"], ns.apply, report, team_scoped=True)
-        setup_label_scope("issueLabel", team_id, labels["workspace_label_groups"].items(), (),
+        setup_label_scope("issueLabel", team_id, labels["workspace_label_groups"].items(), labels["workspace_issue_labels"],
                           ns.apply, report, team_scoped=False)
         setup_label_scope("projectLabel", team_id, labels["project_label_groups"].items(), labels["project_labels"],
                           ns.apply, report, team_scoped=scoped)

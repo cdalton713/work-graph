@@ -173,6 +173,8 @@ databaseSuites((open) => {
       expect(applied.warned).toEqual(expect.arrayContaining(["Ready", "Done", "Duplicate"]));
       expect(applied.state.statuses).toContainEqual({ name: "Needs " + human, type: "started", state: "exists" });
       expect(applied.state.labels).toContainEqual({ name: "agent:codex", scope: "workspace", group: "agent", state: "exists" });
+      expect(applied.state.labels).toContainEqual({ name: "answered", scope: "workspace", state: "exists" });
+      expect(labels.find(l => l.name === "answered")).toMatchObject({ team: null, parent: null });
       expect(labels.find(l => l.name === "ops")?.team).toEqual({ id: "team" });
       expect(labels.find(l => l.name === "agent:codex")).toMatchObject({
         team: null, parent: { id: labels.find(l => l.name === "agent")!.id },
@@ -182,7 +184,7 @@ databaseSuites((open) => {
       expect(writes).toHaveLength(count);
       expect(writes).not.toContain("Ready");
       expect(writes).not.toContain("Done");
-      labels.find(l => l.name === "answered")!.team = null;
+      labels.find(l => l.name === "answered")!.team = { id: "team" };
       expect((await t.request(connection, cookie, "PATCH", { team_labels: !teamLabels })).status).toBe(200);
       const mismatch = await (await t.request(path, cookie, "POST")).json();
       expect(mismatch.created).toEqual([]);

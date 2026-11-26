@@ -1,4 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { InstalledSignInHelp } from "./SignIn";
 import { accountApi } from "../api";
 import { validateNewTeam, type NewTeam } from "../lib/onboarding";
 import type { Account, AccountConnection, AccountTeam } from "../lib/types";
@@ -120,11 +121,13 @@ export function WorkspaceKeyForm({ workspace, refresh }: { workspace?: AccountCo
 }
 
 export function WorkspaceStatus({ workspace }: { workspace: AccountConnection }) {
-  return <p className="account-muted">
+  return <><p className="account-muted">
     {workspace.kind === "oauth" ? "Sign-in workspace" : "Personal API key"} · {workspace.status === "ok" ? "Active" :
       workspace.kind === "api_key" ? "Needs a new key" :
         <a href={`/auth/login?next=${encodeURIComponent(location.pathname + location.search)}`}>Sign in again</a>}
-  </p>;
+  </p>
+  {workspace.kind === "oauth" && workspace.status !== "ok" && <InstalledSignInHelp />}
+  </>;
 }
 
 export function TeamForm({ workspace, refresh, draft, saveDraft }: {

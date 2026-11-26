@@ -11,6 +11,7 @@ import { EffortSheet } from "./components/EffortSheet";
 import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
+import { PullRefresh } from "./components/PullRefresh";
 import { Panel } from "./components/Panel";
 import { CopyButton, Hint, Lamp, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type GNode, type Signal, toggleReviewed } from "./lib/graph";
@@ -23,7 +24,7 @@ import { ownerWords } from "./lib/words";
 import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
 import type { Account, AccountConnection, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
-import { useHover, useNarrow } from "./lib/screen";
+import { isStandalone, syncAge, useHover, useNarrow } from "./lib/screen";
 import { useLink } from "./useLink";
 import { canReleaseClaim, claimMarks, matchesClaim, parseClaimFilter, type ClaimFilter, type ProjectClaims } from "./lib/claims";
 
@@ -69,6 +70,7 @@ export function projectFromQuery(directory: ProjectList | null, query: URLSearch
 }
 
 export function ServiceApp() {
+  const installed = isStandalone();
   const compactBar = useCompactBar();
   const [query, navigate] = useQuery();
   const [account, setAccount] = useState<Account | null>(null);
@@ -92,6 +94,13 @@ export function ServiceApp() {
   useEffect(() => {
     if (account && firstStep(account.onboarding)) setGuide(true);
   }, [account]);
+  const onAccountScreen = page === "settings" || showGuide;
+  useEffect(() => {
+    if (!installed || !onAccountScreen) return;
+    const wake = () => { if (!document.hidden) void run(async () => { await refresh(); }); };
+    document.addEventListener("visibilitychange", wake);
+    return () => document.removeEventListener("visibilitychange", wake);
+  }, [installed, onAccountScreen, refresh, run]);
   const signInWorkspace = account?.connections.find(({ kind }) => kind === "oauth")?.workspace_id;
   const accountView = page === "settings" ? "settings_viewed" : showGuide ? "onboarding_viewed" : null;
   const lastAccountView = useRef<typeof accountView>(null);
@@ -106,10 +115,13 @@ export function ServiceApp() {
     <header className="bar account-bar">
       <span className="brand">work-graph</span><span className="station-fill" />
       {page === "settings" ?
-        <button onClick={() => route(null)}>{showGuide ? "Setup guide" : "Overview"}</button> :
+        <button onClick={() => route(null)}>{showGuide ? "Setup guide" : installed && query.has("project") ? "Back to project" : "Overview"}</button> :
         <button onClick={() => route("settings")}>Settings</button>}
+      {installed && <button className="installed-refresh" type="button" aria-label="Refresh account"
+        disabled={busy} onClick={() => void run(async () => { await refresh(); })}>Refresh</button>}
       {compactBar ? <BarMenu title="Account controls">{() => signOut}</BarMenu> : signOut}
     </header>
+    {installed && account && <AccountError error={error} />}
     {!account ? <main className="account-page"><div className="account-content">
       {error ? <><AccountError error={error} /><button disabled={busy} onClick={() => void run(async () => { await refresh(); })}>Retry</button></> :
         <p role="status">Loading your account…</p>}
@@ -122,6 +134,8 @@ export function ServiceApp() {
 export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, service = false, connections }: {
   openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
 } = {}) {
+  const installed = isStandalone();
+  const stage = useRef<HTMLElement>(null);
   const [query, setQuery] = useQuery();
   const overviewInitiatives = useMemo(() => query.getAll("initiative"), [query]);
   const overviewStates = useMemo(() => readProjectStates(query), [query]);
@@ -158,6 +172,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
 
   // The overview also gives the project picker the count of issues that wait on the human.
   const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [overviewSyncedAt, setOverviewSyncedAt] = useState<Date | null>(null);
   const [overviewBusy, setOverviewBusy] = useState(false);
   const [overviewTick, setOverviewTick] = useState(0);
   const [now, setNow] = useState(Date.now);
@@ -171,6 +186,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     let live = true, running = false, statusRunning = false;
     const poll = () => {
       if (running || document.hidden) return;
+      if (installed) setNow(Date.now());
       running = true;
       setOverviewBusy(true);
       // Status has its own guard: a slow status answer must not come after a newer one.
@@ -178,7 +194,14 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         statusRunning = true;
         api.status().then((s) => live && setStatus(s)).catch(() => {}).finally(() => { statusRunning = false; });
       }
-      api.overview().then((o) => { if (live) { setOverview(o); setDirectory((old) => mergeDirectory(old, o)); setNow(Date.now()); } })
+      api.overview().then((o) => {
+        if (!live) return;
+        const time = Date.now();
+        if (installed) setOverviewSyncedAt(new Date(time));
+        setOverview(o);
+        setDirectory((old) => mergeDirectory(old, o));
+        setNow(time);
+      })
         .catch((e) => live && setError(`overview: ${e.message}`))
         .finally(() => { running = false; if (live) setOverviewBusy(false); });
     };
@@ -186,7 +209,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     const timer = setInterval(poll, OVERVIEW_MS);
     document.addEventListener("visibilitychange", poll);
     return () => { live = false; clearInterval(timer); document.removeEventListener("visibilitychange", poll); };
-  }, [overviewTick]);
+  }, [overviewTick, installed]);
 
 
   const load = useCallback(async (project: Project) => {
@@ -226,6 +249,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   currentProject.current = project;
   useEffect(() => {
     setData(null);
+    if (installed) setSyncedAt(null);
     version.current = null;
     setPlaced(null);
     const project = currentProject.current;
@@ -240,7 +264,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
       document.removeEventListener("visibilitychange", wake);
       generation.current++;
     };
-  }, [openKey, load]);
+  }, [openKey, load, installed]);
 
   // The link: the coordinator of this project (or of every project, on the overview), and a change on the
   // page or in Linear at once instead of at the next poll.
@@ -717,6 +741,12 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   );
   const settings = openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>;
   const signOut = site.user && <a className="bar-user" href="/auth/logout" title={nativeBarTitles ? signOutHelp : undefined}>Sign out</a>;
+  const refreshScreen = useCallback(() => {
+    const current = currentProject.current;
+    if (current) void load(current);
+    else setOverviewTick((tick) => tick + 1);
+  }, [load]);
+  const refreshLabel = project ? "Refresh project" : "Refresh overview";
   const closeControl = !viewer && !sharedRole && activeProject && (
     <button type="button" className="ghost bar-close" disabled={closing || busy} onClick={() => void closeProject()} title={nativeBarTitles ? closeHelp : undefined}>
       {closing ? "Closing…" : "Close project"}
@@ -752,6 +782,8 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         {!narrow && viewer && <span className="bar-viewer" title={nativeBarTitles ? viewerHelp : undefined}>view only</span>}
         {!narrow && boardControl}
         {!narrow && viewPicker}
+        {installed && !full && <button type="button" className="installed-refresh" aria-label={refreshLabel}
+          onClick={refreshScreen} disabled={project ? busy : overviewBusy}>Refresh</button>}
         {full && (
           <button type="button" className="sync" onClick={() => project && void load(project)} aria-label="Refresh project"
             title={nativeBarTitles ? syncHelp : undefined} aria-description={syncHelp}>
@@ -895,9 +927,14 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         </div>
       )}
 
-      <main className={`stage${narrow ? ` project-view-${view}` : ""}`}>
+      {installed && <div className="installed-refresh-status">
+        <div className="installed-sync-age">{syncAge(project ? syncedAt : overviewSyncedAt, now)}</div>
+        <PullRefresh stage={stage} onRefresh={refreshScreen} busy={project ? busy : overviewBusy} />
+      </div>}
+      <main ref={stage} className={`stage${narrow ? ` project-view-${view}` : ""}`}>
         {!project && directory && (
           <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
+            managedPullRefresh={installed}
             budget={budget} states={overviewStates} onStates={(states) => setQuery({ state: states.join(",") || null }, true)}
             initiatives={overviewInitiatives} onInitiatives={(names) => setQuery({ initiative: names }, true)} />
         )}
@@ -919,6 +956,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             progress={link.progress.find((p) => p.issue === selected.issue.identifier)}
             agent={agentsFresh(agents, now) ? agents.agents.find((a) => a.issue === selected.issue.identifier) : undefined}
             onDispatch={canCommand ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer} limitedEdits={collaborator}
+            refresh={installed ? refreshScreen : undefined} refreshing={busy}
             onGo={pick} />
         )}
         {narrow && full && <ViewSwitch view={view} onChange={showView} />}

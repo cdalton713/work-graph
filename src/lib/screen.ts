@@ -24,3 +24,27 @@ function mediaQuery(query: string) {
 export const useNarrow = mediaQuery(`(max-width: ${PHONE_MAX_WIDTH}px)`);
 export const useCoarse = mediaQuery("(pointer: coarse)");
 export const useHover = mediaQuery("(hover: hover)");
+
+type StandaloneNavigator = Pick<Navigator, "userAgent" | "maxTouchPoints"> & { standalone?: boolean };
+
+export function isStandalone(
+  display: Pick<MediaQueryList, "matches"> = matchMedia("(display-mode: standalone)"),
+  device: { standalone?: boolean } = navigator as StandaloneNavigator,
+) {
+  return display.matches || device.standalone === true;
+}
+
+export function isAppleMobile(device: StandaloneNavigator = navigator) {
+  return /iPhone|iPad|iPod/.test(device.userAgent) ||
+    (/Macintosh/.test(device.userAgent) && device.maxTouchPoints > 1);
+}
+
+export function pullDistance(dx: number, dy: number) {
+  return dy > Math.abs(dx) ? dy : 0;
+}
+
+export function syncAge(syncedAt: Date | null, now: number) {
+  if (!syncedAt) return "Waiting for first sync";
+  const minutes = Math.floor((now - syncedAt.getTime()) / 60_000);
+  return minutes < 1 ? "Synced just now" : `Synced ${minutes} min ago`;
+}

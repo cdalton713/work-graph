@@ -1,0 +1,29 @@
+/* The page background fills all four safe-area insets, including in landscape. */
+html:has(:is(.installed-refresh, .installed-sync-age)),
+.app:has(:is(.installed-refresh, .installed-sync-age)) { background: var(--cab-0); }
+
+.installed-refresh { color: var(--ink-2); }
+.installed-sync-age {
+  flex: none;
+  padding: 4px 16px;
+  background: var(--cab-1);
+  color: var(--ink-3);
+  font: 12px var(--mono);
+}
+.installed-refresh-status { position: relative; z-index: 2; flex: none; }
+.pull-refresh {
+  position: absolute;
+  inset: 0 0 auto;
+  padding: 8px 16px;
+  text-align: center;
+  background: var(--cab-2);
+  color: var(--ink-1);
+  pointer-events: none;
+}
+.installed-signin-help { max-width: 36ch; }
+.signin:has(.installed-signin-help) { padding-inline: 16px; }
+
+@media (pointer: coarse) {
+  .installed-refresh { min-width: 44px; min-height: 44px; }
+  .app:has(.installed-refresh) .signin-go { display: inline-flex; align-items: center; min-height: 44px; }
+}

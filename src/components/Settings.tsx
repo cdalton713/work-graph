@@ -1,3 +1,4 @@
+import { Intro } from "./Intro";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { InstalledSignInHelp } from "./SignIn";
 import { accountApi } from "../api";
@@ -347,6 +348,7 @@ export function Settings({ account, refresh, openGuide }: { account: Account; re
       </section>
       <section className="account-card">
         <h2>Setup guide</h2>
+        <details className="intro-details"><summary>How Work Graph works</summary><Intro /></details>
         <div><button onClick={openGuide}>Open setup guide</button></div>
       </section>
       <section className="account-card">

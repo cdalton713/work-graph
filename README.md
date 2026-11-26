@@ -11,6 +11,21 @@ holds two parts:
 - The page (`src/`, `server/`): a web app that shows each effort as a graph of its nodes (phases, lanes, merge
   and ship points), with an issue panel to edit and comment, and a live link to the coordinator.
 
+## How Work Graph works
+
+Work Graph turns a big change into a graph of Linear issues in the order they need to happen.
+Agents work on every ready issue at the same time. Each has its own branch and pull request.
+You see what needs your answer, merge the changes, and deploy.
+
+```mermaid
+flowchart LR
+    plan["You describe the change"] --> graph["Linear issues in order"]
+    graph --> first["Agent: branch and pull request"]
+    graph --> second["Agent: branch and pull request"]
+    first --> ship["You merge and ship"]
+    second --> ship
+```
+
 The page server uses a tenant provider to find the human and Linear workspaces for a request.
 The config supplies one tenant. The server keeps Linear data in separate caches for each tenant.
 

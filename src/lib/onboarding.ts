@@ -1,6 +1,7 @@
 import type { Account, OnboardingState } from "./types";
 
 export const steps = [
+  { id: "welcome", label: "Welcome" },
   { id: "name", label: "Your name" },
   { id: "workspaces", label: "Linear workspaces" },
   { id: "teams", label: "Teams" },
@@ -14,7 +15,7 @@ export type NewTeams = Record<string, NewTeam>;
 type SetupAccount = Pick<Account, "human" | "pageUrl" | "connections">;
 
 export function doneSteps({ name, workspaces, teams, token, connected }: OnboardingState): Record<Step, boolean> {
-  return { name, workspaces, teams, setup: token, connect: connected };
+  return { welcome: name || token || connected, name, workspaces, teams, setup: token, connect: connected };
 }
 
 export function firstStep(state: OnboardingState): Step | null {

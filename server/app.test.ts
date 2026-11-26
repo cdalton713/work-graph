@@ -2734,6 +2734,73 @@ describe("sign-in of the viewer", () => {
     }
   });
 
+  it("queues replies for the opted-in agent sender and reports the outcome to its page", async () => {
+    let now = Date.now();
+    const page = rolesPage(() => now);
+    const ref = { workspace: "work", id: "p1" };
+    const messages: { type: string; payload: unknown }[] = [];
+    const observed: typeof messages = [];
+    const peer = (log: typeof messages) => ({ send: (raw: string) => log.push(JSON.parse(raw)), close: () => {} });
+    const sender = await page.link.hub.joinCoordinator(peer(messages), ref);
+    const secondMessages: typeof messages = [];
+    const second = await page.link.hub.joinCoordinator(peer(secondMessages), ref);
+    const tab = await page.link.hub.joinPage(peer(observed), ref);
+    const send = (type: string, payload: unknown) => sender.receive(JSON.stringify({ v: 1, type, payload }));
+    const owner = await rolesHeaders("ada@example.com");
+    const viewer = await rolesHeaders("viewer@example.com");
+    const post = (id = "a", body: unknown = "Please continue", headers = owner) => page.request(
+      "/api/projects/p1/agents/" + id + "/reply", { method: "POST", body: JSON.stringify({ body }),
+        headers: { ...headers, origin: "https://view.example.com", "x-workspace": "work", "content-type": "application/json" } });
+    const agents = [{ id: "a", state: "waiting" }, { id: "b", state: "blocked" }, { id: "c", state: "working" }];
+    try {
+      await send("agents", { agents });
+      expect((await post()).status).toBe(409);
+      await send("agents", { agents, replies: true, sender: "watcher" });
+      expect((await post("a", "Hello", viewer)).status).toBe(403);
+      expect((await post("unknown")).status).toBe(404);
+      expect((await post("b")).status).toBe(409);
+      expect((await post("c")).status).toBe(409);
+      expect((await post("a", "a".repeat(4001))).status).toBe(400);
+      const res = await post();
+      expect(res.status).toBe(202);
+      const { id } = await res.json();
+      const poll = (sender: string) => JSON.stringify({ v: 1, type: "agents", payload: { agents, replies: true, sender } });
+      await second.receive(poll("another-watcher"));
+      expect(secondMessages.at(-1)).toMatchObject({ type: "agent-reply", payload: null });
+      await Promise.all([sender.receive(poll("watcher")), second.receive(poll("watcher"))]);
+      const replies = [...messages, ...secondMessages].filter(({ payload }) => payload);
+      expect(replies).toEqual([expect.objectContaining({ type: "agent-reply", payload: { id, agent: "a", body: "Please continue" } })]);
+      const claimedBy = messages.at(-1)?.payload ? sender : second;
+      const result = JSON.stringify({ v: 1, type: "agent-reply-result", payload: { id, status: "delivered", messageId: "msg-1" } });
+      await (claimedBy === sender ? second : sender).receive(result);
+      expect(observed.some(({ type }) => type === "agent-reply-result")).toBe(false);
+      await claimedBy.receive(result);
+      expect(observed.at(-1)).toMatchObject({ type: "agent-reply-result", payload: { id, agent: "a", status: "delivered", messageId: "msg-1" } });
+      const expired = await (await post()).json();
+      now += 120_000;
+      await page.link.hub.beat();
+      expect(observed.at(-1)).toMatchObject({ type: "agent-reply-result", payload: { id: expired.id, status: "refused" } });
+    } finally {
+      await second.closed();
+      await sender.closed();
+      await tab.closed();
+      page.link.stop();
+    }
+  });
+
+  it("refuses agent replies on a read-only site", async () => {
+    const page = createApp(hostedRoles, { team: "WG", dist, readOnly: true, watchMs: 0, auth: rolesAuth });
+    try {
+      const response = await page.request("/api/projects/p1/agents/a/reply", {
+        method: "POST", headers: { ...await rolesHeaders("ada@example.com"), origin: "https://view.example.com" },
+        body: JSON.stringify({ body: "Please continue" }),
+      });
+      expect(response.status).toBe(403);
+    } finally {
+      page.link.stop();
+    }
+  });
+
   it.each(["expiry", "logout"])("filters real viewer sockets and closes owner sockets on %s", async (endSession) => {
     let shared = true;
     let now = Date.now();

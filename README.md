@@ -68,6 +68,7 @@ the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace wit
   "health_interval": 6,
   "health_agent": "codex",
   "context_limit": 250000,
+  "agent_replies": false,
   "notify": [
     {"type": "webhook", "url_env": "WG_NOTIFY_URL", "url_file": "~/.config/work-graph/notify-url"},
     {"type": "command", "argv": ["/usr/local/bin/my-notifier", "--title", "work-graph"]}
@@ -164,6 +165,17 @@ The sender checks for config and token changes each cycle. If `wg.py` changes, t
 can start the new code.
 
 When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the agent.
+
+To let a project owner reply to a waiting chat or terminal agent, set `agent_replies` to `true`.
+The default is `false`. Stop the launchd watcher with `wg agents --uninstall` if it runs.
+Then run `wg agents` in your own Orca terminal and keep it open. The launchd watcher can show
+agents on the page, but it cannot send replies. Use Orca directly for a prompt with choices.
+
+The watcher checks that the agent still waits in this effort before it sends Orca mail. This
+check is best effort because Orca can change the agent state before it accepts the mail.
+Mail waits for a running turn to end. A delivered result means that Orca stored the mail.
+It does not confirm that the agent read it. A reply to a worker is also a comment on its
+issue. A reply to the coordinator has no issue comment.
 
 The Overview inbox also shows stalls, with the time since each one started.
 

@@ -33,7 +33,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 const isText = (v: unknown): v is string => typeof v === "string";
 const isRef = (v: unknown): v is ProjectRef => isObject(v) && isText(v.workspace) && isText(v.id);
 /** The message types of the queue: what the server sends to a coordinator. */
-const QUEUE_TYPES: Record<keyof ToCoordinator, true> = { changed: true, answer: true, reply: true, command: true };
+const QUEUE_TYPES: Record<Exclude<keyof ToCoordinator, "agent-reply">, true> = { changed: true, answer: true, reply: true, command: true };
 /** A queued message of this link version and of a queue type, for the room `ref`. */
 const isEnvelope = (ref: ProjectRef) => (v: unknown): v is Envelope =>
   isObject(v) && v.v === LINK_VERSION && isText(v.type) && Object.hasOwn(QUEUE_TYPES, v.type) && isText(v.id) && !!v.id

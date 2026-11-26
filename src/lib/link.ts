@@ -24,8 +24,8 @@ export function plannedRetryAfterFailure(now: number, until: number, delay: numb
   return now < until ? Math.min(until - now, delay, 5000) : null;
 }
 /** The message types of each direction, and the commands. contract.json `link` must hold the same lists. */
-export const LINK_TO_COORDINATOR = ["changed", "answer", "reply", "command"] as const;
-export const LINK_FROM_COORDINATOR = ["hello", "state", "asks", "progress", "ack", "wrote", "agents"] as const;
+export const LINK_TO_COORDINATOR = ["changed", "answer", "reply", "command", "agent-reply"] as const;
+export const LINK_FROM_COORDINATOR = ["hello", "state", "asks", "progress", "ack", "wrote", "agents", "agent-reply-result"] as const;
 export const LINK_COMMANDS = ["next", "dispatch", "pause", "resume", "autonomy"] as const;
 export type Role = "coordinator" | "page";
 
@@ -34,14 +34,17 @@ export interface Envelope<T extends string = string, P = unknown> {
   v: typeof LINK_VERSION; type: T; id: string; project: ProjectRef; at: string; payload: P;
 }
 
-// Server → coordinator. Each one waits in the queue of the project until a coordinator sends `ack`.
+// Server → coordinator. The regular queue waits for `ack`. Agent replies use a separate poll.
 export interface Changed { by: "page" | "linear" | "coordinator"; what: "status" | "comment" | "label" | "issue"; issues: string[] }
 export interface Answer { issue: string; key: string | null; body: string }
 export interface Reply { ask: string; issue: string | null; key: string | null; body: string }
 export type CommandName = (typeof LINK_COMMANDS)[number];
 /** `autonomy` has `level`: the server set the project label to it before it sent the command. */
 export interface Command { name: CommandName; key: string | null; issue: string | null; level?: string }
-export interface ToCoordinator { changed: Changed; answer: Answer; reply: Reply; command: Command }
+export interface AgentReply { id: string; agent: string; body: string }
+export type AgentReplyOutcome = { status: "delivered"; messageId: string } | { status: "refused"; reason: string };
+export type AgentReplyResult = Pick<AgentReply, "id" | "agent"> & AgentReplyOutcome;
+export interface ToCoordinator { "agent-reply": AgentReply | null; changed: Changed; answer: Answer; reply: Reply; command: Command }
 
 // Coordinator → server.
 export interface Hello { plan: string; session: string; host: string; wg: string }
@@ -65,7 +68,8 @@ export interface AgentRow {
 export interface FromCoordinator {
   hello: Hello; state: CoordinatorState; asks: { asks: Ask[] }; progress: { nodes: Progress[] }; ack: { ids: string[] }; wrote: Wrote;
   /** Like `wrote`, it may come without `hello`: `wg agents` is no coordinator. */
-  agents: { agents: AgentRow[] };
+  agents: { agents: AgentRow[]; replies?: boolean; sender?: string };
+  "agent-reply-result": Pick<AgentReply, "id"> & AgentReplyOutcome;
 }
 
 // Server → page.
@@ -80,8 +84,9 @@ export interface CoordinatorPresence {
 }
 export interface Presence { coordinators: CoordinatorPresence[]; queued: number }
 /** The agents of a project. `at`: when the server last got them from `wg agents`. */
-export interface Agents { at: string; agents: AgentRow[] }
+export interface Agents { at: string; agents: AgentRow[]; replies?: true }
 export interface ToPage {
+  "agent-reply-result": AgentReplyResult;
   presence: Presence; changed: Changed; asks: { asks: Ask[] }; progress: { nodes: Progress[] }; agents: Agents;
 }
 

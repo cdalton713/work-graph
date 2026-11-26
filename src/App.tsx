@@ -7,6 +7,7 @@ import { firstStep } from "./lib/onboarding";
 import { BarMenu, useCompactBar } from "./components/BarMenu";
 import { Board } from "./components/Board";
 import { Canvas } from "./components/Canvas";
+import { EffortSheet } from "./components/EffortSheet";
 import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { Panel } from "./components/Panel";
@@ -339,13 +340,14 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     }
   }, [project, coordinator]);
   const canCommand = !viewer && (collaborator || canCommandCoordinator(viewer, coordinator));
-  const commands = canCommand && (
-    <span className="effort-commands">
+  const commands = (detailed = false) => canCommand && (
+    <div className="effort-commands">
       {commandNote && <span className="effort-note" role="status">{commandNote}</span>}
-      <button type="button" className="ghost" onClick={() => void command({ name: "next" }, "wg next runs again.")} title="The coordinator reads Linear and publishes again at once.">Run wg next now</button>
-      {!sharedRole && <button type="button" className="ghost" onClick={() => void command({ name: paused ? "resume" : "pause" }, paused ? "Resumed." : "Paused.")}
-        title={paused ? "The coordinator acts again." : "The coordinator stops acting: wg next holds each action until you resume."}>{paused ? "Resume" : "Pause"}</button>}
-    </span>
+      <button type="button" className="ghost" onClick={() => void command({ name: "next" }, "wg next runs again.")}>Run wg next now</button>
+      {!sharedRole && <button type="button" className="ghost" onClick={() => void command({ name: paused ? "resume" : "pause" }, paused ? "Resumed." : "Paused.")}>{paused ? "Resume" : "Pause"}</button>}
+      {detailed && <p>Run wg next to read Linear and publish a new result.
+        {!sharedRole && (paused ? " Resume to let the coordinator act again." : " Pause to hold coordinator actions until you resume.")}</p>}
+    </div>
   );
 
   // The autonomy level is a label of the project. A change goes to Linear, then to the coordinator at once.
@@ -560,7 +562,28 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const hasCards = useMemo(() => full?.nodes.some((n) => n.card && !n.issue.external) ?? false, [full]);
   const timing = statusTiming(effort, hasCards, data?.status?.updatedAt ?? null, now);
   const ageLabel = timing?.state === "unknown" ? "changed" : timing?.state === "stale" ? "last ran" : "ran";
+  const [effortOpen, setEffortOpen] = useState(false);
+  useEffect(() => setEffortOpen(false), [openKey]);
+  const showEffort = !!(timing || coordinator || canCommand);
+  const effortWarning = timing?.state === "stale" || timing?.state === "never";
+  const effortSummary = timing?.state === "never" ? "wg next has not published this effort" : effort?.status;
   const contractMismatch = effort?.contract != null && effort.contract !== import.meta.env.WG_CONTRACT_HASH;
+  const effortNotices = <>
+    {contractMismatch && (
+      // A hash cannot tell which side is older: an old record and an old page look the same.
+      <div className="effort effort-warning" role="status">
+        wg next wrote this record with contract <span className="mono">{effort?.contract}</span>; this page has <span className="mono">{import.meta.env.WG_CONTRACT_HASH}</span>.
+        Run wg next with the wg of this repository.
+      </div>
+    )}
+    {sharedProject && presence?.coordinators.some((row) => row.connected) && (
+      <div className="effort" aria-label="Connected coordinators">
+        <span className="effort-mark">Coordinators</span>
+        {presence.coordinators.filter((row) => row.connected).map((row) =>
+          <span key={row.session} className="effort-age">{row.accountName ?? (!sharedRole ? site.human : entry?.owner)}</span>)}
+      </div>
+    )}
+  </>;
   const listed = useMemo(() => projectGroups(directory?.projects ?? []), [directory]);
   const initiatives = useMemo(() => (directory?.projects ?? []).some((p) => p.initiative), [directory]);
   // One group per workspace and initiative, open projects first; the projects with no initiative come last in
@@ -744,15 +767,20 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
       {service && collaborator && openKey && project && openSettings && <MemberAccess key={openKey}
         id={project.id} workspace={project.workspace} openSettings={openSettings} />}
 
+      {narrow && effortNotices}
       {full && (
         <div className="rail-bar">
           <div className={`aspects${statusFilter.size ? " is-filtered" : ""}`} role="group" aria-label="Show only these statuses">
-            {counts.map(([status, c]) => (
-              <button type="button" key={status} className={`aspect${statusFilter.has(status) ? " is-on" : ""}`} aria-pressed={statusFilter.has(status)}
-                onClick={() => toggleStatus(status)} title={statusFilter.has(status) ? `Stop the filter on ${status}` : `Dim all but ${status}`}>
-                <Lamp signal={c.signal} />{status}<b className="mono">{c.n}</b>
-              </button>
-            ))}
+            {counts.map(([status, c]) => {
+              const active = statusFilter.has(status);
+              const help = active ? `Stop the filter on ${status}` : `Dim all but ${status}`;
+              return <Hint key={status} className="aspect-hint" text={help} infoLabel={`About the ${status} filter`}>
+                <button type="button" className={`aspect${active ? " is-on" : ""}`} aria-pressed={active}
+                  aria-description={help} onClick={() => toggleStatus(status)}>
+                  <Lamp signal={c.signal} />{status}<b className="mono">{c.n}</b>
+                </button>
+              </Hint>;
+            })}
             {statusFilter.size > 0 && <button type="button" className="ghost" onClick={() => setStatusFilter(new Set())}>Show all</button>}
           </div>
           {canFilterClaims && <label className="claim-filter">
@@ -775,43 +803,32 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         </div>
       )}
 
-      {contractMismatch && (
-        // A hash cannot tell which side is older: an old record and an old page look the same.
-        <div className="effort effort-warning" role="status">
-          wg next wrote this record with contract <span className="mono">{effort?.contract}</span>; this page has <span className="mono">{import.meta.env.WG_CONTRACT_HASH}</span>.
-          Run wg next with the wg of this repository.
-        </div>
-      )}
-      {sharedProject && presence?.coordinators.some((row) => row.connected) && (
-        <div className="effort" aria-label="Connected coordinators">
-          <span className="effort-mark">Coordinators</span>
-          {presence.coordinators.filter((row) => row.connected).map((row) =>
-            <span key={row.session} className="effort-age">{row.accountName ?? (!sharedRole ? site.human : entry?.owner)}</span>)}
-        </div>
-      )}
-      {!timing && (coordinator || commands) && (
-        <div className="effort">
-          <span className="effort-mark">wg next</span><span className="effort-status" />
-          {coordinator && <span className={`effort-age coord-${coordinator.state}`} title={coordinator.title}>{coordinator.text}</span>}
-          {commands}
-        </div>
-      )}
-      {timing && (
-        <div className={`effort${timing.state === "stale" || timing.state === "never" ? " effort-warning" : ""}`}
-          title={effort?.lines.map((l) => `${l.level} ${l.text}`).join("\n") || undefined}>
-          <span className="effort-mark">wg next</span>
-          {timing.state === "never"
-            ? <span>wg next has not published this effort</span>
-            : <span className="effort-status">{effort?.status}</span>}
+      {!narrow && effortNotices}
+      {showEffort && (
+        <div className={`effort effort-row${effortWarning ? " effort-warning" : ""}`}>
+          <button type="button" className="effort-trigger" aria-haspopup="dialog"
+            onClick={() => setEffortOpen(true)}>
+            <span className="effort-mark">wg next</span>
+            <span className="effort-status">{effortSummary}</span>
+          </button>
           {coordinator
-            ? <span className={`effort-age coord-${coordinator.state}`} title={coordinator.title}>{coordinator.text}</span>
-            : timing.state === "listening" && <span className="effort-age">listening</span>}
-          {timing.age && <span className="effort-age" title={timing.state === "unknown" ? "When the result last changed." : "When wg next last published."}>{ageLabel} {timing.age}</span>}
-          {commands}
+            ? <span className={`effort-age effort-coordinator coord-${coordinator.state}`}>{coordinator.text}</span>
+            : timing?.state === "listening" && <span className="effort-age effort-coordinator">listening</span>}
+          {timing?.age && <span className="effort-age effort-timing">{ageLabel} {timing.age}</span>}
+          {commands()}
         </div>
       )}
-
-      {stale && <div className="effort effort-warning" role="status" title={stale.title}>{stale.text}</div>}
+      {stale && <div className="effort effort-warning" role="status">
+        <button type="button" className="effort-trigger" aria-haspopup="dialog"
+          onClick={() => setEffortOpen(true)}>{stale.text}</button>
+      </div>}
+      {(showEffort || stale) && <EffortSheet open={effortOpen} onClose={() => setEffortOpen(false)}
+        summary={effortSummary} lines={effort?.lines} age={timing?.age}
+        changed={timing?.state === "unknown"}
+        coordinator={coordinator?.text ?? (timing?.state === "listening" ? "coordinator listening" : undefined)}
+        coordinatorDetail={coordinator?.title} paused={paused} staleDetail={stale?.title}>
+        {commands(true)}
+      </EffortSheet>}
       {(closeError || error) && <div className="error" role="alert"><span>{closeError || error}</span><button type="button" className="ghost" onClick={() => { setError(null); setCloseError(null); }}>Dismiss</button></div>}
 
       {hover && keys && (

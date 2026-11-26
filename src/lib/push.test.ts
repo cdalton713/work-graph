@@ -32,6 +32,13 @@ describe("notice worker", () => {
       body: "Example project", data: { url },
     });
   });
+  it.each([undefined, { json: () => JSON.parse("plain text") }])("shows a generic notice without JSON", async data => {
+    const w = worker([]);
+    await new Promise(resolve => w.listeners.get("push")({ data, waitUntil: resolve }));
+    expect(w.showNotification).toHaveBeenCalledWith("A move needs your attention", {
+      body: "", data: { url: "https://example.com/" },
+    });
+  });
   it("navigates an existing app window and focuses it", async () => {
     const focus = vi.fn();
     const navigate = vi.fn().mockResolvedValue({ focus });

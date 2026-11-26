@@ -8,7 +8,8 @@ function issueUrl(value) {
 }
 
 self.addEventListener("push", event => {
-  const notice = event.data?.json() || {};
+  let notice = {};
+  try { notice = event.data?.json() || {}; } catch { /* A plain push still needs a visible notice. */ }
   event.waitUntil(self.registration.showNotification("A move needs your attention", {
     body: notice.body || "", data: { url: issueUrl(notice.url) },
   }));

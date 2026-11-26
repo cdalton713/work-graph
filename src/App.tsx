@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { pageEvent, setUsageConsent } from "./lib/telemetry";
+import { pageEvent } from "./lib/telemetry";
 import { accountApi, api, setOpenProject } from "./api";
 import { Onboarding } from "./components/Onboarding";
 import { AccountError, Settings, useAccountAction } from "./components/Settings";
@@ -66,7 +66,6 @@ export function ServiceApp() {
     const account = await accountApi.read();
     if (request === sequence.current) {
       configureSite({ human: account.human, defaultWorkspace: account.connections[0]?.workspace_id });
-      setUsageConsent(account.sendUsageData !== false);
       setAccount(account);
     }
     return account;

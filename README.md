@@ -504,11 +504,11 @@ Adapt this privacy text to your installation. Fill in the retention periods befo
 > Host logs can include request paths with project IDs or keys and the types of coordinator messages.
 > We keep host logs for [host log retention period].
 >
-> When we enable usage data, each account sends data by default for the workspaces we include.
+> When we enable usage data, each account sends data for the workspaces we include.
 > We send activity counts and logs to Datadog. These cover sign-in, account and
 > setup activity, coordinator connections, and page actions. Logs include hashed account and workspace
 > IDs. We exclude names, email addresses, project and issue IDs, issue text, and credentials.
-> We keep these records for [Datadog retention period]. Turn off **Send usage data** to stop future events.
+> We keep these records for [Datadog retention period]. Accounts have no usage data switch. We can turn off usage data for all accounts in the server environment.
 >
 > To delete your account, open **Settings**, choose **Delete account**, and enter `delete` to confirm.
 
@@ -558,7 +558,7 @@ Usage data is off by default. To enable it, set these values in the server envir
 
 The server sends count metrics and logs for sign-ups, sign-ins, account changes, setup progress, coordinator connections, page views, node opens, and types of page writes. Account events use the Linear workspace for sign-in. Other events use the workspace where the action occurred. Logs contain hashed account and workspace IDs. The data contains no names, email addresses, project or issue IDs, issue text, or tokens. The page sends its events through the server. The `wg` CLI sends no usage data.
 
-To turn off usage data for the installation, remove `DD_API_KEY` or clear `WG_TELEMETRY_WORKSPACES`. In service mode, turn off **Send usage data** in Settings to stop sending events for your account.
+When the operator enables usage data, each account in a listed workspace sends it. Accounts have no usage data switch. To turn off usage data for all accounts, the operator can remove `DD_API_KEY` or clear `WG_TELEMETRY_WORKSPACES`.
 
 ## Host a read-only viewer
 

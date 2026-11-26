@@ -47,13 +47,12 @@ export interface UsageWorkspace { id: string; organization: string; configId?: s
 export interface UsageScope {
   tenant: string;
   workspace: UsageWorkspace;
-  enabled: boolean;
 }
 type Resolve = () => UsageScope | null | Promise<UsageScope | null>;
 type Claims = (scope: UsageScope) => boolean | Promise<boolean>;
 type Log = Record<string, string | number>;
 type Metric = { metric: string; tags: string[]; type: 1; interval: 1; points: [{ timestamp: number; value: number }] };
-type Entry = { tenant: string; cancelled?: boolean; prepare(): Promise<{ metric: Metric; log: Log } | null> };
+type Entry = { cancelled?: boolean; prepare(): Promise<{ metric: Metric; log: Log } | null> };
 
 const timeoutMs = 2000;
 const batchSize = 25;
@@ -145,13 +144,7 @@ export function createTelemetry(
   }
 
   return {
-    discard(tenant: string) {
-      for (const entry of active) if (entry.tenant === tenant) entry.cancelled = true;
-      for (let i = queue.length - 1; i >= 0; i--) {
-        if (queue[i].tenant === tenant) queue.splice(i, 1);
-      }
-    },
-    emit<E extends Event>(event: E, input: Fields<NoInfer<E>>, resolve: Resolve, tenant = "", claim?: Claims) {
+    emit<E extends Event>(event: E, input: Fields<NoInfer<E>>, resolve: Resolve, _tenant = "", claim?: Claims) {
       if (!Object.hasOwn(fields, event)) return;
       const accepted: Log = {};
       for (const [field, allowed] of Object.entries(fields[event]) as [string, readonly string[] | "positiveInteger"][]) {
@@ -162,9 +155,9 @@ export function createTelemetry(
       }
       if (queue.length + active.length === queueLimit) queue.shift();
       const timestamp = Math.floor(now() / 1000);
-      queue.push({ tenant, async prepare() {
+      queue.push({ async prepare() {
         const scope = await resolve();
-        if (this.cancelled || !scope?.enabled || ![scope.workspace.id, scope.workspace.organization, scope.workspace.configId].some((id) => id && workspaceIds.has(id.toLowerCase()))) return null;
+        if (this.cancelled || !scope || ![scope.workspace.id, scope.workspace.organization, scope.workspace.configId].some((id) => id && workspaceIds.has(id.toLowerCase()))) return null;
         if (claim && !await claim(scope)) return null;
         const tags = [`mode:${mode}`, ...Object.entries(accepted).flatMap(([name, value]) => typeof value === "string" ? [`${name}:${value}`] : [])];
         return {

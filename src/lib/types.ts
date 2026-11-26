@@ -178,7 +178,6 @@ export interface CoordinatorToken {
 }
 
 export interface Account {
-  sendUsageData: boolean;
   human: string;
   pageUrl: string;
   connections: AccountConnection[];

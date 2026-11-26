@@ -123,7 +123,6 @@ export async function joinProject(token: string, confirm?: true): Promise<Projec
 
 export const accountApi = {
   read: (signal?: AbortSignal) => call<Account>("account", { signal }),
-  saveUsageConsent: (sendUsageData: boolean) => accountWrite("", "PATCH", { sendUsageData }),
   saveName: (human: string) => accountWrite("", "PATCH", { human }),
   onboarding: (state: { name?: true; skipped?: boolean; step?: "workspaces" | "teams" | "setup"; complete?: true }) => accountWrite("/onboarding", "POST", state),
   attach: (key: string) => accountWrite("/workspaces", "POST", { key }),

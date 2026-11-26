@@ -198,7 +198,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }
     const identity = await pending;
     return identity ? {
-      tenant: tenant.id, enabled: true, workspace: { ...identity, configId: workspace.id },
+      tenant: tenant.id, workspace: { ...identity, configId: workspace.id },
     } : null;
   }
 
@@ -1377,9 +1377,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       await next();
     });
     const origin = () => `https://${rules.hosted!.host}`;
-    app.route("/auth", linearAuth ? linearAuthRoutes(linearAuth, origin, clock, tenants!.signIn!, signOut, telemetry ? (id, workspace, created, enabled) => {
-      const resolve = async () => enabled && await (await accountStore?.())?.usageConsent(id)
-        ? { tenant: id, workspace, enabled: true } : null;
+    app.route("/auth", linearAuth ? linearAuthRoutes(linearAuth, origin, clock, tenants!.signIn!, signOut, telemetry ? (id, workspace, created) => {
+      const resolve = () => ({ tenant: id, workspace });
       if (created) telemetry.emit("sign_up", {}, resolve, id);
       telemetry.emit("sign_in", {}, resolve, id);
     } : undefined) : authRoutes(auth!, origin, clock, signOut));

@@ -2,7 +2,7 @@
 // same rules as the Board. The server makes the summaries, so the page does not load each graph.
 import { summaryWords } from "./words.ts";
 import { type MoveRank, type Signal, boardGroups, buildGraph, isClosed, moveImpact, parseStatus, projectGroups, statusName, statusTiming, yourMove } from "./graph.ts";
-import { type Agents, type Ask, type Presence, agentName, agentNeeds, agentsWaiting } from "./link.ts";
+import { type AgentRow, type Agents, type Ask, type Presence, agentName, agentNeeds, agentsWaiting } from "./link.ts";
 import type { GraphData, Project, ProjectList, PullRequest } from "./types.ts";
 
 import { currentSite, statusOrder } from "./site.ts";
@@ -19,6 +19,7 @@ export interface YourMove extends MoveRank {
   identifier: string; title: string; why: string; pullRequests: PullRequest[]; unblocks?: number;
   answer?: { issueId: string; sent: boolean };
   workerAsk?: Ask;
+  agentWait?: AgentRow;
 }
 type MoveImpacts = Record<string, ReturnType<typeof moveImpact>>;
 
@@ -218,8 +219,11 @@ export function movesWithAgents(you: YourMove[], agents: Agents | undefined, now
   if (!waiting.length) return you;
   const byIssue = new Map(waiting.flatMap((a) => (a.issue ? [[a.issue, a] as const] : [])));
   const extra: YourMove[] = waiting.filter((a) => !a.issue || !you.some((m) => m.identifier === a.issue))
-    .map((a) => ({ identifier: agentName(a), title: a.said || a.title, why: `Agent ${agentNeeds(a)} in Orca:`, pullRequests: [], updatedAt: a.at ?? agents!.at, idle: true, ...liveMoveImpact(impacts, a.issue) }));
-  return [...extra, ...you.map((m) => (byIssue.has(m.identifier) ? { ...m, idle: true, why: `Agent ${agentNeeds(byIssue.get(m.identifier)!)} · ${m.why}` } : m))];
+    .map((a) => ({ identifier: agentName(a), title: a.said || a.title, why: `Agent ${agentNeeds(a)} in Orca:`, pullRequests: [], updatedAt: a.at ?? agents!.at, idle: true, agentWait: a, ...liveMoveImpact(impacts, a.issue) }));
+  return [...extra, ...you.map((m) => {
+    const agentWait = byIssue.get(m.identifier);
+    return agentWait ? { ...m, agentWait, idle: true, why: `Agent ${agentNeeds(agentWait)} · ${m.why}` } : m;
+  })];
 }
 
 /** The projects of one initiative in one workspace, and the sums of their summaries. `name` null: no initiative. */

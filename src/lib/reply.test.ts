@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { inboxReply, latestReplyPrompt } from "./reply";
+import { expireAgentReplies, replyDeadline, type RoomAccount } from "../../server/linkstate";
+import { agentReplyLine, agentReplyPending, applyAgentReplyResult, canReplyToAgent, inboxReply, latestReplyPrompt } from "./reply";
 import type { YourMove } from "./overview";
 
 const move: YourMove = { identifier: "WG-1", title: "Pick a table", why: "Which table?", pullRequests: [], updatedAt: "" };
 const ask = { id: "q1", key: null, issue: "WG-1", from: "w", body: "Which table?\n\nUse the full name.", at: "" };
+const agentWait = { id: "orca_session_id:abc", role: "worker" as const, key: "pick", issue: "WG-1",
+  state: "blocked", agent: "codex", title: "Needs input", said: "Pick a table", at: null };
 
 describe("inbox replies", () => {
   it("opens the full worker question and replies to the worker when both targets are present", () => {
@@ -31,5 +34,69 @@ describe("inbox replies", () => {
       comment("1", "Which table?"),
     ])).toBe("Use the full name.\n\nAre there two tables?");
     expect(latestReplyPrompt([])).toBeUndefined();
+  });
+  it("offers no reply box for a row that only reports an agent prompt", () => {
+    expect(inboxReply({ ...move, agentWait }, false)).toBeNull();
+  });
+
+  it("keeps the issue answer available while its agent is at a prompt", () => {
+    const answer = { issueId: "i1", sent: false };
+    expect(inboxReply({ ...move, agentWait, answer }, false)).toEqual({ kind: "issue", ...answer });
+  });
+
+  it("keeps the worker question available while its agent is at a prompt", () => {
+    expect(inboxReply({ ...move, agentWait, workerAsk: ask }, false)).toEqual({ kind: "worker", ask });
+  });
+});
+
+describe("agent replies", () => {
+  const row = { id: "orca_session_id:abc", state: "done" };
+  const sent = { id: "reply", agent: row.id, sentAt: 1_000 };
+  it("offers replies only to the owner for a done session with a fresh enabled watcher", () => {
+    const now = Date.parse("2026-11-20T12:00:00Z");
+    const report = { at: "2026-11-20T12:00:00Z", agents: [], replies: true } as const;
+    const live = { ...report, agents: [] };
+    expect(canReplyToAgent(row, live, now, true)).toBe(true);
+    expect(canReplyToAgent(row, live, now, false)).toBe(false);
+    expect(canReplyToAgent({ ...row, state: "blocked" }, live, now, true)).toBe(false);
+    expect(canReplyToAgent({ ...row, state: "waiting" }, live, now, true)).toBe(false);
+    expect(canReplyToAgent({ ...row, id: "tab:pane" }, live, now, true)).toBe(false);
+    expect(canReplyToAgent(row, { ...live, replies: undefined }, now, true)).toBe(false);
+    expect(canReplyToAgent(row, live, now + 180_000, true)).toBe(false);
+  });
+
+  it("shows the server result once per reply, including when it replays after reload", () => {
+    const delivered = { ...sent, status: "delivered", messageId: "msg" } as const;
+    expect(agentReplyLine(sent, sent.sentAt)).toEqual({ text: "sent", signal: "idle" });
+    const received = applyAgentReplyResult(sent, delivered);
+    expect(agentReplyLine(received, sent.sentAt + 150_000)).toEqual({ text: "delivered", signal: "done" });
+    const reloaded = JSON.parse(JSON.stringify(received));
+    expect(applyAgentReplyResult(reloaded, delivered)).toBe(reloaded);
+    expect(applyAgentReplyResult(sent, { ...delivered, id: "older" })).toBe(sent);
+  });
+
+  it("shows the refusal and the reason that confirmation failed", () => {
+    expect(agentReplyLine(applyAgentReplyResult(sent, { ...sent, status: "refused", reason: "The agent works again" }), sent.sentAt))
+      .toEqual({ text: "The agent works again", signal: "stop" });
+    expect(agentReplyLine(applyAgentReplyResult(sent, { ...sent, status: "unconfirmed", reason: "Check Orca" }), sent.sentAt))
+      .toEqual({ text: "not confirmed · Check Orca", signal: "stop" });
+  });
+
+  it("uses the server's two-minute result to tell a missed reply from an unconfirmed delivery", () => {
+    const expiresAt = replyDeadline(sent.sentAt);
+    const taken = { ...sent, id: "taken" };
+    const account: RoomAccount = { queue: [], asks: [], coordinators: new Map(), progress: [], agents: null,
+      agentReplies: [{ ...sent, sender: "watcher", expiresAt }, { ...taken, sender: "watcher", expiresAt, socket: "watcher" }] };
+    expect(expireAgentReplies(account, expiresAt - 1)).toEqual([]);
+    const [missed, unconfirmed] = expireAgentReplies(account, expiresAt);
+    expect(agentReplyLine(applyAgentReplyResult(sent, missed), expiresAt)).toEqual({ text: "not delivered: wg agents does not run", signal: "stop" });
+    expect(agentReplyLine(applyAgentReplyResult(taken, unconfirmed), expiresAt)).toEqual({ text: "not confirmed", signal: "stop" });
+  });
+
+  it("lets the owner reply again after two and a half minutes with no result", () => {
+    const deadline = sent.sentAt + 150_000;
+    expect(agentReplyPending(sent, deadline - 1)).toBe(true);
+    expect(agentReplyPending(sent, deadline)).toBe(false);
+    expect(agentReplyLine(sent, deadline)).toEqual({ text: "no result: check Orca before you reply again", signal: "stop" });
   });
 });

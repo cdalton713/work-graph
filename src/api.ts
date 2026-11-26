@@ -138,6 +138,9 @@ export const accountApi = {
 };
 
 export const api = {
+  agentReply: (project: string, workspace: string, agent: string, body: string) =>
+    call<{ id: string }>(`${projectPath(project)}/agents/${encodeURIComponent(agent)}/reply`,
+      { method: "POST", body: JSON.stringify({ body }) }, workspace, undefined, project),
   closeProject: (projectId: string, workspace?: string) => call<{ completedIssues: number }>(`projects/${projectId}/close`, { method: "POST", body: JSON.stringify({ confirm: true }) }, workspace, "status_written"),
   projects: () => call<ProjectList>("projects"),
   /** The state of the server: its build and the Linear budget of each workspace. */

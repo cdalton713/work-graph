@@ -46,6 +46,7 @@ button.ov-section-name:hover { text-decoration: underline; }
 .ov-agent-said { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .ov-agent[open] .ov-agent-said { visibility: hidden; }
 .ov-agent-full { margin: 0 0 6px 14px; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ov-agent-reply-status { margin: 0 0 6px 14px; overflow-wrap: anywhere; }
 .ov-row .ov-open { flex: 1; min-width: 0; }
 /* The copy button of a row shows on hover or focus; a touch screen has no hover, so there it always shows. */
 .ov-copy { flex: none; margin-right: 8px; font-size: 11px; }
@@ -103,6 +104,7 @@ button.ov-section-name:hover { text-decoration: underline; }
 .inbox-text { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .inbox-why { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-1); font-weight: 500; }
 .inbox-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: 12px; }
+.inbox-agent-message { display: block; font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
 .inbox-effect { display: block; color: var(--ink-3); font-size: 12px; }
 .inbox-project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--ink-3); }
 .inbox-age { font-size: 11px; text-align: right; color: var(--ink-4); }

@@ -449,6 +449,32 @@ After a pause, it checks a timed-out connection with a fresh ping before it reco
 to check the mode (`readOnly` and `link`) and Redis (`linkStore` and `redisReady`). Redis can be
 unavailable while `/healthz` returns 200.
 
+### Create a starter project
+
+Set `WG_CREATE_PROJECTS=1` on the server to enable project creation for signed-in owners.
+The workspace credential must belong to the selected team. Configure the workspace team filter
+and the team's `Ready` and `Todo` states. The starter has one phase targeting `main`. Its
+first task blocks the merge point, and the merge point blocks the ship point.
+
+When `GET /api/config` returns `createProjects: true`, the page can get eligible teams
+with `GET /api/project-creation/teams`. Send the selected workspace ID in `X-Workspace`
+on this request and on `POST /api/projects`. The team response is `{teams: [{key, name}]}`.
+Send the team key, project name, and first task title as JSON fields `team`, `name`, and
+`firstTask`. Trim the fields before submission. Each field accepts 1 to 120 characters.
+Set `Idempotency-Key` to the lowercase hexadecimal SHA-256 of the UTF-8 bytes of
+`JSON.stringify([workspaceId, team, name, firstTask])`. Retry the same request after an
+interruption. A changed input with the previous key returns HTTP 409. Identical input
+from the same owner selects the same starter. Success returns HTTP 200 with `workspace`,
+`project` (Linear ID and URL), and `handoff` (plan, keymap, and command).
+
+The owner saves the returned `handoff.plan` as `plan.json` and `handoff.keymap` as
+`keymap.json` in a new coordinator checkout of the target repository. Configure the local
+workspace ID and team to match the plan. For a configured owner, run `wg next .`.
+For a hosted account, sign in with `wg login <page-url>`. In the new checkout, run
+`wg pull . --force && wg next .` before editing the files. This loads the current
+hosted revision and connects subsequent edits to the shared plan. The keymap
+identifies the existing project, issues, cards, and milestone.
+
 ## Run the hosted service
 
 The service hosts the page and its API. Accounts share a server and keep their workspaces private.

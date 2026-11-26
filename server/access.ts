@@ -58,6 +58,8 @@ export function linkRefusal(role: string, header: (name: string) => string | und
 
 export const sharedRoutes: Readonly<Record<string, "list" | "project" | "issue" | "owner" | "denied">> = {
   "GET /api/status": "list",
+  "GET /api/project-creation/teams": "denied",
+  "POST /api/projects": "denied",
   "GET /api/projects": "list",
   "GET /api/overview": "list",
   "GET /api/projects/:id/claims": "project",

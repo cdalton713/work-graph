@@ -150,3 +150,18 @@
   .panel .prs > .hint { display: flex; }
   .panel .prs .pr-row { min-width: 0; }
 }
+
+/* In the three-column layout the panel can be narrower than a phone. */
+.panel { container: issue-panel / inline-size; }
+
+@media (721px <= width < 1280px) and (orientation: landscape) {
+  @container issue-panel (max-width: 480px) {
+    .panel-head, .review-row { flex-wrap: wrap; }
+    .panel-head > :not(.station-fill), .review-row > .hint { flex: none; }
+    .panel-head .chip { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .panel-head .chip .lamp { display: inline-block; margin-inline-end: 5px; }
+    .panel-head .panel-id, .review-row button { white-space: nowrap; }
+    .panel .fields, .panel .fields-wg > div { grid-template-columns: minmax(0, 1fr); row-gap: 4px; }
+    .panel .fields dt { margin-top: 4px; }
+  }
+}

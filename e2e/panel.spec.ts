@@ -210,3 +210,46 @@ test("the title hint preserves desktop panel boxes", async ({ page }, testInfo) 
   });
   expect(withHint).toEqual(withoutHint);
 });
+
+test("the landscape issue panel fits chips, review actions and field values", async ({ page }, info) => {
+  test.skip(info.project.name !== "tablet-1180x820");
+  await page.addInitScript(() => Object.defineProperty(navigator, "standalone", { value: true }));
+  await addActions(page);
+  const panel = await openPanel(page, "14");
+  const review = panel.getByRole("button", { name: "Mark reviewed", exact: true });
+  await expect(review).toBeVisible();
+
+  for (const [width, height] of [[1024, 768], [1133, 744], [1180, 820]]) {
+    await page.setViewportSize({ width, height });
+    const panelWidth = (await panel.boundingBox())!.width;
+    expect(Math.abs(panelWidth - width / 3)).toBeLessThan(1);
+    for (const value of await panel.locator(".fields dd").all()) {
+      expect((await value.boundingBox())!.width).toBeGreaterThanOrEqual(panelWidth / 2);
+    }
+    for (const label of await panel.locator(".panel-head .chip, .panel-head a, .review-row button.primary, .fields dt, .pr-status").all()) {
+      const splitWords = await label.evaluate((element) => {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        const split: string[] = [];
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          for (const match of node.textContent!.matchAll(/\S+/g)) {
+            const range = document.createRange();
+            range.setStart(node, match.index);
+            range.setEnd(node, match.index + match[0].length);
+            if (range.getClientRects().length > 1) split.push(match[0]);
+          }
+        }
+        return split;
+      });
+      expect(splitWords).toEqual([]);
+    }
+    for (const control of await panel.locator(".panel-head, .fields, .review-row").locator("button:visible, a:visible").all()) {
+      const box = (await control.boundingBox())!;
+      expect(box.height).toBeGreaterThanOrEqual(44);
+      expect(box.width).toBeGreaterThanOrEqual(44);
+    }
+    for (const region of [page.locator("html"), panel, panel.locator(".panel-body")]) {
+      expect(await region.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
+    }
+  }
+});

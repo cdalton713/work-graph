@@ -7296,13 +7296,21 @@ def send_command(channel, title, body, link, timeout):
 NOTIFY_SENDERS = {"webhook": send_webhook, "command": send_command}
 
 
+class MissingPushToken(ReadError):
+    pass
+
+
+class PageNoticeRejected(ReadError):
+    """A permanent error. Retrying this notice will not help."""
+
+
 def push_page_connection(workspace, collab):
     if collab:
         return collab_page(collab, workspace)
     page = (workspace_page(workspace) or PAGE_URL).rstrip("/")
     token = link_token_for(page, workspace)
     if not token:
-        raise ReadError("run wg login for the workspace page")
+        raise MissingPushToken("run wg login for the workspace page")
     return page, {"Authorization": f"Bearer {token}"}
 
 
@@ -7312,13 +7320,26 @@ def push_page_request(page, headers, path, data, timeout):
     try:
         with urllib.request.build_opener(NoPlanRedirect).open(request, timeout=timeout) as response:
             if response.status != (202 if body else 200):
-                raise ReadError(f"page returned HTTP {response.status}")
+                raise PageNoticeRejected(f"page returned HTTP {response.status}")
             return None if body else json.load(response)
     except urllib.error.HTTPError as error:
         with error:
-            if error.code == 400 and data is None:
-                raise ReadError("set to in the page channel to select an owner") from None
-            raise ReadError(f"page returned HTTP {error.code}") from None
+            try:
+                payload = json.loads(error.read(4096))
+            except (ValueError, OSError, http.client.HTTPException):
+                payload = None
+            detail = payload.get("error") if isinstance(payload, dict) else None
+            message = f"page returned HTTP {error.code}"
+            if isinstance(detail, str) and detail:
+                token = headers.get("Authorization", "").removeprefix("Bearer ")
+                message += ": " + one_line(detail.replace(token, "[redacted]") if token else detail, 200)
+            if data is None and error.code == 400:
+                message += "; set to in the page channel to select an owner"
+            elif data is None and error.code == 403 and detail == "The token identifies the recipient":
+                message += "; remove to from the page channel"
+            if error.code == 429 or 500 <= error.code < 600:
+                raise ReadError(message) from None
+            raise PageNoticeRejected(message) from None
     except (OSError, ValueError, http.client.HTTPException) as error:
         raise ReadError(f"page request failed ({type(error).__name__})") from None
 
@@ -7338,12 +7359,19 @@ def page_notice_entry(text, nodes, km):
         else:
             kind = "wait"
     else:
-        raise ReadError("the move has no issue")
+        raise PageNoticeRejected("the move has no issue")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*-[0-9]+", issue):
+        raise PageNoticeRejected("the move has no issue identifier")
     return {"issue": issue, "kind": kind}
 
 
-def doctor_push(workspace, channel, collab):
-    page, headers = push_page_connection(workspace, collab)
+def doctor_push(workspace, channel, collab, *, planless=False):
+    try:
+        page, headers = push_page_connection(workspace, collab)
+    except MissingPushToken:
+        if planless:
+            return "warn", f"page notices for {workspace}: no token"
+        raise
     path = "/api/push/status"
     if "to" in channel:
         path += "?" + urllib.parse.urlencode({"recipient": channel["to"]})
@@ -7400,6 +7428,7 @@ def notify_effort(plan_dir, plan, lines, paused, asks=None):
             if row != before:
                 save_keymap(plan_dir, km)
         errors = {}
+        warnings = []
         for n, new in claims.items():
             accepted = 0
             kind = channels[n]["type"]
@@ -7421,8 +7450,11 @@ def notify_effort(plan_dir, plan, lines, paused, asks=None):
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise ReadError("no time left")
-                        data = target | page_notice_entry(entries[entry], nodes, km)
-                        push_page_request(page, headers, "/api/push/notices", data, remaining)
+                        try:
+                            data = target | page_notice_entry(entries[entry], nodes, km)
+                            push_page_request(page, headers, "/api/push/notices", data, remaining)
+                        except PageNoticeRejected as e:
+                            warnings.append(f"page: skipped entry {entry}: {one_line(e, 200)}")
                         accepted += 1
                     continue
                 NOTIFY_SENDERS[kind](channels[n], title, "\n".join(entries[i] for i in new), page_link(plan),
@@ -7441,8 +7473,9 @@ def notify_effort(plan_dir, plan, lines, paused, asks=None):
                     else:
                         row.pop(f"notify_failed_{n}", None)
                 save_keymap(plan_dir, km)
-        if errors:
-            print(f"warn notify: {'; '.join(errors.values())}", file=sys.stderr, flush=True)
+        warnings.extend(errors.values())
+        if warnings:
+            print(f"warn notify: {'; '.join(warnings)}", file=sys.stderr, flush=True)
         return "failed" if errors else ("sent" if claims else None)
     except (ReadError, OSError, ValueError, KeyError, TypeError) as e:
         print(f"warn notify: {one_line(e, 200)}", file=sys.stderr, flush=True)
@@ -8734,7 +8767,7 @@ def doctor_lines(plan_dir=None, fix=False):
         if channel["type"] == "page":
             collab = load_keymap(plan_dir).get("collab") if workspace and plan_dir else None
             for w in ([workspace] if workspace else WORKSPACES):
-                checks.append((f"page notices for {w}", lambda w=w, c=channel: doctor_push(w, c, collab)))
+                checks.append((f"page notices for {w}", lambda w=w, c=channel: doctor_push(w, c, collab, planless=plan_dir is None)))
     checks += [("tick", doctor_tick), ("agents_plugin", doctor_watch)]
     if plan_dir:
         checks.append(("agents", lambda: doctor_agents(plan_dir)))

@@ -38,10 +38,12 @@
   padding: 20px; background: var(--cab-2); border: 1px solid var(--rail-3); border-radius: var(--r-2);
 }
 .account-dialog[open] {
+  --dialog-safe-start: max(16px, env(safe-area-inset-top));
+  --dialog-safe-end: max(16px, env(safe-area-inset-bottom));
   position: fixed;
-  inset-block-start: var(--dialog-top, 0px);
-  inset-block-end: calc(100% - var(--dialog-top, 0px) - var(--dialog-height, 100%));
-  max-height: calc(var(--dialog-height, 100%) - max(16px, env(safe-area-inset-top)) - max(16px, env(safe-area-inset-bottom)));
+  inset-block-start: calc(var(--dialog-top, 0px) + var(--dialog-safe-start));
+  inset-block-end: calc(100% - var(--dialog-top, 0px) - var(--dialog-height, 100%) + var(--dialog-safe-end));
+  max-height: calc(var(--dialog-height, 100%) - var(--dialog-safe-start) - var(--dialog-safe-end));
   overflow: auto;
   overscroll-behavior: contain;
 }

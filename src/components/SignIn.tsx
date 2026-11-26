@@ -2,6 +2,8 @@
 import { signInSettings } from "../lib/site";
 
 export function isInAppBrowser() {
+  if ((navigator as Navigator & { standalone?: boolean }).standalone ||
+      matchMedia("(display-mode: standalone)").matches) return false;
   const ua = navigator.userAgent;
   return /FBAN|FBAV|Instagram|Line\/|MicroMessenger|; wv\)|Slack|Discord/i.test(ua) ||
     /(?:iPhone|iPad|iPod).*AppleWebKit(?!.*(?:Safari|CriOS|FxiOS|EdgiOS))/i.test(ua);

@@ -2,8 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { linearAccessRequired, shareApi } from "../api";
 import { accessNotice, linkRow, orderMembers } from "../lib/share";
 import type { LinearAccess, ProjectShare, ShareKind, ShareMember } from "../lib/types";
-import { CopyButton } from "./ui";
-import { useDialogViewport } from "./Settings";
+import { SecretCopyButton, useDialogViewport } from "./Settings";
 
 const links = [
   { kind: "view", name: "Read-only link", description: "View the project and its issues." },
@@ -150,7 +149,10 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
             <div><h3>{name}</h3><p>{description}</p></div>
             {row.state === "new" && <>
               <div className="account-form"><label>New {name.toLowerCase()}<input readOnly value={row.url} /></label></div>
-              <div className="account-actions"><CopyButton label={`Copy ${name.toLowerCase()}`} text={row.url} secret /></div>
+              <div className="account-actions">
+                <SecretCopyButton key={row.url} text={row.url} label={`Copy ${name.toLowerCase()}`}
+                  success="Link copied." manual="Select and copy the link from the field above." />
+              </div>
               <p role="status">Copy this address now. It will not appear again after you close this dialog.</p>
             </>}
             {row.state === "live" && <p>Made {date(row.made)}</p>}

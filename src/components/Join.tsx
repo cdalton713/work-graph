@@ -12,19 +12,20 @@ export function Join({ path, returnedFromSignIn }: { path: string; returnedFromS
   const [busy, setBusy] = useState(false);
   const token = path.slice("/join/".length);
   const login = "/auth/login?" + new URLSearchParams({ next: path + "?signed-in=1" });
+  const inAppBrowser = isInAppBrowser();
   useEffect(() => {
     let active = true;
     request.current ??= joinProject(token);
     void request.current.then((value) => {
       if (!active) return;
       if (value) setPreview(value);
-      else if (returnedFromSignIn || isInAppBrowser()) setSignInRequired(true);
+      else if (returnedFromSignIn || inAppBrowser) setSignInRequired(true);
       else location.replace(login);
     }, (reason: Error) => {
       if (active) setError(reason.message);
     });
     return () => { active = false; };
-  }, [login, returnedFromSignIn, token]);
+  }, [inAppBrowser, login, returnedFromSignIn, token]);
 
   async function confirm() {
     setBusy(true);
@@ -44,9 +45,10 @@ export function Join({ path, returnedFromSignIn }: { path: string; returnedFromS
       <section className="account-card">
         <h1>{joined?.project ?? preview?.project ?? "Join project"}</h1>
         {signInRequired ? <>
-          <p>{returnedFromSignIn ? "Sign-in did not complete." : "Sign in to join this project."}</p>
-          <p><a href={login}>{returnedFromSignIn ? "Try signing in again" : "Sign in"}</a></p>
-          <BrowserSignInHelp />
+          <p>{returnedFromSignIn ? "Sign-in did not complete. " : "Sign in to join this project. "}
+            <a href={login}>{returnedFromSignIn ? "Try signing in again" : "Sign in"}</a>.
+          </p>
+          {inAppBrowser && <BrowserSignInHelp />}
         </> :
           error ? <p role="alert">{error}</p> :
           joined ? <p role="status">You joined as a {joined.role}.</p> :

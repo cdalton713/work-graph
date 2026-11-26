@@ -55,10 +55,22 @@ async function simulateKeyboard(page: Page) {
 }
 
 async function checkKeyboardDialog(dialog: Locator) {
-  await expect.poll(async () => {
-    const bounds = (await dialog.boundingBox())!;
-    return bounds.y >= 36 && bounds.y + bounds.height <= 256;
-  }).toBe(true);
+  // Use unequal insets to check each edge of the visible viewport.
+  await dialog.evaluate((element) => {
+    element.style.setProperty("--dialog-safe-start", "47px");
+    element.style.setProperty("--dialog-safe-end", "34px");
+  });
+  try {
+    await expect.poll(async () => {
+      const bounds = (await dialog.boundingBox())!;
+      return bounds.y >= 83 && bounds.y + bounds.height <= 222;
+    }).toBe(true);
+  } finally {
+    await dialog.evaluate((element) => {
+      element.style.removeProperty("--dialog-safe-start");
+      element.style.removeProperty("--dialog-safe-end");
+    });
+  }
 }
 
 test("settings dialogs fit a short visual viewport and the token can be copied", async ({ page, context }) => {
@@ -89,24 +101,32 @@ test("settings dialogs fit a short visual viewport and the token can be copied",
   await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
-test("setup marks commands that need a computer", async ({ page }) => {
+test("setup marks steps that need a computer", async ({ page }) => {
   await screens.setup(page);
   await checkLayout(page.getByRole("main"));
   await page.getByRole("button", { name: /Set up wg/ }).click();
-  await expect(page.getByText("Run these commands on your computer")).toBeVisible();
-  await expect(page.getByText(/wg login/, { exact: false }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Install the skill and tools on your computer" })).toBeVisible();
+  await expect(page.getByText(/set up a local Linear key for each workspace on your computer/i)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Set up the config on your computer" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Run these commands on your computer" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Copy wg login/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Copy wg setup/ })).toBeVisible();
   await checkLayout(page.getByRole("main"));
 });
 
-test("share members and their actions fit a short visual viewport", async ({ page }) => {
+async function openShare(page: Page) {
   await page.addInitScript(() => localStorage.setItem("wg-board", "off"));
   await page.goto(serviceUrl() + "/auth/login?as=ada&next=/?project=project");
   await expect(page.locator(".react-flow__node").first()).toBeVisible();
   await page.getByRole("button", { name: "Share", exact: true }).press("Enter");
   const dialog = page.getByRole("dialog", { name: "Share project" });
-  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("grace@example.com", { exact: false })).toBeVisible();
+  return dialog;
+}
+
+test("share members and their actions fit a short visual viewport", async ({ page }) => {
+  const dialog = await openShare(page);
   const members = dialog.getByRole("region", { name: "Members" });
-  await expect(members.getByText("grace@example.com", { exact: false })).toBeVisible();
   await checkLayout(dialog);
   await simulateKeyboard(page);
   await checkKeyboardDialog(dialog);
@@ -119,6 +139,31 @@ test("share members and their actions fit a short visual viewport", async ({ pag
   await expect(remove).toBeFocused();
   await dialog.getByRole("button", { name: "Close" }).click();
   await expect(dialog).toHaveCount(0);
+});
+
+test("one-time share links can be copied without the Clipboard API", async ({ page }) => {
+  const url = "https://example.com/join/example";
+  await page.route("**/api/projects/project/share/view", (route) => route.fulfill({ json: { url } }));
+  await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", { value: undefined }));
+  const dialog = await openShare(page);
+  await dialog.getByRole("button", { name: "Make link" }).click();
+  await expect(dialog.getByRole("textbox", { name: "New read-only link" })).toHaveValue(url);
+  const copy = dialog.getByRole("button", { name: "Copy read-only link" });
+
+  await page.evaluate(() => { document.execCommand = () => false; });
+  await copy.click();
+  await expect(dialog.getByRole("status").filter({ hasText: /could not copy.*select and copy the link/i })).toBeVisible();
+  await expect(copy).toHaveText("Copy");
+
+  await page.evaluate((expected) => {
+    document.execCommand = (command) => {
+      const field = document.activeElement;
+      return command === "copy" && field instanceof HTMLTextAreaElement && !!field.closest("dialog[open]") &&
+        field.value.slice(field.selectionStart, field.selectionEnd) === expected;
+    };
+  }, url);
+  await copy.click();
+  await expect(dialog.getByRole("status").filter({ hasText: "Link copied." })).toBeVisible();
 });
 
 test("sign-in and join give recovery instructions in an in-app browser", async ({ page }) => {
@@ -139,4 +184,61 @@ test("sign-in and join give recovery instructions in an in-app browser", async (
   await expect(page.getByText(/open this page in your browser/i)).toBeVisible();
   await expect(page.getByRole("link", { name: "Try signing in again" })).toBeVisible();
   await checkLayout(page.getByRole("main"));
+});
+
+test("an iOS home-screen app signs in and opens a join link without browser help", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Mobile/15E148" });
+    const matchMedia = window.matchMedia.bind(window);
+    window.matchMedia = (query) => query === "(display-mode: standalone)"
+      ? Object.defineProperty(matchMedia(query), "matches", { value: true })
+      : matchMedia(query);
+  });
+  const login = "**/auth/login?**";
+  await page.route(login, (route) => route.fulfill({ body: "Sign-in requested" }));
+
+  await page.goto(serviceUrl());
+  await expect(page.getByText(/open this page in your browser/i)).toHaveCount(0);
+  await page.getByRole("link", { name: /Sign in with/ }).click();
+  await expect(page.getByText("Sign-in requested")).toBeVisible();
+
+  await page.goto(serviceUrl() + "/join/example");
+  await expect(page.getByText("Sign-in requested")).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("next")).toBe("/join/example?signed-in=1");
+
+  await page.goto(serviceUrl() + "/join/example?signed-in=1");
+  await expect(page.getByRole("link", { name: "Try signing in again" })).toBeVisible();
+  await expect(page.getByText(/open this page in your browser/i)).toHaveCount(0);
+});
+
+async function expectBox(locator: Locator, expected: number[]) {
+  await expect(locator).toBeVisible();
+  await expect.poll(async () => {
+    const { x, y, width, height } = (await locator.boundingBox())!;
+    return [x, y, width, height].map(Math.round);
+  }).toEqual(expected);
+}
+
+test("account screens keep their desktop layout at 1440 pixels", async ({ page }, info) => {
+  test.skip(info.project.name !== "desktop-1440x900");
+  expect(await page.evaluate(() => matchMedia("(pointer: fine)").matches)).toBe(true);
+  // Rounded element boxes measured on the base branch at this viewport.
+  await page.goto(serviceUrl());
+  await expectBox(page.getByRole("link", { name: /Sign in with/ }), [650, 482, 141, 33]);
+  await page.goto(serviceUrl() + "/join/example?signed-in=1");
+  await expect(page.getByRole("link", { name: "Try signing in again" })).toBeVisible();
+  await expectBox(page.getByRole("heading", { name: "Join project" }), [491, 53, 458, 38]);
+  await expectBox(page.locator(".share-join .account-card"), [470, 32, 500, 141]);
+
+  await screens.settings(page);
+  await expectBox(page.getByRole("heading", { name: "Settings", exact: true }), [280, 76, 880, 38]);
+  await page.getByRole("button", { name: "Attach another workspace" }).click();
+  await expectBox(page.getByRole("dialog"), [500, 309, 440, 282]);
+
+  await screens.setup(page);
+  await page.getByRole("button", { name: /Set up wg/ }).click();
+  await expectBox(page.getByRole("heading", { name: "Set up wg" }), [507, 151, 632, 26]);
+  await expectBox(page.locator(".account-command").first(), [507, 399, 632, 252]);
+
+  await expectBox(await openShare(page), [450, 62, 540, 776]);
 });

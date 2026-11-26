@@ -33,6 +33,17 @@ export function readVapid(env: NodeJS.ProcessEnv): { publicKey: string; privateK
   } catch { throw new Error("Invalid VAPID key pair"); }
 }
 
+export function configuredVapid(env: NodeJS.ProcessEnv) {
+  try {
+    return readVapid(env);
+  } catch {
+    const setting = !env.WG_VAPID_PUBLIC_KEY && !env.WG_VAPID_PRIVATE_KEY && env.WG_VAPID_FILE
+      ? "WG_VAPID_FILE" : "WG_VAPID_PUBLIC_KEY and WG_VAPID_PRIVATE_KEY";
+    console.warn("Push is off. Check " + setting + ".");
+    return null;
+  }
+}
+
 function validEndpoint(value: unknown): value is string {
   if (typeof value !== "string" || value.length > 4096) return false;
   try {

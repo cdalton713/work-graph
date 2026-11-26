@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serializeSigned } from "hono/utils/cookie";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createApp } from "./app.ts";
 import { readVapid } from "./push.ts";
 import { filePushStore } from "./pushstore.ts";
@@ -142,4 +142,23 @@ test("the notice route binds the token to its project, limits requests and retur
     for (let i = 3; i < 30; ++i) expect((await request("Bearer test")).status).toBe(202);
     expect((await request("Bearer test")).status).toBe(429);
   } finally { finish(); await Promise.all(jobs); app.link.stop(); }
+});
+
+test.each([
+  [{ WG_VAPID_PUBLIC_KEY: "bad-public", WG_VAPID_PRIVATE_KEY: "bad-private" }, "WG_VAPID_PUBLIC_KEY and WG_VAPID_PRIVATE_KEY"],
+  [{ WG_VAPID_FILE: "/unreadable/key-file" }, "WG_VAPID_FILE"],
+])("bad VAPID settings leave the page available and push disabled", async (settings, label) => {
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const app = createApp({ port: 443, tailnet: null, hosted: { host } }, {
+      dist: "/unused", team: "WG", pushEnv: settings, stateDir: "/unused-state", watchMs: 0,
+    });
+    try {
+      const config = await app.request("/api/config", { headers: { host } });
+      expect(config.status).toBe(200);
+      expect((await config.json()).push).toBe(false);
+      expect(warning.mock.calls).toEqual([["Push is off. Check " + label + "."]]);
+      expect((await app.request("/api/push/notices", { method: "POST", headers: { host } })).status).toBe(503);
+    } finally { app.link.stop(); }
+  } finally { warning.mockRestore(); }
 });

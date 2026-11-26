@@ -21,7 +21,7 @@ import { type Rules, linkRefusal, refusal, sharedRoutes } from "./access.ts";
 import { configRecipient, sendNotice } from "./pushsend.ts";
 import { noticeKinds } from "../src/lib/types.ts";
 import { deviceId } from "./pushstore.ts";
-import { readVapid, pushRoutes } from "./push.ts";
+import { configuredVapid, pushRoutes } from "./push.ts";
 import { filePushStore, type PushStore } from "./pushstore.ts";
 import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
 import { isLinearIdentifier, planRoutes } from "./plans.ts";
@@ -191,7 +191,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   if (!tenants && auth && !readOnly && !linkToken) throw new Error("the sign-in needs WG_LINK_TOKEN on a full page");
   const configured = configTenants({ human: human ?? DEFAULT_HUMAN, workspaces, auth, linkToken, readOnly });
   const directory: Tenants = tenants ?? configured;
-  const vapid = readVapid(pushEnv);
+  const vapid = configuredVapid(pushEnv);
   const filePush = vapid && !tenants && stateDir && !isInside(stateDir, dist) ? filePushStore(stateDir) : undefined;
   const pushStore = tenants ? hostedPushStore : filePush ? () => filePush : undefined;
   const accountStore = tenants?.accountStore;

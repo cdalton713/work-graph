@@ -21,6 +21,7 @@ export interface Milestone { id: string; name: string; sortOrder: number; descri
 export interface Team { key: string; states: State[]; members: Person[] }
 export interface GraphData {
   workspace?: string;
+  waitNames?: string[];
   project: { id: string; name: string; url: string };
   milestones: Milestone[]; issues: Issue[]; teams: Record<string, Team>; labels: Label[]; viewerId: string;
   /** The project document that `wg next` writes: its text, and when it was written. Null when the project has none. */

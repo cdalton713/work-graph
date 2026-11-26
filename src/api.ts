@@ -1,3 +1,4 @@
+import type { ProjectClaims } from "./lib/claims";
 import type { Ask, Presence } from "./lib/link";
 import type { AutonomyLevel } from "./lib/autonomy";
 import type { ReviewEffort } from "./lib/review";
@@ -146,6 +147,10 @@ export const api = {
   overview: () => call<OverviewData>("overview"),
   /** The graph with its version, or null when the page already has version `have`. */
   graph: (projectId: string, have?: string, workspace?: string) => call<(GraphData & { version: string }) | null>(`projects/${projectId}/graph${have ? `?have=${have}` : ""}`, undefined, workspace),
+  claims: (id: string, workspace: string, signal: AbortSignal) =>
+    call<ProjectClaims>(`${projectPath(id)}/claims`, { signal, cache: "no-store" }, workspace),
+  releaseClaim: (id: string, workspace: string, node: string) =>
+    shareWrite<null>(`${projectPath(id)}/claims/${encodeURIComponent(node)}?force=1`, workspace, "DELETE"),
   sharedPresence: (id: string, workspace: string) => call<Presence & { asks?: Ask[] }>(`projects/${id}/presence`, undefined, workspace),
   /** A command for the coordinator of the project. */
   command: (projectId: string, command: { name: "next" | "dispatch" | "pause" | "resume"; key?: string; issue?: string }, workspace?: string) =>

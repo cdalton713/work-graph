@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ownerWords } from "../lib/words";
 import { type BoardGroupId, type GNode, type Graph, agentStep, boardGroups, reviewOf, runTime, satisfied, yourMove } from "../lib/graph";
+import { matchesClaim, type ClaimFilter, type ClaimMark } from "../lib/claims";
 import { Lamp, PrLinks } from "./ui";
 
 /** Groups that start folded: they hold the issues that need nothing now. */
@@ -9,6 +10,7 @@ const FOLDED: BoardGroupId[] = ["waiting", "merged", "closed"];
 const PR_GROUPS: BoardGroupId[] = ["you", "running", "review"];
 
 export interface BoardProps {
+  marks: ReadonlyMap<string, ClaimMark>; filter: ClaimFilter;
   graph: Graph; now: number; selectedId: string | null;
   onPick: (id: string) => void; onHover: (id: string | null) => void;
   /** Adds or removes the `reviewed` label. Absent when the team has no such label. */
@@ -23,8 +25,9 @@ export interface BoardProps {
  * The departure board: the issues by the action they need, in run order. A row selects the issue and
  * centres it on the canvas. The find field takes an id or words of a title; `/` puts the focus in it.
  */
-export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked, live }: BoardProps) {
+export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked, live, marks, filter }: BoardProps) {
   const copy = ownerWords();
+  const includes = (node: GNode) => matchesClaim(node.card?.key ? marks.get(node.card.key) : undefined, filter);
   const groups = useMemo(() => boardGroups(graph, asked), [graph, asked]);
   const [query, setQuery] = useState("");
   const [folded, setFolded] = useState<Set<BoardGroupId>>(() => new Set(FOLDED));
@@ -45,12 +48,13 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
 
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const matches = words.length
-    ? graph.nodes.filter((n) => words.every((w) => `${n.issue.identifier} ${n.issue.title}`.toLowerCase().includes(w)))
+    ? graph.nodes.filter((n) => includes(n) && words.every((w) => `${n.issue.identifier} ${n.issue.title}`.toLowerCase().includes(w)))
       .sort((a, b) => a.issue.sortOrder - b.issue.sortOrder)
     : null;
 
   const row = (n: GNode, groupId?: BoardGroupId) => {
     const job = live?.get(n.issue.identifier);
+    const claim = n.card?.key ? marks.get(n.card.key) : undefined;
     const worker = job ?? n.claim?.replace(/^agent:/, "");
     const elapsed = runTime(n.card, now);
     const holder = groupId === "waiting" ? (graph.blockers.get(n.id) ?? []).map((b) => graph.byId.get(b)!).find((b) => !satisfied(b, n)) : undefined;
@@ -61,9 +65,11 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
           onClick={() => onPick(n.id)} onMouseEnter={() => onHover(n.id)} onMouseLeave={() => onHover(null)}>
           <Lamp signal={n.signal} pulse={!!worker} />
           <span className="board-id mono">{n.issue.identifier}{asked?.has(n.issue.identifier) && <b className="board-ask" title={`The worker asks ${copy.owner} a question. Open the issue to reply.`}>asks {copy.owner}</b>}</span>
-          <span className="board-title">{n.issue.title}</span>
+          <span className="board-title">{n.issue.title}{claim && <span className={`runner-mark${claim.stale ? " is-stale" : ""}`} role="img"
+            aria-label={`Runner: ${claim.holder}${claim.stale ? ", stale claim" : ""}`} title={claim.holder}>
+            {claim.stale && "⚠ "}{claim.initials}</span>}</span>
           <span className={`board-status sig-fg-${n.signal}`}>
-            {n.status === "Backlog" ? n.status : worker ?? (holder ? `after ${holder.issue.identifier}` : groupId === "running" ? "" : groupId === "review" ? (n.status === "Ready to Merge" && agentStep(n.card?.next) ? `${n.status} · wg: ${agentStep(n.card?.next)}` : "") : n.status)}
+            {n.waitsOnOther ? `waits on ${n.waitsOnOther}` : n.status === "Backlog" ? n.status : worker ?? (holder ? `after ${holder.issue.identifier}` : groupId === "running" ? "" : groupId === "review" ? (n.status === "Ready to Merge" && agentStep(n.card?.next) ? `${n.status} · wg: ${agentStep(n.card?.next)}` : "") : n.status)}
             {elapsed && <> <span className={`run-time${elapsed.warning ? " run-warning" : ""}`} title="Worker run time">{elapsed.text}</span></>}
           </span>
         </button>
@@ -95,13 +101,13 @@ export function Board({ graph, now, selectedId, onPick, onHover, onReview, asked
         {!query && <kbd aria-hidden>/</kbd>}
       </div>
       <div className="board-scroll">
-        {!matches && !groups.some((g) => g.id === "you" && g.nodes.length) && <p className="board-clear"><Lamp signal="done" />{copy.clear}</p>}
+        {!matches && !groups.some((g) => g.id === "you" && g.nodes.some(includes)) && <p className="board-clear"><Lamp signal="done" />{copy.clear}</p>}
         {matches ? (
           <section className="board-group">
             <h3 className="board-head"><span>Matches</span><b className="mono">{matches.length}</b></h3>
             {matches.length ? <ul>{matches.map((n) => row(n))}</ul> : <p className="board-empty">No issue has these words.</p>}
           </section>
-        ) : groups.filter((g) => g.nodes.length).map((g) => {
+        ) : groups.map((g) => ({ ...g, nodes: g.nodes.filter(includes) })).filter((g) => g.nodes.length).map((g) => {
           const open = !folded.has(g.id);
           return (
             <section key={g.id} className={`board-group board-${g.id}`}>

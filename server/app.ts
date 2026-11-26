@@ -850,6 +850,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       projects: [...list.projects, ...projects.filter((project) => project !== null)] };
   };
   api.get("/projects", async (c) => c.json<ProjectList>(await listedProjects(c.var.viewer)));
+  const waitNamesFor = async (owner: Tenant, workspace: Workspace, id: string) => {
+    const connection = workspace.connectionId;
+    if (connection) return (await accountStore?.())?.shares.waitNames([owner.id, connection, id]);
+  };
+
   // The projects with a summary of each open one. The graphs come from the same cache as the graph
   // route, a few at a time, so a poll of the overview costs about one cheap check for each project.
   api.get("/overview", async (c) => {
@@ -860,6 +865,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const open = list.projects.filter((p) => p.statusType !== "completed" && p.statusType !== "canceled");
     await checkAll(open);
     const summaries: ProjectSummary[] = [];
+    const human = sharedScope.getStore()?.member.name ?? serverSite().human;
     let next = 0;
     const worker = async () => {
       while (next < open.length) {
@@ -870,7 +876,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           // The viewer takes no older graph when Linear fails (see the graph route).
           const read = () => linearWorkspace.run(workspace, () => graphs().get(p.id, { fresh: viewer || !!entry }));
           const { data } = entry ? await runInTenant(entry.owner, read) : await read();
-          summaries.push(summarize(shown(data, viewer || !!entry), p.workspace));
+          const waitNames = await waitNamesFor(entry?.owner ?? scope().tenant, workspace, p.id);
+          const summarizeProject = () => summarize(shown(data, viewer || !!entry), p.workspace);
+          summaries.push(waitNames ? requestSite.run({ ...serverSite(), human, waitNames }, summarizeProject) : summarizeProject());
         } catch (error) {
           summaries.push({ workspace: p.workspace, id: p.id, planned: 0, done: 0, counts: [], you: [], running: 0, review: 0, ready: 0,
             effort: null, freshness: null, updatedAt: null, error: (error as Error).message });
@@ -908,9 +916,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // The viewer gets the error of the refresh in its place: an issue of the older graph can be in another project
     // now. A graph in memory can still have an issue that left the project, until its full reload (`FULL_MS`):
     // the check for changes does not see an issue that is in the project no more.
-    const { data, version, stale, error, loadedAt } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
+    const { data, version: graphVersion, stale, error, loadedAt } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
+    const waitNames = await waitNamesFor(scope().tenant, linearWorkspace.getStore()!, c.req.param("id"));
+    const version = waitNames ? `${graphVersion}:${createHash("sha256").update(JSON.stringify(waitNames)).digest("hex")}` : graphVersion;
     if (!stale && c.req.query("have") === version) return c.body(null, 204);
-    return c.json({ ...shown(data, viewer || !!shared), version, workspace: shared?.id ?? linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
+    return c.json({ ...shown(data, viewer || !!shared), ...(waitNames && { waitNames }), version, workspace: shared?.id ?? linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
   });
   api.post("/projects/:id/close", async (c) => {
     const { confirm } = await json(c.req.json<{ confirm?: unknown }>());

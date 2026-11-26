@@ -33,7 +33,7 @@ export function Asks({ asks, projectId, workspace, now, onError }: AsksProps) {
     <section className="asks" aria-label="Questions of the worker">
       {open.map((ask) => (
         <div key={ask.id} className="ask">
-          <h3>{ask.kind === "escalation" ? "The worker stopped and escalates" : "The worker asks"}{ask.at && <span className="count-note">{ageText(now - Date.parse(ask.at))}</span>}</h3>
+          <h3>{ask.kind === "escalation" ? "The worker stopped and escalates" : "The worker asks"}{ask.accountName && <span className="count-note">{ask.accountName}'s coordinator</span>}{ask.at && <span className="count-note">{ageText(now - Date.parse(ask.at))}</span>}</h3>
           <div className="ask-body"><Rich text={ask.body} /></div>
           <textarea className="editor" rows={3} placeholder="Your reply. ⌘↵ sends it to the worker." value={drafts[ask.id] ?? ""}
             onChange={(e) => setDrafts((d) => ({ ...d, [ask.id]: e.target.value }))}

@@ -54,6 +54,18 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
   }
 
   return {
+    async waitNames(project: ProjectScope): Promise<string[] | undefined> {
+      const rows = await sql.query<{ owner: string; collaborator: string | null }>(`
+        SELECT owner.human AS owner, runner.human AS collaborator
+        FROM project_members m
+        JOIN tenants owner ON owner.id = m.tenant_id
+        LEFT JOIN tenants runner ON runner.owner_user_id = m.user_id AND m.role = 'collaborator'
+        WHERE m.tenant_id = $1 AND m.connection_id = $2 AND m.project_id = $3
+        ORDER BY m.joined_at, m.id`, project);
+      if (!rows.length) return;
+      return [...new Set([rows[0].owner, ...rows.flatMap(({ collaborator }) => collaborator ? [collaborator] : [])])];
+    },
+
     memberships(account: string) {
       return sql.query<{ id: string; ownerId: string; connectionId: string; projectId: string; name: string; role: MemberRole }>(`
         SELECT m.id, m.tenant_id AS "ownerId", m.connection_id AS "connectionId",

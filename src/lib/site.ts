@@ -11,6 +11,7 @@ export const humanSlug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]
 export interface Site {
   /** The human's name, for example "Human". */
   human: string;
+  waitNames?: readonly string[];
   /** The status of an issue that waits on the human (contract.json `human.status`): "Needs Human". */
   waitStatus: string;
   /** The workspace label that marks that status on an issue of another team (`human.label`): "needs-human". */
@@ -44,7 +45,11 @@ export function setSiteSource(source: () => Site | undefined): void {
 }
 
 /** The statuses in the order of a project's flow, for the counts. */
-export const statusOrder = () => ["Triage", "Backlog", "Todo", "Ready", "In Progress", currentSite().waitStatus, "In Review",
+export const waitStatuses = (settings = currentSite()) => (settings.waitNames ?? [settings.human])
+  .map((name) => ({ name, status: `Needs ${name}`, label: `needs-${humanSlug(name)}` }));
+
+export const statusOrder = (settings = currentSite()) => ["Triage", "Backlog", "Todo", "Ready", "In Progress",
+  ...waitStatuses(settings).map(({ status }) => status), "In Review",
   "Ready to Merge", "Merged", "Verifying", "Done", "Canceled"];
 
 // The server gives the link path with the signed-in role. Older servers use the default path for the full page.

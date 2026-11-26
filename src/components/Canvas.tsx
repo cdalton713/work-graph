@@ -4,7 +4,9 @@ import { type GEdge, type GNode, type Graph, reviewMark, runTime, satisfied, soa
 import { type Layout, NODE_H, NODE_W, type Point, arrow, roundedPath, routeAt } from "../lib/layout";
 import { Lamp } from "./ui";
 
-type StationData = { node: GNode; dim: boolean; selected: boolean; showLane: boolean; now: number };
+import type { ClaimMark } from "../lib/claims";
+
+type StationData = { claim?: ClaimMark; node: GNode; dim: boolean; selected: boolean; showLane: boolean; now: number };
 type RouteEdge = Edge<{ points: Point[] }, "route">;
 type StationNode = Node<StationData, "station">;
 type BoxNode = Node<{ kind: "phase" | "lane" }, "box">;
@@ -43,7 +45,7 @@ const HANDLES: NonNullable<StationNode["handles"]> = [
 ];
 
 const Station = memo(function Station({ data }: NodeProps<StationNode>) {
-  const { node, dim, selected, showLane, now } = data;
+  const { node, dim, selected, showLane, now, claim } = data;
   const { issue, card } = node;
   const worker = node.claim?.replace(/^agent:/, "");
   const mark = reviewMark(issue, card);
@@ -57,6 +59,9 @@ const Station = memo(function Station({ data }: NodeProps<StationNode>) {
         <div className="station-top">
           <Lamp signal={node.signal} pulse={!!worker} />
           <span className="station-id">{issue.identifier}</span>
+          {claim && <span className={`runner-mark${claim.stale ? " is-stale" : ""}`} role="img"
+            aria-label={`Runner: ${claim.holder}${claim.stale ? ", stale claim" : ""}`}
+            title={`Runner: ${claim.holder}${claim.stale ? " (stale claim)" : ""}`}>{claim.stale && "⚠ "}{claim.initials}</span>}
           <span className="station-tags">
             {KIND_MARK[node.kind] && <span>{KIND_MARK[node.kind]}</span>}
             {card?.wave === "yes" && <span className="station-wave" title="In the current wave.">WAVE</span>}
@@ -66,7 +71,7 @@ const Station = memo(function Station({ data }: NodeProps<StationNode>) {
           </span>
           {card?.pr && <span className="station-pr">#{card.pr}{mark && <i title={mark.title}> {mark.text}</i>}</span>}
           {elapsed && <span className={`run-time${elapsed.warning ? " run-warning" : ""}`} title="Worker run time">{elapsed.text}</span>}
-          <span className="station-status">{node.status}</span>
+          <span className="station-status" title={node.waitsOnOther ? `Waits on ${node.waitsOnOther}` : undefined}>{node.waitsOnOther ? `waits on ${node.waitsOnOther}` : node.status}</span>
         </div>
         <div className="station-title">{issue.title}</div>
       </div>
@@ -125,12 +130,13 @@ const nodeTypes = { station: Station, box: BoxView, plate: PlateView };
 const edgeTypes = { route: Route };
 
 export interface CanvasProps {
+  marks: ReadonlyMap<string, ClaimMark>;
   graph: Graph; now: number; edges: GEdge[]; layout: Layout; selectedId: string | null; hoverId: string | null;
   statusFilter: Set<string>; focus: { id: string; tick: number } | null; showMap: boolean;
   onSelect: (id: string | null) => void; onHover: (id: string | null) => void;
 }
 
-function Flow({ graph, now, edges: shown, layout, selectedId, hoverId, statusFilter, focus, showMap, onSelect, onHover }: CanvasProps) {
+function Flow({ graph, marks, now, edges: shown, layout, selectedId, hoverId, statusFilter, focus, showMap, onSelect, onHover }: CanvasProps) {
   const flow = useReactFlow();
   // In steps of 0.05, so a zoom gesture renders the canvas again only a few times.
   const zoom = useViewportStore((s) => Math.round(s.transform[2] * 20) / 20);
@@ -165,10 +171,10 @@ function Flow({ graph, now, edges: shown, layout, selectedId, hoverId, statusFil
     }));
     const stations: StationNode[] = graph.nodes.filter((n) => layout.positions.has(n.id)).map((n) => ({
       id: n.id, type: "station", position: layout.positions.get(n.id)!, width: NODE_W, height: NODE_H, handles: HANDLES, draggable: false,
-      data: { node: n, now, selected: n.id === selectedId, showLane: !layout.boxed.has(n.id), dim: dimmed.has(n.id) },
+      data: { node: n, now, claim: n.card?.key ? marks.get(n.card.key) : undefined, selected: n.id === selectedId, showLane: !layout.boxed.has(n.id), dim: dimmed.has(n.id) },
     }));
     return [...boxes, ...plates, ...stations];
-  }, [graph, now, layout, selectedId, dimmed]);
+  }, [graph, marks, now, layout, selectedId, dimmed]);
 
   // Colour is the state of the blocker. A lit edge is brighter and thicker and keeps that colour.
   const edges = useMemo<RouteEdge[]>(() => shown.filter((e) => layout.routes.has(e.id)).map((e) => {

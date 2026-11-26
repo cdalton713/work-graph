@@ -1242,6 +1242,19 @@ it("allows each account to join only its shared projects and closes a removed me
     page.injectWebSocket(http as never);
     const sockets: WebSocket[] = [];
     try {
+      graphLinear();
+      await accounts.setHuman(grace, "Grace Hopper");
+      const get = (id: string, headers: Record<string, string>) => page.request(`/api/projects/${id}/graph`, { headers });
+      const ownerHeaders = await rolesHeaders("ada@example.com", ada);
+      expect(await (await get("p1", ownerHeaders)).json()).toMatchObject({ waitNames: ["Ada", "Grace Hopper"] });
+      expect(await (await get("p2", ownerHeaders)).json()).not.toHaveProperty("waitNames");
+      expect(await (await get("p1", { ...await rolesHeaders("grace@example.com", grace), "x-workspace": collab.id })).json()).toMatchObject({ waitNames: ["Ada", "Grace Hopper"] });
+      expect(await (await app().request("/api/projects/p1/graph", { headers: local })).json()).not.toHaveProperty("waitNames");
+      await accounts.setHuman(grace, "Ada");
+      expect(await (await get("p1", ownerHeaders)).json()).toMatchObject({ waitNames: ["Ada"] });
+      expect(await (await get("p1", { ...await rolesHeaders("grace@example.com", grace), "x-workspace": collab.id })).json())
+        .toMatchObject({ waitNames: ["Ada"] });
+      await accounts.setHuman(grace, "Grace");
       expect((await page.request(path(view.id), { headers: headers(viewToken) })).status).toBe(403);
       expect((await page.request(path(collab.id), { headers: headers(viewToken) })).status).toBe(400);
       expect((await page.request(path(collab.id, "other"), { headers: headers(graceToken) })).status).toBe(404);

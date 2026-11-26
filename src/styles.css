@@ -656,3 +656,10 @@ button.copy.is-copied { color: var(--lamp-done); }
   .service-app .bar > .picker { flex: 0 0 auto; max-width: 100%; }
   .service-app .bar > .picker:first-of-type { flex: 1 1 150px; }
 }
+
+.claim-filter { display: flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--ink-3); }
+.claim-filter select { color: var(--ink-1); background: var(--cab-1); border: 1px solid var(--rail); font: inherit; }
+.runner-mark { flex: none; display: inline-block; border: 1px solid var(--rail); border-radius: 3px; padding: 0 3px; color: var(--ink-2); font-size: 10px; white-space: nowrap; }
+.station-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.runner-mark.is-stale { color: var(--lamp-running); }
+.board-title .runner-mark { margin-inline-start: 5px; }

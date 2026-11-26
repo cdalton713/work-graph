@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
@@ -43,10 +44,16 @@ const started = { id: "started", name: "In progress", type: "started", color: "#
 const issue = {
   id: "issue", identifier: "WG-1", title: "Example issue", description: "", priority: 0,
   url: "https://example.com/issue", sortOrder: 0, updatedAt: new Date().toISOString(),
-  project, team: exampleTeam, state: started, assignee: null, labels: empty,
+  project, team: exampleTeam, state: { ...started, id: "needs-ada", name: "Needs Ada" }, assignee: null, labels: empty,
   relations: empty, inverseRelations: empty, attachments: empty,
   comments: { nodes: [{ id: "card", body: '**work-graph node card**\n\n```json\n{"wg":1,"key":"example","kind":"task"}\n```' }], pageInfo },
 };
+const graceIssue = {
+  ...issue, id: "grace-issue", identifier: "WG-2", title: "Check the shared project",
+  sortOrder: 1, state: { ...started, id: "needs-grace", name: "Needs Grace" },
+  comments: { nodes: [{ id: "grace-card", body: issue.comments.nodes[0].body.replace('"example"', '"check"') }], pageInfo },
+};
+const issues = [issue, graceIssue];
 const accounts = tenants.accounts;
 const people = await Promise.all([
   { id: "ada", name: "Ada", org: workspace },
@@ -76,6 +83,34 @@ await sql.query(`UPDATE project_members SET access_requested_at = now() - interv
   access_request_limit_until = NULL WHERE id = $1`, [membership.id]);
 // Leave the read-only link off so the preview covers both initial link states.
 await accounts.shares.revoke([...scope], "view");
+for (const [person, node, job] of [[owner, "example", "dispatch"], [collaborator, "check", "review"]] as const) {
+  await accounts.claims({ project: [...scope], account: person.accountId,
+    ...(person === collaborator && { membership: membership.id }) }, { kind: "post", node, job, lease: 3600, takeover: false });
+}
+await sql.query(`UPDATE node_claims SET claimed_at = now() - interval '1 hour',
+  renewed_at = now() - interval '30 minutes', lease_until = now() - interval '1 minute'
+  WHERE tenant_id = $1 AND connection_id = $2 AND project_id = $3 AND node_key = 'check'`, [...scope]);
+const ref = { tenant: owner.accountId, workspace: "example", id: project.id };
+async function previewCoordinators() {
+  const { coordinators } = await app.link.hub.presence(ref);
+  if (coordinators.filter(({ connected }) => connected).length === 2) return;
+  async function connect(session: string, member?: Parameters<typeof app.link.hub.joinCoordinator>[2]) {
+    const connection = await app.link.hub.joinCoordinator({
+      close() { void connection.closed(); }, send() {},
+    }, ref, member);
+    await connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session, plan: "example" } }));
+    await connection.receive(JSON.stringify({ v: 1, type: "state", payload: { mode: "waiting" } }));
+    return connection;
+  }
+  await connect("owner");
+  const second = await connect("collaborator", {
+    account: collaborator.accountId, name: collaborator.name, workspace: `shared:${membership.id}`, ownerName: owner.name,
+  });
+  await second.receive(JSON.stringify({ v: 1, type: "asks", payload: { asks: [
+    { id: "question", key: "check", issue: "WG-2", from: "worker", body: "Can you check the result?", at: new Date().toISOString() },
+  ] } }));
+}
+
 const teamMembers = new Set([owner.id]);
 let invitationPending = false;
 
@@ -121,11 +156,15 @@ globalThis.fetch = async (input, init) => {
     invitationPending = true;
     return data({ organizationInviteCreate: { success: true } });
   }
-  if (query.includes("issue(id:")) return data({ issue: visible && variables.id === issue.id ? { ...issue, comments: empty } : null });
-  if (query.includes("teams(first:10")) return data({ teams: { nodes: [{ ...exampleTeam, states: { nodes: [started] }, members: empty }] } });
+  if (query.includes("issue(id:")) {
+    const found = issues.find(({ id }) => id === variables.id);
+    return data({ issue: visible && found ? { ...found, comments: empty } : null });
+  }
+  if (query.includes("teams(first:10")) return data({ teams: { nodes: [{ ...exampleTeam, states: { nodes: [started, ...issues.map((item) => item.state)] }, members: empty }] } });
   if (query.includes("issueLabels(")) return data({ issueLabels: empty });
+  if (query.includes("issues(first:1,")) return data({ issues: empty, comments: empty, project: { documents: empty } });
   if (query.includes("project(id:")) {
-    return data({ viewer: linearViewer, project: visible && variables.id === project.id ? { ...graphProject, issues: { nodes: [issue], pageInfo } } : null });
+    return data({ viewer: linearViewer, project: visible && variables.id === project.id ? { ...graphProject, issues: { nodes: issues, pageInfo } } : null });
   }
   return data({
     viewer: linearViewer,
@@ -145,6 +184,7 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
     const identity = url.searchParams.get("as");
     const person = people.find(({ id }) => id === identity) ?? owner;
     if (identity) await accounts.setOnboarding(person.accountId, undefined, true);
+    await previewCoordinators();
     const value = pack({ accountId: person.accountId, email: person.email, id: randomUUID(), exp: Math.floor(Date.now() / 1000) + SESSION_S });
     const cookie = await serializeSigned("wg_preview_session", value, auth.secret, { path: "/", httpOnly: true, sameSite: "Strict" });
     return new Response(null, { status: 302, headers: {
@@ -177,9 +217,21 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
   return response;
 } }, ({ port }) => console.log(`Service preview at http://127.0.0.1:${port}/`));
 
+server.on("upgrade", (request) => {
+  const address = server.address();
+  if (!address || typeof address === "string") return;
+  const localHost = `127.0.0.1:${address.port}`;
+  if (request.headers.host !== localHost || request.headers.origin !== `http://${localHost}`) return;
+  request.headers.host = host;
+  request.headers.origin = origin;
+  const cookie = /(?:^|;\s*)wg_preview_session=([^;]+)/.exec(request.headers.cookie ?? "")?.[1];
+  if (cookie) request.headers.cookie = `__Host-${SESSION_COOKIE}=${cookie}`;
+});
+if (server instanceof Server) app.injectWebSocket(server);
+
 stopOnSignals(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
   await app.link.shutdown();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   tenants.close();
   await sql.close();
 }, (signal, handle) => process.on(signal, handle), (code) => process.exit(code));

@@ -1,0 +1,8 @@
+usage: wg.py run reset [-h] dir key
+
+positional arguments:
+  dir
+  key
+
+options:
+  -h, --help  show this help message and exit

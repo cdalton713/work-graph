@@ -1,0 +1,7 @@
+usage: wg.py owns [-h] {overlap,diff} ...
+
+positional arguments:
+  {overlap,diff}
+
+options:
+  -h, --help      show this help message and exit

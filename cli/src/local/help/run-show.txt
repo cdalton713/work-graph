@@ -1,0 +1,9 @@
+usage: wg.py run show [-h] [--json] dir [key]
+
+positional arguments:
+  dir
+  key
+
+options:
+  -h, --help  show this help message and exit
+  --json

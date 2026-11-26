@@ -1,0 +1,160 @@
+mod card;
+mod graph;
+mod journal;
+mod rows;
+
+use crate::state::{Config, PlanLock};
+pub use card::CardWriter;
+use serde_json::Value;
+use std::{io, path::Path, process::ExitCode};
+
+type Error = (u8, String);
+type Result<T> = std::result::Result<T, Error>;
+fn invalid(s: impl Into<String>) -> Error {
+    (2, s.into())
+}
+fn failed(s: impl Into<String>) -> Error {
+    (1, s.into())
+}
+fn ioerr(e: io::Error) -> Error {
+    invalid(e.to_string())
+}
+fn list(v: &Value) -> &[Value] {
+    v.as_array().map(Vec::as_slice).unwrap_or_default()
+}
+fn val(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => "None".into(),
+        Value::Bool(b) => if *b { "True" } else { "False" }.into(),
+        _ => v.to_string(),
+    }
+}
+fn text<'a>(v: &'a Value, k: &str) -> &'a str {
+    v[k].as_str().unwrap_or_default()
+}
+fn node<'a>(p: &'a Value, k: &str) -> Result<&'a Value> {
+    list(&p["nodes"])
+        .iter()
+        .find(|n| n["key"] == k)
+        .ok_or_else(|| invalid(format!("unknown key {k}")))
+}
+fn ascii(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for c in s.chars() {
+        if c < '\u{7f}' {
+            out.push(c)
+        } else {
+            for u in c.encode_utf16(&mut [0; 2]) {
+                write!(out, "\\u{u:04x}").unwrap()
+            }
+        }
+    }
+    out
+}
+fn compact(v: &Value) -> String {
+    match v {
+        Value::Array(a) => format!("[{}]", a.iter().map(compact).collect::<Vec<_>>().join(", ")),
+        Value::Object(o) => format!(
+            "{{{}}}",
+            o.iter()
+                .map(|(k, v)| format!(
+                    "{}: {}",
+                    ascii(&serde_json::to_string(k).unwrap()),
+                    compact(v)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => ascii(&v.to_string()),
+    }
+}
+
+pub fn command(args: Vec<String>, cards: Option<&mut dyn CardWriter>) -> ExitCode {
+    match execute(&args, cards) {
+        Ok(code) => ExitCode::from(code),
+        Err((code, msg)) => {
+            eprintln!("{msg}");
+            ExitCode::from(code)
+        }
+    }
+}
+fn execute(args: &[String], cards: Option<&mut dyn CardWriter>) -> Result<u8> {
+    let (verb, args) = args
+        .split_first()
+        .ok_or_else(|| invalid("missing command"))?;
+    if args.iter().any(|s| s == "--help" || s == "-h") {
+        let name = if matches!(verb.as_str(), "run" | "owns")
+            && args.first().is_some_and(|a| !a.starts_with('-'))
+        {
+            format!("{verb} {}", args[0])
+        } else {
+            verb.clone()
+        };
+        print!(
+            "{}",
+            match name.as_str() {
+                "check" => include_str!("help/check.txt"),
+                "owns" => include_str!("help/owns.txt"),
+                "owns overlap" => include_str!("help/owns-overlap.txt"),
+                "owns diff" => include_str!("help/owns-diff.txt"),
+                "log" => include_str!("help/log.txt"),
+                "run" => include_str!("help/run.txt"),
+                "run show" => include_str!("help/run-show.txt"),
+                "run set" => include_str!("help/run-set.txt"),
+                "run reset" => include_str!("help/run-reset.txt"),
+                "run rebuild" => include_str!("help/run-rebuild.txt"),
+                "contract" => include_str!("help/contract.txt"),
+                _ => return Err(invalid("unknown command")),
+            }
+        );
+        return Ok(0);
+    }
+    if verb == "contract" {
+        const CONTRACT: &str = include_str!("../../../skills/work-graph/contract.json");
+        match args {
+            [] => print!("{CONTRACT}"),
+            [s] if s == "--write" => {
+                let cwd = std::env::current_dir().map_err(ioerr)?;
+                let exe = std::env::current_exe().map_err(ioerr)?;
+                let skill = cwd
+                    .ancestors()
+                    .chain(exe.ancestors())
+                    .map(|p| p.join("skills/work-graph"))
+                    .find(|p| p.is_dir())
+                    .ok_or_else(|| {
+                        invalid("cannot locate skills/work-graph for contract --write")
+                    })?;
+                std::fs::write(skill.join("contract.json"), CONTRACT).map_err(ioerr)?;
+            }
+            _ => return Err(invalid("usage: wg contract [--write]")),
+        }
+        return Ok(0);
+    }
+    let (mode, args) = if matches!(verb.as_str(), "run" | "owns") {
+        let (m, a) = args.split_first().ok_or_else(|| invalid("missing mode"))?;
+        (m.as_str(), a)
+    } else {
+        ("", args)
+    };
+    let (dir, args) = args
+        .split_first()
+        .ok_or_else(|| invalid("missing plan directory"))?;
+    let dir = Path::new(dir);
+    let lock = if verb == "run" && matches!(mode, "set" | "reset" | "rebuild") {
+        Some(PlanLock::acquire(dir, None).map_err(ioerr)?)
+    } else {
+        None
+    };
+    let cfg = Config::discover().map_err(ioerr)?;
+    let p = cfg.load_plan(dir).map_err(ioerr)?;
+    let config = cfg.report(None).map_err(ioerr)?;
+    match verb.as_str() {
+        "check" if args.is_empty() => Ok(graph::check(&p, &config)),
+        "owns" => graph::owns(mode, &p, args),
+        "log" => journal::log(dir, &p, args, &config),
+        "run" => rows::run(mode, dir, &p, args, lock.as_ref(), cards, &config),
+        _ => Err(invalid("invalid command arguments")),
+    }
+}

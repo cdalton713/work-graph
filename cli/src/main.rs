@@ -38,6 +38,14 @@ fn main() -> ExitCode {
         };
     }
     let mut args = std::env::args_os().skip(1);
+    if std::env::args_os().nth(1).is_some_and(|v| {
+        matches!(
+            v.to_str(),
+            Some("check" | "owns" | "log" | "run" | "contract")
+        )
+    }) {
+        return wg_preview::local::command(std::env::args().skip(1).collect(), None);
+    }
     match (args.next().as_deref(), args.next()) {
         (Some(verb), dir) if verb == "config" && args.next().is_none() => {
             let config = match wg_preview::state::Config::discover() {

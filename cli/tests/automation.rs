@@ -175,7 +175,7 @@ fn public_next_reconnects_replays_state_and_acknowledges_the_wakeup() {
     listener.set_nonblocking(true).unwrap();
     let server = thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(50);
-        for pass in 0..2 {
+        for pass in 0..4 {
             let stream = loop {
                 match listener.accept() {
                     Ok((s, _)) => break s,
@@ -199,6 +199,26 @@ fn public_next_reconnects_replays_state_and_acknowledges_the_wakeup() {
                     serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
                 if kinds.is_empty() {
                     assert_eq!(frame["type"], "hello");
+                    match pass {
+                        2 => {
+                            for message in [
+                                json!({"id":"missing-key","type":"command","payload":{"name":"dispatch","issue":"unknown"}}),
+                                json!({"id":"queued","type":"answer","payload":{"key":"a","issue":"EX-1","body":"queued before refresh"}})
+                            ] {
+                                let mut message=message;
+                                message["v"]=json!(1);
+                                ws.send(Message::text(message.to_string())).unwrap();
+                            }
+                        },
+                        3 => ws.send(Message::text(json!({"v":1,"id":"reply","type":"reply","payload":{"key":"a","issue":"EX-1","ask":"question","body":"acknowledged"}}).to_string())).unwrap(),
+                        _=>(),
+                    }
+                }
+                if frame["type"] == "progress" {
+                    let nodes = frame["payload"]["nodes"].as_array().unwrap();
+                    assert!(nodes.iter().any(|row| row["key"] == "a"
+                        && row["job"] == "work"
+                        && row["evidence"] == "pass on 1234567"));
                 }
                 kinds.insert(frame["type"].as_str().unwrap().to_string());
             }
@@ -217,13 +237,29 @@ fn public_next_reconnects_replays_state_and_acknowledges_the_wakeup() {
                 .unwrap();
                 continue;
             }
-            ws.send(Message::text(json!({"v":1,"id":"wake","type":"answer","payload":{"key":"a","issue":"EX-1","body":"fixture answer"}}).to_string())).unwrap();
+            let answer = |body: &str| {
+                Message::text(json!({"v":1,"id":"wake","type":"answer","payload":{"key":"a","issue":"EX-1","body":body}}).to_string())
+            };
+            if pass == 1 {
+                ws.send(answer("fixture answer")).unwrap();
+            }
             loop {
                 let frame: Value =
                     serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
                 if frame["type"] == "ack" {
-                    assert_eq!(frame["payload"]["ids"], json!(["wake"]));
-                    break;
+                    if pass == 3 && frame["payload"]["ids"] == json!(["reply"]) {
+                        ws.send(answer("after reply")).unwrap();
+                    } else {
+                        assert_eq!(
+                            frame["payload"]["ids"],
+                            if pass == 2 {
+                                json!(["missing-key", "queued"])
+                            } else {
+                                json!(["wake"])
+                            }
+                        );
+                        break;
+                    }
                 }
             }
         }

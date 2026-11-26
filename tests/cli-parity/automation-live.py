@@ -131,8 +131,18 @@ def scenario(root):
             settings = json.loads(cfg.read_text())
             settings["page_url"] = sys.argv[2]
             cfg.write_text(json.dumps(settings))
+            evidence = plan / "evidence"
+            evidence.mkdir(exist_ok=True)
+            (evidence / "a.json").write_text(json.dumps({"sha":"1234567890", "exit":0}))
             result = run("next", plan, "--wait", "--no-publish", "--interval", "10")
             assert "do answer a EX-1: fixture answer" in result
+            first = run("next", plan, "--all", "--no-publish")
+            assert "do answer a EX-1: queued before refresh" in first, first
+            assert "dispatch -" not in first
+            waited = run("next", plan, "--wait", "--no-publish", "--interval", "10")
+            assert waited.startswith("note replied a EX-1: acknowledged\n"), waited
+            assert "do answer a EX-1: after reply" in waited, waited
+
 
 
 

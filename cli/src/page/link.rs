@@ -267,6 +267,20 @@ impl Link {
         }
         Ok(())
     }
+    /// Read the backlog sent in response to hello before computing one-shot decisions.
+    pub(crate) fn initial_messages(&mut self) -> Result<Vec<Value>> {
+        let mut messages = Vec::new();
+        if self.connect().is_ok() {
+            let deadline = Instant::now() + Duration::from_millis(100);
+            while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                match self.wait(left.min(Duration::from_millis(50)))? {
+                    Some(m) => messages.push(m),
+                    None => break,
+                }
+            }
+        }
+        Ok(messages)
+    }
     pub fn wait(&mut self, duration: Duration) -> Result<Option<Value>> {
         let end = Instant::now() + duration;
         while Instant::now() < end {

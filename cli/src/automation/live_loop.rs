@@ -119,6 +119,34 @@ fn levels(e: &mut Effort, a: &mut Actions, labels: &[Value]) -> Result<()> {
     }
     Ok(())
 }
+fn progress_evidence(dir: &Path, key: &str) -> Option<String> {
+    if Path::new(key).file_name() != Some(key.as_ref()) {
+        return None;
+    }
+    let bytes = std::fs::read(dir.join("evidence").join(format!("{key}.json"))).ok()?;
+    let record: Value = serde_json::from_slice(&bytes).ok()?;
+    let exit = record["exit"].as_i64()?;
+    let sha: String = record["sha"].as_str()?.chars().take(7).collect();
+    let outcome = if exit == 0 {
+        "pass".into()
+    } else {
+        format!("fail (exit {exit})")
+    };
+    Some(format!("{outcome} on {sha}"))
+}
+fn progress(e: &Effort) -> Vec<Value> {
+    let mut nodes = Vec::new();
+    for (key, row) in e.km["run"]["nodes"].as_object().into_iter().flatten() {
+        if row["state"].is_string() || row["job"].is_string() {
+            nodes.push(json!({
+                "key": key, "issue": e.km["nodes"][key]["identifier"], "job": row["job"],
+                "state": row["state"], "ci": row["ci"], "at": row["started_at"],
+                "evidence": progress_evidence(e.dir, key),
+            }));
+        }
+    }
+    nodes
+}
 fn answers(e: &Effort) -> Result<Vec<(String, String)>> {
     let result=e.linear()?.request("query($n:String!){issues(first:50,filter:{labels:{some:{name:{eq:$n}}}}){nodes{id identifier state{name type} labels(first:100){nodes{id name}} comments(first:20){nodes{body createdAt}}}}}",json!({"n":"answered"}))?;
     let mut lines = vec![];
@@ -351,8 +379,8 @@ impl Run<'_> {
         if let Some(link) = &mut self.link {
             let _ = link.send("asks", json!({"asks":asks}));
             let _=link.send("state",json!({"head":a.head,"mode":if !self.args.wait||actionable||complete{"working"}else{"waiting"},"lines":publish::messages(&a)}));
-            let progress=e.km["run"]["nodes"].as_object().into_iter().flatten().filter(|(_,r)|r["state"].is_string()||r["job"].is_string()).map(|(k,r)|json!({"key":k,"issue":e.km["nodes"][k]["identifier"],"job":r["job"],"state":r["state"],"ci":r["ci"],"at":r["started_at"],"evidence":null})).collect::<Vec<_>>();
-            let _ = link.send("progress", json!({"nodes":progress}));
+
+            let _ = link.send("progress", json!({"nodes":progress(&e)}));
         }
         if !self.args.no_publish
             && let Err(err) =
@@ -385,6 +413,17 @@ impl Coordinator for Run<'_> {
             return Ok(());
         }
         let a = self.actions.as_ref().ok_or("no current actions")?;
+        if !finished && !result.settled.is_empty() {
+            for (level, line) in &a.lines {
+                if level == "note"
+                    && (line.starts_with("answer ")
+                        || line.starts_with("reply ")
+                        || line.starts_with("replied "))
+                {
+                    println!("note {line}");
+                }
+            }
+        }
         if finished {
             println!("{}", a.head);
             let dir = quote(
@@ -461,11 +500,16 @@ pub(super) fn next_command(args: &arguments::Next, watch: bool) -> Result<u8> {
             .as_str(),
         "off" | "0" | "no"
     );
-    let link = if disabled {
+    let mut link = if disabled {
         None
     } else {
         Some(sender::link(&e)?.0)
     };
+    let initial = link
+        .as_mut()
+        .map(Link::initial_messages)
+        .transpose()?
+        .unwrap_or_default();
     let mut run = Run {
         plan: e.plan.clone(),
         collaborative: false,
@@ -480,7 +524,7 @@ pub(super) fn next_command(args: &arguments::Next, watch: bool) -> Result<u8> {
         &mut run,
         args.wait,
         interval,
-        vec![],
+        initial,
         &mut std::io::stderr().lock(),
     )?;
     Ok(0)

@@ -41,6 +41,44 @@ const issues = states.map((state, order) => {
   };
 });
 
+const wideLine = "long-value-".repeat(28);
+const panelMarkdown = `\`\`\`text
+${wideLine}
+\`\`\`
+
+| First column | Second column |
+| --- | --- |
+| ${wideLine} | ${wideLine} |
+`;
+const blocker = {
+  ...issues[2], id: "panel-blocker", identifier: "WG-13",
+  title: `Blocker ${wideLine}`, sortOrder: 12,
+};
+const panelIssue = {
+  ...issues[5], id: "panel-task", identifier: "WG-14",
+  title: "Panel actions", sortOrder: 13, description: panelMarkdown,
+  labels: { nodes: [{ id: "worker", name: "agent:worker", color: "#4466aa" }], pageInfo },
+  inverseRelations: { nodes: [{ type: "blocks", issue: blocker }], pageInfo },
+  comments: { nodes: [{
+    id: "panel-card", createdAt: updatedAt, user: null, body: `**work-graph node card**
+
+\`\`\`json
+${JSON.stringify({
+      wg: 1, key: "panel-task", kind: "task", branch: `cd/${wideLine}`,
+      wave: "yes", soak_until: "2099-01-01T00:00:00Z", job: "build",
+      next: `do dispatch ${wideLine}`, pr: "42",
+    })}
+\`\`\``,
+  }], pageInfo },
+};
+const panelIssues = [blocker, panelIssue, {
+  ...issues[5], id: "panel-ops", identifier: "WG-15", title: "Check the rollout", sortOrder: 14,
+  comments: { nodes: [{
+    id: "panel-ops-card", createdAt: updatedAt, user: null,
+    body: "**work-graph node card**\n\n\`\`\`json\n{\"wg\":1,\"key\":\"panel-ops\",\"kind\":\"ops\"}\n\`\`\`",
+  }], pageInfo },
+}];
+
 // Keep the real page API and graph loader. Only the upstream data comes from the fixture.
 setTransport({
   async fetch(_url, init) {
@@ -53,10 +91,20 @@ setTransport({
       return data({ teams: { nodes: [{ ...team, states: { nodes: states }, members: empty }] } });
     }
     if (query.includes("issueLabels(")) return data({ issueLabels: empty });
+    if (query.includes("issue(id:") && variables.id === panelIssue.id) {
+      return data({ issue: { project, comments: { nodes: [{
+        id: "panel-comment", createdAt: updatedAt, user: { name: "Ada" }, body: panelMarkdown,
+      }], pageInfo } } });
+    }
     if (query.includes("issue(id:")) {
       return data({ issue: { project, comments: empty } });
     }
     if (query.includes("project(id:")) {
+      if (variables.id === project.id) return data({
+        viewer: { id: "ada" },
+        project: { ...project, projectMilestones: empty, documents: empty,
+          issues: { nodes: [...issues, ...panelIssues], pageInfo } },
+      });
       const entry = projects.find(({ id }) => id === variables.id);
       return data({
         viewer: { id: "ada" },

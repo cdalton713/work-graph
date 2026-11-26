@@ -54,9 +54,8 @@
 @media (max-width: 720px) {
   .panel { position: absolute; inset: 0; z-index: 10; width: auto; border-left: 0; }
   .panel-head { padding: 6px 6px 6px 16px; }
-  .panel-head .ghost { min-width: 40px; min-height: 40px; font-size: 16px; }
-  .panel-body { padding-bottom: 40px; }
-  .panel button, .panel .picker-trigger { min-height: 32px; }
+  .panel-head .ghost { font-size: 16px; }
+  .panel-body { flex: 1; padding-bottom: 16px; }
   .link-row { padding-block: 6px; }
   .fields-wg { grid-template-columns: 1fr; }
   /* iOS makes the page larger when a field with text below 16px takes the focus. */
@@ -91,3 +90,53 @@
 .next-mark { flex: none; padding-top: 1px; font: 600 9px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-4); }
 .next-lines { flex: 1; min-width: 0; color: var(--ink-1); overflow-wrap: anywhere; }
 .next-action button { flex: none; }
+
+/* Keep the actions in view as the issue scrolls. The app frame supplies the safe-area padding. */
+.panel-actions {
+  display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: flex-end;
+  gap: 8px; padding: 8px 16px; border-top: 1px solid var(--rail); background: var(--cab-1);
+}
+.panel-more { display: grid; gap: 8px; }
+.panel-more h3 { margin: 8px 0 4px; }
+.panel-more .pr-row { flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.panel-pr-title { flex-basis: 100%; overflow-wrap: anywhere; }
+
+@media (max-width: 1279px), (pointer: coarse) {
+  .panel, .panel-more { overflow-wrap: anywhere; }
+  .panel-body { min-width: 0; }
+  .panel-head .chip { white-space: normal; }
+  .panel-title-hint.hint { display: flex; align-items: start; gap: 8px; }
+  .panel-title-hint.hint .title-input { flex: 1; min-width: 0; width: 100%; margin-right: 0; }
+  .panel .fields { grid-template-columns: 84px minmax(0, 1fr); }
+  .panel .fields-wg { grid-template-columns: minmax(0, 1fr); }
+  .panel .fields-wg > div { grid-template-columns: 84px minmax(0, 1fr); }
+  .panel .fields-wg dd, .panel .link-title { white-space: normal; overflow: visible; }
+  .panel .link-row { width: 100%; margin-inline: 0; }
+  .panel .link-title { min-width: 0; }
+  .panel .link-status { max-width: 30%; white-space: normal; }
+  .panel .picker-trigger, .panel .picker-label { white-space: normal; max-width: 100%; }
+  .panel .picker-list { max-width: min(250px, calc(100vw - 128px)); }
+  .panel .chip { max-width: 100%; }
+  .panel .pr-row, .panel .pr-links, .panel .row, .panel .comment header { flex-wrap: wrap; }
+  .panel .pr-status, .panel-more .pr-status { white-space: normal; }
+  .panel .rich table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  .panel .rich pre { max-width: 100%; }
+}
+
+@media (max-width: 720px), (pointer: coarse) {
+  .panel button, .panel textarea, .panel-more button {
+    min-width: var(--touch); min-height: var(--touch);
+  }
+  .panel textarea, .panel .picker-filter { font-size: 16px; }
+  .panel .fields > dd, .panel .fields-wg > div, .panel .fold summary {
+    min-height: var(--touch); align-content: center;
+  }
+  .panel .panel-id, .panel .rich a, .panel .notice a, .panel .pr-links a, .panel-more .pr-links a {
+    display: inline-flex; align-items: center; min-width: var(--touch); min-height: var(--touch);
+  }
+}
+
+@media (min-width: 721px) and (max-width: 1279px), (pointer: coarse) {
+  .panel .prs > .hint { display: flex; }
+  .panel .prs .pr-row { min-width: 0; }
+}

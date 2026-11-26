@@ -63,7 +63,7 @@ export interface Option { id: string; label: string; hint?: string; lead?: React
  */
 export function Picker(props: {
   options: Option[]; value: string[]; onChange: (ids: string[]) => void; multi?: boolean;
-  children: ReactNode; disabled?: boolean; align?: "left" | "right"; title?: string; wide?: boolean;
+  children: ReactNode; disabled?: boolean; align?: "left" | "right"; title?: string; wide?: boolean; label?: string;
 }) {
   const { options, value, onChange, multi, children, disabled, align = "left", title, wide } = props;
   const narrow = useNarrow();
@@ -148,7 +148,7 @@ export function Picker(props: {
       }}>
       {children}
     </button>
-    {open && (sheet ? createPortal(<Sheet open title={sheetTitle} onClose={() => setOpen(false)}>
+    {open && (sheet ? createPortal(<Sheet open title={props.label ?? sheetTitle} onClose={() => setOpen(false)}>
       <div className="picker-sheet">
         {contents}
         {multi && <button type="button" className="picker-done" onClick={() => setOpen(false)}>Done</button>}
@@ -164,22 +164,30 @@ const markdownComponents: Components = {
   a: ({ href, children, title }) => <a href={href} title={title} target="_blank" rel="noopener noreferrer">{children}</a>,
 };
 
+const markdownComponentsWithHints: Components = {
+  a: ({ href, children, title }) => {
+    const link = <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
+    return title ? <Hint text={title} infoLabel="About this link">{link}</Hint> : link;
+  },
+};
+
 /** Linear Markdown. A `+++ Title … +++` section becomes a closed fold, as in Linear. */
-export function Rich({ text }: { text: string }) {
+export function Rich({ text, linkHints }: { text: string; linkHints?: boolean }) {
+  const components = linkHints ? markdownComponentsWithHints : markdownComponents;
   const parts: ReactNode[] = [];
   const fold = /^\+\+\+[ \t]*(.*)\n([\s\S]*?)\n\+\+\+[ \t]*$/gm;
   let at = 0;
   for (let m = fold.exec(text); m; m = fold.exec(text)) {
-    if (m.index > at) parts.push(<Markdown key={at} remarkPlugins={[remarkGfm]} components={markdownComponents}>{text.slice(at, m.index)}</Markdown>);
+    if (m.index > at) parts.push(<Markdown key={at} remarkPlugins={[remarkGfm]} components={components}>{text.slice(at, m.index)}</Markdown>);
     parts.push(
       <details key={`f${m.index}`} className="fold">
         <summary>{m[1] || "Details"}</summary>
-        <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{m[2]}</Markdown>
+        <Markdown remarkPlugins={[remarkGfm]} components={components}>{m[2]}</Markdown>
       </details>,
     );
     at = m.index + m[0].length;
   }
-  if (at < text.length) parts.push(<Markdown key={at} remarkPlugins={[remarkGfm]} components={markdownComponents}>{text.slice(at)}</Markdown>);
+  if (at < text.length) parts.push(<Markdown key={at} remarkPlugins={[remarkGfm]} components={components}>{text.slice(at)}</Markdown>);
   return <div className="rich">{parts}</div>;
 }
 

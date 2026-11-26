@@ -1,0 +1,63 @@
+/* Departure board: the issues by the action they need. It sits on the bed colour, one rail from the canvas,
+   so it reads as part of the panel and not as a second app. */
+.board { width: 300px; flex: none; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--rail); background: var(--cab-1); }
+.board-find { position: relative; padding: calc(var(--u) * 2) calc(var(--u) * 3); border-bottom: 1px solid var(--rail); }
+.board-find input { width: 100%; background: var(--inset); border: 1px solid var(--rail); border-radius: var(--r-1); padding: 5px 28px 5px 9px; }
+.board-find input::placeholder { color: var(--ink-4); }
+.board-find input:focus-visible { outline: 0; border-color: var(--rail-3); }
+.board-find kbd { position: absolute; right: calc(var(--u) * 3 + 7px); top: 50%; transform: translateY(-50%); font: 11px/16px var(--mono); padding: 0 5px; border: 1px solid var(--rail-2); border-radius: var(--r-1); color: var(--ink-4); pointer-events: none; }
+@media (hover: none) { .board-find kbd { display: none; } }
+.board-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: calc(var(--u) * 1) 0 calc(var(--u) * 6); }
+.board-group ul { list-style: none; margin: 0; padding: 0 calc(var(--u) * 2) calc(var(--u) * 2); }
+.board-group h3 { margin: 0; }
+.board-head { display: flex; align-items: center; gap: 7px; width: 100%; border: 0; border-radius: 0; padding: 8px 12px 6px; font: 600 10px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); text-align: left; }
+.board-head b { font-weight: 400; color: var(--ink-4); }
+.board-caret { width: 8px; color: var(--ink-4); letter-spacing: 0; }
+/* "Your move" is the one group that asks for the human: its name takes the stop colour. */
+.board-you .board-head, .board-you .board-head:hover:not(:disabled) { color: var(--lamp-stop); }
+.board-row { display: grid; grid-template-columns: 8px auto 1fr; grid-template-rows: auto auto; column-gap: 8px; row-gap: 1px; align-items: center; width: 100%; border: 1px solid transparent; padding: 5px 8px; text-align: left; color: var(--ink-2); }
+.board-row .lamp { grid-row: 1; }
+.board-id { grid-row: 1; font-size: 11px; color: var(--ink-2); }
+.board-status { grid-row: 1; justify-self: end; font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.board-title { grid-row: 2; grid-column: 2 / -1; font-size: 12px; color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (hover: hover) { .board-row:hover:not(:disabled) { border-color: transparent; background: var(--rail); } }
+/* The selection box holds the row and its pull request links. */
+.board-group li:has(> .board-row.is-selected) { background: var(--cab-3); box-shadow: inset 0 0 0 1px var(--rail-3); border-radius: var(--r-1); }
+.board-row.is-selected, .board-row.is-selected:hover:not(:disabled) { border-color: transparent; background: none; }
+.board-closed .board-title, .board-waiting .board-title, .board-merged .board-title { color: var(--ink-3); }
+.board-empty, .board-clear { margin: 0; padding: 8px 12px; color: var(--ink-4); }
+.board-clear { display: flex; align-items: center; gap: 8px; color: var(--ink-3); }
+
+/* Pull request links: GitHub, and Linear's review page. */
+.pr-links { display: inline-flex; gap: 10px; }
+.pr-links a { color: var(--lamp-review); text-decoration: none; font-size: 12px; white-space: nowrap; }
+.pr-links a:hover { text-decoration: underline; }
+.prs { display: flex; flex-direction: column; gap: 4px; }
+.pr-row { display: flex; align-items: baseline; gap: 10px; font-size: 12px; }
+.pr-status { font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+.board-pr { display: flex; align-items: baseline; gap: 10px; padding: 0 8px 6px 25px; margin-top: -2px; font-size: 11px; color: var(--ink-3); }
+.board-pr .pr-links a { font-size: 11px; }
+
+/* A mid-size pane cannot hold the board, the canvas, and the panel. An open panel hides the board;
+   closing the panel (Esc) shows it again, and j/k still step in board order. */
+@media (min-width: 721px) and (max-width: 1279px) {
+  .stage:has(> .panel) > .board { display: none; }
+}
+
+@media (max-width: 720px) {
+  .board { position: absolute; inset: 0; z-index: 9; width: auto; border-right: 0; }
+  .board-row { padding-block: 8px; }
+  .board-find input { font-size: 16px; }
+}
+
+/* Why an issue is in "Your move": an instruction, so it reads in full ink. A red rule marks it as the human's. */
+.board-why { margin: 0 8px 6px 25px; padding: 1px 0 1px 8px; border-left: 2px solid var(--lamp-stop); color: var(--ink-1); font-size: 11.5px; line-height: 1.4; }
+
+.board-ask { margin-left: 6px; padding: 0 4px; border-radius: 3px; background: var(--lamp-stop); color: var(--cab-0); font: 600 9px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; vertical-align: 1px; }
+
+/* "Your move" rows keep two lines of title: the title says what the move is about. */
+.board-you .board-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35; }
+.board-mark { padding: 1px 8px; font-size: 11px; border-color: var(--rail-2); color: var(--ink-2); }
+.board-mark.is-on { border-color: color-mix(in srgb, var(--lamp-done) 50%, transparent); color: var(--lamp-done); }
+
+.board-title .runner-mark { margin-inline-start: 5px; }

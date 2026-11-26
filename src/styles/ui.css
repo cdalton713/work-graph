@@ -1,0 +1,51 @@
+/* Lamps */
+.lamp { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--lamp, var(--lamp-idle)); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 6px -1px var(--lamp, transparent); }
+.lamp-idle { --lamp: var(--lamp-idle); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
+.lamp-off { --lamp: var(--lamp-off); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
+.lamp-ready { --lamp: var(--lamp-ready); } .lamp-running { --lamp: var(--lamp-running); } .lamp-review { --lamp: var(--lamp-review); }
+.lamp-merged { --lamp: var(--lamp-merged); } .lamp-done { --lamp: var(--lamp-done); } .lamp-stop { --lamp: var(--lamp-stop); }
+.lamp-pulse { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .lamp-pulse, .sync-dot.is-busy { animation: none; } }
+.sig-bg-idle { background: var(--lamp-idle); } .sig-bg-off { background: var(--lamp-off); } .sig-bg-ready { background: var(--lamp-ready); }
+.sig-bg-running { background: var(--lamp-running); } .sig-bg-review { background: var(--lamp-review); } .sig-bg-merged { background: var(--lamp-merged); }
+.sig-bg-done { background: var(--lamp-done); } .sig-bg-stop { background: var(--lamp-stop); }
+
+/* Picker */
+.picker { position: relative; display: inline-flex; }
+.picker-trigger { display: inline-flex; align-items: center; gap: 7px; background: var(--inset); max-width: 100%; }
+.picker-list { position: absolute; top: calc(100% + 4px); z-index: 30; min-width: 220px; max-width: 320px; background: var(--cab-3); border: 1px solid var(--rail-2); border-radius: var(--r-2); padding: 4px; }
+.picker-left { left: 0; } .picker-right { right: 0; }
+.picker-scroll { max-height: min(420px, 60vh); overflow-y: auto; }
+.picker-filter { width: 100%; margin-bottom: 4px; background: var(--inset); border: 1px solid var(--rail); border-radius: var(--r-1); padding: 4px 8px; }
+.picker-option { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; border-radius: var(--r-1); padding: 5px 8px; text-align: left; color: var(--ink-1); }
+.picker-option.is-active { background: var(--rail); }
+.picker-option.is-selected { background: var(--inset); box-shadow: inset 2px 0 0 var(--lamp-review); }
+.picker-option.is-selected.is-active { background: var(--rail); }
+.picker-option.is-dim .picker-label { color: var(--ink-3); }
+.picker-list:focus { outline: none; }
+.picker-wide { min-width: 280px; max-width: min(460px, calc(100vw - 32px)); }
+.picker-group { padding: 8px 8px 3px; color: var(--ink-4); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.picker-scroll > :first-child .picker-group { padding-top: 3px; }
+.picker-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-hint { color: var(--ink-3); font-size: 11px; }
+.picker-check { width: 12px; text-align: center; color: var(--lamp-review); font-size: 11px; }
+.picker-empty { padding: 6px 8px; color: var(--ink-3); }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+.labels { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--rail-2); border-radius: 10px; padding: 0 8px; font: 11px/18px var(--mono); color: var(--ink-2); white-space: nowrap; }
+.chip i { width: 6px; height: 6px; border-radius: 50%; }
+.chip-fixed { border-style: dashed; color: var(--ink-3); }
+.chip-claim { border-color: rgba(242, 178, 62, 0.5); color: var(--lamp-running); }
+
+.sig-fg-idle { color: var(--ink-3); } .sig-fg-off { color: var(--ink-4); } .sig-fg-ready { color: var(--lamp-ready); }
+.sig-fg-running { color: var(--lamp-running); } .sig-fg-review { color: var(--lamp-review); } .sig-fg-merged { color: var(--lamp-merged); }
+.sig-fg-done { color: var(--lamp-done); } .sig-fg-stop { color: var(--lamp-stop); }
+
+button.copy { font-size: 11px; }
+button.copy.is-copied { color: var(--lamp-done); }
+
+.runner-mark { flex: none; display: inline-block; border: 1px solid var(--rail); border-radius: 3px; padding: 0 3px; color: var(--ink-2); font-size: 10px; white-space: nowrap; }
+
+.runner-mark.is-stale { color: var(--lamp-running); }

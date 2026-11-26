@@ -1,0 +1,20 @@
+/* A signal panel. The bed is dark; a phase, a lane, and a station each sit one step lighter.
+   Colour is state: a lamp is the status of an issue, a green track is a blocker that is done.
+   On the canvas one thing moves: the lamp of an issue while a worker runs on it. */
+:root {
+  --cab-0: #0a0f0e; --cab-1: #0f1615; --cab-2: #141d1b; --cab-3: #1a2523; --cab-4: #222f2c; --inset: #070b0a;
+  --ink-1: #e6efea; --ink-2: #a9b8b1; --ink-3: #7c8c85; --ink-4: #5a6862;
+  --rail: rgba(190, 220, 205, 0.09); --rail-2: rgba(190, 220, 205, 0.16); --rail-3: rgba(190, 220, 205, 0.3);
+  --track: #64766f; --track-lit: #e6efea; --track-clear: #38a876; --track-clear-lit: #62e6a6;
+  --lamp-idle: #56635e; --lamp-ready: #e8f1ec; --lamp-running: #f2b23e; --lamp-review: #56b6e8;
+  --lamp-merged: #2fb7a6; --lamp-done: #3fd68a; --lamp-stop: #ef5b4c; --lamp-off: #2f3835;
+  --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --r-1: 3px; --r-2: 5px; --u: 4px;
+  --touch: 44px; --touch-gap: 8px;
+  color-scheme: dark;
+}
+
+/* Layout    Viewport width
+   Phone     Up to 720px
+   Tablet   721px to 1279px
+   Desktop  1280px and wider */

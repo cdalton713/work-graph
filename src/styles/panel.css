@@ -1,0 +1,93 @@
+/* Panel */
+.panel { width: clamp(360px, 36vw, 460px); flex: none; border-left: 1px solid var(--rail); background: var(--cab-1); display: flex; flex-direction: column; min-height: 0; }
+.panel-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--rail); }
+.panel-id { text-decoration: none; color: var(--ink-2); font-size: 12px; }
+.panel-id:hover { color: var(--ink-1); }
+.panel-body { overflow-y: auto; padding: 14px 16px 40px; display: flex; flex-direction: column; gap: 16px; }
+.panel-body > * { flex: none; }
+.panel h3 { margin: 0 0 6px; display: flex; align-items: center; gap: 8px; font: 600 10px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); }
+.count { color: var(--ink-4); font-weight: 400; }
+.count-note { color: var(--ink-2); font-weight: 400; letter-spacing: 0.06em; }
+.count-note::before { content: "·"; margin-right: 8px; color: var(--ink-4); }
+.count-note.is-clear { color: var(--track-clear); }
+.title-input { width: calc(100% + 12px); field-sizing: content; min-height: 30px; resize: none; background: none; border: 1px solid transparent; border-radius: var(--r-1); padding: 4px 6px; margin: -4px -6px; font-size: 16px; font-weight: 600; line-height: 1.3; }
+.title-input:hover:not(:read-only), .title-input:focus { border-color: var(--rail-2); background: var(--inset); outline: 0; }
+.fields { display: grid; grid-template-columns: 84px 1fr; gap: 8px 12px; margin: 0; align-items: center; }
+.fields dt { color: var(--ink-3); font-size: 12px; }
+.fields dd { margin: 0; min-width: 0; }
+.fields-wg { grid-template-columns: 1fr 1fr; }
+.fields-wg > div { display: grid; grid-template-columns: 84px 1fr; gap: 12px; }
+.fields-wg dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.wg .rich { margin-top: 12px; }
+
+.notice, .warning { margin: 0; border: 1px solid var(--rail-2); border-radius: var(--r-2); padding: 8px 10px; color: var(--ink-2); }
+.warning { border-color: rgba(242, 178, 62, 0.55); background: rgba(242, 178, 62, 0.07); color: var(--ink-1); }
+.warning p { margin: 4px 0; color: var(--ink-2); }
+.row { display: flex; gap: 8px; margin-top: 8px; }
+.link-row { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; border-radius: var(--r-1); padding: 4px 6px; margin: 0 -6px; text-align: left; font-size: 12px; }
+.link-row:hover { background: var(--rail); }
+.link-title { flex: 1; color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link-status { color: var(--ink-3); font: 10px var(--mono); text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
+.editor { width: 100%; resize: vertical; background: var(--inset); border: 1px solid var(--rail-2); border-radius: var(--r-1); padding: 8px 10px; font: 12px/1.5 var(--mono); }
+.empty { margin: 0; color: var(--ink-4); }
+.comment { border-top: 1px solid var(--rail); padding: 8px 0; }
+.comment-reply { margin-left: 16px; }
+.comment header { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); }
+.comment time { color: var(--ink-4); font: 11px var(--mono); }
+.rich { color: var(--ink-2); overflow-wrap: anywhere; }
+.rich > :first-child, .rich > * > :first-child { margin-top: 0; } .rich > :last-child, .rich > * > :last-child { margin-bottom: 0; }
+.rich p, .rich ul, .rich ol, .rich pre, .rich table { margin: 6px 0; }
+.rich ul, .rich ol { padding-left: 20px; }
+.rich h1, .rich h2, .rich h3, .rich h4 { margin: 12px 0 4px; font: 600 13px var(--sans); letter-spacing: 0; text-transform: none; color: var(--ink-1); }
+.rich strong { color: var(--ink-1); }
+.rich a { color: var(--lamp-review); }
+.rich code { font: 12px var(--mono); background: var(--inset); border-radius: 2px; padding: 1px 4px; }
+.rich pre { background: var(--inset); border: 1px solid var(--rail); border-radius: var(--r-1); padding: 8px 10px; overflow-x: auto; }
+.rich pre code { background: none; padding: 0; }
+.rich table { border-collapse: collapse; font-size: 12px; } .rich th, .rich td { border: 1px solid var(--rail-2); padding: 3px 8px; text-align: left; }
+.rich blockquote { margin: 6px 0; padding-left: 10px; border-left: 2px solid var(--rail-3); }
+.fold { border: 1px solid var(--rail); border-radius: var(--r-1); padding: 4px 10px; margin: 6px 0; }
+.fold summary { cursor: pointer; color: var(--ink-3); font: 11px var(--mono); }
+.fold[open] summary { margin-bottom: 6px; }
+
+/* Phone: the panel is a sheet over the canvas. */
+@media (max-width: 720px) {
+  .panel { position: absolute; inset: 0; z-index: 10; width: auto; border-left: 0; }
+  .panel-head { padding: 6px 6px 6px 16px; }
+  .panel-head .ghost { min-width: 40px; min-height: 40px; font-size: 16px; }
+  .panel-body { padding-bottom: 40px; }
+  .panel button, .panel .picker-trigger { min-height: 32px; }
+  .link-row { padding-block: 6px; }
+  .fields-wg { grid-template-columns: 1fr; }
+  /* iOS makes the page larger when a field with text below 16px takes the focus. */
+  .panel textarea, .picker-filter { font-size: 16px; }
+}
+
+/* The form for the evidence of an ops node or the answer of a decision: the look of a warning, without its colour. */
+.warning-form { border-color: rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.03); }
+.warning .editor { width: 100%; margin: 6px 0; }
+
+/* "Mark reviewed": the button, and beside it what the reviews of the PR say now. */
+.review-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; color: var(--ink-2); font-size: 12px; }
+
+/* What wg next said is a sentence: it takes the full width of the panel. */
+.fields-wg .wide { grid-column: 1 / -1; }
+.fields-wg .wide dd { white-space: pre-line; overflow: visible; }
+
+.panel-agent-said { display: block; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* A worker's question (an Orca ask), with the reply box. */
+.asks .ask { margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--lamp-stop); border-radius: var(--r-2); background: color-mix(in srgb, var(--lamp-stop) 6%, transparent); }
+.asks h3 { margin: 0 0 6px; color: var(--lamp-stop); }
+.ask-body { margin-bottom: 8px; color: var(--ink-1); }
+.ask .editor { width: 100%; }
+.ask-hint { color: var(--ink-3); font-size: 11px; margin-left: 10px; }
+
+.live-job { color: var(--lamp-running); }
+
+/* The panel's first block: what wg next says about the issue, and the Dispatch button when it can go. */
+.next-action { display: flex; align-items: flex-start; gap: 10px; margin: 4px 0 14px; padding: 8px 10px; border: 1px solid var(--rail-2); border-left: 2px solid var(--lamp-review); border-radius: var(--r-1); background: var(--cab-2); font-size: 12px; }
+.next-action.is-you { border-left-color: var(--lamp-stop); }
+.next-mark { flex: none; padding-top: 1px; font: 600 9px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-4); }
+.next-lines { flex: 1; min-width: 0; color: var(--ink-1); overflow-wrap: anywhere; }
+.next-action button { flex: none; }

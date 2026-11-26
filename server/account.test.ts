@@ -38,12 +38,79 @@ it("returns 404 for every account route in config mode", async () => {
 });
 
 databaseSuites((open) => {
-  async function setup() {
+  it("scopes page and account events and persists the account opt-out", async () => {
+    const t = await setup({
+      DD_API_KEY: "test-key", WG_SESSION_SECRET: auth.secret, WG_TELEMETRY_WORKSPACES: "work-id",
+    });
+    try {
+      const { cookie } = await t.owner("usage");
+      const personal = "lin_api_" + "x".repeat(30);
+      t.identities.set(personal, { org: "personal", teams: ["WG"] });
+      expect((await t.request(root + "/workspaces", cookie, "POST", { key: personal })).status).toBe(201);
+      for (const workspace of ["work", "personal"]) {
+        expect((await t.request("/api/events", cookie, "POST", { event: "node_opened", workspace })).status).toBe(204);
+      }
+      expect((await t.request(root + "/tokens", cookie, "POST", { name: "First token" })).status).toBe(201);
+      await Promise.all(t.jobs);
+      const messages = () => t.intake.flatMap((entry) => Array.isArray(entry) ? entry.map(({ message }) => message) : []);
+      expect(messages()).toEqual(["node_opened", "token_created"]);
+      expect((await t.request(root, cookie, "PATCH", { sendUsageData: false })).status).toBe(200);
+      expect(await (await t.request(root, cookie)).json()).toMatchObject({ sendUsageData: false });
+      expect((await t.request(root + "/tokens", cookie, "POST", { name: "Second token" })).status).toBe(201);
+      expect((await t.request("/api/events", cookie, "POST", { event: "node_opened", workspace: "work" })).status).toBe(204);
+      await Promise.all(t.jobs);
+      expect(messages()).toEqual(["node_opened", "token_created"]);
+    } finally { await t.close(); }
+  });
+
+  it("counts a sign-up once and uses the sign-in workspace for account events", async () => {
+    const t = await setup({
+      DD_API_KEY: "test-key", WG_SESSION_SECRET: auth.secret, WG_TELEMETRY_WORKSPACES: "work",
+    });
+    try {
+      await t.signIn();
+      await t.signIn();
+      t.setSignInOrg("personal");
+      const cookie = await t.signIn();
+      const allowedKey = "lin_api_" + "x".repeat(30);
+      t.identities.set(allowedKey, { org: "work", teams: ["WG"] });
+      expect((await t.request(root + "/workspaces", cookie, "POST", { key: allowedKey })).status).toBe(201);
+      expect((await t.request(root + "/tokens", cookie, "POST", { name: "Token" })).status).toBe(201);
+      await Promise.all(t.jobs);
+      expect(t.intake.flatMap((entry) => Array.isArray(entry) ? entry.map(({ message }) => message) : []))
+        .toEqual(["sign_up", "sign_in", "sign_in", "workspace_attached"]);
+    } finally { await t.close(); }
+  });
+
+  it("queues and claims the first connection once for repeated coordinator requests", async () => {
+    const t = await setup({
+      DD_API_KEY: "test-key", WG_SESSION_SECRET: auth.secret, WG_TELEMETRY_WORKSPACES: "work",
+    });
+    try {
+      const claim = vi.spyOn(t.tenants.accounts, "claimFirstConnection");
+      const { cookie } = await t.owner("coordinator");
+      const response = await t.request(root + "/tokens", cookie, "POST", { name: "Coordinator" });
+      expect(response.status).toBe(201);
+      const { token } = await response.json();
+      await Promise.all(t.jobs);
+      t.jobs.length = 0;
+
+      for (let i = 0; i < 100; i++) {
+        expect((await t.request("/api/status", "", "GET", undefined, { authorization: "Bearer " + token })).status).toBe(200);
+      }
+      await Promise.all(t.jobs);
+      expect(t.jobs).toHaveLength(1);
+      expect(claim).toHaveBeenCalledTimes(1);
+    } finally { await t.close(); }
+  });
+
+  async function setup(telemetryEnv: NodeJS.ProcessEnv = {}) {
     const sql = await open();
     await migrate(sql);
     const crypto = credentialCrypto({ WG_DATA_KEY: Buffer.alloc(32).toString("base64") });
     const tenants = dbTenants(sql, crypto, { linearAuth: auth });
-    const app = createApp(rules, { ...options, linearAuth: auth, tenants });
+    const jobs: Promise<void>[] = [];
+    const app = createApp(rules, { ...options, linearAuth: auth, tenants, telemetryEnv, waitUntil: (job) => jobs.push(job) });
     async function owner(user: string) {
       const accountId = await tenants.accounts.signIn({
         linearUserId: user, linearOrgId: "work-id", name: "Ada", email: "ada@example.com",
@@ -59,10 +126,16 @@ databaseSuites((open) => {
     }
     const output: string[] = [];
     for (const level of ["log", "warn", "error"] as const) vi.spyOn(console, level).mockImplementation((...args) => output.push(args.join(" ")));
+    let signInOrg = "work";
     const identities = new Map<string, { org: string; teams: string[] }>();
     const revoked = new Set<string>();
     const revocations: string[] = [];
+    const intake: unknown[] = [];
     const fetch = vi.fn(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/api/v2/logs") || url.endsWith("/api/v2/series")) {
+        intake.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 202 });
+      }
       if (url.endsWith("/oauth/token")) {
         return Response.json({ access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 });
       }
@@ -73,7 +146,7 @@ databaseSuites((open) => {
       expect(url).toBe("https://api.linear.app/graphql");
       const token = new Headers(init.headers).get("authorization")!;
       const { query, variables } = JSON.parse(String(init.body));
-      const identity = token === "Bearer test-access" ? { org: "work", teams: ["WG"] } : identities.get(token);
+      const identity = token === "Bearer test-access" ? { org: signInOrg, teams: ["WG"] } : identities.get(token);
       if (revoked.has(token) || !identity) {
         return Response.json({ errors: [{ message: "Refused " + token.slice(-15) + " from " + token }] }, { status: 401 });
       }
@@ -100,7 +173,8 @@ databaseSuites((open) => {
       return response;
     }
     return {
-      app, owner, output, identities, revoked, fetch, tenants, sql, revocations, request,
+      app, owner, intake, jobs, output, identities,
+      setSignInOrg(org: string) { signInOrg = org; }, revoked, fetch, tenants, sql, revocations, request,
       async signIn() {
         const login = await request("/auth/login", "");
         const state = new URL(login.headers.get("location")!).searchParams.get("state");

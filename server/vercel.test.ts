@@ -132,7 +132,7 @@ it("keeps the signed-in viewer's config and read-only routes", async () => {
   const actor = await sessionHeaders("ada@example.com");
   expect(await (await app.request("/api/config", { headers: actor })).json()).toEqual({
     human: expect.any(String), defaultWorkspace: "work", contract: expect.any(String), version: "test",
-    readOnly: true, auth: true, user: "ada@example.com", role: "viewer", link: null,
+    readOnly: true, auth: true, user: "ada@example.com", role: "viewer", link: null, telemetry: false,
   });
   expect((await app.request("/api/projects", { headers })).status).toBe(401);
   expect((await app.request("/api/projects/p1/commands", { method: "POST", headers: actor })).status).toBe(405);
@@ -250,5 +250,39 @@ it("keeps health and status available when Redis is lost", async () => {
     expect((await app.request("/healthz")).status).toBe(200);
   } finally {
     if ("link" in app) await app.link.shutdown();
+  }
+});
+
+it("registers usage delivery with the Vercel request context", async () => {
+  const context = Symbol.for("@vercel/request-context");
+  const previous = Object.getOwnPropertyDescriptor(globalThis, context);
+  const jobs: Promise<void>[] = [];
+  Object.defineProperty(globalThis, context, { configurable: true, value: {
+    get: () => ({ waitUntil: (job: Promise<void>) => jobs.push(job) }),
+  } });
+  const intake = vi.fn(async (url: string) => url.endsWith("/graphql") ? Response.json({ data: {
+    viewer: { name: "Ada" }, organization: { id: "org-id", name: "Workspace", urlKey: "org" },
+    teams: { nodes: [{ key: "WG", name: "WG" }], pageInfo: { hasNextPage: false } },
+  } }) : new Response(null, { status: 202 }));
+  vi.stubGlobal("fetch", intake);
+  try {
+    const { app } = createVercelApp({
+      ...env, WG_READ_ONLY: "1", WG_REDIS_URL: undefined, LINEAR_WORK_API_KEY: "linear-key",
+      DD_API_KEY: "test-intake-key", WG_TELEMETRY_WORKSPACES: "work",
+    });
+    const actor = await sessionHeaders("ada@example.com");
+    const response = await app.request("/api/events", {
+      method: "POST", headers: { ...actor, origin: "https://" + host, "content-type": "application/json" },
+      body: JSON.stringify({ event: "node_opened", workspace: "work" }),
+    });
+    expect(response.status).toBe(204);
+    expect(jobs).toHaveLength(1);
+    await Promise.all(jobs);
+    expect(intake.mock.calls.map(([url]) => url).filter((url) => url.includes("/api/v2/"))).toHaveLength(2);
+  } finally {
+    await Promise.all(jobs);
+    if (previous) Object.defineProperty(globalThis, context, previous);
+    else Reflect.deleteProperty(globalThis, context);
+    vi.unstubAllGlobals();
   }
 });

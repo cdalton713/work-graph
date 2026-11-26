@@ -1,5 +1,6 @@
 import type { AutonomyLevel } from "./lib/autonomy";
 import type { ReviewEffort } from "./lib/review";
+import { pageEvent, type PageEvent } from "./lib/telemetry";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
 import type { Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectList, ServerStatus } from "./lib/types";
@@ -10,7 +11,7 @@ export const setOpenProject = (id: string | null) => { openProject = id; };
 
 let reloading = false;
 
-async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace): Promise<T> {
+async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace, event?: PageEvent): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "x-workspace": workspace };
   if (openProject) headers["x-project"] = openProject;
   const method = init?.method?.toUpperCase() ?? "GET";
@@ -28,6 +29,7 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
     location.reload();
   }
   if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+  if (event) pageEvent(event, workspace);
   return body as T;
 }
 
@@ -37,8 +39,9 @@ function accountWrite<T>(path: string, method: string, data?: object) {
 
 export const accountApi = {
   read: (signal?: AbortSignal) => call<Account>("account", { signal }),
+  saveUsageConsent: (sendUsageData: boolean) => accountWrite("", "PATCH", { sendUsageData }),
   saveName: (human: string) => accountWrite("", "PATCH", { human }),
-  onboarding: (state: { name?: true; skipped?: boolean }) => accountWrite("/onboarding", "POST", state),
+  onboarding: (state: { name?: true; skipped?: boolean; step?: "workspaces" | "teams" | "setup"; complete?: true }) => accountWrite("/onboarding", "POST", state),
   attach: (key: string) => accountWrite("/workspaces", "POST", { key }),
   replace: (id: string, key: string) => accountWrite(`/workspaces/${id}/key`, "PUT", { key }),
   teams: async (id: string, signal?: AbortSignal) =>
@@ -52,7 +55,7 @@ export const accountApi = {
 };
 
 export const api = {
-  closeProject: (projectId: string, workspace?: string) => call<{ completedIssues: number }>(`projects/${projectId}/close`, { method: "POST", body: JSON.stringify({ confirm: true }) }, workspace),
+  closeProject: (projectId: string, workspace?: string) => call<{ completedIssues: number }>(`projects/${projectId}/close`, { method: "POST", body: JSON.stringify({ confirm: true }) }, workspace, "status_written"),
   projects: () => call<ProjectList>("projects"),
   /** The state of the server: its build and the Linear budget of each workspace. */
   status: () => call<ServerStatus>("status"),
@@ -62,7 +65,7 @@ export const api = {
   graph: (projectId: string, have?: string, workspace?: string) => call<(GraphData & { version: string }) | null>(`projects/${projectId}/graph${have ? `?have=${have}` : ""}`, undefined, workspace),
   /** A command for the coordinator of the project. */
   command: (projectId: string, command: { name: "next" | "dispatch" | "pause" | "resume"; key?: string; issue?: string }, workspace?: string) =>
-    call<{ ok: boolean; queued: number }>(`projects/${projectId}/commands`, { method: "POST", body: JSON.stringify(command) }, workspace),
+    call<{ ok: boolean; queued: number }>(`projects/${projectId}/commands`, { method: "POST", body: JSON.stringify(command) }, workspace, "command_written"),
   /** Set the autonomy level of the project; the coordinator gets it at once. */
   autonomy: (projectId: string, level: AutonomyLevel, workspace?: string) =>
     call<{ ok: boolean; level: AutonomyLevel; queued: number }>(`projects/${projectId}/autonomy`, { method: "POST", body: JSON.stringify({ level }) }, workspace),
@@ -73,8 +76,8 @@ export const api = {
   share: (projectId: string, shared: boolean, workspace?: string) =>
     call<{ ok: boolean; shared: boolean }>(`projects/${projectId}/share`, { method: "POST", body: JSON.stringify({ shared }) }, workspace),
   /** The human's reply to a worker's question; the coordinator sends it to the worker. */
-  reply: (projectId: string, askId: string, body: string, workspace?: string) => call<{ ok: boolean; recorded: boolean }>(`projects/${projectId}/asks/${encodeURIComponent(askId)}/reply`, { method: "POST", body: JSON.stringify({ body }) }, workspace),
-  update: (issueId: string, patch: IssuePatch, workspace?: string) => call<Issue>(`issues/${issueId}`, { method: "PATCH", body: JSON.stringify(patch) }, workspace),
+  reply: (projectId: string, askId: string, body: string, workspace?: string) => call<{ ok: boolean; recorded: boolean }>(`projects/${projectId}/asks/${encodeURIComponent(askId)}/reply`, { method: "POST", body: JSON.stringify({ body }) }, workspace, "answer_written"),
+  update: (issueId: string, patch: IssuePatch, workspace?: string) => call<Issue>(`issues/${issueId}`, { method: "PATCH", body: JSON.stringify(patch) }, workspace, patch.stateId === undefined ? undefined : "status_written"),
   comments: (issueId: string, workspace?: string) => call<Comment[]>(`issues/${issueId}/comments`, undefined, workspace),
-  comment: (issueId: string, body: string, workspace?: string) => call<Comment>(`issues/${issueId}/comments`, { method: "POST", body: JSON.stringify({ body }) }, workspace),
+  comment: (issueId: string, body: string, workspace?: string) => call<Comment>(`issues/${issueId}/comments`, { method: "POST", body: JSON.stringify({ body }) }, workspace, "comment_written"),
 };

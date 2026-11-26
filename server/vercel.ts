@@ -9,6 +9,14 @@ import { readConfig } from "./workspaces.ts";
 import { readLinearAuth, serviceSetting } from "./linearauth.ts";
 import { openServiceTenants, type Tenants } from "./tenants.ts";
 
+// Vercel provides this request context to Node functions, including the HTTP server export.
+function waitUntil(job: Promise<void>) {
+  const global = globalThis as typeof globalThis & {
+    [key: symbol]: { get(): { waitUntil?(job: Promise<void>): void } | undefined } | undefined;
+  };
+  global[Symbol.for("@vercel/request-context")]?.get()?.waitUntil?.(job);
+}
+
 export const VERCEL_MAX_DURATION = 300;
 
 export function vercelLinkSettings(env: NodeJS.ProcessEnv) {
@@ -72,7 +80,7 @@ export function createVercelApp(env: NodeJS.ProcessEnv) {
   try {
     app = createApp({ port: 443, tailnet: null, hosted: { host: hostedName.toLowerCase() } }, {
       team: config.workspaces[0].team, dist: join(root, "dist") + sep, human: config.human, workspaces: config.workspaces, auth: config.auth,
-      linkToken: env.WG_LINK_TOKEN,
+      linkToken: env.WG_LINK_TOKEN, telemetryEnv: env, waitUntil,
       ...socketSettings,
       redisUrl: env.WG_REDIS_URL,
       redisPrefix: env.WG_REDIS_PREFIX || undefined,
@@ -116,7 +124,7 @@ function createVercelService(env: NodeJS.ProcessEnv) {
     fromSession: async (session) => (await directory()).fromSession(session),
     fromToken: async (authorization) => (await directory()).fromToken(authorization),
     byId: async (id) => (await directory()).byId(id),
-    signIn: async (user, first) => (await directory()).signIn(user, first),
+    signIn: async (...args) => (await directory()).signIn(...args),
     accountStore: async () => (await directory()).accountStore(),
     onChange(listener) {
       listeners.add(listener);
@@ -127,7 +135,7 @@ function createVercelService(env: NodeJS.ProcessEnv) {
   let app: ReturnType<typeof createApp>;
   try {
     app = createApp({ port: 443, tailnet: null, hosted: { host: env.WG_HOSTED!.trim().toLowerCase() } }, {
-      team: "", workspaces: [], readOnly: false, dist: join(root, "dist") + sep, ...socketSettings, linearAuth, tenants,
+      team: "", workspaces: [], readOnly: false, dist: join(root, "dist") + sep, ...socketSettings, linearAuth, tenants, telemetryEnv: env, waitUntil,
       redisUrl: env.WG_REDIS_URL, redisPrefix: env.WG_REDIS_PREFIX || undefined,
       contractFile: join(root, "skills/work-graph/contract.json"),
       version: env.WG_VERSION || env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "dev",

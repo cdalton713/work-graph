@@ -109,7 +109,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
   }
 
   return {
-    async signIn(user: User, first: NewConnection) {
+    async signIn(user: User, first: NewConnection, observed?: (id: string, created: boolean, enabled: boolean) => void) {
       const tenant = await sql.transaction(async ({ query }) => {
         // A concurrent first callback waits on the unique identity. For an existing
         // account, take the tenant lock before updating the user, as account deletion does.
@@ -122,9 +122,9 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
             "INSERT INTO tenants (id, owner_user_id, human) VALUES ($1, $2, $3) RETURNING id",
             [randomUUID(), created.id, user.name]);
           await insertConnection(query, id, { ...first, ownerName: user.name }, 0);
-          return id;
+          return { id, created: true, enabled: true };
         }
-        const [account] = await query<{ id: string; owner: string }>(`SELECT t.id, u.id AS owner
+        const [account] = await query<{ id: string; owner: string; enabled: boolean }>(`SELECT t.id, u.id AS owner, t.send_usage_data AS enabled
           FROM tenants t JOIN users u ON u.id = t.owner_user_id
           WHERE u.linear_user_id = $1 AND u.linear_org_id = $2 FOR UPDATE OF t`, [user.linearUserId, user.linearOrgId]);
         if (!account) throw new Error("Account not found");
@@ -141,10 +141,11 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
           if (rows.length >= MAX_CONNECTIONS) throw new Error("Connection limit reached");
           await insertConnection(query, id, { ...first, ownerName: user.name }, rows.length);
         }
-        return id;
+        return { id, created: false, enabled: account.enabled };
       });
-      await notify(tenant);
-      return tenant;
+      await notify(tenant.id);
+      observed?.(tenant.id, tenant.created, tenant.enabled);
+      return tenant.id;
     },
 
     async refreshCredential(tenant: string, connection: string, rejected: string | undefined, now: () => number,
@@ -190,8 +191,8 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
     async readTenant(tenant: string) {
       requireUuid(tenant);
       return sql.transaction(async ({ query }) => {
-        const [account] = await query<{ id: string; human: string; nameConfirmed: boolean; onboardingSkipped: boolean; user: User }>(`
-          SELECT t.id, t.human, t.name_confirmed AS "nameConfirmed", t.onboarding_skipped AS "onboardingSkipped",
+        const [account] = await query<{ id: string; human: string; nameConfirmed: boolean; onboardingSkipped: boolean; sendUsageData: boolean; user: User }>(`
+          SELECT t.id, t.human, t.name_confirmed AS "nameConfirmed", t.onboarding_skipped AS "onboardingSkipped", t.send_usage_data AS "sendUsageData",
             json_build_object('linearUserId', u.linear_user_id,
             'linearOrgId', u.linear_org_id, 'email', u.email, 'name', u.name) AS "user"
           FROM tenants t JOIN users u ON u.id = t.owner_user_id WHERE t.id = $1 FOR SHARE OF t`, [tenant]);
@@ -206,6 +207,34 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       return change(tenant, async (query) => {
         await query("UPDATE tenants SET human = $2 WHERE id = $1", [tenant, human]);
       });
+    },
+
+    setAccountSettings(tenant: string, human: string | null, sendUsageData: boolean) {
+      return change(tenant, async (query) => {
+        await query("UPDATE tenants SET human = coalesce($2, human), send_usage_data = $3 WHERE id = $1",
+          [tenant, human, sendUsageData]);
+      });
+    },
+
+    async usageConsent(tenant: string) {
+      requireUuid(tenant);
+      const [account] = await sql.query<{ enabled: boolean }>(
+        'SELECT send_usage_data AS enabled FROM tenants WHERE id = $1', [tenant]);
+      return account?.enabled === true;
+    },
+
+    async claimFirstConnection(tenant: string) {
+      requireUuid(tenant);
+      const rows = await sql.query(`UPDATE tenants SET first_usage_connection = true
+        WHERE id = $1 AND send_usage_data AND NOT first_usage_connection RETURNING id`, [tenant]);
+      return rows.length > 0;
+    },
+
+    async claimOnboardingComplete(tenant: string) {
+      requireUuid(tenant);
+      const rows = await sql.query(`UPDATE tenants SET usage_onboarding_complete = true
+        WHERE id = $1 AND send_usage_data AND NOT usage_onboarding_complete RETURNING id`, [tenant]);
+      return rows.length > 0;
     },
 
     setOnboarding(tenant: string, name: true | undefined, skipped: boolean | undefined) {

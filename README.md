@@ -173,6 +173,7 @@ Then run `wg agents` in your own Orca terminal and keep it open. The launchd wat
 agents on the page, but it cannot send replies. Use Orca directly for a prompt with choices.
 
 On the Overview, open the line of a stopped coordinator or worker to read its last message and send a reply.
+The line stays visible for 60 minutes after the agent stops. You can reply during that time.
 A prompt that needs an answer stays in the inbox. Answer that agent in Orca.
 
 The line shows `sent` when the server queues the reply and `delivered` when Orca confirms it.

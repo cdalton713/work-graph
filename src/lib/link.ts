@@ -43,6 +43,8 @@ export type CommandName = (typeof LINK_COMMANDS)[number];
 export interface Command { name: CommandName; key: string | null; issue: string | null; level?: string }
 export interface AgentReply { id: string; agent: string; body: string }
 export const AGENT_REPLY_STATUSES = ["delivered", "refused", "unconfirmed"] as const;
+export const AGENT_REPLY_NOT_TAKEN = "No agent watcher took the reply within two minutes";
+export const AGENT_REPLY_NOT_CONFIRMED = "Orca mail delivery was not confirmed";
 export type AgentReplyOutcome = { status: "delivered"; messageId: string } | { status: Exclude<(typeof AGENT_REPLY_STATUSES)[number], "delivered">; reason: string };
 export type AgentReplyResult = Pick<AgentReply, "id" | "agent"> & AgentReplyOutcome;
 export interface ToCoordinator { "agent-reply": AgentReply | null; changed: Changed; answer: Answer; reply: Reply; command: Command }

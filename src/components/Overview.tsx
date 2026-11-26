@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { agentReplyLine, applyAgentReplyResult, canReplyToAgent, inboxReply, latestReplyPrompt, type AgentReplyReceipt, type InboxReply } from "../lib/reply";
+import { agentReplyLine, agentReplyPending, applyAgentReplyResult, canReplyToAgent, inboxReply, latestReplyPrompt, type AgentReplyReceipt, type InboxReply } from "../lib/reply";
 import { Reply } from "./Reply";
 import { ownerWords } from "../lib/words";
 import { type OverviewData, type OverviewFilter, type OverviewRow, type YourMove, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
@@ -125,14 +125,14 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const [receipts, setReceipts] = useState<ProjectReply[]>(() => {
     try {
       const saved: unknown = JSON.parse(sessionStorage.getItem(receiptStore) ?? "[]");
-      return Array.isArray(saved) ? saved : [];
+      return Array.isArray(saved) ? saved.map((receipt: ProjectReply) => ({ ...receipt, sentAt: receipt.sentAt ?? Date.now() })) : [];
     } catch { return []; }
   });
   useEffect(() => {
     try { sessionStorage.setItem(receiptStore, JSON.stringify(receipts)); } catch { /* storage can be disabled */ }
   }, [receiptStore, receipts]);
   const pendingProjects = new Map(receipts
-    .filter(({ project, result }) => !readOnly && !result && !sharedWorkspaces.has(project.workspace))
+    .filter((receipt) => !readOnly && agentReplyPending(receipt, now) && !sharedWorkspaces.has(receipt.project.workspace))
     .map(({ project }) => [projectKey(project), project]));
   const receiveResult = (key: string, result: AgentReplyResult) => setReceipts((previous) => {
     const index = previous.findIndex((receipt) => projectKey(receipt.project) === key && receipt.id === result.id);
@@ -319,7 +319,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
               {shown.map((a) => {
                 const state = agentState(a);
                 const receipt = owner ? receipts.find((r) => projectKey(r.project) === key && r.agent === a.id) : undefined;
-                const status = receipt && agentReplyLine(receipt);
+                const status = receipt && agentReplyLine(receipt, now);
                 return (
                   <li key={a.id}>
                     <details className="ov-agent">
@@ -332,12 +332,13 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                       </summary>
                       <p className="ov-agent-full">{a.said || "no message yet"}{messageCut(a.said) && <span className="ov-agents-note"> (message cut at 500 characters)</span>}</p>
                       {agentNeeds(a) && <p className="ov-agent-full">answer this agent in Orca</p>}
-                      {canReplyToAgent(a, reported, now, owner) && (!receipt || receipt.result) &&
+                      {canReplyToAgent(a, reported, now, owner) && (!receipt || !agentReplyPending(receipt, now)) &&
                         <div className="ov-agent-full">
                           <Reply label="Reply to the agent" placeholder="Write a reply" send={async (body) => {
                             const { id } = await api.agentReply(project.id, project.workspace, a.id, body);
+                            const sentAt = Date.now();
                             setReceipts((previous) => [...previous.filter((r) => projectKey(r.project) !== key || r.agent !== a.id),
-                              { id, agent: a.id, project }]);
+                              { id, agent: a.id, sentAt, project }]);
                           }} />
                         </div>}
                     </details>
@@ -408,7 +409,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                         {m.agentWait && <>
                           {m.agentWait.said && <span className="inbox-agent-message">{m.agentWait.said}</span>}
                           {messageCut(m.agentWait.said) && <span className="inbox-effect">Message cut at 500 characters.</span>}
-                          <span className="inbox-effect">answer this agent in Orca</span>
+                          {!target && <span className="inbox-effect">answer this agent in Orca</span>}
                         </>}
                         {effect && <span className="inbox-effect">{effect}</span>}
                         {sent && <span className="inbox-effect sig-fg-done" role="status">sent</span>}

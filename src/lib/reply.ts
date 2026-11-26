@@ -1,12 +1,12 @@
 import { CARD_PREFIX } from "./graph";
-import { agentsFresh, type AgentReplyResult, type AgentRow, type Agents, type Ask } from "./link";
+import { AGENT_REPLY_NOT_CONFIRMED, AGENT_REPLY_NOT_TAKEN, agentsFresh, type AgentReplyResult, type AgentRow, type Agents, type Ask } from "./link";
 import type { YourMove } from "./overview";
 import type { Comment } from "./types";
 
 export type InboxReply = { kind: "worker"; ask: Ask } | { kind: "issue"; issueId: string; sent: boolean };
 
 export function inboxReply(move: YourMove, readOnly: boolean): InboxReply | null {
-  if (readOnly || move.agentWait) return null;
+  if (readOnly) return null;
   if (move.workerAsk) return { kind: "worker", ask: move.workerAsk };
   return move.answer ? { kind: "issue", ...move.answer } : null;
 }
@@ -23,6 +23,7 @@ export function latestReplyPrompt(comments: Comment[]): string | undefined {
 export interface AgentReplyReceipt {
   id: string;
   agent: string;
+  sentAt: number;
   result?: AgentReplyResult;
 }
 
@@ -36,12 +37,19 @@ export function applyAgentReplyResult(receipt: AgentReplyReceipt, result: AgentR
   return { ...receipt, result };
 }
 
-export function agentReplyLine({ result }: AgentReplyReceipt): { text: string; signal: "idle" | "done" | "stop" } {
-  if (!result) return { text: "sent", signal: "idle" };
+/** Give the server thirty seconds after its two-minute deadline to report the result. */
+export function agentReplyPending(receipt: AgentReplyReceipt, now: number): boolean {
+  return !receipt.result && now - receipt.sentAt < 150_000;
+}
+
+export function agentReplyLine(receipt: AgentReplyReceipt, now: number): { text: string; signal: "idle" | "done" | "stop" } {
+  const { result } = receipt;
+  if (!result) return agentReplyPending(receipt, now) ? { text: "sent", signal: "idle" }
+    : { text: "no result: check Orca before you reply again", signal: "stop" };
   if (result.status === "delivered") return { text: "delivered", signal: "done" };
   if (result.status === "unconfirmed") return { text: `not confirmed · ${result.reason}`, signal: "stop" };
   // The server knows whether the watcher took the reply before its two-minute deadline.
-  const text = result.reason === "No agent watcher took the reply within two minutes" ? "not delivered: wg agents does not run"
-    : result.reason === "Orca mail delivery was not confirmed" ? "not confirmed" : result.reason;
+  const text = result.reason === AGENT_REPLY_NOT_TAKEN ? "not delivered: wg agents does not run"
+    : result.reason === AGENT_REPLY_NOT_CONFIRMED ? "not confirmed" : result.reason;
   return { text, signal: "stop" };
 }

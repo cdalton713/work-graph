@@ -1,0 +1,56 @@
+# Each line starts a new process with a fresh copy of the legacy effort.
+check effort
+share effort
+pull effort --force --accept-settings
+preflight effort --phase missing
+base effort --phase missing
+status effort --phase missing
+load effort --prune
+ready effort
+next effort --interval 0 --no-publish
+watch effort --interval -1 --all
+wake effort
+health effort --install --due
+autostart effort --install --uninstall
+approve effort missing --quote approved
+dispatch effort missing --agent codex
+claim effort missing ci --send
+started effort missing task=one
+done effort missing --dispatch id
+move effort missing Done --keep-worktree
+cleanup effort --dry-run
+archive effort
+run set effort @effort baseline=pass
+run show effort --json
+run reset effort a
+run rebuild effort
+log effort a -n 1
+usage effort --json --all
+evidence effort missing
+autonomy effort
+review-effort effort
+verify effort missing
+owns overlap effort a merge
+owns diff effort missing main
+explain unknown-verb
+doctor --invalid-option
+setup --team EX --private
+config effort
+contract
+tick --channel none --root empty
+agents --once --root empty
+login invalid --token-stdin
+logout https://page.invalid
+join invalid --project Example --repo effort
+leave effort
+ui --no-open --port invalid
+owns diff effort a main
+owns overlap effort a
+explain dispatch
+health effort
+autostart effort --agent codex --model example
+ui --no-open --no-tailnet
+doctor effort
+service | autonomy effort
+service | run set effort a branch=wg/example
+service | login https://page.invalid --token-stdin

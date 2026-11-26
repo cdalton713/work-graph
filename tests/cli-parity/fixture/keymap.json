@@ -1,0 +1,6 @@
+{
+  "project": {"id": "project"},
+  "milestones": {"1": "milestone"},
+  "nodes": {"a": {"id": "issue-a", "identifier": "EX-1"}},
+  "extra": {"keep": true}
+}

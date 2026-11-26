@@ -1,4 +1,5 @@
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useCoarse, useHover, useNarrow } from "../lib/screen";
@@ -108,6 +109,11 @@ export function Picker(props: {
   };
   const contents = <>
     {(sheet || options.length > 8) && <input className="picker-filter" placeholder="Filter" value={query} aria-label="Filter"
+      onKeyDown={sheet ? (e) => {
+        if (e.key !== "Enter" || e.nativeEvent.isComposing || !shown[0]) return;
+        e.preventDefault();
+        pick(shown[0].id);
+      } : undefined}
       onChange={(e) => { setQuery(e.target.value); setActive(0); }} />}
     {sheet && title && title !== sheetTitle && <p className="picker-description">{title}</p>}
     <div className="picker-scroll" role="listbox" aria-multiselectable={multi || undefined}>
@@ -142,12 +148,12 @@ export function Picker(props: {
       }}>
       {children}
     </button>
-    {open && (sheet ? <Sheet open title={sheetTitle} onClose={() => setOpen(false)}>
+    {open && (sheet ? createPortal(<Sheet open title={sheetTitle} onClose={() => setOpen(false)}>
       <div className="picker-sheet">
         {contents}
         {multi && <button type="button" className="picker-done" onClick={() => setOpen(false)}>Done</button>}
       </div>
-    </Sheet> : <div className={`picker-list picker-${align}${wide ? " picker-wide" : ""}`}
+    </Sheet>, document.body) : <div className={`picker-list picker-${align}${wide ? " picker-wide" : ""}`}
       ref={list} tabIndex={-1} onKeyDown={onKey}>
       {contents}
     </div>)}

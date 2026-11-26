@@ -27,10 +27,14 @@ export class LinearError extends Error {
   }
 }
 
+export const boardRead = new AsyncLocalStorage<boolean>();
+
 export class LinearReadLimited extends LinearError {
   readonly deadline: number;
-  constructor(deadline: number, message = "Linear rate limit") {
+  readonly endpointOnly: boolean;
+  constructor(deadline: number, message = "Linear rate limit", endpointOnly = false) {
     super(message, 429);
+    this.endpointOnly = endpointOnly;
     this.deadline = deadline;
     this.retryAfter = this.remaining();
   }
@@ -167,16 +171,16 @@ function budgetNumber(headers: Headers | undefined, name: string): number | null
   return Number.isFinite(value) ? value : null;
 }
 
-function limitDeadline(headers: Headers, retryAfter: string | null, now: number): number {
-  let reset = 0;
+function exhaustedBudgets(headers: Headers) {
+  const exhausted = new Map<string, number>();
   const cost = Number(headers?.get?.("x-complexity")) || 1;
   for (const limit of ["requests", "complexity", "endpoint-requests", "endpoint-complexity"]) {
     const remaining = budgetNumber(headers, `${limit}-remaining`);
     if (remaining !== null && remaining < (limit.endsWith("complexity") ? Math.max(1, cost) : 1)) {
-      reset = Math.max(reset, budgetNumber(headers, `${limit}-reset`) ?? 0);
+      exhausted.set(limit, budgetNumber(headers, `${limit}-reset`) ?? 0);
     }
   }
-  return Math.max(reset, retryDeadline(retryAfter, now, reset > now ? 0 : 30_000));
+  return exhausted;
 }
 
 function keepBudget(headers: Headers | undefined): void {
@@ -349,11 +353,18 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         const result = transportFailure(error);
         return kind === "oauth" || rejectApiKey ? { ...result, error: new LinearError("Linear request failed") } : result;
       };
-      const credentialId = (value: string) => createHash("sha256").update(value).digest("hex");
+      const credentialIds = (value: string) => {
+        const ids = [createHash("sha256").update(value).digest("hex")];
+        if (kind === "oauth" && workspace.connectionId) ids.push(`connection:${workspace.connectionId}`);
+        return ids;
+      };
       const send = async (value: string) => {
-        if (!mutation) {
-          const deadline = readDeadlines.get(credentialId(value));
-          if (deadline !== undefined && deadline > transport.now()) throw new LinearReadLimited(deadline);
+        if (!mutation && boardRead.getStore()) {
+          const ids = credentialIds(value);
+          const global = Math.max(...ids.map(id => readDeadlines.get(id) ?? 0));
+          const endpoint = Math.max(...ids.map(id => readDeadlines.get(id + query) ?? 0));
+          const deadline = Math.max(global, endpoint);
+          if (deadline > transport.now()) throw new LinearReadLimited(deadline, undefined, endpoint > global);
         }
         try { return await transport.fetch(ENDPOINT, init(value)); } catch (error) { return failed(error); }
       };
@@ -435,10 +446,21 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         for (const [id, deadline] of readDeadlines) {
           if (deadline <= now) readDeadlines.delete(id);
         }
-        const id = credentialId(sentCredential);
-        const deadline = Math.max(readDeadlines.get(id) ?? 0, limitDeadline(response.headers, retryAfter, now));
-        readDeadlines.set(id, deadline);
-        if (!mutation) throw new LinearReadLimited(deadline, error.message);
+        const ids = credentialIds(sentCredential);
+        const budgets = exhaustedBudgets(response.headers);
+        let deadline = 0;
+        let endpointOnly = false;
+        for (const endpoint of [false, true]) {
+          const resets = [...budgets].filter(([name]) => name.startsWith("endpoint-") === endpoint).map(([, reset]) => reset);
+          if (!resets.length && (endpoint || budgets.size)) continue;
+          const reset = Math.max(0, ...resets);
+          const until = Math.max(reset, retryDeadline(retryAfter, now, reset > now ? 0 : 30_000));
+          const scopes = ids.map(id => endpoint ? id + query : id);
+          const held = Math.max(until, ...scopes.map(scope => readDeadlines.get(scope) ?? 0));
+          for (const scope of scopes) readDeadlines.set(scope, held);
+          if (held > deadline) { deadline = held; endpointOnly = endpoint; }
+        }
+        if (!mutation && boardRead.getStore()) throw new LinearReadLimited(deadline, error.message, endpointOnly);
       }
       if (rated && retryAfter) error.retryAfter = retryAfter;
       return { failure, error, retryAfter };

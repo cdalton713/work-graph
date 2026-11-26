@@ -38,6 +38,7 @@ export interface Versioned {
   /** When the stale graph loaded (epoch ms). Set only with `stale`. */
   loadedAt?: number;
   retryAfter?: number;
+  endpointOnly?: boolean;
 }
 interface Entry extends Versioned {
   /**
@@ -57,6 +58,8 @@ interface Entry extends Versioned {
 export interface ReadOptions {
   /** A write depends on this graph (which issues are in the project): give the refresh error, never a stale graph. */
   fresh?: boolean;
+  /** A mutation may retry its prerequisite read while page reads wait. */
+  forWrite?: boolean;
 }
 
 export interface GraphCache {
@@ -121,6 +124,7 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
     if (!old || now() - old.loadedAt > STALE_MS) throw error;
     const answer: Versioned = { data: old.data, version: old.version, stale: true, error: (error as Error).message, loadedAt: old.loadedAt };
     if (error instanceof LinearReadLimited) answer.retryAfter = Number(error.remaining());
+    if (error instanceof LinearReadLimited && error.endpointOnly) answer.endpointOnly = true;
     causes.set(answer, error);
     return answer;
   }
@@ -168,12 +172,15 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
   }
 
   return {
-    get(projectId, { fresh = false } = {}) {
+    get(projectId, { fresh = false, forWrite = false } = {}) {
       const answer = read(projectId);
-      if (!fresh) return answer;
+      if (!fresh && !forWrite) return answer;
       return answer.then((value) => {
         if (value.stale) throw causes.get(value) ?? new Error(value.error);
         return value;
+      }).catch(error => {
+        if (forWrite && error instanceof LinearReadLimited) return refresh(projectId);
+        throw error;
       });
     },
     async check(projectIds) {

@@ -82,7 +82,12 @@ export const shareApi = {
 // can still read while one credential is limited. Storage can be unavailable.
 const deadlines = new Map<string, number>();
 function readKey(workspace: string | null) {
-  return "wg:linear-retry:" + JSON.stringify([site.user, site.readOnly, workspace]);
+  const scope = [site.user, site.readOnly, workspace];
+  if (site.readOnly && !site.user) {
+    const view = new URLSearchParams(location.search);
+    scope.push(view.get("workspace") ?? site.defaultWorkspace, view.get("project"));
+  }
+  return "wg:linear-retry:" + JSON.stringify(scope);
 }
 
 function deadlineFor(key: string): number {
@@ -113,7 +118,7 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
   if (read && deadlineFor(key) > Date.now()) throw new ApiError(429, { error: "Linear rate limit" });
   const response = await fetch(`/api/${path}`, { ...init, headers });
   const retry = response.headers?.get?.("Retry-After");
-  if (read && (response.status === 429 || (response.ok && retry != null))) {
+  if (read && response.headers?.get?.("X-RateLimit-Scope") !== "endpoint" && (response.status === 429 || (response.ok && retry != null))) {
     holdReads(key, retryDeadline(retry ?? null, Date.now()));
   }
   if (response.status === 204) return null as T; // the graph did not change

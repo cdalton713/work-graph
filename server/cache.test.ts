@@ -1,3 +1,5 @@
+import { LinearKeyRequired } from "./linear.ts";
+import { LinearSignInRequired } from "./linearauth.ts";
 import { describe, expect, it } from "vitest";
 import type { GraphData } from "../src/lib/types.ts";
 import { FRESH_MS, FULL_MS, STALE_MS, createGraphCache } from "./cache.ts";
@@ -95,6 +97,13 @@ describe("graph cache", () => {
     cache.clear();
     await Promise.all([cache.get("a"), cache.get("b")]);
     expect(loads).toEqual(["a", "b", "a", "b", "a", "b"]);
+  });
+  it.each([new LinearKeyRequired(), new LinearSignInRequired()])("refuses a cached graph after credential loss", async error => {
+    let at = 0;
+    const cache = createGraphCache({ load: async () => graph(1), changed: async () => { throw error; }, now: () => at });
+    await cache.get("p");
+    at += FRESH_MS;
+    await expect(cache.get("p")).rejects.toBe(error);
   });
   it("gives the last graph, marked stale with the error, when a refresh fails, while it is at most 15 minutes old", async () => {
     const clock = { at: 1_000_000 }, linear = { down: false };

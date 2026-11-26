@@ -865,6 +865,27 @@ describe("graph cache of the server", () => {
     expect(await saved.json()).toEqual({ ok: true, recorded: true });
     expect(asked.comments).toHaveLength(1);
   });
+  it("refreshes a dispatch prerequisite after a batch check was limited", async () => {
+    const { state, asked } = graphLinear();
+    state.issues.p1 = [rawIssue("i1", "TM-1", "p1")];
+    const server = cached();
+    await graph(server, "p1");
+    clock.at += 60_000;
+    const respond = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(init?.body).includes("project:{id:{in:$ids}}")) {
+        return new Response(null, { status: 429, headers: { "Retry-After": "90" } });
+      }
+      return respond(url, init);
+    });
+    await server.request("/api/overview", { headers: local });
+    expect((await graph(server, "p1")).headers.get("Retry-After")).toBe("90");
+    const dispatch = await server.request("/api/projects/p1/commands", { method: "POST", headers: write,
+      body: JSON.stringify({ name: "dispatch", key: "a", issue: "TM-1" }) });
+    expect(dispatch.status).toBe(200);
+    expect(asked.comments).toHaveLength(1);
+  });
+
   it("shares the Linear cooldown across stale and cold graphs and the overview", async () => {
     graphLinear();
     setTransport({ now: () => clock.at, sleep: async () => {} });

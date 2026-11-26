@@ -36,7 +36,7 @@ import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAut
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { NeedsLinearAccess, sharedLinear, LinearReadLimited, LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
+import { boardRead, NeedsLinearAccess, sharedLinear, LinearReadLimited, LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, type LinkMember, LinkHub, LinkRoomFull, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
@@ -551,7 +551,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   };
   /** The identifier, status, and wg node key of an issue, from the cached graph (never a stale one: the status decides a write). */
   const issueInfo = async (ref: ProjectRef, issueId: string) => {
-    const issue = (await graphs().get(ref.id, { fresh: true }).catch(() => null))?.data.issues.find((i) => i.id === issueId);
+    const issue = (await graphs().get(ref.id, { forWrite: true }).catch(() => null))?.data.issues.find((i) => i.id === issueId);
     return issue
       ? { identifier: issue.identifier, status: statusName(issue.state, issue.labels), key: parseCard(issue.card?.body)?.key ?? null }
       : { identifier: issueId, status: null, key: null };
@@ -794,6 +794,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   }
   const creationEnabled = process.env.WG_CREATE_PROJECTS === "1";
   const api = new Hono<{ Variables: { viewer: boolean; creationActor?: string } }>();
+  api.use((c, next) => boardRead.run(c.req.method === "GET" && /^\/api\/(?:projects|overview|projects\/[^/]+\/graph|issues\/[^/]+\/comments)$/.test(c.req.path), next));
   // The API can change Linear with the user's key. Accept only this page as the caller.
   api.use(async (c, next) => {
     const shared = sharedScope.getStore();
@@ -924,7 +925,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const address = shareUrl ?? (auth && !readOnly ? `https://${rules.hosted!.host}` : undefined);
         return [{
           id, name, ...(address ? { shareUrl: address } : {}),
-          ...(result.status === "rejected" && result.reason instanceof LinearReadLimited && { retryAfter: Number(result.reason.remaining()) }),
+          ...(result.status === "rejected" && result.reason instanceof LinearReadLimited && !result.reason.endpointOnly && { retryAfter: Number(result.reason.remaining()) }),
           ...(result.status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
         }];
       }),
@@ -963,7 +964,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         if (scoped) throw error;
         if (error instanceof LinearReadLimited) {
           sharedRows[at].error = "Linear rate limit";
-          sharedRows[at].retryAfter = Number(error.remaining());
+          if (!error.endpointOnly) sharedRows[at].retryAfter = Number(error.remaining());
         }
         return null;
       }
@@ -1037,13 +1038,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         try {
           // The viewer takes no older graph when Linear fails (see the graph route).
           const read = () => linearWorkspace.run(workspace, () => graphs().get(p.id, { fresh: viewer || !!entry }));
-          const { data, retryAfter } = entry ? await runInTenant(entry.owner, read) : await read();
-          recordLimit(p.workspace, retryAfter);
+          const { data, retryAfter, endpointOnly } = entry ? await runInTenant(entry.owner, read) : await read();
+          if (!endpointOnly) recordLimit(p.workspace, retryAfter);
           const waitNames = await waitNamesFor(entry?.owner ?? scope().tenant, workspace, p.id);
           const summarizeProject = () => summarize(shown(data, viewer || !!entry), p.workspace);
           summaries.push(waitNames ? requestSite.run({ ...serverSite(), human, waitNames }, summarizeProject) : summarizeProject());
         } catch (error) {
-          if (error instanceof LinearReadLimited) recordLimit(p.workspace, Number(error.remaining()));
+          if (error instanceof LinearReadLimited && !error.endpointOnly) recordLimit(p.workspace, Number(error.remaining()));
           summaries.push({ workspace: p.workspace, id: p.id, planned: 0, done: 0, counts: [], you: [], running: 0, review: 0, ready: 0,
             effort: null, freshness: null, updatedAt: null, error: (error as Error).message });
         }
@@ -1083,9 +1084,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // The viewer gets the error of the refresh in its place: an issue of the older graph can be in another project
     // now. A graph in memory can still have an issue that left the project, until its full reload (`FULL_MS`):
     // the check for changes does not see an issue that is in the project no more.
-    const { data, version: graphVersion, stale, error, loadedAt, retryAfter } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
+    const { data, version: graphVersion, stale, error, loadedAt, retryAfter, endpointOnly } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
     const waitNames = await waitNamesFor(scope().tenant, linearWorkspace.getStore()!, c.req.param("id"));
     const version = waitNames ? `${graphVersion}:${createHash("sha256").update(JSON.stringify(waitNames)).digest("hex")}` : graphVersion;
+    if (endpointOnly) c.header("X-RateLimit-Scope", "endpoint");
     if (retryAfter !== undefined) c.header("Retry-After", String(retryAfter));
     if (!stale && c.req.query("have") === version) return c.body(null, 204);
     return c.json({ ...shown(data, viewer || !!shared), ...(waitNames && { waitNames }), version, workspace: shared?.id ?? linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
@@ -1123,7 +1125,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (name === "dispatch") {
       if (typeof key !== "string" || typeof issue !== "string") throw new LinearError("dispatch names the node key and its issue", 400);
       // Which issues are in the project decides the write: a stale graph is not enough.
-      const found = (await graphs().get(ref.id, { fresh: true })).data.issues.find((i) => i.identifier === issue);
+      const found = (await graphs().get(ref.id, { forWrite: true })).data.issues.find((i) => i.identifier === issue);
       if (!found || (sharedScope.getStore() && (found.external || parseCard(found.card?.body)?.key !== key))) throw new LinearError(`no issue ${issue} in this project`, 404);
       const written = projectOfWrite();
       await addComment(found.id, "**Dispatch requested** on the page. The coordinator dispatches it at its next `wg next`.", linearWorkspace.getStore()!.team, written.hear);
@@ -1217,7 +1219,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       : "no open question with this id: it was answered, or the coordinator has not reported it", 404);
     // Which issues are in the project decides whether the reply is saved in Linear: a stale graph is not enough.
     // A failed refresh stops the route here, and the question stays open.
-    const issue = ask.issue ? (await graphs().get(ref.id, { fresh: true })).data.issues.find((i) => i.identifier === ask.issue) : undefined;
+    const issue = ask.issue ? (await graphs().get(ref.id, { forWrite: true })).data.issues.find((i) => i.identifier === ask.issue) : undefined;
     if (sharedScope.getStore() && ask.issue && (!issue || issue.external)) {
       throw new LinearError("no issue with this id in the shared project", 404);
     }
@@ -1618,6 +1620,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // An API request writes its one log line in the request log above. Another route writes the error here.
     if (status === 500 && !c.req.path.startsWith("/api/") && !c.req.path.startsWith("/join/")) console.error(error);
     if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) c.header("Retry-After", "1");
+    if (error instanceof LinearReadLimited && error.endpointOnly) c.header("X-RateLimit-Scope", "endpoint");
     if (error instanceof LinearError && error.retryAfter) c.header("Retry-After",
       error instanceof LinearReadLimited ? error.remaining() : error.retryAfter);
     return c.json({ error: error.message }, status);
@@ -1627,7 +1630,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // A hash of the node card: two card texts of the same length are still a change.
   const cardHash = (body: string | undefined) => (body === undefined ? "" : createHash("sha1").update(body).digest("hex"));
   const fingerprint = (data: GraphData) => new Map(data.issues.map((i) => [i.id, `${i.updatedAt}|${i.state.id}|${cardHash(i.card?.body)}`]));
-  const check = async () => {
+  const check = () => boardRead.run(true, async () => {
     if (!linkEnabled || !linkAvailable()) return;
     const active = await hub.active({ forCheck: true });
     const present = linkMaxAgeMs ? await hub.active({ forCheck: true, includeGrace: true }) : active;
@@ -1677,7 +1680,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         }
       }, lookupRevision);
     }));
-  };
+  });
   let checking = false;
   const timer = linkEnabled && watchMs > 0 ? setInterval(() => {
     if (checking) return;

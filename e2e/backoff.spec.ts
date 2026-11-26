@@ -31,3 +31,36 @@ test("project polls, new tabs and visibility wait for the 90-second retry window
   await expect.poll(() => overviews).toBe(1);
   expect(directories).toBe(beforeHome);
 });
+
+test("a viewer hides a graph when its refresh fails and recovers on a fresh read", async ({ page }) => {
+  await page.route("**/api/config", async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), readOnly: true } });
+  });
+  await page.goto("/?project=fixture");
+  const board = page.getByRole("navigation", { name: "Issues by the action they need" });
+  await expect(board).toBeVisible();
+  await page.route("**/api/projects/fixture/graph*", route => route.fulfill({
+    status: 503, json: { error: "Cannot confirm this share" },
+  }), { times: 1 });
+  await page.getByRole("button", { name: "Refresh project" }).click();
+  await expect(page.getByText("Cannot confirm this share").first()).toBeVisible();
+  await expect(board).toBeHidden();
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(board).toBeVisible();
+});
+
+test("an anonymous viewer hold applies only to the selected share", async ({ page }) => {
+  await page.route("**/api/config", async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), readOnly: true, user: null } });
+  });
+  await page.route("**/api/projects/fixture/graph*", route => route.fulfill({
+    status: 429, headers: { "Retry-After": "90" }, json: { error: "Limited share" },
+  }));
+  await page.goto("/?project=fixture");
+  await expect(page.getByText("Limited share", { exact: true }).first()).toBeVisible();
+  await Promise.all([page.waitForResponse(r => r.url().includes("/api/projects/planned/graph") && r.ok()),
+    page.goto("/?project=planned")]);
+  await expect(page.locator(".bar-project")).toContainText("Planned project");
+});

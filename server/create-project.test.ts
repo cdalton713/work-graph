@@ -16,7 +16,18 @@ it("binds a retry to its workspace, team, project name and task", () => {
   expect(() => creationInput(body, { ...workspace, id: "other" }, key)).toThrow();
 });
 
+it.each(["a".repeat(121) + "\nDetails", "Title\n" + "a".repeat(9995), "Title\nx\ry", "Title\nx\u0000y", "\nDetails"])(
+  "rejects invalid first task text before creation", firstTask => {
+    const key = createHash("sha256").update(JSON.stringify([workspace.id, body.team, body.name, firstTask])).digest("hex");
+    expect(() => creationInput({ ...body, firstTask }, workspace, key)).toThrow(/first task title/);
+  },
+);
+
 it("resumes partial and concurrent writes and returns a valid coordinator plan", async () => {
+  const details = "Keep the existing route.\n\n\tPreserve indentation.";
+  const input = { ...body, firstTask: "First\r\n" + details.replaceAll("\n", "\r\n") };
+  const retryKey = createHash("sha256").update(JSON.stringify([workspace.id, input.team, input.name, input.firstTask])).digest("hex");
+  expect(creationInput(input, workspace, retryKey)).toEqual(input);
   const saved = new Map<string, object>();
   const cards: string[] = [];
   let interrupt = true;
@@ -27,6 +38,10 @@ it("resumes partial and concurrent writes and returns a valid coordinator plan",
     expect(input.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     if (field === "commentCreate" && interrupt) { interrupt = false; throw Error("interrupted"); }
     if (saved.has(input.id)) throw Error("already exists");
+    if (field === "issueCreate" && input.title === "First") {
+      expect(input.description).toBe(details + "\n\n+++ Agent notes\n\nwork-graph node " +
+        "`first` · kind `task` · phase `1` · lane `core`\n\n+++");
+    }
     const object = { id: input.id, identifier: "WG-" + (1 + saved.size), url: "https://example.invalid/p",
       teams: { nodes: [{ id: "team" }] }, project: { id: input.projectId }, team: { id: input.teamId }, issue: { id: input.issueId }, type: input.type, relatedIssue: { id: input.relatedIssueId } };
     saved.set(input.id, object);
@@ -34,10 +49,12 @@ it("resumes partial and concurrent writes and returns a valid coordinator plan",
     return { result: { object, success: true } };
   };
   const team = { id: "team", key: "WG", name: "Work", viewer: "me", ready: "ready", todo: "todo" };
-  const run = () => createStarter(workspace, team, body, "actor", key, query);
+  const run = () => createStarter(workspace, team, input, "actor", retryKey, query);
   await expect(run()).rejects.toThrow("interrupted");
   const [result, concurrent] = await Promise.all([run(), run()]);
   expect(concurrent).toEqual(result);
+  expect(result.plan.nodes[0]).toMatchObject({ title: "First", description: details });
+  expect(cards[0]).not.toContain("Preserve indentation.");
   expect(saved.size).toBe(10);
   expect(cards.map(card => parseCard(card)?.kind)).toEqual(["task", "merge-point", "ship-point"]);
   expect(Object.keys(result.keymap.nodes)).toEqual(["first", "merge", "ship"]);

@@ -10,14 +10,20 @@ export function creationInput(value: unknown, workspace: Workspace, key: string 
   const clean = (s: unknown): s is string => typeof s === "string" && !!s && s === s.trim()
     && s.length <= 120 && !/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(s);
   const body = value as Partial<Input> | null;
-  if (!clean(body?.name) || !clean(body?.firstTask) || !clean(body?.team)) {
-    throw new LinearError("Supply a team, project name and first task of 1 to 120 characters", 400);
+  if (!clean(body?.name) || !clean(body?.team)) {
+    throw new LinearError("Supply a team and project name of 1 to 120 characters", 400);
+  }
+  const task = body.firstTask;
+  if (typeof task !== "string" || task !== task.trim() || task.length > 10000 ||
+      !clean(task.split(/\r?\n/, 1)[0].trimEnd()) ||
+      /[\u0000-\u0008\u000b-\u001f\u007f\ud800-\udfff]/u.test(task.replaceAll("\r\n", "\n"))) {
+    throw new LinearError("Use up to 120 characters for the first task title and 10000 for the full task", 400);
   }
   if (workspace.team !== body.team) throw new LinearError("Team is outside the configured workspace filter", 403);
-  if (key !== digest(JSON.stringify([workspace.id, body.team, body.name, body.firstTask]))) {
+  if (key !== digest(JSON.stringify([workspace.id, body.team, body.name, task]))) {
     throw new LinearError("Idempotency-Key does not match the creation input", 409);
   }
-  return { name: body.name, firstTask: body.firstTask, team: body.team };
+  return { name: body.name, firstTask: task, team: body.team };
 }
 
 export async function starterTeam(workspace: Workspace): Promise<Team | null> {
@@ -61,11 +67,13 @@ export async function createStarter(workspace: Workspace, team: Team, input: Inp
   const milestone = await ensure(query, "projectMilestone", "id project{id}", { id: id("phase"), name: "Initial phase",
     projectId: project.id, description: "target main" });
   if (milestone.project.id !== project.id) throw new LinearError("Milestone belongs to a different project", 409);
+  const [firstLine, ...detailLines] = input.firstTask.split(/\r?\n/);
+  const description = detailLines.join("\n");
   const plan = {
     effort: { name: input.name, slug: "project-" + project.id, workspace: workspace.id, team: team.key },
     phases: [{ key: "1", name: "Initial phase", target: "main" }],
     nodes: [
-      { key: "first", kind: "task", phase: "1", lane: "core", title: input.firstTask },
+      { key: "first", kind: "task", phase: "1", lane: "core", title: firstLine.trimEnd(), description: description || undefined },
       { key: "merge", kind: "merge-point", phase: "1", title: "Merge the first task" },
       { key: "ship", kind: "ship-point", phase: "1", title: "Verify the first release" },
     ],
@@ -73,10 +81,10 @@ export async function createStarter(workspace: Workspace, team: Team, input: Inp
   };
   const nodes: Record<string, { id: string; identifier: string; card: { id: string } }> = {};
   for (const [index, node] of plan.nodes.entries()) {
-    const { title, ...data } = node;
+    const { title, description, ...data } = node;
     const marker = Object.entries(data).map(([field, value]) => (field === "key" ? "" : field + " ") + "`" + value + "`").join(" · ");
     const issue = await ensure(query, "issue", "id identifier project{id} team{id}", { id: id(node.key), title,
-      description: "+++ Agent notes\n\nwork-graph node " + marker + "\n\n+++",
+      description: [description, "+++ Agent notes\n\nwork-graph node " + marker + "\n\n+++"].filter(Boolean).join("\n\n"),
       teamId: team.id, projectId: project.id, projectMilestoneId: milestone.id, assigneeId: team.viewer,
       preserveSortOrderOnCreate: true, sortOrder: (index + 1) * 100, stateId: index === 0 ? team.ready : team.todo });
     if (issue.project?.id !== project.id || issue.team.id !== team.id) throw new LinearError("Issue moved outside the project", 409);

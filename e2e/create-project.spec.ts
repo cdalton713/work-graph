@@ -42,12 +42,23 @@ for (const dropResponse of [false, true]) {
     const name = "Starter " + info.project.name;
     const task = dropResponse ? "Recover the response" : "Build the first task";
     await form.getByLabel("Project name").fill(name);
-    await form.getByLabel("First task").fill(task);
-    await form.getByLabel("First task").press("Enter");
+    const firstTask = form.getByLabel("First task");
+    const details = "Keep both paragraphs.\n\nInclude the coordinator handoff.";
+    await firstTask.fill("x".repeat(121));
+    await expect(firstTask).toHaveJSProperty("validationMessage", "Use up to 120 characters for the first line.");
+    await firstTask.fill(task);
+    await firstTask.press("End");
+    await firstTask.press("Enter");
+    await expect(firstTask).toHaveValue(task + "\n");
+    await firstTask.pressSequentially("Keep both paragraphs.");
+    await firstTask.press("Enter");
+    await firstTask.press("Enter");
+    await firstTask.pressSequentially("Include the coordinator handoff.");
+    await form.getByRole("button", { name: "Create project" }).click();
     if (dropResponse) {
       await expect(form.getByRole("alert")).toBeVisible();
       await expect(form.getByLabel("Project name")).toHaveValue(name);
-      await expect(form.getByLabel("First task")).toHaveValue(task);
+      await expect(firstTask).toHaveValue(task + "\n" + details);
       await form.getByRole("button", { name: "Create project" }).click();
     }
     const setup = page.getByRole("dialog", { name: "Coordinator setup" });
@@ -61,8 +72,10 @@ for (const dropResponse of [false, true]) {
       const chunks = [];
       for await (const chunk of stream!) chunks.push(chunk);
       const data = JSON.parse(Buffer.concat(chunks).toString());
-      if (file === "plan") expect(data.nodes.map((n: { title: string }) => n.title)).toEqual([task, "Merge the first task", "Verify the first release"]);
-      else expect(data.project.id).toBe(id);
+      if (file === "plan") {
+        expect(data.nodes.map((n: { title: string }) => n.title)).toEqual([task, "Merge the first task", "Verify the first release"]);
+        expect(data.nodes[0].description).toBe(details);
+      } else expect(data.project.id).toBe(id);
     }
     await setup.getByRole("button", { name: "Close" }).press("Escape");
     await expect(page.getByText(task, { exact: true }).first()).toBeVisible();

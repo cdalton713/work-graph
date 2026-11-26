@@ -41,6 +41,44 @@ const issues = states.map((state, order) => {
   };
 });
 
+// Keep the real page API and graph loader. Only the upstream data comes from the fixture.
+setTransport({
+  async fetch(_url, init) {
+    const { query, variables } = JSON.parse(String(init.body));
+    const data = (value: object) => Response.json({ data: value });
+    if (query.includes("projects(first:50")) {
+      return data({ teams: { nodes: [{ projects: { nodes: [...projects, panelProject], pageInfo } }] } });
+    }
+    if (query.includes("teams(first:10")) {
+      return data({ teams: { nodes: [{ ...team, states: { nodes: states }, members: empty }] } });
+    }
+    if (query.includes("issueLabels(")) return data({ issueLabels: empty });
+    if (query.includes("project(id:") && variables.id === panelProject.id) return data({
+      viewer: { id: "ada" },
+      project: { ...panelProject, projectMilestones: empty, documents: empty,
+        issues: { nodes: panelIssues, pageInfo } },
+    });
+    if (query.includes("issue(id:") && variables.id === panelIssue.id) {
+      return data({ issue: { project: panelProject, comments: { nodes: [{
+        id: "panel-comment", createdAt: updatedAt, user: { name: "Ada" }, body: panelMarkdown,
+      }], pageInfo } } });
+    }
+    if (query.includes("issue(id:")) {
+      return data({ issue: { project, comments: empty } });
+    }
+    if (query.includes("project(id:")) {
+      const entry = projects.find(({ id }) => id === variables.id);
+      return data({
+        viewer: { id: "ada" },
+        project: entry && { ...entry, projectMilestones: empty, documents: empty,
+          issues: { nodes: entry === project ? issues : [], pageInfo } },
+      });
+    }
+    throw new Error(`Unhandled fixture query: ${query}`);
+  },
+  sleep: async () => {},
+});
+
 const panelProject = { ...project, id: "panel", name: "Panel project", url: "https://example.com/panel" };
 const wideLine = "long-value-".repeat(28);
 const panelMarkdown = `\`\`\`text
@@ -57,6 +95,7 @@ const blocker = {
 };
 const panelIssue = {
   ...issues[5], project: panelProject, id: "panel-task", identifier: "WG-14",
+  state: states[4],
   title: "Panel actions", sortOrder: 13, description: panelMarkdown,
   labels: { nodes: [{ id: "worker", name: "agent:worker", color: "#4466aa" }], pageInfo },
   inverseRelations: { nodes: [{ type: "blocks", issue: blocker }], pageInfo },
@@ -74,49 +113,12 @@ ${JSON.stringify({
 };
 const panelIssues = [blocker, panelIssue, {
   ...issues[5], project: panelProject, id: "panel-ops", identifier: "WG-15", title: "Check the rollout", sortOrder: 14,
+  state: states[4],
   comments: { nodes: [{
     id: "panel-ops-card", createdAt: updatedAt, user: null,
     body: "**work-graph node card**\n\n\`\`\`json\n{\"wg\":1,\"key\":\"panel-ops\",\"kind\":\"ops\"}\n\`\`\`",
   }], pageInfo },
 }];
-
-// Keep the real page API and graph loader. Only the upstream data comes from the fixture.
-setTransport({
-  async fetch(_url, init) {
-    const { query, variables } = JSON.parse(String(init.body));
-    const data = (value: object) => Response.json({ data: value });
-    if (query.includes("projects(first:50")) {
-      return data({ teams: { nodes: [{ projects: { nodes: [...projects, panelProject], pageInfo } }] } });
-    }
-    if (query.includes("teams(first:10")) {
-      return data({ teams: { nodes: [{ ...team, states: { nodes: states }, members: empty }] } });
-    }
-    if (query.includes("issueLabels(")) return data({ issueLabels: empty });
-    if (query.includes("issue(id:") && variables.id === panelIssue.id) {
-      return data({ issue: { project: panelProject, comments: { nodes: [{
-        id: "panel-comment", createdAt: updatedAt, user: { name: "Ada" }, body: panelMarkdown,
-      }], pageInfo } } });
-    }
-    if (query.includes("issue(id:")) {
-      return data({ issue: { project, comments: empty } });
-    }
-    if (query.includes("project(id:")) {
-      if (variables.id === panelProject.id) return data({
-        viewer: { id: "ada" },
-        project: { ...panelProject, projectMilestones: empty, documents: empty,
-          issues: { nodes: panelIssues, pageInfo } },
-      });
-      const entry = projects.find(({ id }) => id === variables.id);
-      return data({
-        viewer: { id: "ada" },
-        project: entry && { ...entry, projectMilestones: empty, documents: empty,
-          issues: { nodes: entry === project ? issues : [], pageInfo } },
-      });
-    }
-    throw new Error(`Unhandled fixture query: ${query}`);
-  },
-  sleep: async () => {},
-});
 
 const rules = { port: 0, tailnet: null };
 const app = createApp(rules, {

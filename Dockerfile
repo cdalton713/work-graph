@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.10.0
 # The hosted work-graph page (README "Host the page"). Node runs the TypeScript server directly.
 FROM node:24.22.1-alpine AS build
 WORKDIR /ui
@@ -10,7 +11,10 @@ COPY public ./public
 COPY src ./src
 COPY skills/work-graph/contract.json ./skills/work-graph/contract.json
 COPY server ./server
-RUN pnpm build && pnpm prune --prod && rm -r server/testing && find server src -name '*.test.ts' -delete
+ARG WG_VERSION=dev
+ARG SENTRY_ORG
+ARG SENTRY_PROJECT_BROWSER
+RUN --mount=type=secret,id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN pnpm build && pnpm prune --prod && rm -r server/testing && find server src -name '*.test.ts' -delete
 
 FROM node:24.22.1-alpine
 WORKDIR /ui

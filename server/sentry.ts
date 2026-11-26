@@ -29,6 +29,10 @@ export function scrubEvent(event: ErrorEvent): ErrorEvent {
   };
 }
 
+export function releaseVersion(env: NodeJS.ProcessEnv): string {
+  return env.WG_VERSION || env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "dev";
+}
+
 export let sentry: typeof import("@sentry/node") | undefined;
 
 export async function startSentry(env: NodeJS.ProcessEnv) {
@@ -36,7 +40,7 @@ export async function startSentry(env: NodeJS.ProcessEnv) {
   const sdk = await import("@sentry/node");
   sdk.init({
     dsn: env.WG_SENTRY_DSN, environment: env.WG_SENTRY_ENVIRONMENT || "production",
-    release: env.WG_VERSION || "dev", sendDefaultPii: false, beforeSend: scrubEvent,
+    release: releaseVersion(env), sendDefaultPii: false, beforeSend: scrubEvent,
     defaultIntegrations: false, skipOpenTelemetrySetup: true, registerEsmLoaderHooks: false, spotlight: false,
     sendClientReports: false,
   });

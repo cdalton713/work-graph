@@ -3085,7 +3085,8 @@ it("publishes only the browser DSN with its release and environment", async () =
   expect(await config()).not.toHaveProperty("sentry");
   telemetryEnv.WG_SENTRY_BROWSER_DSN = "browser";
   expect((await config()).sentry).toEqual({ dsn: "browser", environment: "production", release: "dev" });
+  telemetryEnv.WG_SENTRY_TEST_EVENT = "1";
   telemetryEnv.WG_VERSION = "build";
   telemetryEnv.WG_SENTRY_ENVIRONMENT = "preview";
-  expect((await config()).sentry).toEqual({ dsn: "browser", environment: "preview", release: "build" });
+  expect((await config()).sentry).toEqual({ dsn: "browser", environment: "preview", release: "build", test: true });
 });

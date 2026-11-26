@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import type { Server } from "node:http";
-import { sentry } from "./sentry.ts";
+import { releaseVersion, sentry } from "./sentry.ts";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { Hono, type Context } from "hono";
 import { matchedRoutes } from "hono/route";
@@ -768,7 +768,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           dsn: telemetryEnv.WG_SENTRY_BROWSER_DSN,
           ...(telemetryEnv.WG_SENTRY_TEST_EVENT === "1" ? { test: true } : {}),
           environment: telemetryEnv.WG_SENTRY_ENVIRONMENT || "production",
-          release: telemetryEnv.WG_VERSION || "dev",
+          release: releaseVersion(telemetryEnv),
         } } : {}),
         human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version, telemetry: !!telemetry,
         readOnly: viewer, auth: !!(auth || linearAuth), user: membership && !disconnected ? session?.email ?? null : null,

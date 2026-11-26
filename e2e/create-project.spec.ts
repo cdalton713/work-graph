@@ -223,7 +223,10 @@ test("the overview uses its own project list after a workspace read fails", asyn
   });
   await page.goto("/");
   const project = page.locator(".overview .ov-title").getByText("Example project", { exact: true });
-  await expect(project).toHaveCount(0);
+  await expect(project).toBeVisible();
+  await page.locator(".bar-project").click();
+  await expect(page.getByRole("option", { name: /Example project/ })).toBeVisible();
+  await page.keyboard.press("Escape");
   release();
   await expect(page.getByText(/Workspace unavailable/).first()).toBeVisible();
   await expect(project).toHaveCount(0);

@@ -111,7 +111,7 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
     headers["Idempotency-Key"] = idempotencyKey ?? Array.from(crypto.getRandomValues(new Uint8Array(16)),
       (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
-  const directory = path === "overview" || path === "projects";
+  const directory = path === "overview?view=waiting" || path === "overview" || path === "projects";
   const graph = /^projects\/[^/]+\/graph(?:\?|$)/.test(path);
   const read = method === "GET" && (directory || graph);
   const key = readKey(directory ? null : workspace);
@@ -206,6 +206,7 @@ export const api = {
   /** The state of the server: its build and the Linear budget of each workspace. */
   status: () => call<ServerStatus>("status"),
   /** The projects, with a summary of each open one. */
+  waiting: () => call<ProjectList & { summaries: Pick<OverviewData["summaries"][number], "id" | "workspace" | "you">[] }>("overview?view=waiting"),
   overview: () => call<OverviewData>("overview"),
   /** The graph with its version, or null when the page already has version `have`. */
   graph: (projectId: string, have?: string, workspace?: string) => call<(GraphData & { version: string }) | null>(`projects/${projectId}/graph${have ? `?have=${have}` : ""}`, undefined, workspace),

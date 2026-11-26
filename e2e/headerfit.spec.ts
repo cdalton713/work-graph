@@ -4,7 +4,7 @@ import { projectPath, screens, test } from "./support/screens.ts";
 
 test("the phone header gives at least half its width to the project picker", async ({ page }, info) => {
   test.skip(!info.project.name.startsWith("phone-"));
-  await page.route("**/api/overview", async (route) => {
+  await page.route("**/api/overview?view=waiting", async (route) => {
     const response = await route.fetch();
     const overview: OverviewData = await response.json();
     const waiting = Array.from({ length: 25 }, (_, index) => ({
@@ -15,9 +15,8 @@ test("the phone header gives at least half its width to the project picker", asy
       ...overview,
       summaries: overview.summaries.map((summary) => ({ ...summary, you: summary.id === "fixture" ? waiting : [] })),
     } });
-  }, { times: 1 });
-  await screens.overview(page);
-  await page.locator(".ov-open").filter({ hasText: "Example project" }).first().click();
+  });
+  await screens.project(page);
   const bar = page.locator(".project-bar");
   const overview = bar.getByRole("button", { name: /^Overview/ });
   const picker = bar.getByRole("button", { name: /Example project/ });

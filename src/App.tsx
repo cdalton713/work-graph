@@ -224,6 +224,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
 
   // The overview also gives the project picker the count of issues that wait on the human.
   const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [waiting, setWaiting] = useState<Awaited<ReturnType<typeof api.waiting>>["summaries"] | null>(null);
   const [overviewSyncedAt, setOverviewSyncedAt] = useState<Date | null>(null);
   const overviewList = useMemo(() => includePending(overview, newProject), [overview, newProject]);
   const [overviewBusy, setOverviewBusy] = useState(false);
@@ -247,20 +248,34 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         statusRunning = true;
         api.status().then((s) => live && setStatus(s)).catch(() => {}).finally(() => { statusRunning = false; });
       }
+      let summaryReady = false;
+      const directory = api.projects().then(list => {
+        if (live && (viewingProject || !summaryReady)) {
+          setDirectory(old => mergeDirectory(site.readOnly ? null : old, list));
+          setDirectoryError(null);
+        }
+      }).catch(error => { if (live && viewingProject) setDirectoryError(error.message); });
       try {
-        const list = viewingProject ? await api.projects() : await api.overview();
-        if (!live) return;
-        setDirectory(old => mergeDirectory(site.readOnly ? null : old, list));
-        if ("summaries" in list) {
-          setOverview(list as OverviewData);
+        if (viewingProject) {
+          const list = await api.waiting();
+          if (!live) return;
+          setWaiting(list.summaries);
+        } else {
+          const list = await api.overview();
+          if (!live) return;
+          summaryReady = true;
+          setDirectory(old => mergeDirectory(site.readOnly ? null : old, { projects: list.projects, workspaces: list.workspaces }));
+          setDirectoryError(null);
+          setOverview(list);
+          setWaiting(list.summaries);
           setNewProject(null);
           if (installed) setOverviewSyncedAt(new Date());
         }
         setNow(Date.now());
-        setDirectoryError(null);
       } catch (error) {
         if (live) setDirectoryError((error as Error).message);
       } finally {
+        await directory;
         running = false;
         if (live) setOverviewBusy(false);
       }
@@ -402,9 +417,20 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
     setFilterChoice({ key: openKey, value });
   };
   // A worker's question is a move of the human's: it counts in "Your move", the picker, and the badge.
-  const yours = useMemo(() => new Map((overview?.summaries ?? []).map((s) => [summaryKey(s), movesWithAgents(movesWithAsks(s.you, link.asksBy.get(summaryKey(s))), link.agentsBy.get(summaryKey(s)), now).length])), [overview, link.asksBy, link.agentsBy, now]);
-  const badgeCount = overview ? [...yours.values()].reduce((sum, count) => sum + count, 0) : null;
-  useEffect(() => { if (site.push && badgeCount !== null && !site.readOnly) updateBadge(badgeCount); }, [badgeCount]);
+  const yours = useMemo(() => {
+    const visible = new Set(directory?.projects.map(summaryKey));
+    return new Map((waiting ?? []).flatMap(summary => {
+      const key = summaryKey(summary);
+      if (!visible.has(key)) return [];
+      const moves = movesWithAsks(summary.you, link.asksBy.get(key));
+      return [[key, movesWithAgents(moves, link.agentsBy.get(key), now).length] as const];
+    }));
+  }, [waiting, directory, link.asksBy, link.agentsBy, now]);
+  const waitingTotal = [...yours.values()].reduce((a, b) => a + b, 0);
+  const badgeCount = waiting && directory ? waitingTotal : null;
+  useEffect(() => {
+    if (site.push && badgeCount !== null && !site.readOnly) updateBadge(badgeCount);
+  }, [badgeCount]);
   const [sharedPresence, setSharedPresence] = useState<{ key: string; data: Awaited<ReturnType<typeof api.sharedPresence>> } | null>(null);
   useEffect(() => {
     if (sharedRole !== "collaborator" || link.connected || !linkRef || !openKey) return;
@@ -741,7 +767,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
     setQuery({ workspace: p.workspace ?? site.defaultWorkspace, project: p.id, issue: issue ?? null }, true), [setQuery]);
   const setupButton = (dismiss?: () => void) => project && starter && <button onClick={() => { dismiss?.(); setSetup(true); }}>Coordinator setup</button>;
   const home = () => setQuery({ workspace: null, project: null, issue: null }, true);
-  const waitingTotal = [...yours.values()].reduce((a, b) => a + b, 0);
+
   const total = full?.nodes.length ?? 0;
   const done = full?.nodes.filter((n) => n.status === "Done").length ?? 0;
   // A canceled issue is not work that is left, so it is not in the total that "done" counts to.
@@ -818,7 +844,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const refreshScreen = useCallback(() => {
     const current = currentProject.current;
     if (current) void load(current);
-    else setOverviewTick((tick) => tick + 1);
+    setOverviewTick((tick) => tick + 1);
   }, [load]);
   const refreshLabel = project ? "Refresh project" : "Refresh overview";
   const closeControl = !viewer && !sharedRole && activeProject && (
@@ -865,7 +891,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         {installed && !full && <button type="button" className="installed-refresh" aria-label={refreshLabel}
           onClick={refreshScreen} disabled={project ? busy : overviewBusy}>Refresh</button>}
         {full && (
-          <button type="button" className="sync" onClick={() => project && void load(project)} aria-label="Refresh project"
+          <button type="button" className="sync" onClick={refreshScreen} aria-label="Refresh project"
             title={nativeBarTitles ? syncHelp : undefined} aria-description={syncHelp}>
             <span className={`sync-dot${busy ? " is-busy" : ""}`} /><span className="sync-time">{syncTime ?? "…"}</span>
           </button>

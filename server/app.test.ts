@@ -1,3 +1,4 @@
+import type { ProjectSummary } from "../src/lib/overview.ts";
 import { api as browserApi } from "../src/api.ts";
 import { configureSite, site } from "../src/lib/site.ts";
 import { connectRedis } from "./redis.ts";
@@ -865,6 +866,38 @@ describe("graph cache of the server", () => {
     expect(await saved.json()).toEqual({ ok: true, recorded: true });
     expect(asked.comments).toHaveLength(1);
   });
+  it("projects waiting moves without loading the other boards", async () => {
+    const { asked, state } = graphLinear();
+    const server = cached();
+    const issue = rawIssue("i", "TM-1", "p2");
+    state.issues.p2 = [{ ...issue, state: { ...issue.state, name: "Triage" } }];
+    const read = async (url: string) => (await server.request(url, { headers: local })).json();
+    const visit = async () => {
+      const [, waiting] = await Promise.all([read("/api/projects"), read("/api/overview?view=waiting"),
+        read("/api/status"), graph(server, "p1")]);
+      return waiting;
+    };
+    const waiting = await visit();
+    expect(fetch).toHaveBeenCalledTimes(5); // directory, two projections, selected graph head and issue page
+    expect(asked.loads).toEqual(["p1"]);
+    expect(waiting.summaries.find((p: { id: string }) => p.id === "p2").you).toMatchObject([{ identifier: "TM-1" }]);
+    vi.mocked(fetch).mockClear();
+    await visit(); // a second tab or immediate visibility change
+    expect(fetch).toHaveBeenCalledTimes(1);
+    vi.mocked(fetch).mockClear();
+    clock.at += 60_000;
+    await visit();
+    expect(fetch).toHaveBeenCalledTimes(3); // directory, one batch for both projects, selected graph check
+    const overview = await read("/api/overview");
+    expect(waiting.summaries).toEqual(expect.arrayContaining(overview.summaries.map(({ id, workspace, you }: ProjectSummary) => ({ id, workspace, you }))));
+    vi.mocked(fetch).mockClear();
+    state.changed = ["p2"];
+    clock.at += 60_000;
+    state.issues.p2 = [issue];
+    expect((await visit()).summaries.every((p: ProjectSummary) => p.you.length === 0)).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(4); // only the changed waiting projection costs another request
+  });
+
   it("refreshes a dispatch prerequisite after a batch check was limited", async () => {
     const { state, asked } = graphLinear();
     state.issues.p1 = [rawIssue("i1", "TM-1", "p1")];
@@ -1998,6 +2031,10 @@ it("isolates site, projects, graphs and budgets for tenants with the same worksp
     expect(await (await get("/overview", grace)).json()).toMatchObject({ summaries: expect.arrayContaining([
       expect.objectContaining({ id: "p1", you: [expect.objectContaining({ why: "Needs Grace" })] }),
     ]) });
+    for (const [headers, name] of [[ada, "Ada"], [grace, "Grace"]] as const) {
+      const waiting = await (await get("/overview?view=waiting", headers)).json();
+      expect(waiting.summaries.find((p: ProjectSummary) => p.id === "p1").you).toMatchObject([{ why: "Needs " + name }]);
+    }
     release();
     expect(await (await overview).json()).toMatchObject({ summaries: expect.arrayContaining([
       expect.objectContaining({ id: "p1", you: [expect.objectContaining({ why: "Needs Ada" })] }),
@@ -2257,6 +2294,10 @@ describe("read-only viewer", () => {
     const overview = await (await get("/api/overview")).json();
     expect(overview.summaries).toMatchObject([{ id: "p1", planned: 1, you: [] }]);
     for (const secret of ["Private plan", "private-key"]) expect(JSON.stringify(overview)).not.toContain(secret);
+    const viewerWaiting = await (await get("/api/overview?view=waiting")).json();
+    expect(viewerWaiting.summaries).toEqual([{ id: "p1", workspace: overview.summaries[0].workspace, you: [] }]);
+    const ownerWaiting = await (await app().request("/api/overview?view=waiting", { headers: local })).json();
+    expect(ownerWaiting.summaries[0].you).toMatchObject([{ identifier: "CD-9" }]);
     expect(overview.summaries[0].effort.status).toBe("phase 1: 2 tasks; wave a");
     expect((await (await app().request("/api/overview", { headers: local })).json()).summaries[0]).toMatchObject({ planned: 2, you: [{ identifier: "CD-9" }] });
   });

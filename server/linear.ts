@@ -851,25 +851,28 @@ export async function changedProjects(ids: string[], since: string): Promise<Map
   }
 }
 
-/** The states, members, and labels of the teams change seldom: one load serves ten minutes. */
-const META_MS = 10 * 60_000;
+// Fields needed for the waiting group and for following linked project nodes.
+const WAITING_ISSUE = `id identifier title updatedAt sortOrder team{id key} ${STATE}
+  labels(first:20){nodes{id name parent{name}}}
+  comments(first:1, filter:{body:{startsWith:"${CARD_PREFIX}"}}){nodes{id body}}`;
+export async function waitingIssues(projectId: string, includeExternal: boolean) {
+  const relations = includeExternal ? `relations(first:${RELATION_PAGE},includeArchived:true){${RELATIONS}}
+    inverseRelations(first:${RELATION_PAGE},includeArchived:true){${INVERSE_RELATIONS}}` : "";
+  return projectIssues(projectId, WAITING_ISSUE + relations, includeExternal);
+}
 
-export async function loadGraph(projectId: string): Promise<GraphData> {
-  const head = await gql(
-    `query($id:String!){ viewer{id} project(id:$id){ id name url
-       projectMilestones(first:50){nodes{id name sortOrder description}}
-       documents(first:5, filter:{title:{eq:"${STATUS_DOC}"}}){nodes{content updatedAt}} } }`,
-    { id: projectId },
-  );
-  if (!head.project) throw new LinearError(`project ${projectId} not found`, 404);
+async function projectIssues(projectId: string, fields: string, includeExternal: boolean) {
   const raw = await pages<RawIssue>(
     `query($id:String!,$after:String){ project(id:$id){ issues(first:25,after:$after){
-       nodes{${ISSUE}} pageInfo{hasNextPage endCursor} } } }`,
+       nodes{${fields}} pageInfo{hasNextPage endCursor} } } }`,
     { id: projectId },
     (data) => data.project.issues,
   );
+  if (!includeExternal) {
+    const empty = { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+    return raw.map(issue => normalizeIssue({ ...issue, relations: empty, inverseRelations: empty }, projectId));
+  }
   const issues = await mapLimit(raw, MAX_PARALLEL, (i) => completeIssue(i, projectId));
-  const teamIds = [...new Set(issues.map((i) => i.teamId))];
   // Issues outside the project that are linked to it by blocks relations (for example, ENG
   // tickets that wg maps as nodes). They are read-only here. Their own relations give the edges
   // between them. A wg node can be several relations away (ENG lane -> ENG lane -> CD merge
@@ -882,13 +885,29 @@ export async function loadGraph(projectId: string): Promise<GraphData> {
     outside.forEach((id) => known.add(id));
     const found: Issue[] = [];
     for (let at = 0; at < outside.length; at += 25) {
-      const data = await gql(`query($ids:[ID!]){ issues(first:25,filter:{id:{in:$ids}}){ nodes{${ISSUE}} } }`, { ids: outside.slice(at, at + 25) });
+      const data = await gql(`query($ids:[ID!]){ issues(first:25,filter:{id:{in:$ids}}){ nodes{${fields}} } }`, { ids: outside.slice(at, at + 25) });
       const linked = await mapLimit(data.issues.nodes as RawIssue[], MAX_PARALLEL, (i) => completeIssue(i, projectId));
       found.push(...linked.map((i) => ({ ...i, external: true })));
     }
     issues.push(...found);
     frontier = found.filter((i) => i.card);
   }
+  return issues;
+}
+
+/** The states, members, and labels of the teams change seldom: one load serves ten minutes. */
+const META_MS = 10 * 60_000;
+
+export async function loadGraph(projectId: string): Promise<GraphData> {
+  const head = await gql(
+    `query($id:String!){ viewer{id} project(id:$id){ id name url
+       projectMilestones(first:50){nodes{id name sortOrder description}}
+       documents(first:5, filter:{title:{eq:"${STATUS_DOC}"}}){nodes{content updatedAt}} } }`,
+    { id: projectId },
+  );
+  if (!head.project) throw new LinearError(`project ${projectId} not found`, 404);
+  const issues = await projectIssues(projectId, ISSUE, true);
+  const teamIds = [...new Set(issues.filter(i => !i.external).map(i => i.teamId))];
   await addReviewUrls(issues);
   let teams: Record<string, Team> = {};
   let labels: Label[] = [];

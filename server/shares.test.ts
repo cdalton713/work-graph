@@ -170,7 +170,7 @@ databaseSuites((open) => {
       expect((await member.request("/api/issues/inside/comments", "POST", { body: "Read only" }, headers)).status).toBe(405);
       expect((await member.request("/api/issues/inside", "PATCH", { stateId: "started" }, headers)).status).toBe(405);
       expect((await member.request("/api/projects/project/asks/ask1/reply", "POST", { body: "Read only" }, headers)).status).toBe(405);
-      for (const path of ["/api/projects", "/api/overview"]) {
+      for (const path of ["/api/projects", "/api/overview", "/api/overview?view=waiting"]) {
         const list = await (await member.request(path, "GET", undefined, headers)).json();
         expect(list.workspaces).toEqual([summary]);
         expect(list.projects.map(({ id }: { id: string }) => id)).toEqual(["project"]);

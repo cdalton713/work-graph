@@ -152,6 +152,40 @@ test("the app updates the icon when there are moves", async ({ page }) => {
   await expect.poll(() => page.evaluate(() => Number(document.documentElement.dataset.testBadge))).toBeGreaterThan(0);
 });
 
+test("a board refresh updates the header, picker and installed badge", async ({ page }) => {
+  await allowPush(page);
+  await page.addInitScript(() => Object.defineProperty(navigator, "setAppBadge", {
+    value: (count: number) => { document.documentElement.dataset.testBadge = String(count); },
+  }));
+  let count = 2, reads = 0;
+  await page.route("**/api/overview?view=waiting", async route => {
+    reads++;
+    await route.fulfill({ json: { summaries: [{ workspace: "default", id: "fixture",
+      you: Array.from({ length: count }, (_, i) => ({ identifier: `WG-${i}` })) }], workspaces: [], projects: [] } });
+  });
+  await screens.project(page);
+  const check = async () => {
+    await expect(page.locator(".bar-home-count")).toHaveText(String(count));
+    await expect(page.locator("html")).toHaveAttribute("data-test-badge", String(count));
+    await page.locator(".bar-project").click();
+    const option = page.getByRole("option", { name: /Example project/ });
+    await expect(option).toContainText(`${count} for`);
+    await option.click();
+  };
+  await check();
+  count = 3;
+  await page.getByRole("button", { name: "Refresh project" }).click();
+  await check();
+  count = 4;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await check();
+  expect(reads).toBe(3);
+  await page.locator(".bar-home").click();
+  count = 5;
+  await page.locator(".ov-open").filter({ hasText: "Example project" }).first().click();
+  await check();
+});
+
 test("desktop notices preserve project picker widths", async ({ page }, info) => {
   test.skip(!info.project.name.startsWith("desktop"));
   const bar = page.locator(".project-bar");

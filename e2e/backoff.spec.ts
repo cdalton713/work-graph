@@ -29,7 +29,7 @@ test("project polls, new tabs and visibility wait for the 90-second retry window
   const beforeHome = directories;
   await page.goto("/");
   await expect.poll(() => overviews).toBe(1);
-  expect(directories).toBe(beforeHome);
+  await expect.poll(() => directories).toBe(beforeHome + 1);
 });
 
 test("a viewer hides a graph when its refresh fails and recovers on a fresh read", async ({ page }) => {

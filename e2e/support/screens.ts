@@ -25,6 +25,9 @@ export const screens = {
   async project(page: Page) {
     await page.addInitScript(() => localStorage.setItem("wg-board", "off"));
     await page.goto(projectPath);
+    const graph = page.getByRole("group", { name: "Project view" }).getByRole("button", { name: "Graph" });
+    await expect(page.locator(".react-flow")).toBeAttached();
+    if (await graph.isVisible()) await graph.click();
     await expect(page.locator(".react-flow")).toBeVisible();
   },
   async issue(page: Page) {
@@ -34,6 +37,12 @@ export const screens = {
   },
   async board(page: Page) {
     await screens.project(page);
+    const list = page.getByRole("group", { name: "Project view" }).getByRole("button", { name: "List" });
+    if (await list.isVisible()) {
+      await list.click();
+      await expect(board(page)).toBeVisible();
+      return;
+    }
     const toggle = page.getByRole("button", { name: "Board", exact: true });
     if (!(await toggle.isVisible())) {
       await page.locator(".bar").getByRole("button", { name: "More", exact: true }).click();

@@ -67,7 +67,7 @@ test("the project bar keeps one row and gives touch controls room", async ({ pag
       expect(box.width).toBeGreaterThanOrEqual(43.5);
       expect(box.height).toBeGreaterThanOrEqual(43.5);
     }
-    await expect(menu.getByRole("button", { name: "Board", exact: true })).toHaveCount(phone ? 1 : 0);
+    await expect(menu.getByRole("button", { name: "Board", exact: true })).toHaveCount(0);
     await expect(menu.getByRole("button", { name: /^View/ })).toHaveCount(phone ? 1 : 0);
     const close = menu.getByRole("button", { name: "Close project" });
     await expect(menu.getByRole("button").last()).toHaveText("Close project");

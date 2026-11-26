@@ -193,3 +193,17 @@
     content: ""; position: absolute; inset: -17px auto 0 0; width: var(--touch);
   }
 }
+
+.view-switch {
+  position: absolute;
+  inset: auto 0 0;
+  height: var(--view-switch-height);
+  z-index: 11;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background: var(--cab-1);
+  border-top: 1px solid var(--rail);
+}
+.view-switch button { min-height: 44px; border: 0; border-radius: 0; }
+.view-switch button[aria-pressed="true"] { background: var(--cab-3); color: var(--ink-1); }
+.view-switch button:focus-visible { outline-offset: -2px; }

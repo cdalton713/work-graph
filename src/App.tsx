@@ -10,6 +10,7 @@ import { Canvas } from "./components/Canvas";
 import { EffortSheet } from "./components/EffortSheet";
 import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
+import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
 import { Panel } from "./components/Panel";
 import { CopyButton, Hint, Lamp, Picker } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type GNode, type Signal, toggleReviewed } from "./lib/graph";
@@ -22,7 +23,7 @@ import { ownerWords } from "./lib/words";
 import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
 import type { Account, AccountConnection, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
-import { TABLET_OR_WIDER, useHover, useNarrow } from "./lib/screen";
+import { useHover, useNarrow } from "./lib/screen";
 import { useLink } from "./useLink";
 import { canReleaseClaim, claimMarks, matchesClaim, parseClaimFilter, type ClaimFilter, type ProjectClaims } from "./lib/claims";
 
@@ -38,10 +39,11 @@ function useQuery() {
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
   }, []);
-  const set = useCallback((changes: Record<string, string | null>, push = false) => {
+  const set = useCallback((changes: Record<string, string | null>, push: boolean | "issue" = false) => {
     const next = read();
     for (const [k, v] of Object.entries(changes)) v === null ? next.delete(k) : next.set(k, v);
-    history[push ? "pushState" : "replaceState"](null, "", `?${next}`);
+    const state = push === "issue" ? { issuePanel: true } : push ? null : history.state;
+    history[push ? "pushState" : "replaceState"](state, "", `?${next}`);
     setQuery(next);
   }, []);
   return [query, set] as const;
@@ -126,11 +128,14 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const [allEdges, setAllEdges] = useState(false);
   const [map, setMap] = useState(() => localStorage.getItem("wg-map") !== "off");
   useEffect(() => localStorage.setItem("wg-map", map ? "on" : "off"), [map]);
-  // The board starts open on a wide pane. On a phone it covers the canvas, so it starts closed there.
-  const [board, setBoard] = useState(() => localStorage.getItem("wg-board") !== "off" && matchMedia(TABLET_OR_WIDER).matches);
+  const narrow = useNarrow();
+  const [board, setBoard] = useState(() => localStorage.getItem("wg-board") !== "off");
+  const [view, setView] = useState<ProjectView>(() => localStorage.getItem("wg-project-view") === "graph" ? "graph" : "list");
+  useEffect(() => localStorage.setItem("wg-project-view", view), [view]);
   useEffect(() => localStorage.setItem("wg-board", board ? "on" : "off"), [board]);
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set());
   const [hoverId, setHoverId] = useState<string | null>(null);
+  const [graphTrace, setGraphTrace] = useState<{ project: string; id: string } | null>(null);
   const [focus, setFocus] = useState<{ id: string; tick: number } | null>(null);
   const [placed, setPlaced] = useState<{ key: string; layout: Layout } | null>(null);
   const pending = useRef(0);
@@ -472,8 +477,26 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     // A click pins the node. The canvas then shows the pinned state, not the trace of the pointer,
     // until the pointer goes onto a node again.
     setHoverId(null);
-    setQuery({ issue: id ? full?.byId.get(id)?.issue.identifier ?? null : null });
-  }, [full, setQuery]);
+    setGraphTrace(null);
+    const issue = id ? full?.byId.get(id)?.issue.identifier ?? null : null;
+    if (!issue && query.has("issue") && history.state?.issuePanel) {
+      history.back();
+    } else {
+      setQuery({ issue }, issue && narrow && !query.has("issue") ? "issue" : false);
+    }
+  }, [full, narrow, query, setQuery]);
+
+  const showInGraph = () => {
+    if (!selected || !openKey) return;
+    if (!graph?.byId.has(selected.id)) {
+      setOpenOnly(false);
+      chooseClaimFilter("all");
+    }
+    select(null);
+    setView("graph");
+    setGraphTrace({ project: openKey, id: selected.id });
+    setFocus({ id: selected.id, tick: Date.now() });
+  };
 
   const onPatch = useCallback((id: string, patch: IssuePatch, optimistic: Partial<Issue>) => {
     let before: Issue | undefined;
@@ -504,16 +527,14 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   }, [data, onPatch]); // eslint-disable-line react-hooks/exhaustive-deps
   const canReview = !!data?.labels.some((l) => l.name === REVIEWED);
 
-  // A board row selects the issue and centres it. On a phone the board then gives the screen to the canvas.
+  // Keep the phone canvas in place while an issue is open.
   const pick = useCallback((id: string) => {
     select(id);
-    setFocus({ id, tick: Date.now() });
-    if (!matchMedia(TABLET_OR_WIDER).matches) setBoard(false);
-  }, [select]);
+    if (!narrow) setFocus({ id, tick: Date.now() });
+  }, [narrow, select]);
 
   // The keys of a project page. `j` and `k` step through the issues in board order (Your move first).
   const hover = useHover();
-  const narrow = useNarrow();
   const compactBar = useCompactBar();
   const [keys, setKeys] = useState(false);
   const order = useMemo(() => (full ? boardOrder(full, asked, atPrompt).filter(includeClaim) : []), [full, asked, atPrompt, includeClaim]);
@@ -534,18 +555,18 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         e.preventDefault();
         const next = order[at < 0 ? 0 : (at + (e.key === "j" ? 1 : -1) + order.length) % order.length];
         select(next.id);
-        setFocus({ id: next.id, tick: Date.now() });
+        if (!narrow) setFocus({ id: next.id, tick: Date.now() });
       } else if (e.key === "o" && selected) {
         window.open(selected.issue.url, "_blank", "noopener");
       } else if (e.key === "p" && selected?.issue.pullRequests[0]) {
         window.open(selected.issue.pullRequests[0].url, "_blank", "noopener");
-      } else if (e.key === "b") {
+      } else if (e.key === "b" && !narrow) {
         setBoard((on) => !on);
       }
     };
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
-  }, [query, select, full, order, selected, keys, hover]);
+  }, [query, select, full, order, selected, keys, hover, narrow]);
 
   const counts = useMemo(() => {
     const tally = new Map<string, { n: number; signal: Signal }>();
@@ -659,9 +680,9 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     );
     return <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void setShared(true)} title={nativeBarTitles ? shareHelp : undefined}>{shareBusy ? "Sharing…" : "Share"}</button>;
   };
-  const boardControl = (dismiss?: () => void) => full && (
+  const boardControl = full && (
     <button type="button" className={`toggle toggle-board${board ? " is-on" : ""}`} aria-pressed={board} title={nativeBarTitles ? boardHelp : undefined}
-      onClick={() => { setBoard(!board); dismiss?.(); }}>Board</button>
+      onClick={() => setBoard(!board)}>Board</button>
   );
   const viewPicker = full && (
     <Picker multi align="right" title={nativeBarTitles ? "View options" : undefined} value={[openOnly && "open", allEdges && "edges", map && "map"].filter(Boolean) as string[]}
@@ -714,7 +735,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         </>}
         <span className="station-fill" />
         {!narrow && viewer && <span className="bar-viewer" title={nativeBarTitles ? viewerHelp : undefined}>view only</span>}
-        {!narrow && boardControl()}
+        {!narrow && boardControl}
         {!narrow && viewPicker}
         {full && (
           <button type="button" className="sync" onClick={() => project && void load(project)} aria-label="Refresh project"
@@ -741,7 +762,6 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
               {reviewPicker}
               <p>{reviewHelp}</p>
             </div>}
-            {narrow && boardControl(dismiss)}
             {narrow && viewPicker}
             {full && <>
               <p>{boardHelp}</p>
@@ -845,7 +865,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Next or previous issue, in board order: {words.move} first</dd>
             <dt><kbd>o</kbd></dt><dd>Open the issue in Linear</dd>
             <dt><kbd>p</kbd></dt><dd>Open the PR of the issue in GitHub</dd>
-            <dt><kbd>b</kbd></dt><dd>Show or hide the board</dd>
+            {!narrow && <><dt><kbd>b</kbd></dt><dd>Show or hide the board</dd></>}
             <dt><kbd>/</kbd></dt><dd>Find an issue (board) or a project (overview)</dd>
             {!project && <>
               <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Move between inbox rows when the inbox has focus</dd>
@@ -859,23 +879,23 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         </div>
       )}
 
-      <main className="stage">
+      <main className={`stage${narrow ? ` project-view-${view}` : ""}`}>
         {!project && directory && (
           <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
             budget={budget} states={overviewStates} onStates={(states) => setQuery({ state: states.join(",") || null }, true)}
             initiative={query.get("initiative")} onInitiative={(name) => setQuery({ initiative: name }, true)} />
         )}
         {project && !data && !error && <div className="blank">Loading {project.name}…</div>}
-        {board && full && full.nodes.length > 0 && <Board graph={full} marks={marks} filter={claimFilter} now={now} selectedId={selected?.id ?? null} onPick={pick} onHover={setHoverId} onReview={canReview && !viewer ? onReview : undefined}
+        {(board || narrow) && full && full.nodes.length > 0 && <Board graph={full} marks={marks} filter={claimFilter} now={now} selectedId={selected?.id ?? null} onPick={pick} onHover={setHoverId} onReview={canReview && !viewer ? onReview : undefined}
           asked={asked} atPrompt={atPrompt}
           live={new Map(link.progress.flatMap((p) => { const job = liveJob(p); return job && p.issue ? [[p.issue, job] as [string, string]] : []; }))} />}
         {graph && data && !graph.nodes.length && <div className="blank">{claimFilter !== "all" ? "No issues match this runner filter." : openOnly ? "No open issues. Turn off “Open issues only” under View to see all." : "This project has no issues."}</div>}
         {graph && placed && graph.nodes.length > 0 && (
-          <Canvas graph={graph} marks={marks} now={now} edges={edges} layout={placed.layout} selectedId={selected?.id ?? null} hoverId={hoverId} statusFilter={statusFilter}
+          <Canvas graph={graph} marks={marks} now={now} edges={edges} layout={placed.layout} selectedId={narrow ? (graphTrace?.project === openKey ? graphTrace.id : null) : selected?.id ?? null} hoverId={hoverId} statusFilter={statusFilter}
             focus={focus} showMap={map} onSelect={select} onHover={setHoverId} />
         )}
         {selected && full && data && (
-          <Panel node={selected} claim={selectedClaim}
+          <Panel node={selected} claim={selectedClaim} onShowInGraph={narrow ? showInGraph : undefined}
             onRelease={!viewer && linkRef && canReleaseClaim(selectedClaim, claims?.role) ? async (node) => {
               await api.releaseClaim(linkRef.id, linkRef.workspace, node);
               refreshClaims.current();
@@ -883,8 +903,9 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             progress={link.progress.find((p) => p.issue === selected.issue.identifier)}
             agent={agentsFresh(agents, now) ? agents.agents.find((a) => a.issue === selected.issue.identifier) : undefined}
             onDispatch={canCommand ? (key, issue) => command({ name: "dispatch", key, issue }, `Dispatch of ${issue} sent.`) : undefined} onPatch={onPatch} onClose={() => select(null)} onError={setError} onReview={canReview && !viewer ? onReview : undefined} readOnly={viewer} limitedEdits={collaborator}
-            onGo={(id) => { select(id); setFocus({ id, tick: Date.now() }); }} />
+            onGo={pick} />
         )}
+        {narrow && full && <ViewSwitch view={view} onChange={setView} />}
       </main>
     </div>
   );

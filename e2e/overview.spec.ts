@@ -407,3 +407,47 @@ test("questions use prompt age and identify the workspace before sending", async
   await detail.getByRole("button", { name: "Reply to the worker" }).click();
   await expect(releaseQuestion.getByRole("status")).toHaveText("sent");
 });
+
+test("long inbox text fits on a landscape touch screen", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("tablet-1180"), "Requires a landscape touch tablet");
+  const reason = "No matching worker in the agent report";
+  const title = "Check the draft and record all questions about the example project before the next scheduled review.";
+  await page.route("**/api/overview*", async (route) => {
+    const response = await route.fetch();
+    const data: OverviewData = await response.json();
+    data.summaries.find(({ id }) => id === "fixture")!.you = [{
+      identifier: "WG-1", title, why: reason, idle: false, updatedAt: "", pullRequests: [],
+    }];
+    await route.fulfill({ response, json: data });
+  });
+
+  await screens.overview(page);
+  const inbox = page.getByRole("region", { name: "Inbox" });
+  const row = inbox.getByRole("button", { name: /WG-1.*No matching worker/ });
+  const issue = row.getByText(title, { exact: true });
+  const why = row.getByText(reason, { exact: true });
+  expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+
+  for (const [width, height] of [[1024, 768], [1133, 744], [1180, 820]]) {
+    await test.step(`${width} × ${height}`, async () => {
+      await page.setViewportSize({ width, height });
+      expect((await bounds(issue)).width).toBeGreaterThanOrEqual(200);
+      for (const text of [why, issue]) {
+        const lines = await text.evaluate((element) => {
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          const bottom = element.getBoundingClientRect().bottom;
+          return new Set(Array.from(range.getClientRects())
+            .filter((rect) => rect.top < bottom)
+            .map((rect) => rect.top)).size;
+        });
+        expect(lines).toBeGreaterThan(0);
+        expect(lines).toBeLessThanOrEqual(2);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    });
+  }
+
+  await row.tap();
+  await expect(page.locator(".panel")).toContainText("Example issue 1");
+});

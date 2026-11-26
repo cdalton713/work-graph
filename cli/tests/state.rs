@@ -186,6 +186,30 @@ with wg['plan_lock'](p), wg['atomic_text_file'](p/'keymap.json') as temp:
     child.wait().unwrap();
     assert_eq!(blocked.err().unwrap().kind(), ErrorKind::TimedOut);
     let lock = PlanLock::acquire(root.path(), Some(Duration::from_secs(1))).unwrap();
+    let python = Command::new("python3")
+        .args([
+            "-I",
+            "-c",
+            r#"
+import pathlib, runpy, sys
+lock = runpy.run_path(sys.argv[1])['plan_lock']
+try:
+    with lock(pathlib.Path(sys.argv[2]), wait=0):
+        sys.exit("Python acquired the Rust lock")
+except TimeoutError:
+    pass
+"#,
+            REFERENCE,
+        ])
+        .arg(root.path())
+        .env("WG_CONFIG", root.path().join("absent"))
+        .output()
+        .unwrap();
+    assert!(
+        python.status.success(),
+        "{}",
+        String::from_utf8_lossy(&python.stderr)
+    );
     let mut data = load_keymap(root.path()).unwrap();
     assert_eq!(data["legacy"], "kept");
     data["nodes"]["new"] = serde_json::json!({"id":"1"});
@@ -250,7 +274,12 @@ os.execv(sys.argv[1], [sys.argv[1], '--exact', 'save_in_limited_process'])
         .env("WG_TEST_SAVE_DIR", dir.path())
         .output()
         .unwrap();
-    assert!(!status.status.success());
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status.status),
+        Some(nix::libc::SIGXFSZ),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
     assert_eq!(load_keymap(dir.path()).unwrap(), original);
     let lock = PlanLock::acquire(dir.path(), Some(std::time::Duration::ZERO)).unwrap();
     lock.save_keymap(&serde_json::json!({"legacy":2})).unwrap();
@@ -312,4 +341,49 @@ fn resolves_workspace_pages_and_local_shared_plan() {
             String::from_utf8_lossy(&result.stdout)
         );
     }
+}
+
+#[test]
+fn python_and_rust_keep_the_same_state_file_hashes() {
+    use wg_preview::state::{Config, PlanLock, load_keymap};
+    let root = tempdir().unwrap();
+    let dir = root.path();
+    let script = r#"
+import pathlib, runpy, sys
+wg=runpy.run_path(sys.argv[1])
+p=pathlib.Path(sys.argv[2])
+value={"café": '😀"\\\b\f\n\r\t'+''.join(map(chr,range(32)))+chr(127),
+       "floats":[0.0,-0.0,1e-4,1e-5,1e15,1e16,1e23,5e-324]}
+wg['save_json'](p/'plan.json',dict(effort=dict(team='EX'),edges=[],legacy=value))
+wg['save_json'](p/'keymap.json',dict(nodes={},milestones={},legacy=value))
+print(wg['plan_file_sha'](p))
+"#;
+    let hashes = |script: &str| {
+        let result = Command::new("python3")
+            .args(["-I", "-c", script, REFERENCE])
+            .arg(dir)
+            .env("WG_CONFIG", dir.join("absent"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        result.stdout
+    };
+    let original_hash = hashes(script);
+    let paths = ["plan.json", "keymap.json"].map(|f| dir.join(f));
+    let original = paths.each_ref().map(|p| fs::read(p).unwrap());
+    let lock = PlanLock::acquire(dir, None).unwrap();
+    let config = Config::read(dir.join("absent")).unwrap();
+    lock.save_plan(&config.load_plan(dir).unwrap()).unwrap();
+    lock.save_keymap(&load_keymap(dir).unwrap()).unwrap();
+    assert_eq!(original, paths.each_ref().map(|p| fs::read(p).unwrap()));
+    assert_eq!(
+        original_hash,
+        hashes(
+            "import pathlib,runpy,sys; print(runpy.run_path(sys.argv[1])['plan_file_sha'](pathlib.Path(sys.argv[2])))"
+        )
+    );
 }

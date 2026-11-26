@@ -1,11 +1,13 @@
 //! Local effort files shared with the Python CLI.
 mod config;
+mod json;
 pub use config::{Config, Workspace};
+pub use json::write_pretty_json;
 
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, Permissions},
-    io::{self, Write},
+    io,
     os::unix::fs::PermissionsExt,
     path::Path,
     time::{Duration, Instant},
@@ -78,6 +80,7 @@ impl<'a> PlanLock<'a> {
         Ok(Self { dir, directory })
     }
 
+    /// Replace the local keymap file. The caller handles journal and collaboration updates.
     pub fn save_keymap(&self, data: &Value) -> io::Result<()> {
         self.save("keymap.json", data)
     }
@@ -87,13 +90,12 @@ impl<'a> PlanLock<'a> {
     fn save(&self, name: &str, data: &Value) -> io::Result<()> {
         let path = self.dir.join(name);
         let mode = match fs::metadata(&path) {
-            Ok(meta) => meta.permissions().mode(),
+            Ok(meta) => meta.permissions().mode() & 0o7777,
             Err(e) if e.kind() == io::ErrorKind::NotFound => 0o644,
             Err(e) => return Err(e),
         };
         let mut temp = NamedTempFile::new_in(self.dir)?;
-        serde_json::to_writer_pretty(&mut temp, data)?;
-        temp.write_all(b"\n")?;
+        write_pretty_json(&mut temp, data)?;
         temp.as_file()
             .set_permissions(Permissions::from_mode(mode))?;
         temp.as_file().sync_all()?;

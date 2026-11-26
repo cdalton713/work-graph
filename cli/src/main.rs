@@ -1,23 +1,6 @@
-use std::fmt::Write;
 use std::process::ExitCode;
 
 const USAGE: &str = "Usage: wg-preview --version";
-
-// The reference CLI prints JSON with ensure_ascii enabled.
-fn print_config(report: &serde_json::Value) {
-    let json = serde_json::to_string_pretty(report).expect("JSON value");
-    let mut output = String::with_capacity(json.len());
-    for ch in json.chars() {
-        if ch < '\u{7f}' {
-            output.push(ch);
-        } else {
-            for unit in ch.encode_utf16(&mut [0; 2]) {
-                write!(output, "\\u{unit:04x}").expect("write to String");
-            }
-        }
-    }
-    println!("{output}");
-}
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -44,7 +27,14 @@ fn main() -> ExitCode {
                     .filter(|p| !p.is_empty())
                     .map(std::path::Path::new),
             ) {
-                Ok(report) => print_config(&report),
+                Ok(report) => {
+                    if let Err(e) =
+                        wg_preview::state::write_pretty_json(std::io::stdout().lock(), &report)
+                    {
+                        eprintln!("{e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
                 Err(e) => {
                     eprintln!("{e}");
                     return ExitCode::from(2);

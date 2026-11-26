@@ -24,9 +24,9 @@ it("reports a silent worker at twenty minutes after its last report", () => {
 
 it("allows three minutes for a job to get an agent or recover after its agent stops", () => {
   expect(stalls({ ...summary, liveJobs: [{ ...job, startedAt: ago(3, 1) }] }, undefined, report(coordinator), now)).toEqual([]);
-  expect(stalls({ ...summary, liveJobs: [{ ...job, startedAt: ago(3) }] }, undefined, report(coordinator), now)).toMatchObject([{ kind: "worker-gone", since: ago(3) }]);
+  expect(stalls({ ...summary, liveJobs: [{ ...job, startedAt: ago(3) }] }, undefined, report(coordinator), now)).toMatchObject([{ kind: "worker-gone", since: ago(3), reason: "No matching worker in the agent report" }]);
   expect(stalls(summary, undefined, report(coordinator, { ...worker, state: "done", at: ago(3, 1) }), now)).toEqual([]);
-  expect(stalls(summary, undefined, report(coordinator, { ...worker, state: "done", at: ago(3) }), now)).toMatchObject([{ kind: "worker-gone", since: ago(3) }]);
+  expect(stalls(summary, undefined, report(coordinator, { ...worker, state: "done", at: ago(3) }), now)).toMatchObject([{ kind: "worker-gone", since: ago(3), reason: "No matching worker in the agent report" }]);
   expect(stalls(summary, undefined, report(coordinator, { ...worker, state: "blocked" }), now)).toEqual([]);
 });
 
@@ -41,23 +41,11 @@ it("reports a coordinator missing for fifteen minutes when it has work to do", (
   expect(stalls({ ...duty, nextLines: [{ level: "do", text: "ask-merge page WG-12" }] }, undefined, report(), now)).toEqual([]);
 });
 
-it("reports one missing agent view at three minutes and suppresses worker stalls", () => {
-  const effort = { ...summary, liveJobs: [job, { ...job, identifier: "WG-13" }] };
+it("uses the last agent report only while it is fresh", () => {
   const seen = presence(ago(0), true);
-  expect(stalls(effort, seen, { at: ago(3, 1), agents: [worker] }, now)).toMatchObject([{ kind: "worker-silent" }, { kind: "worker-gone" }]);
-  expect(stalls(effort, seen, { at: ago(3), agents: [worker] }, now)).toMatchObject([{ kind: "no-agent-view", since: ago(3), reason: expect.stringContaining("wg agents --install") }]);
-  expect(stalls(effort, seen, undefined, now)).toMatchObject([{ kind: "no-agent-view" }]);
-});
-
-it("omits stalls for a shared collaborator with a live job and no link data", () => {
-  expect(stalls(summary, undefined, undefined, now)).toEqual([]);
-});
-
-it("waits for the first project link message on the owner's Overview", () => {
-  const beforeMessages = stalls(summary, undefined, undefined, now);
-  const afterPresence = stalls(summary, { coordinators: [], queued: 0 }, undefined, now);
-  expect(overviewTitle(beforeMessages.length)).toBe("Overview");
-  expect(afterPresence.map(({ kind }) => kind)).toEqual(["no-agent-view", "no-coordinator"]);
+  expect(stalls(summary, seen, { at: ago(3, 1), agents: [worker] }, now)).toMatchObject([{ kind: "worker-silent" }]);
+  expect(stalls(summary, seen, { at: ago(3), agents: [worker] }, now)).toEqual([]);
+  expect(stalls(summary, seen, undefined, now)).toEqual([]);
 });
 
 it("omits stalls for paused and completed efforts and for read-only viewers", () => {
@@ -96,31 +84,56 @@ it("puts the first ranked inbox reason on the row and counts the remaining entri
   expect(selectedState(withInbox)).toEqual({ state: "waits", reason: "WG-14 · Approve the plan +1" });
 });
 
-it("puts a stall above inbox and moving work", () => {
-  for (const s of [withInbox, idle]) {
-    expect(selectedState({ ...s, liveJobs: [job] }, presence(ago(0), true))).toMatchObject({ state: "stalled", reason: expect.stringContaining("No agent view") });
-  }
+it.each([
+  { externalBlocker: "WG-19" },
+  { collaborator: "Ada" },
+  { you: [waiting] },
+  ...["human merge WG-13", "owner ship WG-13", "collaborator Ada page: job=dispatch", "soak ship WG-13: until 14:00"]
+    .map((text) => ({ nextLines: [duty, { level: "wait", text }] })),
+])("does not raise a stall during an expected wait (%o)", (change) => {
+  const blocked = { ...summary, nextLines: [duty], effort: { status: "wave 1", at: ago(20) }, ...change };
+  expect(stalls(blocked, presence(ago(15)), report(), now)).toEqual([]);
+  expect(selectedState(blocked, presence(ago(15)), report()).state).not.toBe("stalled");
 });
 
-it("puts a missing coordinator stall above an idle reason without a live job", () => {
-  const blocked = { ...idle, externalBlocker: "WG-19", nextLines: [duty], effort: { status: "wave 1", at: ago(20) } };
-  expect(selectedState(blocked, presence(ago(15, 1)))).toEqual({ state: "idle", reason: "Waits for WG-19 outside the project" });
-  expect(selectedState(blocked, presence(ago(15)))).toMatchObject({ state: "stalled", reason: expect.stringContaining("No coordinator") });
-});
-
-it("keeps a project moving while a live job finishes after a pause", () => {
+it("keeps a paused project moving while a fresh agent report confirms work", () => {
   const moving = { state: "moving", reason: "Worker on WG-12" };
-  expect(selectedState({ ...summary, paused: true }, presence(ago(0), true))).toEqual(moving);
-  expect(projectState(summary, { now, project: { statusType: "paused" } })).toEqual(moving);
+  expect(selectedState({ ...summary, paused: true }, undefined, report({ ...worker, at: ago(1) }))).toEqual(moving);
+  expect(projectState(summary, { now, project: { statusType: "paused" } })).toEqual({ state: "idle", reason: "Paused" });
+});
+
+it.each([{ level: "wait", text: "coordinator ops WG-12" }, null])("shows an unattended queue at fifteen minutes (%o)", (line) => {
+  const queued = { ...idle, ready: 1, nextLines: line ? [line] : [],
+    freshness: { state: "stale" as const, ran: ago(60) }, updatedAt: ago(15, 1) };
+  const seen = { coordinators: [], queued: 0 };
+  expect(selectedState(queued, seen).state).toBe("idle");
+  expect(selectedState({ ...queued, updatedAt: ago(15) }).state).toBe("idle");
+  expect(selectedState({ ...queued, updatedAt: ago(15) }, seen)).toEqual({
+    state: "stalled", reason: "Waiting for a coordinator report · 15 min ago",
+  });
+  expect(selectedState({ ...queued, updatedAt: ago(15) }, presence(ago(15), true)).state).not.toBe("stalled");
+});
+
+it("does not treat a disconnected coordinator’s old working state as progress", () => {
+  const link = presence(ago(15));
+  link.coordinators[0].mode = "working";
+  const queued = { ...idle, nextLines: [duty] };
+  expect(selectedState(queued, link).state).toBe("stalled");
 });
 
 it("gives an unavailable reason when the project graph fails to load", () => {
   expect(selectedState({ ...idle, error: "Could not load issues" })).toEqual({ state: "idle", reason: "Project details unavailable" });
 });
 
-it("shows moving work until link data confirms a stall", () => {
-  expect(selectedState(summary)).toEqual({ state: "moving", reason: "Worker on WG-12" });
-  expect(selectedState(summary, presence(ago(0), true)).state).toBe("stalled");
+it("shows uncertainty when a job has no current agent report", () => {
+  expect(selectedState(summary)).toEqual({ state: "idle", reason: "No agent report for WG-12" });
+  expect(selectedState(summary, presence(ago(0), true), { at: ago(3), agents: [worker] }))
+    .toEqual({ state: "idle", reason: "Agent report for WG-12 is stale" });
+});
+
+it("shows a human prompt on a fresh agent report", () => {
+  expect(selectedState(summary, undefined, report({ ...worker, state: "blocked" })))
+    .toEqual({ state: "waits", reason: "WG-12 waits at a prompt" });
 });
 
 it("puts the inbox above moving work and an idle reason", () => {

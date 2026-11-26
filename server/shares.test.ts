@@ -171,6 +171,13 @@ databaseSuites((open) => {
       expect((await member.request("/api/issues/inside", "PATCH", { stateId: "started" }, headers)).status).toBe(405);
       expect((await member.request("/api/projects/project/asks/ask1/reply", "POST", { body: "Read only" }, headers)).status).toBe(405);
       for (const path of ["/api/projects", "/api/overview", "/api/overview?view=waiting"]) {
+        calls.length = 0;
+        const projected = await (await member.request(path, "GET", undefined, {
+          ...headers, "x-omit-workspaces": encodeURIComponent(shared.id),
+        })).json();
+        expect(projected.workspaces).toEqual([{ ...summary, error: "Example is temporarily unavailable." }]);
+        expect(projected.projects).toEqual([]);
+        expect(calls).toHaveLength(0);
         const list = await (await member.request(path, "GET", undefined, headers)).json();
         expect(list.workspaces).toEqual([summary]);
         expect(list.projects.map(({ id }: { id: string }) => id)).toEqual(["project"]);

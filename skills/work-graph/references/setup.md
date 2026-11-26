@@ -41,6 +41,8 @@ When moving an existing setup, copy all of them, check that `wg status <new-dir>
 2. Run `wg setup --team WG --name "Work Graph"` to see the existing and missing items. Use `--apply` to create missing items or configure them by hand as described below. The first configured workspace and its team key are the defaults. Use `--workspace <id>` to select a different configured workspace. Give `--name` if the team does not exist.
 3. Add the workspace entry that `wg setup` prints to the config if necessary. Run `wg doctor` and `wg preflight <plan-dir>`.
 
+Use `--parent KEY` to create a sub-team under the team with that key. Setup stops before creation if the parent does not exist or you cannot see it. For an existing team, setup checks its parent. It prints `exists parent KEY` for a match or `warn parent KEY` with the current parent if they differ. Setup keeps the existing parent in both cases.
+
 Setup creates a public team by default. Use `--private` for a private team on a paid Linear plan. Setup first creates an empty team, then sets and checks its privacy before it adds workflow items. If Linear refuses the privacy change, make the team private in Linear and run setup again, or run again with `--no-private`. For a team with issues or projects, change its privacy in Linear.
 
 - **Statuses** use the names in the table below. `Needs <human>` uses the configured `human`, for example `Needs Ada`. Linear supplies Duplicate and adds Triage when triage is enabled.

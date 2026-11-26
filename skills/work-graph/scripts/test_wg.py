@@ -50,6 +50,7 @@ class SetupTests(unittest.TestCase):
         self.writes = []
         self.content = None
         self.refusal = None
+        self.created_parent = {"key": "ROOT"}
         self.stays_public = False
         self.visibility_error = None
         self.workspaces = set()
@@ -77,7 +78,8 @@ class SetupTests(unittest.TestCase):
         if name == "teamCreate":
             self.team = {"id": "team", "visibility": "public", "triageEnabled": False}
             if item.get("parentId") == "root":
-                self.team["parent"] = {"key": "ROOT"}
+                self.assertIn("parent{key}", query)
+                self.team["parent"] = self.created_parent
             self.states = [{"id": "default", "name": "Duplicate", "type": "duplicate"}]
             return {name: {"success": True, "team": self.team}}
         if name == "teamUpdate":
@@ -134,6 +136,29 @@ class SetupTests(unittest.TestCase):
         self.team["parent"] = None
         self.assertIn("warn parent ROOT", self.run_setup(*args))
         self.assertEqual(self.writes, [])
+
+    def test_setup_stops_if_linear_creates_team_with_wrong_parent(self):
+        for actual in (None, {"key": "OTHER"}):
+            with self.subTest(actual=actual):
+                self.team = None
+                self.writes.clear()
+                self.created_parent = actual
+                out = self.run_setup("--team", "WG", "--name", "Work Graph", "--private",
+                                     "--parent", "ROOT", "--apply", code=2)
+                self.assertIn("Linear created team WG", out)
+                self.assertIn("expected parent ROOT", out)
+                self.assertEqual([name for name, _ in self.writes], ["teamCreate"])
+
+    def test_contract_lists_setup_statuses_in_workflow_order(self):
+        setup = wg.contract()["setup"]
+        self.assertNotIn("status_types", setup)
+        expected = [
+            ("Triage", "triage"), ("Backlog", "backlog"), ("Todo", "unstarted"), ("Ready", "unstarted"),
+            ("In Progress", "started"), ("Needs {name}", "started"), ("In Review", "started"),
+            ("Ready to Merge", "started"), ("Merged", "started"), ("Verifying", "started"),
+            ("Done", "completed"), ("Canceled", "canceled"), ("Duplicate", "duplicate"),
+        ]
+        self.assertEqual(setup["statuses"], [{"name": name, "type": kind} for name, kind in expected])
 
     def test_missing_parent_prevents_creation(self):
         self.assertIn("parent MISSING", self.run_setup("--team", "WG", "--name", "Work Graph",

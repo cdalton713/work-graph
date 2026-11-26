@@ -1948,8 +1948,13 @@ def setup_command(ns):
             if parent:
                 item["parentId"] = parent["id"]
             team = setup_mutation("teamCreate", """mutation($i:TeamCreateInput!){
-                teamCreate(input:$i){success team{id visibility triageEnabled}} }""",
+                teamCreate(input:$i){success team{id visibility triageEnabled parent{key}}} }""",
                 {"i": item})["team"]
+            if parent:
+                actual = (team.get("parent") or {}).get("key")
+                if actual != parent_key:
+                    raise ReadError(f"Linear created team {team_key} with parent {actual or 'none'}; "
+                                    f"expected parent {parent_key}. Check the team in Linear.")
         if ns.private and (not team or team["visibility"] != "private"):
             report(f"private visibility for team {team_key}", "missing")
             if ns.apply:
@@ -2976,7 +2981,10 @@ def contract():
         "version": 3,
         "kinds": sorted(KINDS),
         "kind_labels": sorted(KIND_LABEL.values()),
-        "setup": {"status_types": setup_status_types("Needs {name}"), **setup_labels_contract()},
+        "setup": {
+            "statuses": [{"name": name, "type": kind} for name, kind in setup_status_types("Needs {name}").items()],
+            **setup_labels_contract(),
+        },
         "status_aliases": ALIAS,
         "human": {"default": CONTRACT_HUMAN, "status": "Needs {name}", "label": "needs-{slug}", "wait": "wait human",
                   "slug": "lowercase; each run of other characters than a-z and 0-9 is one -; no - at the ends"},
@@ -10409,7 +10417,8 @@ def cli_parser():
     setup.add_argument("--workspace", default=DEFAULT_WORKSPACE_ID)
     setup.add_argument("--team")
     setup.add_argument("--name")
-    setup.add_argument("--parent", metavar="KEY", help="parent team key for a new sub-team")
+    setup.add_argument("--parent", metavar="KEY",
+                       help="parent team key: a new team is created under it; an existing team's parent is checked")
     setup.add_argument("--private", action=argparse.BooleanOptionalAction, default=False)
     setup.add_argument("--apply", action="store_true")
     sub.add_parser("config", help="print the config of this machine (no keys) and the local rules file").add_argument("dir", nargs="?")

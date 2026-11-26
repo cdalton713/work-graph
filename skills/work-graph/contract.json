@@ -16,21 +16,60 @@
     "spike"
   ],
   "setup": {
-    "status_types": {
-      "Triage": "triage",
-      "Backlog": "backlog",
-      "Todo": "unstarted",
-      "Ready": "unstarted",
-      "In Progress": "started",
-      "Needs {name}": "started",
-      "In Review": "started",
-      "Ready to Merge": "started",
-      "Merged": "started",
-      "Verifying": "started",
-      "Done": "completed",
-      "Canceled": "canceled",
-      "Duplicate": "duplicate"
-    },
+    "statuses": [
+      {
+        "name": "Triage",
+        "type": "triage"
+      },
+      {
+        "name": "Backlog",
+        "type": "backlog"
+      },
+      {
+        "name": "Todo",
+        "type": "unstarted"
+      },
+      {
+        "name": "Ready",
+        "type": "unstarted"
+      },
+      {
+        "name": "In Progress",
+        "type": "started"
+      },
+      {
+        "name": "Needs {name}",
+        "type": "started"
+      },
+      {
+        "name": "In Review",
+        "type": "started"
+      },
+      {
+        "name": "Ready to Merge",
+        "type": "started"
+      },
+      {
+        "name": "Merged",
+        "type": "started"
+      },
+      {
+        "name": "Verifying",
+        "type": "started"
+      },
+      {
+        "name": "Done",
+        "type": "completed"
+      },
+      {
+        "name": "Canceled",
+        "type": "canceled"
+      },
+      {
+        "name": "Duplicate",
+        "type": "duplicate"
+      }
+    ],
     "team_issue_labels": [
       "merge-point",
       "ship-point",

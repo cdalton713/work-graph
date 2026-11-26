@@ -1,5 +1,5 @@
 import { ageText, rankMoves } from "./graph.ts";
-import { agentNeeds, agentName, agentsFresh, agentsWaiting, type Agents, type Presence } from "./link.ts";
+import { agentNeeds, agentName, agentsFresh, agentsWaiting, type AgentRow, type Agents, type Presence } from "./link.ts";
 import type { ProjectSummary } from "./overview.ts";
 import type { Project } from "./types.ts";
 import { overviewMoveReason } from "./words.ts";
@@ -27,13 +27,49 @@ function agentLine({ level, text }: { level: string; text: string }): boolean {
   return level === "do" && !["ask", "ask-ready", "ask-merge"].includes(verb);
 }
 
-function coordinatorDuty(summary: ProjectSummary) {
-  return summary.nextLines?.find((line) => (line.level === "do" && agentLine(line))
-    || (line.level === "wait" && line.text.startsWith("coordinator ")));
+const soakDeadline = (text: string): string | undefined => text.match(/^soak \S+ \S+: until (.+)$/)?.[1];
+const lineTarget = (text: string) => text.split(": ", 1)[0].split(" ").at(-1);
+const expectedLine = ({ level, text }: { level: string; text: string }, now: number) =>
+  level === "wait" ? /^(human|owner|collaborator) /.test(text)
+    || (text.startsWith("soak ") && !(Date.parse(soakDeadline(text) ?? "") <= now))
+    : level === "do" && !agentLine({ level, text });
+
+function waitsOnTarget(summary: ProjectSummary, now: number, issue?: string | null, key?: string | null): boolean {
+  return !!(issue && summary.you.some((move) => move.identifier === issue)
+    || summary.nextLines?.some((line) => {
+      const target = lineTarget(line.text);
+      return target !== "-" && (target === issue || target === key) && expectedLine(line, now);
+    }));
+}
+
+function coordinatorDuties(summary: ProjectSummary, now: number, prompts: AgentRow[] = []) {
+  return (summary.nextLines ?? []).flatMap<{ line: { level: string; text: string }; since: string | null }>((line) => {
+    const issue = lineTarget(line.text);
+    const key = line.text.split(" ")[1];
+    if (waitsOnTarget(summary, now, issue, key)
+      || prompts.some((row) => row.role === "worker" && (row.issue ? row.issue === issue : row.key === key))) return [];
+    const explicit = (line.level === "do" && agentLine(line))
+      || (line.level === "wait" && line.text.startsWith("coordinator "));
+    if (explicit) return [{ line, since: null }];
+    const since = line.level === "wait" ? soakDeadline(line.text) : undefined;
+    if (!since || !(Date.parse(since) <= now)) return [];
+    return [{ line: { level: "do", text: `ship ${key} ${issue}` }, since }];
+  });
+}
+
+function reportCoversDispatch(reportAt: string, startedAt: string | null): boolean {
+  const start = Date.parse(startedAt ?? "");
+  return !Number.isFinite(start) || Date.parse(reportAt) >= start;
+}
+
+function dispatchWorkers(agents: Agents, job: NonNullable<ProjectSummary["liveJobs"]>[number]): AgentRow[] {
+  if (!reportCoversDispatch(agents.at, job.startedAt)) return [];
+  return agents.agents.filter((row) => row.role === "worker" && row.issue === job.identifier
+    && reportCoversDispatch(row.at ?? "", job.startedAt));
 }
 
 function expectedWait(summary: ProjectSummary, now: number): string | null {
-  const soak = summary.nextLines?.find(({ level, text }) => level === "wait" && text.startsWith("soak "));
+  const soak = summary.nextLines?.find((line) => line.text.startsWith("soak ") && expectedLine(line, now));
   if (soak) return nextStep({ ...summary, nextLines: [soak] }, now) ?? soak.text;
   if (summary.externalBlocker) return `Waits for ${summary.externalBlocker} outside the project`;
   const collaborator = summary.nextLines?.find(({ level, text }) => level === "wait" && /^(collaborator|owner) /.test(text));
@@ -55,16 +91,21 @@ export function stalls(summary: ProjectSummary, presence: Presence | undefined, 
   const coordinators = presence?.coordinators ?? [];
   if (readOnly || summary.error || summary.paused || coordinators.some((row) => row.paused)
     || summary.effort?.status === "every ship point is Done or Canceled"
-    || (summary.planned > 0 && summary.done === summary.planned)
-    || summary.you.length || expectedWait(summary, now) || agentsWaiting(agents, now).length) return [];
+    || (summary.planned > 0 && summary.done === summary.planned)) return [];
 
   const jobs = summary.liveJobs ?? [];
   const fresh = agentsFresh(agents, now);
   const rows = fresh ? agents.agents : [];
+  const prompts = agentsWaiting(agents, now);
+  const duties = coordinatorDuties(summary, now, prompts);
   const result: Stall[] = [];
   let workingJob = false;
-  for (const job of fresh ? jobs : []) {
-    const workers = rows.filter((row) => row.role === "worker" && row.issue === job.identifier);
+  for (const job of jobs) {
+    if (!fresh || !reportCoversDispatch(agents.at, job.startedAt)) continue;
+    const workers = dispatchWorkers(agents, job);
+    const key = summary.nextLines?.find(({ text }) => /^(worker|reviewer) /.test(text)
+      && lineTarget(text) === job.identifier)?.text.split(" ")[1];
+    if (waitsOnTarget(summary, now, job.identifier, key) || workers.some(agentNeeds)) continue;
     const running = workers.filter((row) => row.state !== "done");
     workingJob ||= running.some((row) => row.state === "working");
     const since = latest(job.startedAt, ...workers.map((row) => row.at)) ?? latest(summary.effort?.at, summary.updatedAt);
@@ -77,13 +118,17 @@ export function stalls(summary: ProjectSummary, presence: Presence | undefined, 
     }
   }
 
-  const duty = coordinatorDuty(summary);
-  const ready = summary.ready > 0 && !!summary.freshness;
-  if ((presence || fresh) && (duty || ready || workingJob) && !coordinatorActive(presence, agents, now)) {
+  const ready = summary.ready > 0 && !!summary.freshness
+    && !summary.you.length && !expectedWait(summary, now) && !prompts.length;
+  if ((presence || fresh) && (duties.length || ready || workingJob)
+    && !prompts.some((row) => row.role === "coordinator") && !coordinatorActive(presence, agents, now)) {
     // Ready issues can change after the last next report. Give the newer evidence the full grace period.
-    const since = latest(summary.effort?.at, summary.freshness?.ran, ready ? summary.updatedAt : undefined,
+    const last = latest(summary.effort?.at, summary.freshness?.ran, ready ? summary.updatedAt : undefined,
       ...jobs.map((job) => job.startedAt), ...coordinators.map((row) => row.lastSeen),
       ...rows.filter((row) => row.role === "coordinator").map((row) => row.at)) ?? latest(summary.updatedAt);
+    const since = ready || workingJob || duties.some((duty) => !duty.since)
+      ? last
+      : latest(last, duties.map((duty) => duty.since).sort()[0]);
     if (now - Date.parse(since ?? "") >= NO_COORDINATOR_MS) {
       result.push({ kind: "no-coordinator", reason: "Waiting for a coordinator report", since });
     }
@@ -156,13 +201,14 @@ export function projectState(summary: ProjectSummary | null, activity: ProjectAc
   if (!summary) return idle("Project details are loading");
   if (summary.planned > 0 && summary.done === summary.planned) return idle("Each node is done");
 
-  const prompt = agentsWaiting(agents, now).find((row) => row.role === "coordinator"
-    || summary.liveJobs?.some((job) => job.identifier === row.issue));
+  const prompts = agentsWaiting(agents, now);
+  const fresh = agentsFresh(agents, now);
+  const prompt = prompts.find((row) => row.role === "coordinator"
+    || (fresh && summary.liveJobs?.some((job) => dispatchWorkers(agents, job).includes(row))));
   if (prompt) return { state: "waits", reason: `${agentName(prompt)} ${agentNeeds(prompt)}` };
 
-  const rows = agentsFresh(agents, now) ? agents.agents : [];
-  const job = summary.liveJobs?.find((job) => rows.some((row) => row.role === "worker"
-    && row.issue === job.identifier && row.state === "working"));
+  const job = fresh ? summary.liveJobs?.find((job) =>
+    dispatchWorkers(agents, job).some((row) => row.state === "working")) : undefined;
   if (job) {
     const line = summary.nextLines?.find(({ level, text }) => level === "wait"
       && /^(worker|reviewer) /.test(text) && text.split(/[: ]/, 3)[2] === job.identifier);
@@ -170,18 +216,21 @@ export function projectState(summary: ProjectSummary | null, activity: ProjectAc
   }
 
   if (paused) return idle("Paused");
-  const wait = expectedWait(summary, now);
-  if (wait) return idle(wait);
-  const duty = coordinatorDuty(summary);
+  const [duty] = coordinatorDuties(summary, now, prompts);
   if (duty) {
     return coordinatorActive(presence, agents, now)
-      ? { state: "moving", reason: nextStep({ ...summary, nextLines: [duty] }, now) ?? "Coordinator working" }
+      ? { state: "moving", reason: nextStep({ ...summary, nextLines: [duty.line] }, now) ?? "Coordinator working" }
       : idle("Waits for the coordinator");
   }
+  const wait = expectedWait(summary, now);
+  if (wait) return idle(wait);
   const reportedJob = summary.liveJobs?.[0];
   if (reportedJob) {
     if (!agents) return idle(`No agent report for ${reportedJob.identifier}`);
     if (!agentsFresh(agents, now)) return idle(`Agent report for ${reportedJob.identifier} is stale`);
+    if (!reportCoversDispatch(agents.at, reportedJob.startedAt)) {
+      return idle(`No agent report for the current dispatch of ${reportedJob.identifier}`);
+    }
     return idle(`No active worker reported for ${reportedJob.identifier}`);
   }
   const next = nextStep(summary, now);

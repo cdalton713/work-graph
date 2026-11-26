@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { NO_INITIATIVE, countProjectStates, filterProjectStates, readProjectStates, rankMoves, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, overviewMoveReason, summarize, type OverviewData, type ProjectSummary } from "./overview";
 import { DEFAULT_HUMAN, configureSite, createSite } from "./site";
+import type { Agents } from "./link";
 import type { GraphData, Issue, State } from "./types";
 
 const state = (name: string, type: State["type"] = "unstarted"): State => ({ id: name, name, type, color: "#000" });
@@ -175,6 +176,23 @@ describe("overviewRows", () => {
     expect(selected).toEqual(["stalled", "idle"]);
     expect(filterProjectStates(rows, selected).map((r) => r.project.id)).toEqual(["a", "d"]);
     expect(filterProjectStates(rows, [])).toEqual(rows);
+  });
+
+  it("keeps the question in the summary when a separate dispatch stalls", () => {
+    const agents: Agents = { at: new Date(0).toISOString(), agents: [{
+      id: "worker", role: "worker", key: "question", issue: "WG-2", state: "blocked",
+      agent: "agent", title: "Question", said: "Which option?", at: new Date(0).toISOString(),
+    }] };
+    const [row] = overviewRows({
+      projects: [project("a", "Alpha")], workspaces: list.workspaces,
+      summaries: [{
+        ...summary("a", 0), you: movesWithAgents([], agents, 0),
+        nextLines: [{ level: "do", text: "dispatch task WG-1" }],
+        updatedAt: new Date(-900_000).toISOString(),
+      }],
+    }, { text: "", workspace: null, closed: false }, { now: 0, agents: new Map([["work:a", agents]]) });
+    expect(row.attention.state).toBe("stalled");
+    expect(row.summary?.you).toMatchObject([{ identifier: "WG-2", title: "Which option?" }]);
   });
 
   it.each(["viewer", "collaborator"] as const)("omits stalled states in shared %s workspaces", (role) => {

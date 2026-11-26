@@ -33,3 +33,9 @@ The installer authenticates the manifest, matches the stable version and host ta
 - Use the skill and plugin from the same version as the binary. Installing the bundle grants no Orca permissions. Use the normal plugin installation and fingerprint approval flow when enabling it.
 
 Run the synthetic bootstrap checks from this directory with `GO111MODULE=off go test`.
+
+Add `export PATH="$HOME/.local/bin:$PATH"` to your shell configuration to use the managed launcher. If the installer reports another `wg` on PATH, use `command -v wg` to identify its owner. Keep the existing installation if you still need it. To switch, use its owner's removal or unlink procedure before running the bootstrap again.
+
+Point your skill registration at `~/.local/share/work-graph/current/skills/work-graph`. The matching plugin is in `~/.local/share/work-graph/current/orca-plugin`. Keep any local edits in the old registration and use Orca's normal permission approval when registering the managed plugin.
+
+After an interrupted bootstrap, rerun the same command with the same assets, key, and migration flag. It verifies a previously published version directory before completing the launcher switch. Forward installation preserves edits in an inactive version directory. It sets `previous` to the verified version that was active just before the switch. A rollback consumer must verify the destination before activation, since a user can edit its files after the link is set.

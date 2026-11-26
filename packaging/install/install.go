@@ -269,11 +269,16 @@ func install(home, assets, pin, version, target string, migrate bool) error {
 		if !stable.MatchString(v) || value != "versions/"+v+"-"+target {
 			return fmt.Errorf("preserve unmanaged %s", name)
 		}
+		// An inactive generation can contain user edits. The installer only
+		// replaces this link with the current generation after verifying it.
+		if name == "previous" {
+			continue
+		}
 		old, err := inspect(filepath.Join(root, value), v, target)
 		if err != nil {
 			return err
 		}
-		if name == "current" && active != next && (!older(v, version) || old.PublicKey != pin) {
+		if active != next && (!older(v, version) || old.PublicKey != pin) {
 			return errors.New("next version must be newer and signed with the current release key")
 		}
 	}

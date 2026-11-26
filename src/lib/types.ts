@@ -226,6 +226,7 @@ export interface SetupItem {
 }
 
 export interface TeamSetupState {
+  suggestedProjectLabelScope?: "team" | "workspace";
   team: SetupTeam | null;
   plan: { privateTeams: boolean; subTeams: boolean };
   fallback: string;

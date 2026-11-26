@@ -1,6 +1,7 @@
 import contract from "../skills/work-graph/contract.json" with { type: "json" };
 import type { SetupItem, SetupTeam, SetupTeamInput, TeamSetupResult, TeamSetupState } from "../src/lib/types.ts";
 import { gql, LinearAccessRefused, LinearError, pages } from "./linear.ts";
+import { usesTeamProjectLabels } from "./linearauth.ts";
 
 interface LinearTeam {
   id: string;
@@ -112,7 +113,7 @@ export async function teamSetup(key: string, human: string, teamLabels: boolean,
   const team = await findTeam(key);
   if (apply && !team) throw new LinearError("Team not found", 404);
   const { organization } = await setupQuery("query { organization { subscription { type } } }");
-  const business = /^(business|enterprise)(?:[_-]|$)/i.test(organization.subscription?.type ?? "");
+  const business = usesTeamProjectLabels(organization.subscription?.type);
   const state: TeamSetupState = { team: team ? summary(team) : null, plan: { privateTeams: business, subTeams: business },
     fallback: setupCommand(workspace, key, team ? { ...summary(team), parent: team.parent?.key } : null), statuses: [], labels: [] };
   const created: string[] = [];
@@ -153,12 +154,20 @@ export async function teamSetup(key: string, human: string, teamLabels: boolean,
       const teamId = scoped ? team?.id : null;
       const located = (r: LabelRow) => (r.team?.id ?? null) === teamId && (r.parent?.id ?? null) === parentId;
       const named = rows.filter(r => r.name.toLowerCase() === name.toLowerCase());
-      const found = named.find(r => located(r) && r.name === name) ?? named.find(located) ?? named[0];
+      const found = named.find(r => located(r) && r.name === name) ?? named.find(located) ??
+        named.find(r => (r.team?.id ?? null) === teamId) ?? named[0];
       if (found) {
         const ok = located(found) && found.name === name && !found.retiredAt && found.isGroup === group &&
           (!group || found.groupType === "singleSelect");
-        state.labels.push({ ...item, state: ok ? "exists" : "warn",
-          detail: ok ? undefined : `Check the name, scope, group and availability of "${found.name}" in Linear.` });
+        let detail: string | undefined;
+        if ((found.team?.id ?? null) !== teamId) {
+          const actual = found.team ? "team" : "workspace";
+          detail = `"${found.name}" exists in the ${actual} scope. Setup expects it in the ${scoped ? "team" : "workspace"} scope.`;
+          if (kind === "projectLabel") state.suggestedProjectLabelScope = actual;
+        } else if (!ok) {
+          detail = `Check the name, group and availability of "${found.name}" in Linear.`;
+        }
+        state.labels.push({ ...item, state: ok ? "exists" : "warn", detail });
         return ok ? found.id : null;
       }
       const id = apply ? await createItem(kind, { name, ...(teamId && { teamId }), ...(parentId && { parentId }),

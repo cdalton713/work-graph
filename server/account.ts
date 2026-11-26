@@ -4,7 +4,7 @@ import { bodyLimit } from "hono/body-limit";
 import type { createAccounts } from "./db/accounts.ts";
 import { LinearAccessRefused, LinearError, readLinearTeams } from "./linear.ts";
 import { RedisCommandFailed, RedisUnavailable, type RedisLink } from "./redis.ts";
-import { LinearSignInRequired, revokeLinearToken } from "./linearauth.ts";
+import { defaultTeamLabels, LinearSignInRequired, revokeLinearToken } from "./linearauth.ts";
 import type { Session } from "./auth.ts";
 import type { Telemetry, UsageScope } from "./telemetry.ts";
 import type { Tenant } from "./tenants.ts";
@@ -275,7 +275,7 @@ export function accountRoutes(options: Options) {
     const { workspaceId, organization, name, ownerName } = identity;
     const id = await accounts.addConnection(account.id, {
       workspaceId, linearOrgId: organization, name, ownerName, credential,
-      team: teams.length === 1 ? teams[0].key : "", teamLabels: false,
+      team: teams.length === 1 ? teams[0].key : "", teamLabels: await defaultTeamLabels(credential.key),
     });
     const saved = await accounts.readTenant(account.id);
     const connection = findConnection(saved?.connections ?? [], id);

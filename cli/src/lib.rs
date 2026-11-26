@@ -83,3 +83,4 @@ pub mod providers;
 
 pub mod workflow;
 pub mod automation;
+pub mod diagnostics;

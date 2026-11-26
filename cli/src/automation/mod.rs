@@ -93,7 +93,7 @@ fn enqueue(messages: &mut Vec<Value>, message: Value) {
 mod tests;
 
 pub mod arguments;
-mod machine;
+pub(crate) mod machine;
 pub mod manage;
 pub mod precheck;
 pub mod scheduled;

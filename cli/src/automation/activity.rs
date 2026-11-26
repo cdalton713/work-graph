@@ -178,7 +178,7 @@ pub fn collect(
     Ok(efforts)
 }
 
-pub fn record_send(dir: &Path) -> Result<()> {
+pub(crate) fn stamp_path(dir: &Path) -> Result<PathBuf> {
     let hash = format!(
         "{:x}",
         Sha256::digest(dir.canonicalize()?.as_os_str().as_bytes())
@@ -186,8 +186,11 @@ pub fn record_send(dir: &Path) -> Result<()> {
     let path = home()?
         .join(".local/state/work-graph/agent-sends")
         .join(format!("{hash}.json"));
+    Ok(path)
+}
+pub fn record_send(dir: &Path) -> Result<()> {
     save_state(
-        &path,
+        &stamp_path(dir)?,
         &json!({"at":Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()}),
     )
 }

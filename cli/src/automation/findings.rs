@@ -277,3 +277,17 @@ impl Findings {
         Ok(())
     }
 }
+
+impl Findings {
+    pub fn collect_diagnostics(
+        &mut self,
+        dir: &Path,
+        roots: &[std::path::PathBuf],
+        now: i64,
+        complete: bool,
+        fetch: impl FnOnce(&Value) -> Result<BTreeMap<String, crate::diagnostics::MappedIssue>>,
+    ) -> Result<()> {
+        let doctor = crate::diagnostics::collect(Some(dir), roots, now, fetch);
+        self.include_checks(&doctor, dir, now, complete)
+    }
+}

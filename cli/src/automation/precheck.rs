@@ -89,7 +89,7 @@ pub fn wake(
     Ok(decision)
 }
 
-pub(super) fn duration(seconds: i64) -> String {
+pub(crate) fn duration(seconds: i64) -> String {
     let minutes = seconds.div_euclid(60);
     if minutes >= 1440 {
         format!("{}d{:02}h", minutes / 1440, minutes % 1440 / 60)

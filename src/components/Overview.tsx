@@ -70,12 +70,12 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const rows = useMemo(() => sections.flatMap((section) => section.rows), [sections]);
   const openProjects = useMemo(() => overviewRows(list, START), [list]);
   const stallsByProject = useMemo(() => {
-    const viewers = new Set(list.workspaces.filter(({ role }) => role === "viewer").map(({ id }) => id));
+    const shared = new Set(list.workspaces.filter(({ role }) => role).map(({ id }) => id));
     return new Map(openProjects.flatMap(({ project, summary }) => {
       if (!summary || project.paused || project.statusType === "paused") return [];
       const key = summaryKey(project);
       return [[key, stalls(summary, presence?.get(key), agents?.get(key), now,
-        currentSite().readOnly || viewers.has(project.workspace))] as const];
+        currentSite().readOnly || shared.has(project.workspace))] as const];
     }));
   }, [openProjects, list.workspaces, presence, agents, now]);
   const inboxProjects = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, initiative }), [list, filter.workspace, initiative]);
@@ -171,11 +171,18 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             <span className={`ov-age${s?.freshness?.state === "stale" || s?.freshness?.state === "never" ? " is-warning" : ""}`}>
               {s?.freshness && freshnessText(s.freshness, s.effort?.at ?? null, now)}
             </span>
-            <span className="ov-effort">
-              <span className="ov-effort-mark">next:</span>
-              {s?.error ? <span className="sig-fg-stop">{s.error}</span>
-                : <span className={`ov-effort-status${stall ? " is-stalled" : ""}`} title={next ?? undefined}>{next ?? "—"}</span>}
-            </span>
+            {(s?.error || s?.effort) && (
+              <span className="ov-effort">
+                {s.error ? <span className="sig-fg-stop">{s.error}</span>
+                  : <><span className="ov-effort-mark">wg next</span><span className="ov-effort-status">{s.effort!.status}</span></>}
+              </span>
+            )}
+            {next && (
+              <span className="ov-effort">
+                <span className="ov-effort-mark">next:</span>
+                <span className={`ov-effort-status${stall ? " is-stalled" : ""}`} title={next}>{next}</span>
+              </span>
+            )}
           </button>
           <CopyButton text={p.name} label="Copy the project name" className="ov-copy" />
           {shown.length > 0 && (

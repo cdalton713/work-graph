@@ -26,8 +26,10 @@ function agentLine({ level, text }: { level: string; text: string }): boolean {
 }
 
 export function stalls(summary: ProjectSummary, presence: Presence | undefined, agents: Agents | undefined, now: number, readOnly = false): Stall[] {
+  // A project message confirms that this page receives link data for the room.
+  if (readOnly || (!presence && !agents)) return [];
   const coordinators = presence?.coordinators ?? [];
-  if (readOnly || summary.paused || coordinators.some((row) => row.paused)
+  if (summary.paused || coordinators.some((row) => row.paused)
     || summary.effort?.status === "every ship point is Done or Canceled") return [];
 
   const jobs = summary.liveJobs ?? [];
@@ -73,6 +75,8 @@ export function stalls(summary: ProjectSummary, presence: Presence | undefined, 
 export function nextStep(summary: ProjectSummary, now: number): string | null {
   const line = summary.nextLines?.find(agentLine);
   if (!line) return null;
+  const triage = line.level === "do" && line.text.match(/^triage (\S+): (.*)$/);
+  if (triage) return `coordinator: triage ${triage[1]} · ${triage[2]}`;
   const parts = line.text.match(/^(\S+) (\S+) (\S+?)(?:: (.*))?$/);
   if (!parts) return line.level === "do" ? `coordinator: ${line.text}` : line.text;
   const [, verb, , id, detail] = parts;
@@ -83,7 +87,13 @@ export function nextStep(summary: ProjectSummary, now: number): string | null {
     const age = job && ageText(now - Date.parse(job.startedAt ?? ""))?.replace(/ ago$/, "");
     return `${verb}${target ? ` on${target}` : ""}${age ? ` · ${age}` : ""}`;
   }
-  if (verb === "soak" && detail) return `soak ${detail}`;
+  if (verb === "soak" && detail) {
+    const until = new Date(detail.startsWith("until ") ? detail.slice(6) : "");
+    if (Number.isFinite(until.getTime())) {
+      return `soak until ${until.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`;
+    }
+    return `soak ${detail}`;
+  }
   if (verb === "paused") return "paused";
   return `${verb}${target}${detail ? ` · ${detail}` : ""}`;
 }

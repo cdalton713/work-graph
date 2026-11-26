@@ -49,20 +49,35 @@ it("reports one missing agent view at three minutes and suppresses worker stalls
   expect(stalls(effort, seen, undefined, now)).toMatchObject([{ kind: "no-agent-view" }]);
 });
 
+it("omits stalls for a shared collaborator with a live job and no link data", () => {
+  expect(stalls(summary, undefined, undefined, now)).toEqual([]);
+});
+
+it("waits for the first project link message on the owner's Overview", () => {
+  const beforeMessages = stalls(summary, undefined, undefined, now);
+  const afterPresence = stalls(summary, { coordinators: [], queued: 0 }, undefined, now);
+  expect(overviewTitle(beforeMessages.length)).toBe("Overview");
+  expect(afterPresence.map(({ kind }) => kind)).toEqual(["no-agent-view", "no-coordinator"]);
+});
+
 it("omits stalls for paused and completed efforts and for read-only viewers", () => {
-  expect(stalls({ ...summary, paused: true }, undefined, undefined, now)).toEqual([]);
+  const seen = { coordinators: [], queued: 0 };
+  expect(stalls({ ...summary, paused: true }, seen, undefined, now)).toEqual([]);
   const paused = presence(ago(0));
   paused.coordinators[0].paused = true;
   expect(stalls(summary, paused, undefined, now)).toEqual([]);
-  expect(stalls({ ...summary, effort: { status: "every ship point is Done or Canceled", at: ago(20) } }, undefined, undefined, now)).toEqual([]);
-  expect(stalls(summary, undefined, undefined, now, true)).toEqual([]);
+  expect(stalls({ ...summary, effort: { status: "every ship point is Done or Canceled", at: ago(20) } }, seen, undefined, now)).toEqual([]);
+  expect(stalls(summary, seen, undefined, now, true)).toEqual([]);
 });
 
 it("describes the first wait or action that belongs to the agents", () => {
   const nextLines = [{ level: "wait", text: "human merge WG-13" }, { level: "wait", text: "worker page WG-12: job=dispatch" }];
   expect(nextStep({ ...summary, nextLines }, now)).toBe("worker on WG-12 · 25 min");
   expect(nextStep({ ...summary, nextLines: [{ level: "do", text: "dispatch page WG-12" }] }, now)).toBe("coordinator: dispatch WG-12");
-  expect(nextStep({ ...summary, nextLines: [{ level: "wait", text: "soak ship WG-13: until 14:00" }] }, now)).toBe("soak until 14:00");
+  const until = "2026-11-25T14:00:00Z";
+  const local = new Date(until).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  expect(nextStep({ ...summary, nextLines: [{ level: "wait", text: `soak ship WG-13: until ${until}` }] }, now)).toBe(`soak until ${local}`);
+  expect(nextStep({ ...summary, nextLines: [{ level: "do", text: "triage WG-40: Bug" }] }, now)).toBe("coordinator: triage WG-40 · Bug");
 });
 
 it("includes the inbox count in the tab title only when it has entries", () => {

@@ -7,6 +7,7 @@ import type { Telemetry, UsageScope } from "./telemetry.ts";
 
 type Access = {
   plans: ReturnType<typeof createAccounts>["plans"];
+  notice: () => Promise<void>;
   scope: ClaimScope;
   name: string;
   usage: () => Promise<UsageScope | null>;
@@ -130,6 +131,7 @@ export function planRoutes(access?: (c: Context) => Promise<Access | Response>, 
       return c.json({ error: "Plan version conflict", version: result.version, writer: result.writer }, 412);
     }
     if (result.status !== 200 || !result.version || !result.role) return missing(c);
+    await target.notice();
     telemetry?.emit("plan_written", { version: result.version, role: result.role }, target.usage, target.scope.project[0]);
     c.header("ETag", tag(result.version));
     return c.json({ version: result.version });

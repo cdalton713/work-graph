@@ -37,6 +37,22 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
     return row;
   }
 
+  async function changeMemberWithClaims(project: ProjectScope, member: string, role?: MemberRole) {
+    const released = await sql.transaction(async ({ query }) => {
+      if (!await lock(query, project[0])) return null;
+      const rows = role
+        ? await query(`UPDATE project_members SET role = $5, access_requested_at = CASE WHEN $5 = 'viewer' THEN NULL ELSE access_requested_at END WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member, role])
+        : await query(`DELETE FROM project_members WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member]);
+      if (!rows.length) return null;
+      if (role === "collaborator") return [];
+      const deleted = await query<{ node: string }>(
+        `DELETE FROM node_claims WHERE ${scope} AND holder_user_id = $4 RETURNING node_key AS node`, [...project, member]);
+      return deleted.map(({ node }) => node).sort();
+    });
+    if (released) await notify(project[0], true);
+    return released;
+  }
+
   return {
     memberships(account: string) {
       return sql.query<{ id: string; ownerId: string; connectionId: string; projectId: string; name: string; role: MemberRole }>(`
@@ -125,19 +141,9 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
       return changed;
     },
 
+    changeMemberWithClaims,
     async changeMember(project: ProjectScope, member: string, role?: MemberRole) {
-      const changed = await sql.transaction(async ({ query }) => {
-        if (!await lock(query, project[0])) return false;
-        const rows = role
-          ? await query(`UPDATE project_members SET role = $5, access_requested_at = CASE WHEN $5 = 'viewer' THEN NULL ELSE access_requested_at END WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member, role])
-          : await query(`DELETE FROM project_members WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member]);
-        if (rows.length && role !== "collaborator") {
-          await query(`DELETE FROM node_claims WHERE ${scope} AND holder_user_id = $4`, [...project, member]);
-        }
-        return rows.length > 0;
-      });
-      if (changed) await notify(project[0], true);
-      return changed;
+      return (await changeMemberWithClaims(project, member, role)) !== null;
     },
 
     async preview(token: string) {

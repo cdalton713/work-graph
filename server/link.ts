@@ -701,6 +701,28 @@ export class LinkHub {
     return (await this.enqueue(ref, type, payload)).message;
   }
 
+  async projectChanged(ref: RoomRef, issues: string[], writer?: string) {
+    const payload: ToPage["changed"] = { by: "coordinator", what: "issue", issues };
+    // A page must hear each change even when the coordinator queues stay the same.
+    const pages = (room: LinkRoom) => ({ ...this.pages(room, "changed", payload), sequence: undefined });
+    const message = this.envelope(ref, "changed", payload);
+    const updated = await this.shared.editExisting(ref, (room) => {
+      const recipients = roomAccounts(room).filter(([account]) => account !== writer);
+      for (const [, account] of recipients) appendMessage(account, message);
+      return { room, recipients };
+    });
+    if (!updated) {
+      // Redis can track page sockets without storing a coordinator room.
+      const room = await this.shared.read(ref);
+      if (room) await this.send([pages(room)], ref.tenant);
+      return;
+    }
+    const { room, recipients } = updated;
+    const events = recipients.map(([account, state]) => this.queueEvent(room,
+      [...state.coordinators.values()].flatMap(({ socket }) => socket ? [socket] : []), message, false, account));
+    await this.send([...events, pages(room), this.announce(room)], ref.tenant);
+  }
+
   async enqueue<T extends keyof ToCoordinator>(ref: RoomRef, type: T, payload: ToCoordinator[T], answeredAsk?: string, id?: string, member?: LinkMember, writer?: { account?: string }) {
     const envelope = this.envelope(ref, type, payload);
     if (id !== undefined) envelope.id = id;

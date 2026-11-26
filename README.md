@@ -392,6 +392,7 @@ The hosted service stores node claims for each project. A coordinator token can
 claim a node and renew its lease. The lease defaults to ten minutes. The project
 owner can list and release claims. Project members can list claims, and
 collaborators can claim nodes and release their own claims.
+The service tells connected pages and other coordinators when a claim changes.
 
 The service hosts the page and its API. Accounts share a server and keep their workspaces private.
 Each user runs `wg`, Orca, `gh`, `st`, `uv`, and an agent CLI on their own machine.
@@ -413,6 +414,7 @@ the current plan. When a plan exists, only the owner can claim a merge point,
 ship point, or ops node. Use the version number in the response body for
 `If-Match` when you save a new version. If the newest plan removed a node,
 claim renewal returns 404 and the holder must stop work on that node.
+The service tells connected pages and other coordinators when it saves a new version.
 
 ### Parts of the service
 

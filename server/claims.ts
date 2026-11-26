@@ -6,6 +6,7 @@ import type { Telemetry, UsageScope } from "./telemetry.ts";
 
 type Access = {
   claims: ReturnType<typeof createAccounts>["claims"];
+  notice: (nodes: string[]) => Promise<void>;
   scope: ClaimScope;
   usage: () => Promise<UsageScope | null>;
 };
@@ -41,7 +42,10 @@ export function claimRoutes(access?: (c: Context) => Promise<Access | Response>,
     if (!key || !nodeKey.test(key)) return c.json({ error: "Invalid node key" }, 400);
     if (kind === "release") {
       const { status } = await target.claims(target.scope, { kind, node: key });
-      if (status === 204) return c.body(null, 204);
+      if (status === 204) {
+        await target.notice([key]);
+        return c.body(null, 204);
+      }
       return status === 403 ? c.json({ error: "Only the holder or project owner can release this claim" }, 403) : missing(c);
     }
     const input: { job?: unknown; lease_s?: unknown } | null = kind === "put" && !c.req.raw.body
@@ -57,6 +61,7 @@ export function claimRoutes(access?: (c: Context) => Promise<Access | Response>,
     if (result.status === 200 && result.claim) {
       if (result.action !== "renewed") telemetry?.emit("node_claimed",
         { job: result.claim.job, role: result.role }, target.usage, target.scope.project[0]);
+      if (result.action !== "renewed" || result.jobChanged) await target.notice([key]);
       return c.json({ action: result.action, claim: result.claim });
     }
     if (result.status === 409) {

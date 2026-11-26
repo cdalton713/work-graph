@@ -534,6 +534,36 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const pageChanged = async (ref: ProjectRef | null, what: Changed["what"], issues: string[], id?: string) => {
     if (ref) await notify(() => enqueueLink(ref, "changed", { by: "page", what, issues }, undefined, id), undefined);
   };
+  const projectChanged = async (
+    ref: RoomRef, accounts: ShareAccess["accounts"],
+    scope: ClaimScope, nodes?: string[],
+  ) => {
+    if (!linkEnabled || nodes?.length === 0) return;
+    let keymap: Record<string, unknown> | undefined;
+    const lost = () => console.warn("Project change saved, but the link notice was lost");
+    if (nodes) {
+      try {
+        const result = await accounts.plans({ project: scope.project, account: scope.project[0] }, { kind: "get" });
+        keymap = result.plan?.keymap;
+      } catch {
+        lost();
+        return;
+      }
+    }
+    const entries = keymap?.nodes;
+    for (const node of nodes ?? [undefined]) {
+      const entry = node && entries && typeof entries === "object" && Object.hasOwn(entries, node)
+        ? (entries as Record<string, unknown>)[node] : undefined;
+      const id = entry && typeof entry === "object" && "identifier" in entry
+        ? entry.identifier : node && keymap?.[node];
+      const issues = typeof id === "string" && /^[A-Z][A-Z0-9]*-[0-9]+$/.test(id) ? [id] : [];
+      try {
+        await hub.projectChanged(ref, issues, scope.membership ? scope.account : undefined);
+      } catch {
+        lost();
+      }
+    }
+  };
   async function shareProject(tenant: Tenant, workspace: Workspace, id: string) {
     try {
       const data = await runInTenant(tenant, () => linearWorkspace.run(workspace,
@@ -582,11 +612,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }
     const accounts = await accountStore();
     if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
+    const claimScope = { project: [owner.id, connection, id], account: account.id,
+      membership: shared?.id.slice(sharedPrefix.length) } satisfies ClaimScope;
     return {
       claims: accounts.claims,
       plans: accounts.plans,
       name,
-      scope: { project: [owner.id, connection, id], account: account.id, membership: shared?.id.slice(sharedPrefix.length) } satisfies ClaimScope,
+      scope: claimScope,
+      notice: (nodes?: string[]) => projectChanged(roomRef({ workspace: workspace.id, id }, owner), accounts, claimScope, nodes),
       usage: () => usageScope(owner, workspace),
     };
   });
@@ -1270,6 +1303,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     app.route("/api", shareRoutes({
       runLinear,
       access, pageUrl, telemetry,
+      notice: (account, workspace, project, nodes) => projectChanged(
+        roomRef({ workspace, id: project[2] }, account.tenant), account.accounts, { project, account: account.tenant.id }, nodes),
       limit: attemptLimit({ now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX }, "join-attempts:"),
       project: shareProject,
     }));

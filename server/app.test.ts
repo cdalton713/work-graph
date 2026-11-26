@@ -4,6 +4,7 @@ import { connectRedis } from "./redis.ts";
 import { localRedis, startLocalRedis } from "./testing/redis.ts";
 import { testTenants } from "./testing/tenants.ts";
 import { pgliteSql } from "./testing/pglite.ts";
+import { host as projectHost, projectFixture } from "./testing/projects.ts";
 import { credentialCrypto } from "./db/crypto.ts";
 import { migrate } from "./db/migrations.ts";
 import { dbTenants } from "./db/tenants.ts";
@@ -1297,6 +1298,138 @@ it("allows each account to join only its shared projects and closes a removed me
   } finally {
     directory.close();
     await sql.close();
+  }
+});
+
+const storedPlan = {
+  plan: { effort: { name: "Example" }, nodes: [{ key: "build", kind: "task" }, { key: "check", kind: "task" }], edges: [] },
+  keymap: { nodes: { build: { identifier: "WG-1" } } },
+};
+const projectPlan = "/api/projects/project/plan";
+const projectClaim = "/api/projects/project/claims/build";
+const claimJob = { job: "dispatch", lease_s: 30 };
+
+it.each(localRedis ? ["memory", "redis"] : ["memory"])("delivers stored project changes through the %s link store", async (storage) => {
+  const redis = storage === "redis" ? await startLocalRedis() : null;
+  const db = await pgliteSql();
+  try {
+    const { app, openApp, owner, collaborator, scope, memberPath } =
+      await projectFixture(db, "org", { redisUrl: redis?.url });
+    const remote = redis ? openApp() : app;
+    try {
+      const ref = { tenant: owner.id, workspace: "work", id: "project" };
+      const savePlan = (version?: number) => owner.request(projectPlan, "PUT", storedPlan, undefined, false,
+        version ? { "if-match": String(version) } : { "if-none-match": "*" });
+      const claim = (method: string, path = projectClaim) =>
+        collaborator.request(path, method, method === "POST" ? claimJob : undefined, scope);
+      const peer = () => {
+        const changes: unknown[] = [];
+        return { changes, close() {}, send(raw: string) {
+          const { type, payload } = JSON.parse(raw);
+          if (type === "changed") changes.push(payload);
+        } };
+      };
+      const changed = (issues: string[] = []) => ({ by: "coordinator", what: "issue", issues });
+      if (redis) {
+        for (const instance of [app, remote]) {
+          await vi.waitFor(async () => expect(await (await instance.request("/api/status", {
+            headers: { host: projectHost, authorization: "Bearer " + owner.token },
+          })).json()).toMatchObject({ redisReady: true }));
+        }
+      }
+      expect((await savePlan()).status).toBe(200);
+      expect((await claim("POST")).status).toBe(200);
+      expect(await app.link.hub.roomRefs()).toEqual([]);
+      expect((await claim("DELETE")).status).toBe(204);
+
+      const view = peer();
+      await remote.link.hub.joinViewer(view, ref, () => true);
+      expect((await savePlan(1)).status).toBe(200);
+      await vi.waitFor(() => expect(view.changes).toEqual([changed()]));
+
+      const a = peer(), b = peer(), ownerPage = peer(), memberPage = peer();
+      const member = { account: collaborator.id, workspace: scope, name: "Grace", ownerName: "Ada" };
+      const first = await remote.link.hub.joinCoordinator(a, ref);
+      const second = await app.link.hub.joinCoordinator(b, ref, member);
+      for (const [connection, session] of [[first, "owner"], [second, "member"]] as const) {
+        await connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session } }));
+      }
+      await app.link.hub.joinPage(ownerPage, ref);
+      await remote.link.hub.joinPage(memberPage, ref, false, owner.id, member);
+      expect((await claim("POST")).status).toBe(200);
+      const issue = changed(["WG-1"]);
+      await vi.waitFor(() => {
+        expect(a.changes).toEqual([issue]);
+        expect(ownerPage.changes).toEqual([issue]);
+        expect(memberPage.changes).toEqual([issue]);
+        expect(view.changes).toEqual([changed(), changed()]);
+      });
+      expect(b.changes).toEqual([]);
+      expect((await claim("PUT")).status).toBe(200);
+      expect((await claim("DELETE")).status).toBe(204);
+      await vi.waitFor(() => expect(a.changes).toEqual([issue, issue]));
+
+      expect((await owner.request(projectClaim, "POST", claimJob)).status).toBe(200);
+      await db.query("UPDATE node_claims SET lease_until = now() - interval '1 second'");
+      expect(await (await claim("POST")).json()).toMatchObject({ action: "taken_over" });
+      await vi.waitFor(() => expect(a.changes).toEqual([issue, issue, issue]));
+      expect((await claim("POST", projectClaim.replace("/build", "/check"))).status).toBe(200);
+      expect((await savePlan(2)).status).toBe(200);
+      await vi.waitFor(() => {
+        expect(a.changes).toEqual([issue, issue, issue, changed()]);
+        expect(b.changes).toEqual([issue, changed()]);
+      });
+      expect((await savePlan(2)).status).toBe(412);
+
+      expect((await owner.request(memberPath, "PATCH", { role: "viewer" }, undefined, true)).status).toBe(204);
+      await vi.waitFor(() => expect(ownerPage.changes.slice(6)).toEqual([issue, changed()]));
+      expect(a.changes).toEqual([issue, issue, issue, changed()]);
+      expect(await (await owner.request(projectClaim.replace("/build", ""))).json()).toEqual({ claims: [] });
+      expect((await owner.request(memberPath, "PATCH", { role: "collaborator" }, undefined, true)).status).toBe(204);
+      expect((await claim("POST")).status).toBe(200);
+      expect((await owner.request(memberPath, "DELETE", undefined, undefined, true)).status).toBe(204);
+      await vi.waitFor(() => expect(ownerPage.changes.slice(8)).toEqual([issue, issue]));
+      await vi.waitFor(() => expect(view.changes).toEqual(Array.from({ length: 11 }, () => changed())));
+
+      // Only the owner has a coordinator queue now. Both writes must still reach pages.
+      expect((await owner.request(projectClaim, "POST", claimJob)).status).toBe(200);
+      const jobChange = await owner.request(projectClaim, "POST", { ...claimJob, job: "review" });
+      expect(await jobChange.json()).toMatchObject({ action: "renewed", claim: { job: "review" } });
+      expect((await owner.request(projectClaim, "PUT")).status).toBe(200);
+      expect((await owner.request(projectClaim, "DELETE")).status).toBe(204);
+      await vi.waitFor(() => expect(ownerPage.changes.slice(10)).toEqual([issue, issue, issue]));
+      expect(a.changes).toEqual([issue, issue, issue, changed(), issue]);
+    } finally {
+      app.link.stop();
+      if (remote !== app) remote.link.stop();
+    }
+  } finally {
+    await db.close();
+    await redis?.close();
+  }
+}, 30_000);
+
+it("keeps successful claim and plan writes when the notice store fails", async () => {
+  const db = await pgliteSql();
+  const linkState = memoryLinkState();
+  vi.spyOn(linkState, "editExisting").mockRejectedValue(new Error("Store unavailable"));
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const { app, owner } = await projectFixture(db, "org", { linkState });
+    try {
+      expect((await owner.request(projectPlan, "PUT", storedPlan, undefined, false, { "if-none-match": "*" })).status).toBe(200);
+      expect((await owner.request(projectClaim, "POST", claimJob)).status).toBe(200);
+      expect(await (await owner.request(projectPlan)).json()).toEqual({ version: 1, ...storedPlan });
+      expect(await (await owner.request(projectClaim.replace("/build", ""))).json())
+        .toMatchObject({ claims: [{ node: "build" }] });
+      expect(warn.mock.calls).toEqual([["Project change saved, but the link notice was lost"],
+        ["Project change saved, but the link notice was lost"]]);
+    } finally {
+      app.link.stop();
+    }
+  } finally {
+    warn.mockRestore();
+    await db.close();
   }
 });
 

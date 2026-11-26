@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { NO_INITIATIVE, countProjectStates, filterProjectStates, readProjectStates, rankMoves, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewRows, overviewMoveReason, summarize, type OverviewData, type ProjectSummary } from "./overview";
 import { DEFAULT_HUMAN, configureSite, createSite } from "./site";
+import type { Agents } from "./link";
 import type { GraphData, Issue, State } from "./types";
 
 const state = (name: string, type: State["type"] = "unstarted"): State => ({ id: name, name, type, color: "#000" });
@@ -150,13 +151,24 @@ describe("overviewRows", () => {
     expect(ids({ closed: true })).toEqual(["e", "b", "c", "a", "d"]);
   });
   it("orders by state, counts each state, and filters by any selected state from the URL", () => {
-    const liveJobs = [{ identifier: "WG-1", title: "Work", state: "running", startedAt: null }];
+    const liveJobs = [{ identifier: "WG-1", title: "Work", state: "running", startedAt: new Date(-900_000).toISOString() }];
     const rows = overviewRows({
-      ...list, summaries: list.summaries.map((s) => s.id === "a" ? { ...s, liveJobs } : s.id === "c"
-        ? { ...s, liveJobs, nextLines: [{ level: "wait", text: "worker page WG-1" }] } : s),
+      ...list, summaries: list.summaries.map((s) => s.id === "a"
+        ? { ...s, ready: 1, freshness: { state: "stale", ran: new Date(-900_000).toISOString() } }
+        : s.id === "c" ? { ...s, liveJobs, nextLines: [{ level: "wait", text: "worker page WG-1" }] } : s),
     }, { text: "", workspace: null, closed: true }, {
-      now: 0, presence: new Map([["work:a", { coordinators: [], queued: 0 }]]),
-      agents: new Map([["work:c", { at: new Date(0).toISOString(), agents: [] }]]),
+      now: 0,
+      presence: new Map([
+        ["work:a", { coordinators: [], queued: 0 }],
+        ["work:c", { coordinators: [{
+          session: "coordinator", host: "", plan: "", connected: true, mode: "waiting", head: null,
+          since: "", lastSeen: "", paused: false,
+        }], queued: 0 }],
+      ]),
+      agents: new Map([["work:c", { at: new Date(0).toISOString(), agents: [{
+        id: "worker", role: "worker", issue: "WG-1", key: "page", state: "working",
+        agent: "agent", title: "", said: "", at: new Date(0).toISOString(),
+      }] }]]),
     });
     expect(rows.map((r) => r.project.id)).toEqual(["a", "e", "b", "c", "d"]);
     expect(countProjectStates(rows)).toEqual({ stalled: 1, waits: 2, moving: 1, idle: 1 });
@@ -166,15 +178,52 @@ describe("overviewRows", () => {
     expect(filterProjectStates(rows, [])).toEqual(rows);
   });
 
+  it("keeps the question in the summary when a separate dispatch stalls", () => {
+    const agents: Agents = { at: new Date(0).toISOString(), agents: [{
+      id: "worker", role: "worker", key: "question", issue: "WG-2", state: "blocked",
+      agent: "agent", title: "Question", said: "Which option?", at: new Date(0).toISOString(),
+    }] };
+    const [row] = overviewRows({
+      projects: [project("a", "Alpha")], workspaces: list.workspaces,
+      summaries: [{
+        ...summary("a", 0), you: movesWithAgents([], agents, 0),
+        nextLines: [{ level: "do", text: "dispatch task WG-1" }],
+        updatedAt: new Date(-900_000).toISOString(),
+      }],
+    }, { text: "", workspace: null, closed: false }, { now: 0, agents: new Map([["work:a", agents]]) });
+    expect(row.attention.state).toBe("stalled");
+    expect(row.summary?.you).toMatchObject([{ identifier: "WG-2", title: "Which option?" }]);
+  });
+
   it.each(["viewer", "collaborator"] as const)("omits stalled states in shared %s workspaces", (role) => {
     const liveJobs = [{ identifier: "WG-1", title: "Work", state: "running", startedAt: null }];
     const rows = overviewRows({
       ...list, workspaces: list.workspaces.map((w) => ({ ...w, role })),
-      summaries: list.summaries.map((s) => s.id === "a" ? { ...s, liveJobs } : s),
+      summaries: list.summaries.map((s) => s.id === "a"
+        ? { ...s, liveJobs, ready: 1, freshness: { state: "stale", ran: new Date(-900_000).toISOString() } } : s),
     }, { text: "", workspace: null, closed: false }, {
       now: 0, presence: new Map([["work:a", { coordinators: [], queued: 0 }]]),
     });
-    expect(rows.find(({ project }) => project.id === "a")).toMatchObject({ attention: { state: "moving" }, stalls: [] });
+    expect(rows.find(({ project }) => project.id === "a")).toMatchObject({
+      attention: { state: "idle", reason: "No agent report for WG-1" }, stalls: [],
+    });
+  });
+
+  it("omits queue stalls when the project is paused, completed, or canceled", () => {
+    const statuses = ["started", "paused", "completed", "canceled"];
+    const rows = overviewRows({
+      projects: statuses.map((status) => project(status, status, status)),
+      workspaces: list.workspaces,
+      summaries: statuses.map((status) => ({
+        ...summary(status, 0), nextLines: [{ level: "wait", text: "coordinator ops WG-1" }],
+        updatedAt: new Date(-900_000).toISOString(),
+      })),
+    }, { text: "", workspace: null, closed: true }, {
+      now: 0, presence: new Map(statuses.map((status) => [`work:${status}`, { coordinators: [], queued: 0 }])),
+    });
+    expect(rows.map(({ project, attention, stalls }) => [project.id, attention.state, stalls.length])).toEqual([
+      ["started", "stalled", 1], ["paused", "idle", 0], ["canceled", "idle", 0], ["completed", "idle", 0],
+    ]);
   });
 
   it("keeps the reason accurate for viewers with started issues and no wg next lines", () => {
@@ -205,8 +254,8 @@ describe("initiatives", () => {
   const all = { text: "", workspace: null, closed: false };
 
   it("groups the rows by workspace and initiative, by roll-up state, with sums", () => {
-    const liveJobs = [{ identifier: "WG-1", title: "Work", state: "running", startedAt: null }];
-    const ranked = { ...list, summaries: list.summaries.map((s) => s.id === "c" ? { ...s, liveJobs } : s) };
+    const ranked = { ...list, summaries: list.summaries.map((s) => s.id === "c"
+      ? { ...s, you: [], nextLines: [{ level: "do", text: "dispatch page WG-1" }], updatedAt: new Date(-900_000).toISOString() } : s) };
     const sections = initiativeSections(overviewRows(ranked, all, {
       now: 0, presence: new Map([["work:c", { coordinators: [], queued: 0 }]]),
     }), list.workspaces);

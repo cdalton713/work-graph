@@ -8064,6 +8064,8 @@ class CollaborativePlanTests(DirTests):
         super().setUp()
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+        self.p["effort"]["slug"] = "example"
+        self.write_plan()
         self.km = self.keymap(rows={"a": {"dispatch": "local-dispatch", "branch": "wg/a"}})
         self.km["status_doc"] = {"id": "doc", "sha": "local-sha", "at": "local-time"}
         self.km["nodes"]["a"]["card"] = {"id": "card", "sha": "card-sha"}
@@ -8072,6 +8074,7 @@ class CollaborativePlanTests(DirTests):
         self.version = 0
         self.data = {}
         self.down = False
+        self.refused = None
         self.race = None
         self.redirect = None
         self.writer_in_plan = False
@@ -8093,6 +8096,8 @@ class CollaborativePlanTests(DirTests):
                 self.record()
                 if test.down:
                     self.answer(503)
+                elif test.refused:
+                    self.answer(test.refused)
                 elif test.redirect:
                     self.send_response(302)
                     self.send_header("Location", test.redirect)
@@ -8207,6 +8212,17 @@ class CollaborativePlanTests(DirTests):
             self.assertIn("HTTP 503", err)
             linear.assert_not_called()
 
+    def test_timeout_warns_and_auth_errors_name_the_token(self):
+        self.cli("share")
+        with patch.object(wg.urllib.request.OpenerDirector, "open", side_effect=TimeoutError):
+            _, err = self.cli("run show", "a")
+        self.assertIn("warn plan", err)
+        self.assertIn("TimeoutError", err)
+        for self.refused in (401, 403):
+            with self.subTest(status=self.refused):
+                _, err = self.cli("run show", "a", code=2)
+                self.assertIn(f"refused the token (HTTP {self.refused})", err)
+
     def test_load_refuses_newer_version_before_linear_even_with_a_clean_plan(self):
         self.cli("share")
         self.remote_change()
@@ -8225,6 +8241,7 @@ class CollaborativePlanTests(DirTests):
         self.km = wg.load_keymap(self.d)
         self.km["milestones"] = {}
         wg.save_json(self.d / "keymap.json", self.km)
+        self.data["keymap"]["milestones"] = {}
         self.enterContext(patch.object(wg, "team_info", return_value=(
             "team", {}, {"merge-point": "m", "ship-point": "s", "reviewed": "r"})))
         self.enterContext(patch.object(wg, "fetch_nodes", return_value={}))
@@ -8241,18 +8258,25 @@ class CollaborativePlanTests(DirTests):
             return {"viewer": {"id": "me"}}
 
         self.enterContext(patch.object(wg, "gql", side_effect=gql))
-        before = {p.name: p.read_bytes() for p in self.d.iterdir() if p.is_file()}
+        before = (self.d / "plan.json").read_bytes()
+        synced = wg.load_keymap(self.d)["collab"]
         self.race = self.remote_change
         _, err = self.cli("load", "--apply", code=2)
         self.assertIn("run wg pull", err)
-        self.assertEqual({p.name: p.read_bytes() for p in self.d.iterdir() if p.is_file()}, before)
+        self.assertEqual((self.d / "plan.json").read_bytes(), before)
+        after = wg.load_keymap(self.d)
+        self.assertEqual(after["milestones"], {"1": "milestone"})
+        self.assertEqual(after["collab"]["version"], synced["version"])
+        self.assertEqual(after["collab"]["plan_sha"], synced["plan_sha"])
         settings.assert_not_called()
         self.assertEqual(self.requests[-1][2]["If-Match"], '"1"')
-        self.cli("pull", "--force")
+        self.cli("pull")
+        self.assertEqual(wg.load_keymap(self.d)["milestones"], {"1": "milestone"})
         self.p["effort"]["summary"] = "rebased change"
         self.write_plan()
         self.cli("load", "--apply")
         self.assertEqual(self.data["plan"]["effort"]["summary"], "rebased change")
+        self.assertEqual(self.data["keymap"]["milestones"], {"1": "milestone"})
         self.assertEqual(self.requests[-1][2]["If-Match"], '"2"')
         self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 3)
 
@@ -8294,6 +8318,149 @@ class CollaborativePlanTests(DirTests):
         _, err = self.cli("run show", "a", code=2)
         self.assertIn("HTTP 302", err)
         self.assertEqual([req[1] for req in self.requests], ["/api/projects/project/plan"] * 2)
+
+    def test_remote_settings_need_explicit_acceptance(self):
+        self.p["effort"]["test"] = ["local-test"]
+        self.write_plan()
+        self.cli("share")
+        self.remote_change()
+        remote = {"test": ["remote-test"], "lint": ["remote-lint"], "rules": "remote rules",
+                  "workspace": "home", "team": "WG", "slug": "remote-slug", "agents": {
+                      "worker": {"agent": "claude"}}, "stacked_hotfix": True, "initiative": "Remote"}
+        self.data["plan"]["effort"].update(remote)
+        with patch.object(wg, "evidence", return_value=0) as evidence:
+            out, _ = self.cli("evidence", "a")
+            effective = evidence.call_args.args[1]
+            self.assertEqual(wg.test_command(effective), ["local-test"])
+            self.assertEqual(wg.plan_workspace(effective), wg.plan_workspace(self.p))
+            for field in remote:
+                self.assertEqual(effective["effort"].get(field), self.p["effort"].get(field) if field != "team"
+                                 else wg.plan_team(self.p))
+                self.assertTrue(any(field in line and "Ada" in line for line in out.splitlines()), field)
+        self.data["plan"]["effort"].pop("workspace")
+        self.data["plan"]["effort"].pop("team")
+        out, _ = self.cli("pull", "--accept-settings")
+        self.assertIn("test", out)
+        self.assertEqual(wg.test_command(wg.load_plan(self.d)), ["remote-test"])
+
+    def test_invalid_remote_plan_and_foreign_mappings_stay_off_disk(self):
+        self.cli("share")
+        before = ((self.d / "plan.json").read_bytes(), (self.d / "keymap.json").read_bytes())
+        original = json.dumps(self.data)
+        for change, problem in [
+            (lambda d: d["plan"]["nodes"][0].update(key=".."), "node key"),
+            (lambda d: d["plan"]["nodes"][0].pop("title"), "no title"),
+            (lambda d: d["plan"]["effort"].update(name="Other project"), "project name"),
+            (lambda d: d["keymap"]["project"].update(id="other"), "wrong project id"),
+            (lambda d: d["keymap"]["nodes"]["a"].update(id="other"), "outside the project"),
+            (lambda d: d["keymap"]["milestones"].update({"1": "other"}), "outside the project"),
+        ]:
+            with self.subTest(problem=problem):
+                self.data = json.loads(original)
+                self.version += 1
+                change(self.data)
+                with patch.object(wg, "fetch_nodes", return_value={"other": {"project": {"id": "other"}}}), \
+                     patch.object(wg, "project_entries", return_value=[]):
+                    _, err = self.cli("pull", code=2)
+                self.assertIn(problem, err)
+                self.assertEqual(((self.d / "plan.json").read_bytes(), (self.d / "keymap.json").read_bytes()), before)
+
+    def test_pending_run_row_survives_outage_and_reaches_page(self):
+        self.cli("share")
+        self.down = True
+        _, err = self.cli("run set", "a", "pr=9")
+        self.assertEqual(err.count("warn"), 1)
+        self.assertEqual(wg.load_keymap(self.d)["run"]["nodes"]["a"]["pr"], "9")
+        self.down = False
+        self.cli("run show", "a")
+        self.assertEqual(self.data["keymap"]["nodes"]["a"]["pr"], "9")
+
+    def test_pending_run_row_does_not_publish_local_plan_edits(self):
+        self.cli("share")
+        path = self.d / "plan.json"
+        baseline = path.read_bytes()
+        self.p["effort"]["summary"] = "unpublished"
+        self.write_plan()
+        _, err = self.cli("run set", "a", "pr=9")
+        self.assertIn("pending", err)
+        self.assertEqual(wg.load_keymap(self.d)["run"]["nodes"]["a"]["pr"], "9")
+        self.assertEqual(self.version, 1)
+        path.write_bytes(baseline)
+        self.cli("run show", "a")
+        self.assertEqual(self.data["keymap"]["nodes"]["a"]["pr"], "9")
+        self.assertNotIn("summary", self.data["plan"]["effort"])
+
+    def test_load_saves_issue_ids_before_a_linear_failure_and_recovers_an_accepted_push(self):
+        self.km["nodes"].pop("a")
+        wg.save_keymap(self.d, self.km)
+        self.cli("share")
+        self.p["effort"]["summary"] = "local changes"
+        self.write_plan()
+        self.enterContext(patch.object(wg, "team_info", return_value=(
+            "team", {"Todo": "todo"}, {"merge-point": "m", "ship-point": "s", "reviewed": "r"})))
+        self.enterContext(patch.object(wg, "fetch_nodes", return_value={}))
+        self.enterContext(patch.object(wg, "project_entries", return_value=[]))
+        self.enterContext(patch.object(wg, "_sort"))
+        self.enterContext(patch.object(wg, "sync_card", return_value=False))
+        relations = self.enterContext(patch.object(wg, "_relations", side_effect=wg.ReadError("Linear stopped")))
+        created = []
+
+        def gql(query, args=None):
+            if "issueCreate" in query:
+                created.append("issue-a")
+                return {"issueCreate": {"issue": {"id": "issue-a", "identifier": "WG-1"}}}
+            self.assertIn("viewer", query)
+            return {"viewer": {"id": "me"}}
+
+        self.enterContext(patch.object(wg, "gql", side_effect=gql))
+        _, err = self.cli("load", "--apply", code=2)
+        self.assertIn("Linear stopped", err)
+        self.assertEqual(wg.load_keymap(self.d)["nodes"]["a"]["id"], "issue-a")
+        relations.side_effect = None
+
+        save = wg.save_keymap
+
+        def interrupted(plan_dir, km, **kwargs):
+            if km["collab"]["version"] == 2:
+                raise OSError("interrupted after server write")
+            return save(plan_dir, km, **kwargs)
+
+        with patch.object(wg, "save_keymap", side_effect=interrupted):
+            _, err = self.cli("load", "--apply", code=2)
+        self.assertIn("interrupted after server write", err)
+        self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 1)
+        self.cli("run show", "a")
+        self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 2)
+        self.assertEqual(created, ["issue-a"])
+
+    def test_interrupted_pull_recovers_the_plan_keymap_pair(self):
+        self.cli("share")
+        self.remote_change()
+        save = wg.save_json
+
+        def interrupted(path, value, *args, **kwargs):
+            if path == self.d / "plan.json":
+                save(path, value, *args, **kwargs)
+                raise OSError("interrupted after plan write")
+            return save(path, value, *args, **kwargs)
+
+        with patch.object(wg, "save_json", side_effect=interrupted):
+            _, err = self.cli("pull", code=2)
+        self.assertIn("interrupted after plan write", err)
+        self.cli("run show", "a")
+        self.assertEqual(wg.load_keymap(self.d)["collab"]["version"], 2)
+        self.assertEqual(wg.load_keymap(self.d)["nodes"]["a"]["pr"], "7")
+
+    def test_incoming_keymap_cannot_replace_local_fields(self):
+        self.cli("share")
+        self.remote_change()
+        self.data["keymap"].update(run={"nodes": {}}, collab={"page": "https://example.com"},
+                                   status_doc={"id": "doc", "sha": "other", "at": "other"})
+        self.cli("pull")
+        km = wg.load_keymap(self.d)
+        self.assertEqual(km["collab"]["page"], self.url)
+        self.assertEqual(km["run"], self.km["run"])
+        self.assertEqual(km["status_doc"], self.km["status_doc"])
 
 
 class PageLoginTests(unittest.TestCase):

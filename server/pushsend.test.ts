@@ -1,6 +1,12 @@
+import type { LookupFunction } from "node:net";
 import { expect, test, vi } from "vitest";
 import { sendNotice, configRecipient } from "./pushsend.ts";
 import { deviceId, defaultSettings, type PushStore } from "./pushstore.ts";
+
+const service = vi.hoisted(() => vi.fn());
+vi.mock("web-push", () => ({ sendNotification: service }));
+const dnsLookup = vi.hoisted(() => vi.fn());
+vi.mock("node:dns", async importOriginal => ({ ...await importOriginal<typeof import("node:dns")>(), lookup: dnsLookup }));
 
 const devices = ["a", "b"].map(id => ({ endpoint: "https://example.com/" + id, keys: { auth: "", p256dh: "" }, label: "", time: 0 }));
 const notice = { project: "Project", workspace: "work", projectId: "p", issue: "WG-1", kind: "merge" as const };
@@ -58,4 +64,32 @@ test("selects one configured owner", () => {
   expect(configRecipient(["a","b"], undefined)).toMatchObject({ status: 400 });
   expect(configRecipient(["a","b"], "c")).toMatchObject({ status: 403 });
   expect(configRecipient(["a","b"], "b")).toEqual({ account: "b" });
+});
+
+test.each(["https://10.0.0.1/device", "http://example.com/device"])("rejects %s before calling the transport", async endpoint => {
+  service.mockClear();
+  const storage = store();
+  vi.mocked(storage.list).mockResolvedValue([{ ...devices[0], endpoint }]);
+  expect(await sendNotice(storage, "account", keys, notice, undefined, async () => {})).toBe(3);
+  expect(service).not.toHaveBeenCalled();
+});
+
+test("refuses delivery when DNS returns only private addresses", async () => {
+  const storage = store();
+  vi.mocked(storage.list).mockResolvedValue([devices[0]]);
+  dnsLookup.mockImplementation((_host, _options, reply) => reply(null, [
+    { address: "10.0.0.1", family: 4 }, { address: "::1", family: 6 },
+  ]));
+  const connect = vi.fn();
+  service.mockImplementation((device, _payload, options) => new Promise<void>((resolve, reject) => {
+    const lookup: LookupFunction = options.agent.options.lookup;
+    lookup(new URL(device.endpoint).hostname, { all: true }, (error, addresses) => {
+      if (error) return reject(error);
+      connect(addresses);
+      resolve();
+    });
+  }));
+  expect(await sendNotice(storage, "account", keys, notice, undefined, async () => {})).toBe(3);
+  expect(dnsLookup).toHaveBeenCalledTimes(3);
+  expect(connect).not.toHaveBeenCalled();
 });

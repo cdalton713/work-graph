@@ -19,7 +19,7 @@ struct Tree {
     child_worktree_ids: Vec<String>,
 }
 
-fn orca(args: &[&str]) -> Result<Value, String> {
+pub(super) fn orca(args: &[&str]) -> Result<Value, String> {
     let binary = std::env::var_os("ORCA_CLI_COMMAND").unwrap_or_else(|| "orca".into());
     let out = Command::new(binary)
         .args(args)
@@ -133,6 +133,7 @@ fn cleanup(
         lanes.entry(stack).or_default().push(k);
     }
     let mut kept = 0;
+    let before = km.clone();
     let mut changed = false;
     for k in keys {
         let row = &km["run"]["nodes"][k];
@@ -221,7 +222,13 @@ fn cleanup(
         }
     }
     if changed {
-        lock.save_keymap(&km).map_err(|e| e.to_string())?;
+        crate::page::save_run_keymap(dir, &lock, plan, &mut km)?;
+        super::journal(
+            dir,
+            if target.is_some() { "move" } else { "cleanup" },
+            &before,
+            &km,
+        );
     }
     Ok(kept)
 }

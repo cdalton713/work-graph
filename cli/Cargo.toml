@@ -32,3 +32,8 @@ regex = "1"
 sentry-types = "0.48"
 ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
 serde_derive = "1"
+toml = "1"
+
+[[test]]
+name = "workflow"
+path = "../tests/cli-parity/workflow.rs"

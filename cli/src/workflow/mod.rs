@@ -117,3 +117,11 @@ pub use cleanup::cleanup_worktrees;
 mod load;
 
 mod transition;
+
+mod settings;
+
+fn journal(dir: &std::path::Path, cmd: &str, old: &Value, new: &Value) {
+    if let Err(e) = crate::local::record_workflow(dir, cmd, old, new) {
+        eprintln!("warn: journal not written ({e})");
+    }
+}

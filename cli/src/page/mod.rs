@@ -256,3 +256,6 @@ pub fn preview(args: &[String]) -> Result<Output> {
 pub(crate) use collaboration::save_run_keymap;
 pub(crate) use collaboration::project_claims;
 pub(crate) use collaboration::update_claim;
+pub(crate) use collaboration::publish_load;
+
+pub(crate) use collaboration::refresh_workflow;

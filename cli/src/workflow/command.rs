@@ -83,6 +83,11 @@ fn execute(verb: Verb) -> Result<(), String> {
         | Verb::Archive { dir, .. }
         | Verb::Status { dir, .. } => dir,
     };
+    crate::page::refresh_workflow(
+        &installation,
+        dir,
+        matches!(verb, Verb::Load { apply: true, .. }),
+    )?;
     let plan = installation
         .config
         .load_plan(dir)
@@ -96,9 +101,12 @@ fn execute(verb: Verb) -> Result<(), String> {
             force,
             keep_worktree,
         } => super::transition::move_node(
-            dir,
-            &installation,
-            &plan,
+            super::transition::Workflow {
+                dir,
+                installation: &installation,
+                plan: &plan,
+                command: "move",
+            },
             &key,
             &status,
             note.as_deref(),
@@ -123,9 +131,17 @@ fn execute(verb: Verb) -> Result<(), String> {
                 None
             };
             let km = crate::state::load_keymap(dir).map_err(|e| e.to_string())?;
-            ready(dir, &installation, &plan, &km, apply, false)
+            ready(
+                dir,
+                &installation,
+                &plan,
+                &km,
+                apply,
+                false,
+                "ready --apply",
+            )
         }
-        Verb::Archive { apply, .. } => archive(&mut client(&installation, &plan)?, apply),
+        Verb::Archive { apply, .. } => archive(&mut client(&installation, &plan)?, apply, true),
         Verb::Status { ref dir, phase } => {
             let km = crate::state::load_keymap(dir).map_err(|e| e.to_string())?;
             let snap = if km["nodes"].as_object().is_some_and(|m| m.is_empty()) {
@@ -141,10 +157,12 @@ fn execute(verb: Verb) -> Result<(), String> {
     }
 }
 
-pub(super) fn archive(linear: &mut Linear, apply: bool) -> Result<(), String> {
+pub(super) fn archive(linear: &mut Linear, apply: bool, explicit: bool) -> Result<(), String> {
     let org = linear.request("query{organization{subscription{type}}}", json!({}))?;
     if org["organization"].get("subscription") != Some(&Value::Null) {
-        println!("no archive: the workspace has a paid Linear plan");
+        if explicit {
+            println!("no archive: the workspace has a paid Linear plan");
+        }
         return Ok(());
     }
     let result = (|| {
@@ -175,7 +193,9 @@ pub(super) fn archive(linear: &mut Linear, apply: bool) -> Result<(), String> {
         Vec::new()
     });
     if labels.is_empty() {
-        println!("no completed or canceled issue to archive");
+        if explicit {
+            println!("no completed or canceled issue to archive");
+        }
     } else {
         let verb = if apply { "archived" } else { "would archive" };
         let tail = if labels.len() > 20 { " …" } else { "" };
@@ -293,6 +313,7 @@ pub(super) fn ready(
     km: &Value,
     apply: bool,
     quiet: bool,
+    command: &str,
 ) -> Result<(), String> {
     let snap = snapshot(installation, plan, km)?;
     let mut linear = client(installation, plan)?;
@@ -322,7 +343,9 @@ pub(super) fn ready(
                 && status != &wait
                 && !matches!(
                     status.as_str(),
-                    "In Progress"
+                    "Triage"
+                        | "Backlog"
+                        | "In Progress"
                         | "In Review"
                         | "Ready to Merge"
                         | "Merged"
@@ -374,9 +397,7 @@ pub(super) fn ready(
             if result["issueUpdate"]["success"] != true {
                 return Err(format!("{ident}: state update failed"));
             }
-            if let Err(e) =
-                crate::local::record_status(dir, "ready --apply", &km["run"], k, status, want)
-            {
+            if let Err(e) = crate::local::record_status(dir, command, &km["run"], k, status, want) {
                 eprintln!("warn: journal: {e}");
             }
             eprintln!("  moved {ident} {status} -> {want}");

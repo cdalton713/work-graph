@@ -286,7 +286,7 @@ fn append(dir: &Path, cmd: &str, after: &Value, t: &str, entry: Value) -> io::Re
         fs::rename(&path, dir.join("journal.1.jsonl"))?
     }
     if !path.exists() {
-        let mut run = after.clone();
+        let mut run = json!({"effort":after["effort"].as_object().cloned().unwrap_or_default(),"nodes":after["nodes"].as_object().cloned().unwrap_or_default()});
         fn redact(row: &mut Value) {
             if let Some(o) = row.as_object_mut() {
                 o.retain(|k, v| {
@@ -312,4 +312,31 @@ fn append(dir: &Path, cmd: &str, after: &Value, t: &str, entry: Value) -> io::Re
         .open(path)?;
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.write_all(line.as_bytes())
+}
+
+pub(crate) fn record_workflow(
+    dir: &Path,
+    cmd: &str,
+    before: &Value,
+    after: &Value,
+) -> io::Result<()> {
+    record(dir, cmd, &before["run"], &after["run"])?;
+    let keys: BTreeSet<_> = fields(&before["nodes"])
+        .chain(fields(&after["nodes"]))
+        .collect();
+    let t = now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    for k in keys {
+        let old = &before["nodes"][k]["identifier"];
+        let new = &after["nodes"][k]["identifier"];
+        if old != new {
+            append(
+                dir,
+                cmd,
+                &after["run"],
+                &t,
+                json!({"time":t,"command":cmd,"kind":"issue","key":k,"changes":{"issue":[old,new]}}),
+            )?;
+        }
+    }
+    Ok(())
 }

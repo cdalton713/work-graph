@@ -264,3 +264,5 @@ pub(crate) use contract::satisfied;
 pub(crate) use journal::record_status;
 
 pub(crate) use card::{refresh as refresh_card,render as render_card};
+
+pub(crate) use journal::record_workflow;

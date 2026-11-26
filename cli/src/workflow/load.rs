@@ -239,6 +239,42 @@ pub(super) fn load(
         return Err("plan.json fails check; fix it first".into());
     }
     let mut km = load_keymap(dir).map_err(|e| e.to_string())?;
+    if km["run"]["effort"].is_null() {
+        km["run"]["effort"] = json!({});
+    }
+    if km["run"]["nodes"].is_null() {
+        km["run"]["nodes"] = json!({});
+    }
+    let mut previous = km.clone();
+    let mut save = |km: &Value| -> Result<(), String> {
+        lock.save_keymap(km).map_err(|e| e.to_string())?;
+        super::journal(dir, "load --apply", &previous, km);
+        previous = km.clone();
+        Ok(())
+    };
+    let shared = apply && km["collab"].is_object();
+    let plan_sha = || {
+        std::fs::read(dir.join("plan.json"))
+            .map(|b| format!("{:x}", Sha256::digest(b)))
+            .map_err(|e| e.to_string())
+    };
+    let sha = if shared {
+        let sha = plan_sha()?;
+        if installation
+            .config
+            .load_plan(dir)
+            .map_err(|e| e.to_string())?
+            != *plan
+        {
+            return Err(
+                "plan.json changed during wg load; check the change and run wg load --apply again"
+                    .into(),
+            );
+        }
+        Some(sha)
+    } else {
+        None
+    };
     let mut linear = client(installation, plan)?;
     let eff = &plan["effort"];
     let nodes = rows(plan, "nodes")?;
@@ -282,7 +318,8 @@ pub(super) fn load(
             return Err(format!("more than one project is named '{name}'"));
         }
         if adopting {
-            return adopt(
+            let before = km.clone();
+            adopt(
                 &mut linear,
                 plan,
                 &mut km,
@@ -294,7 +331,9 @@ pub(super) fn load(
                 })?,
                 tid,
                 &lock,
-            );
+            )?;
+            super::journal(dir, "load", &before, &km);
+            return Ok(());
         }
         if let Some(p) = project {
             return Err(format!(
@@ -315,10 +354,36 @@ pub(super) fn load(
             let project = &r["projectCreate"]["project"];
             string(project, "id")?;
             km["project"] = project.clone();
-            lock.save_keymap(&km).map_err(|e| e.to_string())?;
+            save(&km)?;
         }
     }
+    if !shared {
+        super::settings::coordinator(
+            dir,
+            string(eff, "name")?,
+            installation.config.settings(),
+            apply,
+            &mut changes,
+        );
+    }
     let pid = km["project"]["id"].clone();
+    if let Some(name) = eff["initiative"].as_str().filter(|s| !s.trim().is_empty()) {
+        let scope = workspace(installation, plan)?;
+        let scoped = installation
+            .workspaces()
+            .iter()
+            .find(|w| w["id"] == scope)
+            .is_none_or(|w| w["team_labels"] != false);
+        initiative(
+            &mut linear,
+            name.trim(),
+            tid,
+            &pid,
+            scoped,
+            apply,
+            &mut changes,
+        )?;
+    }
     let mut conflicts = BTreeSet::new();
     if existing
         && nodes.iter().any(|n| {
@@ -371,7 +436,7 @@ pub(super) fn load(
             let r=linear.request("mutation($i:ProjectMilestoneCreateInput!){projectMilestoneCreate(input:$i){projectMilestone{id}}}",json!({"i":{"name":name,"projectId":pid,"description":desc}}))?;
             km["milestones"][phase] =
                 string(&r["projectMilestoneCreate"]["projectMilestone"], "id")?.into();
-            lock.save_keymap(&km).map_err(|e| e.to_string())?;
+            save(&km)?;
         }
     }
     let kinds: BTreeSet<_> = nodes
@@ -432,7 +497,7 @@ pub(super) fn load(
                 }
                 if apply {
                     km["nodes"][k] = mapped(&i)?;
-                    lock.save_keymap(&km).map_err(|e| e.to_string())?;
+                    save(&km)?;
                 }
                 issue = Some(i);
             }
@@ -489,7 +554,7 @@ pub(super) fn load(
                 json!({"i":input}),
             )?;
             km["nodes"][k] = mapped(&r["issueCreate"]["issue"])?;
-            lock.save_keymap(&km).map_err(|e| e.to_string())?;
+            save(&km)?;
         }
     }
     let mut writer = LinearCards::new(workspace(installation, plan)?, &cfg);
@@ -515,7 +580,7 @@ pub(super) fn load(
         if apply {
             local::refresh_card(n, &mut km["nodes"][k], &row, &mut writer)
                 .map_err(|e| e.to_string())?;
-            lock.save_keymap(&km).map_err(|e| e.to_string())?;
+            save(&km)?;
         }
     }
     if !apply {
@@ -561,9 +626,11 @@ pub(super) fn load(
                     }
                 }
             }
-            lock.save_keymap(&km).map_err(|e| e.to_string())?;
+            save(&km)?;
         }
-        print_changes();
+        if !shared {
+            print_changes();
+        }
         let fresh = if !nodes.is_empty() {
             snapshot(installation, plan, &km)?.live
         } else {
@@ -585,6 +652,191 @@ pub(super) fn load(
             }
         }
         println!("sort order: {moved} issue(s) updated");
+        if let Some(sha) = sha {
+            if plan_sha()? != sha {
+                return Err("plan.json changed during wg load; check the change and run wg load --apply again".into());
+            }
+            crate::page::publish_load(
+                installation,
+                workspace(installation, plan)?,
+                &lock,
+                plan,
+                &mut km,
+                &sha,
+            )?;
+            super::settings::coordinator(
+                dir,
+                string(eff, "name")?,
+                installation.config.settings(),
+                apply,
+                &mut changes,
+            );
+            println!(
+                "{}",
+                if changes.is_empty() {
+                    "no changes to nodes".into()
+                } else {
+                    changes.join("\n")
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+fn project_labels(l: &mut Linear, scope: &Value) -> Result<Vec<Value>, String> {
+    let r=l.request("query($f:ProjectLabelFilter!){projectLabels(first:250,filter:$f){nodes{id name isGroup retiredAt parent{id}}}}",json!({"f":scope}))?;
+    Ok(rows(&r["projectLabels"], "nodes")?.clone())
+}
+
+fn create_label(
+    l: &mut Linear,
+    scope: &Value,
+    body: Value,
+    matches: impl Fn(&Value) -> bool,
+) -> Result<Value, String> {
+    match l.request(
+        "mutation($i:ProjectLabelCreateInput!){projectLabelCreate(input:$i){projectLabel{id}}}",
+        json!({"i":body}),
+    ) {
+        Ok(r) => Ok(json!({"id":string(&r["projectLabelCreate"]["projectLabel"],"id")?})),
+        Err(e) if e.contains("duplicate label name") => {
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if let Some(hit) = project_labels(l, scope)?.into_iter().find(&matches) {
+                    return Ok(hit);
+                }
+            }
+            Err(e)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn initiative(
+    l: &mut Linear,
+    name: &str,
+    tid: &Value,
+    pid: &Value,
+    scoped: bool,
+    apply: bool,
+    changes: &mut Vec<String>,
+) -> Result<(), String> {
+    let scope = if scoped {
+        json!({"team":{"id":{"eq":tid}}})
+    } else {
+        json!({"team":{"null":true}})
+    };
+    let found = project_labels(l, &scope)?;
+    let is_group = |v: &Value| {
+        v["isGroup"] == true
+            && v["name"]
+                .as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("initiative"))
+    };
+    let mut group = found.iter().find(|v| is_group(v)).cloned();
+    let mut child = group
+        .as_ref()
+        .and_then(|g| {
+            found
+                .iter()
+                .find(|v| v["parent"]["id"] == g["id"] && v["name"] == name)
+        })
+        .cloned();
+    if group.as_ref().is_some_and(|g| g["retiredAt"].is_string()) {
+        return Err("the project label group 'initiative' is retired; restore it in Linear".into());
+    }
+    if child.as_ref().is_some_and(|v| v["retiredAt"].is_string()) {
+        return Err(format!(
+            "the initiative label '{name}' is retired; restore it in Linear or name another initiative"
+        ));
+    }
+    if group.is_none() {
+        changes.push("create project label group 'initiative'".into());
+        if apply {
+            let mut input = json!({"name":"initiative","isGroup":true,"groupType":"singleSelect","description":"work-graph: the initiative of each project. Each child label is one initiative."});
+            if scoped {
+                input["teamId"] = tid.clone();
+            }
+            group = Some(create_label(l, &scope, input, is_group)?);
+        }
+    }
+    if child.is_none() {
+        let mut known: Vec<_> = found
+            .iter()
+            .filter(|v| {
+                group.as_ref().is_some_and(|g| g["id"] == v["parent"]["id"])
+                    && v["retiredAt"].is_null()
+            })
+            .map(|v| display(&v["name"]))
+            .collect();
+        known.sort();
+        changes.push(format!(
+            "create initiative '{name}'{}",
+            if known.is_empty() {
+                String::new()
+            } else {
+                format!(" (existing: {})", known.join(", "))
+            }
+        ));
+        if let Some(ref g) = group
+            && apply
+        {
+            let mut input = json!({"name":name,"parentId":g["id"]});
+            if scoped {
+                input["teamId"] = tid.clone();
+            }
+            child = Some(create_label(l, &scope, input, |v| {
+                v["parent"]["id"] == g["id"] && v["name"] == name
+            })?);
+        }
+    }
+    let assigned = if pid.is_string() {
+        let r = l.request(
+            "query($id:String!){project(id:$id){labels(first:50){nodes{id name parent{id}}}}}",
+            json!({"id":pid}),
+        )?;
+        rows(&r["project"]["labels"], "nodes")?.clone()
+    } else {
+        vec![]
+    };
+    let stale: Vec<_> = assigned
+        .iter()
+        .filter(|v| {
+            group.as_ref().is_some_and(|g| g["id"] == v["parent"]["id"])
+                && !child.as_ref().is_some_and(|c| c["id"] == v["id"])
+        })
+        .collect();
+    if stale.is_empty()
+        && child
+            .as_ref()
+            .is_some_and(|c| assigned.iter().any(|v| v["id"] == c["id"]))
+    {
+        return Ok(());
+    }
+    let previous = stale
+        .iter()
+        .map(|v| format!(" (was '{}')", display(&v["name"])))
+        .collect::<String>();
+    changes.push(format!("set initiative '{name}'{previous}"));
+    if apply {
+        for v in stale {
+            let r = l.request(
+                "mutation($id:String!,$l:String!){projectRemoveLabel(id:$id,labelId:$l){success}}",
+                json!({"id":pid,"l":v["id"]}),
+            )?;
+            if r["projectRemoveLabel"]["success"] != true {
+                return Err("could not remove project label".into());
+            }
+        }
+        let child = child.ok_or("missing initiative label")?;
+        let r = l.request(
+            "mutation($id:String!,$l:String!){projectAddLabel(id:$id,labelId:$l){success}}",
+            json!({"id":pid,"l":child["id"]}),
+        )?;
+        if r["projectAddLabel"]["success"] != true {
+            return Err("could not add project label".into());
+        }
     }
     Ok(())
 }

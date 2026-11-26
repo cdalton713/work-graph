@@ -25,11 +25,11 @@ fn comment(l: &mut Linear, id: &Value, body: &str) -> Result<(), String> {
         .ok_or("failed to add issue comment")?;
     Ok(())
 }
-fn sync_ready(dir: &Path, i: &Installation, p: &Value) {
+fn sync_ready(dir: &Path, i: &Installation, p: &Value, cmd: &str) {
     let result = (|| {
         let _lock = PlanLock::acquire(dir, None).map_err(|e| e.to_string())?;
         let km = keymap(dir)?;
-        ready(dir, i, p, &km, true, true)
+        ready(dir, i, p, &km, true, true, cmd)
     })();
     if let Err(e) = result {
         eprintln!("Todo and Ready not synced ({e}); run 'wg ready --apply'");
@@ -68,11 +68,13 @@ pub(super) fn approve(
         {
             let lock = PlanLock::acquire(dir, None).map_err(|e| e.to_string())?;
             let mut km = keymap(dir)?;
-            if &km["nodes"][k]["id"] != &entry["id"] {
+            if km["nodes"][k]["id"] != entry["id"] {
                 return Err(format!("{k}: issue mapping changed"));
             }
+            let before = km.clone();
             km["run"]["nodes"][k]["approved"] = format!("{date}: {quote}").into();
             crate::page::save_run_keymap(dir, &lock, p, &mut km)?;
+            super::journal(dir, "approve", &before, &km);
         }
         comment(
             &mut linear,
@@ -84,10 +86,22 @@ pub(super) fn approve(
         )?;
         println!("approved {k} {}", display(&entry["identifier"]));
         if snap.statuses.get(k) == Some(&format!("Needs {}", human(i))) {
-            move_node(dir, i, p, k, "Todo", None, None, false)?;
+            move_node(
+                Workflow {
+                    dir,
+                    installation: i,
+                    plan: p,
+                    command: "approve",
+                },
+                k,
+                "Todo",
+                None,
+                None,
+                false,
+            )?;
         }
     }
-    sync_ready(dir, i, p);
+    sync_ready(dir, i, p, "approve");
     Ok(())
 }
 
@@ -103,16 +117,28 @@ fn gh(dir: &Path, pr: &str, fields: &str) -> Result<Value, String> {
     serde_json::from_slice(&r.stdout).map_err(|e| e.to_string())
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct Workflow<'a> {
+    pub dir: &'a Path,
+    pub installation: &'a Installation,
+    pub plan: &'a Value,
+    pub command: &'a str,
+}
+
 fn guard(
-    dir: &Path,
-    i: &Installation,
-    p: &Value,
+    ctx: Workflow<'_>,
     km: &Value,
     n: &Value,
     want: &str,
     note: Option<&str>,
     issue: &Value,
 ) -> Result<(Vec<String>, Vec<String>), String> {
+    let Workflow {
+        dir,
+        installation: i,
+        plan: p,
+        ..
+    } = ctx;
     let mut failures = vec![];
     let mut notes = vec![];
     let key = n["key"].as_str().ok_or("missing key")?;
@@ -258,15 +284,13 @@ fn guard(
         }
     }
     if matches!(kind, "merge-point" | "ship-point") && matches!(want, "Verifying" | "Done") {
-        milestone(dir, i, p, km, n, want, phase, &mut failures, &mut notes)?;
+        milestone(ctx, km, n, want, phase, &mut failures, &mut notes)?;
     }
     Ok((failures, notes))
 }
 
 fn milestone(
-    dir: &Path,
-    i: &Installation,
-    p: &Value,
+    ctx: Workflow<'_>,
     km: &Value,
     n: &Value,
     want: &str,
@@ -274,6 +298,12 @@ fn milestone(
     failures: &mut Vec<String>,
     notes: &mut Vec<String>,
 ) -> Result<(), String> {
+    let Workflow {
+        dir,
+        installation: i,
+        plan: p,
+        ..
+    } = ctx;
     let snap = snapshot(i, p, km)?;
     let k = n["key"].as_str().ok_or("missing key")?;
     let ship = n["kind"] == "ship-point";
@@ -474,15 +504,19 @@ fn milestone(
 }
 
 pub(super) fn move_node(
-    dir: &Path,
-    i: &Installation,
-    p: &Value,
+    ctx: Workflow<'_>,
     k: &str,
     want: &str,
     note: Option<&str>,
     force: Option<&str>,
     keep: bool,
 ) -> Result<(), String> {
+    let Workflow {
+        dir,
+        installation: i,
+        plan: p,
+        ..
+    } = ctx;
     let human = human(i);
     let wait = format!("Needs {human}");
     if !matches!(
@@ -582,7 +616,7 @@ pub(super) fn move_node(
     }
     let mut notes = vec![];
     if force.is_none() {
-        let (fail, msg) = guard(dir, i, p, &km, n, want, note, issue)?;
+        let (fail, msg) = guard(ctx, &km, n, want, note, issue)?;
         if !fail.is_empty() {
             for f in fail {
                 println!("FAIL {f}");
@@ -682,7 +716,7 @@ pub(super) fn move_node(
     }
     {
         let _lock = PlanLock::acquire(dir, None).map_err(|e| e.to_string())?;
-        if let Err(e) = crate::local::record_status(dir, "move", &km["run"], k, old, want) {
+        if let Err(e) = crate::local::record_status(dir, ctx.command, &km["run"], k, old, want) {
             eprintln!("warn: journal: {e}");
         }
     }
@@ -763,7 +797,7 @@ pub(super) fn move_node(
         {
             let key = task["key"].as_str().ok_or("missing key")?;
             if all.statuses.get(key).is_some_and(|v| v == "Merged")
-                && let Err(e) = move_node(dir, i, p, key, "Done", None, None, false)
+                && let Err(e) = move_node(ctx, key, "Done", None, None, false)
             {
                 eprintln!(
                     "{key}: stays Merged; move it with wg move after you fix the cause ({e})"
@@ -772,13 +806,15 @@ pub(super) fn move_node(
         }
     }
     if matches!(want, "Merged" | "Done" | "Canceled" | "In Review") {
-        sync_ready(dir, i, p);
+        sync_ready(dir, i, p, ctx.command);
     }
     if !keep && matches!(want, "Merged" | "Done") {
         super::cleanup_worktrees(dir, i, p, Some((k, want)), false);
     }
-    if matches!(want, "Done" | "Canceled") {
-        archive(&mut linear, true)?;
+    if matches!(want, "Done" | "Canceled")
+        && let Err(e) = archive(&mut linear, true, false)
+    {
+        eprintln!("warn: archive of settled issues failed: {e}");
     }
     Ok(())
 }

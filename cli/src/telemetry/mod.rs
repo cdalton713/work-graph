@@ -3,7 +3,7 @@
 use reqwest::blocking::Client;
 use sentry_types::Dsn;
 use sentry_types::protocol::latest::{Envelope, Event, Level};
-use std::{env, panic, process::ExitCode, sync::mpsc, thread, time::Duration};
+use std::{env, io::ErrorKind, panic, process::ExitCode, sync::mpsc, thread, time::Duration};
 
 const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 const VERBS: &[&str] = &[
@@ -48,7 +48,11 @@ impl Reporter {
 
     fn send(&self, message: &'static str) -> Result<(), Box<dyn std::error::Error>> {
         let event = Event {
-            release: Some(env!("CARGO_PKG_VERSION").into()),
+            release: Some(
+                option_env!("WG_RELEASE_VERSION")
+                    .unwrap_or(env!("CARGO_PKG_VERSION"))
+                    .into(),
+            ),
             platform: "native".into(),
             message: Some(message.into()),
             level: Level::Fatal,
@@ -76,9 +80,9 @@ impl Reporter {
     }
 }
 
-pub fn run(dispatch: impl FnOnce() -> ExitCode) -> ExitCode {
+pub fn run(dispatch: impl FnOnce(&dyn Fn(ErrorKind)) -> ExitCode) -> ExitCode {
     let Some(reporter) = Reporter::configured() else {
-        return dispatch();
+        return dispatch(&|_| {});
     };
     let previous = panic::take_hook();
     let panic_reporter = reporter.clone();
@@ -86,9 +90,20 @@ pub fn run(dispatch: impl FnOnce() -> ExitCode) -> ExitCode {
         panic_reporter.report("Command panicked");
         previous(info);
     }));
-    let status = dispatch();
-    if status != ExitCode::SUCCESS {
-        reporter.report("Command failed");
-    }
-    status
+    dispatch(&|kind| {
+        // Input validation, absent input files, and a closed output pipe are routine outcomes.
+        if !matches!(
+            kind,
+            ErrorKind::InvalidData
+                | ErrorKind::InvalidInput
+                | ErrorKind::UnexpectedEof
+                | ErrorKind::NotFound
+                | ErrorKind::NotADirectory
+                | ErrorKind::IsADirectory
+                | ErrorKind::AlreadyExists
+                | ErrorKind::BrokenPipe
+        ) {
+            reporter.report("Command failed");
+        }
+    })
 }

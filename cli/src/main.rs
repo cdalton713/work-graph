@@ -8,7 +8,7 @@ fn main() -> ExitCode {
     telemetry::run(dispatch)
 }
 
-fn dispatch() -> ExitCode {
+fn dispatch(on_io_failure: &dyn Fn(std::io::ErrorKind)) -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|v| v == "usage") {
         return wg_preview::usage::command(std::env::args().skip(2));
     }
@@ -53,7 +53,11 @@ fn dispatch() -> ExitCode {
             Some("check" | "owns" | "log" | "run" | "contract")
         )
     }) {
-        return wg_preview::local::command(std::env::args().skip(1).collect(), None);
+        return wg_preview::local::command_with_io_handler(
+            std::env::args().skip(1).collect(),
+            None,
+            on_io_failure,
+        );
     }
     match (args.next().as_deref(), args.next()) {
         (Some(verb), dir) if verb == "config" && args.next().is_none() => {
@@ -61,6 +65,7 @@ fn dispatch() -> ExitCode {
                 Ok(config) => config,
                 Err(e) => {
                     eprintln!("{e}");
+                    on_io_failure(e.kind());
                     return ExitCode::FAILURE;
                 }
             };
@@ -83,11 +88,13 @@ fn dispatch() -> ExitCode {
                         wg_preview::state::write_pretty_json(std::io::stdout().lock(), &report)
                     {
                         eprintln!("{e}");
+                        on_io_failure(e.kind());
                         return ExitCode::FAILURE;
                     }
                 }
                 Err(e) => {
                     eprintln!("{e}");
+                    on_io_failure(e.kind());
                     return ExitCode::from(2);
                 }
             }

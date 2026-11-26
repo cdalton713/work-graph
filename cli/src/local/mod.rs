@@ -10,16 +10,21 @@ pub use card::CardWriter;
 use serde_json::Value;
 use std::{io, path::Path, process::ExitCode};
 
-type Error = (u8, String);
+#[derive(Debug)]
+enum Failure {
+    Expected(u8),
+    Io(u8, io::ErrorKind),
+}
+type Error = (Failure, String);
 type Result<T> = std::result::Result<T, Error>;
 fn invalid(s: impl Into<String>) -> Error {
-    (2, s.into())
+    (Failure::Expected(2), s.into())
 }
 fn failed(s: impl Into<String>) -> Error {
-    (1, s.into())
+    (Failure::Expected(1), s.into())
 }
 fn ioerr(e: io::Error) -> Error {
-    invalid(e.to_string())
+    (Failure::Io(2, e.kind()), e.to_string())
 }
 fn list(v: &Value) -> &[Value] {
     v.as_array().map(Vec::as_slice).unwrap_or_default()
@@ -139,10 +144,25 @@ fn compact(v: &Value) -> String {
 }
 
 pub fn command(args: Vec<String>, cards: Option<&mut dyn CardWriter>) -> ExitCode {
+    command_with_io_handler(args, cards, |_| {})
+}
+
+pub fn command_with_io_handler(
+    args: Vec<String>,
+    cards: Option<&mut dyn CardWriter>,
+    on_io_failure: impl FnOnce(io::ErrorKind),
+) -> ExitCode {
     match execute(&args, cards) {
         Ok(code) => ExitCode::from(code),
-        Err((code, msg)) => {
+        Err((failure, msg)) => {
             eprintln!("{msg}");
+            let code = match failure {
+                Failure::Expected(code) => code,
+                Failure::Io(code, kind) => {
+                    on_io_failure(kind);
+                    code
+                }
+            };
             ExitCode::from(code)
         }
     }
@@ -214,7 +234,7 @@ fn execute(args: &[String], cards: Option<&mut dyn CardWriter>) -> Result<u8> {
     } else {
         None
     };
-    let cfg = Config::discover().map_err(|e| failed(e.to_string()))?;
+    let cfg = Config::discover().map_err(|e| (Failure::Io(1, e.kind()), e.to_string()))?;
     let p = cfg.load_plan(dir).map_err(ioerr)?;
     let config = cfg.report(None).map_err(ioerr)?;
     match verb.as_str() {

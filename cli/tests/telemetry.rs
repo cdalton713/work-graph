@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{Ipv4Addr, TcpListener};
 use std::process::Command;
@@ -22,11 +22,16 @@ fn command(socket: &TcpListener) -> Command {
     cmd
 }
 
-fn check_event(verb: &OsStr, arg: &OsStr, tag: &str, message: &str, status: i32) {
-    let socket = listener();
+fn check_event(
+    socket: &TcpListener,
+    cmd: &mut Command,
+    tag: &str,
+    message: &str,
+    status: i32,
+) -> std::process::Output {
     // Leave the response pending until the command exits to exercise the flush deadline.
     let start = Instant::now();
-    let result = command(&socket).args([verb, arg]).output().unwrap();
+    let result = cmd.output().unwrap();
     assert_eq!(result.status.code(), Some(status));
     assert!(start.elapsed() < Duration::from_secs(3));
 
@@ -53,32 +58,48 @@ fn check_event(verb: &OsStr, arg: &OsStr, tag: &str, message: &str, status: i32)
     let body = String::from_utf8(bytes).unwrap();
     assert!(!body.contains(PRIVATE));
     let event: serde_json::Value = serde_json::from_str(body.lines().nth(2).unwrap()).unwrap();
-    assert_eq!(event["release"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        event["release"],
+        option_env!("WG_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+    );
     assert_eq!(event["tags"]["command"], tag);
     assert_eq!(event["message"], message);
+    result
 }
 
+#[cfg(unix)]
 #[test]
-fn fatal_event_omits_unknown_verbs_arguments_and_environment() {
-    let details =
-        format!(r#"{{"plan":"{PRIVATE}","page_url":"https://fixture.invalid/?token={PRIVATE}"}}"#);
-    check_event(
-        PRIVATE.as_ref(),
-        details.as_ref(),
-        "unknown",
-        "Command failed",
-        2,
-    );
+fn storage_failure_emits_a_generic_event_only_with_opt_in() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let private_dir = dir.path().join(PRIVATE);
+    fs::create_dir(&private_dir).unwrap();
+    fs::write(private_dir.join("plan.json"), format!(r#"{{"effort":{{"team":"EX","summary":"{PRIVATE}","page_url":"https://fixture.invalid/?token={PRIVATE}"}}}}"#)).unwrap();
+    symlink("keymap.json", private_dir.join("keymap.json")).unwrap();
+    let socket = listener();
+    let run_check = || {
+        let mut cmd = command(&socket);
+        cmd.arg("check").arg(&private_dir);
+        cmd
+    };
+    let result = run_check().env_remove("WG_SENTRY_DSN").output().unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(!result.stderr.is_empty());
+    assert_quiet(&socket);
+    let reported = check_event(&socket, &mut run_check(), "check", "Command failed", 2);
+    assert_eq!(reported.stderr, result.stderr);
+    assert_eq!(reported.stdout, result.stdout);
 }
 
 #[cfg(unix)]
 #[test]
 fn panic_event_omits_panic_payload_and_preserves_exit() {
-    use std::os::unix::ffi::OsStrExt;
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
     let bytes = [PRIVATE.as_bytes(), &[0xff]].concat();
+    let socket = listener();
     check_event(
-        "usage".as_ref(),
-        OsStr::from_bytes(&bytes),
+        &socket,
+        command(&socket).arg("usage").arg(OsStr::from_bytes(&bytes)),
         "usage",
         "Command panicked",
         101,
@@ -86,23 +107,30 @@ fn panic_event_omits_panic_payload_and_preserves_exit() {
 }
 
 #[test]
-fn no_connection_without_opt_in_or_after_success() {
+fn normal_command_results_are_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("plan.json"),
+        r#"{"effort":{"rules":42,"team":"EX"}}"#,
+    )
+    .unwrap();
     let socket = listener();
-    assert!(
-        !command(&socket)
-            .env_remove("WG_SENTRY_DSN")
-            .arg(PRIVATE)
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        command(&socket)
-            .arg("--version")
-            .status()
-            .unwrap()
-            .success()
-    );
+    let dir = dir.path().to_str().unwrap();
+    for (args, code) in [
+        (vec![PRIVATE], 2),
+        (vec!["login", "--unknown-flag"], 2),
+        (vec!["config", dir, "extra"], 2),
+        (vec!["check", dir], 1),
+        (vec!["usage", "--help"], 0),
+        (vec!["--version"], 0),
+    ] {
+        let result = command(&socket).args(&args).output().unwrap();
+        assert_eq!(result.status.code(), Some(code), "{args:?}");
+        assert_quiet(&socket);
+    }
+}
+
+fn assert_quiet(socket: &TcpListener) {
     socket.set_nonblocking(true).unwrap();
     assert_eq!(
         socket.accept().unwrap_err().kind(),

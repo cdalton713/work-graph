@@ -583,6 +583,8 @@ The Postgres driver also reads `PG*` environment values, such as `PGSSLMODE` for
 
 Set `WG_SENTRY_DSN` to enable server error reports. Set `WG_SENTRY_BROWSER_DSN` to publish the browser DSN in `/api/config`. You can enable either setting independently. Both use `WG_SENTRY_ENVIRONMENT` (default `production`) and the same release as the build.
 
+Set `WG_SENTRY_DSN` in the Rust CLI process to report panics and fatal I/O errors. Set it separately in the server process to select the server’s Sentry project. Leave it unset in either process to keep reporting off there. CLI events contain the compiled release, the command verb and a fixed failure message. They omit arguments, paths, plan data and credentials.
+
 To upload browser source maps, set all three build variables. Use `SENTRY_AUTH_TOKEN` for the upload token, `SENTRY_ORG` for the organization slug, and `SENTRY_PROJECT_BROWSER` for the browser project slug. Set `WG_VERSION` to the same release at build time and at runtime. If unset, the release uses the first seven characters of `VERCEL_GIT_COMMIT_SHA`, or `dev` if no commit is available. The build uploads hidden source maps and removes the map files from `dist`. If any upload variable is empty, the build skips source maps and makes no upload request.
 
 For Vercel, set the variables in the project environment. For Docker, pass `--secret id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN` and the build arguments `--build-arg SENTRY_ORG --build-arg SENTRY_PROJECT_BROWSER --build-arg WG_VERSION` from the build environment.

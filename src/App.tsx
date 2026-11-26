@@ -155,6 +155,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const [query, setQuery] = useQuery();
   const overviewInitiatives = useMemo(() => query.getAll("initiative"), [query]);
   const overviewStates = useMemo(() => readProjectStates(query), [query]);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
   const [directoryResponse, setDirectory] = useState<ProjectList | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -218,7 +219,8 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
     confirmed.id === starter.project.id ? confirmed : null);
   const missing = project ? null : selection.missing;
 
-  useEffect(() => { api.projects().then((list) => setDirectory((now) => now ?? list)).catch((e) => setError(e.message)); }, []);
+  const viewingProject = !!query.get("project");
+
 
   // The overview also gives the project picker the count of issues that wait on the human.
   const [overview, setOverview] = useState<OverviewData | null>(null);
@@ -235,7 +237,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const [status, setStatus] = useState<ServerStatus | null>(null);
   useEffect(() => {
     let live = true, running = false, statusRunning = false;
-    const poll = () => {
+    const poll = async () => {
       if (running || document.hidden) return;
       if (installed) setNow(Date.now());
       running = true;
@@ -245,23 +247,29 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         statusRunning = true;
         api.status().then((s) => live && setStatus(s)).catch(() => {}).finally(() => { statusRunning = false; });
       }
-      api.overview().then((o) => {
+      try {
+        const list = viewingProject ? await api.projects() : await api.overview();
         if (!live) return;
-        const time = Date.now();
-        if (installed) setOverviewSyncedAt(new Date(time));
-        setOverview(o);
-        setNewProject(null);
-        setDirectory((old) => mergeDirectory(old, o));
-        setNow(time);
-      })
-        .catch((e) => live && setError(`overview: ${e.message}`))
-        .finally(() => { running = false; if (live) setOverviewBusy(false); });
+        setDirectory(old => mergeDirectory(site.readOnly ? null : old, list));
+        if ("summaries" in list) {
+          setOverview(list as OverviewData);
+          setNewProject(null);
+          if (installed) setOverviewSyncedAt(new Date());
+        }
+        setNow(Date.now());
+        setDirectoryError(null);
+      } catch (error) {
+        if (live) setDirectoryError((error as Error).message);
+      } finally {
+        running = false;
+        if (live) setOverviewBusy(false);
+      }
     };
     poll();
     const timer = setInterval(poll, OVERVIEW_MS);
     document.addEventListener("visibilitychange", poll);
     return () => { live = false; clearInterval(timer); document.removeEventListener("visibilitychange", poll); };
-  }, [overviewTick, installed]);
+  }, [overviewTick, installed, viewingProject]);
 
 
   const load = useCallback(async (project: Project) => {
@@ -278,7 +286,13 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
       setSyncedAt(new Date()); // also for an answer of "no change": the page is as new as this poll
       setError(null);
     } catch (e) {
-      if (mine === generation.current) setError((e as Error).message);
+      if (mine === generation.current) {
+        if (site.readOnly || project.workspace?.startsWith("shared:")) {
+          version.current = null;
+          setData(null);
+        }
+        setError((e as Error).message);
+      }
     } finally {
       if (mine === generation.current) setBusy(false);
     }
@@ -975,7 +989,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         coordinatorDetail={coordinator?.title} coordinatorNotice={coordinatorNotice} staleDetail={stale?.title}>
         {commands(true)}
       </EffortSheet>}
-      {(closeError || error) && <div className="error" role="alert"><span>{closeError || error}</span><button type="button" className="ghost" onClick={() => { setError(null); setCloseError(null); }}>Dismiss</button></div>}
+      {(closeError || error || directoryError) && <div className="error" role="alert"><span>{closeError || error || directoryError}</span><button type="button" className="ghost" onClick={() => { setError(null); setCloseError(null); setDirectoryError(null); }}>Dismiss</button></div>}
 
       {hover && keys && (
         <div className="keys" role="dialog" aria-label="Keyboard keys">

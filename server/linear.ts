@@ -1,4 +1,6 @@
 // Linear GraphQL access for the work-graph UI. The API key stays in this process.
+import { createHash } from "node:crypto";
+import { retryDeadline } from "../src/lib/retry-after.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Comment, GraphData, Issue, IssuePatch, IssueRef, Label, Milestone, Person, Project, PullRequest, State, Team } from "../src/lib/types.ts";
 import { serverSite } from "./site.ts";
@@ -22,6 +24,19 @@ export class LinearError extends Error {
   constructor(message: string, status = 502) {
     super(message);
     this.status = status;
+  }
+}
+
+export class LinearReadLimited extends LinearError {
+  readonly deadline: number;
+  constructor(deadline: number, message = "Linear rate limit") {
+    super(message, 429);
+    this.deadline = deadline;
+    this.retryAfter = this.remaining();
+  }
+
+  remaining(): string {
+    return String(Math.max(0, Math.ceil((this.deadline - transport.now()) / 1000)));
   }
 }
 
@@ -124,8 +139,8 @@ export interface LinearBudget {
 }
 type LinearMeta = { at: number; teams: Record<string, Team>; labels: Label[] };
 
-export function createLinearCache() {
-  return { budgets: new Map<string, LinearBudget>(), meta: new Map<string, LinearMeta>() };
+export function createLinearCache(readDeadlines = new Map<string, number>()) {
+  return { readDeadlines, budgets: new Map<string, LinearBudget>(), meta: new Map<string, LinearMeta>() };
 }
 
 export const linearCache = new AsyncLocalStorage<ReturnType<typeof createLinearCache>>();
@@ -146,13 +161,27 @@ export function linearBudget(workspace: string = workspaceOf().id): LinearBudget
   return currentCache().budgets.get(workspace) ?? null;
 }
 
+function budgetNumber(headers: Headers | undefined, name: string): number | null {
+  const text = headers?.get?.(`x-ratelimit-${name}`);
+  const value = text?.trim() ? Number(text) : NaN;
+  return Number.isFinite(value) ? value : null;
+}
+
+function limitDeadline(headers: Headers, retryAfter: string | null, now: number): number {
+  let reset = 0;
+  const cost = Number(headers?.get?.("x-complexity")) || 1;
+  for (const limit of ["requests", "complexity", "endpoint-requests", "endpoint-complexity"]) {
+    const remaining = budgetNumber(headers, `${limit}-remaining`);
+    if (remaining !== null && remaining < (limit.endsWith("complexity") ? Math.max(1, cost) : 1)) {
+      reset = Math.max(reset, budgetNumber(headers, `${limit}-reset`) ?? 0);
+    }
+  }
+  return Math.max(reset, retryDeadline(retryAfter, now, reset > now ? 0 : 30_000));
+}
+
 function keepBudget(headers: Headers | undefined): void {
   if (!headers || typeof headers.get !== "function") return;
-  const number = (name: string) => {
-    const text = headers.get(`x-ratelimit-${name}`);
-    const value = text === null ? NaN : Number(text);
-    return Number.isFinite(value) ? value : null;
-  };
+  const number = (name: string) => budgetNumber(headers, name);
   const budget: LinearBudget = {
     requestsRemaining: number("requests-remaining"), requestsLimit: number("requests-limit"),
     requestsReset: number("requests-reset"),
@@ -294,7 +323,7 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
   const workspace = memberWrite ? shared.writer : workspaceOf();
   if (!workspace || (memberWrite && workspace.needsKey)) throw new NeedsLinearAccess();
   const { key, kind, oauthKey, needsKey, rejectApiKey } = workspace;
-  currentCache();
+  const { readDeadlines } = currentCache();
   serverSite();
   if (needsKey) throw new LinearSignInRequired();
   if (!key) throw new LinearError("LINEAR_API_KEY is not set", 500);
@@ -320,7 +349,12 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         const result = transportFailure(error);
         return kind === "oauth" || rejectApiKey ? { ...result, error: new LinearError("Linear request failed") } : result;
       };
+      const credentialId = (value: string) => createHash("sha256").update(value).digest("hex");
       const send = async (value: string) => {
+        if (!mutation) {
+          const deadline = readDeadlines.get(credentialId(value));
+          if (deadline !== undefined && deadline > transport.now()) throw new LinearReadLimited(deadline);
+        }
         try { return await transport.fetch(ENDPOINT, init(value)); } catch (error) { return failed(error); }
       };
       let sentCredential = credential;
@@ -396,6 +430,16 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       const failure: Failure = rated ? "rate" : response.status >= 500 ? "server" : "final";
       const retryAfter = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;
       const error = new LinearError(rated ? `Linear rate limit: ${detail}` : options?.manageAccess ? "Linear request failed" : `Linear: ${detail}`, rated ? 429 : 502);
+      if (rated) {
+        const now = transport.now();
+        for (const [id, deadline] of readDeadlines) {
+          if (deadline <= now) readDeadlines.delete(id);
+        }
+        const id = credentialId(sentCredential);
+        const deadline = Math.max(readDeadlines.get(id) ?? 0, limitDeadline(response.headers, retryAfter, now));
+        readDeadlines.set(id, deadline);
+        if (!mutation) throw new LinearReadLimited(deadline, error.message);
+      }
       if (rated && retryAfter) error.retryAfter = retryAfter;
       return { failure, error, retryAfter };
     });
@@ -474,6 +518,7 @@ export async function addReviewUrls(issues: Pick<Issue, "url" | "pullRequests">[
       for (const p of data.pullRequests.nodes as { slugId: string; url: string }[]) slugs.set(p.url, p.slugId);
     }
   } catch (error) {
+    if (error instanceof LinearReadLimited) throw error;
     console.warn(`wg ui: no Linear review links: ${(error as Error).message}`);
   }
   for (const p of prs) if (slugs.has(p.url)) p.reviewUrl = `https://linear.app/${workspace}/review/${slugs.get(p.url)}`;

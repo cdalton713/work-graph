@@ -15,8 +15,9 @@ test("the phone header gives at least half its width to the project picker", asy
       ...overview,
       summaries: overview.summaries.map((summary) => ({ ...summary, you: summary.id === "fixture" ? waiting : [] })),
     } });
-  });
-  await screens.project(page);
+  }, { times: 1 });
+  await screens.overview(page);
+  await page.locator(".ov-open").filter({ hasText: "Example project" }).first().click();
   const bar = page.locator(".project-bar");
   const overview = bar.getByRole("button", { name: /^Overview/ });
   const picker = bar.getByRole("button", { name: /Example project/ });

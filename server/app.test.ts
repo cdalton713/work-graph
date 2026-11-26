@@ -865,6 +865,30 @@ describe("graph cache of the server", () => {
     expect(await saved.json()).toEqual({ ok: true, recorded: true });
     expect(asked.comments).toHaveLength(1);
   });
+  it("shares the Linear cooldown across stale and cold graphs and the overview", async () => {
+    graphLinear();
+    setTransport({ now: () => clock.at, sleep: async () => {} });
+    try {
+      const server = cached();
+      await graph(server, "p1");
+      clock.at += 60_000;
+      vi.mocked(fetch).mockClear().mockResolvedValueOnce(new Response(null, { status: 429, headers: { "Retry-After": "90" } }));
+      const stale = await graph(server, "p1");
+      expect(stale.headers.get("retry-after")).toBe("90");
+      expect(await stale.json()).toMatchObject({ stale: true });
+      clock.at += 60_000;
+      const [cold, overview] = await Promise.all([graph(server, "p2"), server.request("/api/overview", { headers: local })]);
+      expect(cold.status).toBe(429);
+      expect(cold.headers.get("retry-after")).toBe("30");
+      expect((await overview.json()).workspaces[0].retryAfter).toBe(30);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      clock.at += 30_000;
+      expect((await graph(server, "p2")).status).toBe(200);
+    } finally {
+      setTransport({ sleep: async () => {} });
+    }
+  });
+
   it("sends the last graph with stale, the error, and its load time when Linear fails, also for the version the page has", async () => {
     const { state } = graphLinear();
     const server = cached();
@@ -1210,6 +1234,38 @@ const rolesHeaders = async (email: string, id?: string) => {
 };
 const rolesPage = (now?: () => number) => createApp(hostedRoles, {
   team: "CD", dist, workspaces: [workWorkspace()], readOnly: false, auth: rolesAuth, linkToken: rolesToken, watchMs: 0, now,
+});
+
+it("recovers a shared deep link after the owner's credential cooldown", async () => {
+  const { tenants } = testTenants(TEAM);
+  const owner = (await tenants.byId("ada"))!;
+  const viewScope = "shared:example";
+  tenants.sharedWorkspaces = async () => [{ id: viewScope, role: "viewer", owner,
+    name: owner.human, workspace: owner.workspaces[0], projectId: "project" }];
+  const page = createApp(hostedRoles, { team: TEAM, dist, auth: rolesAuth, tenants, watchMs: 0 });
+  const headers = await rolesHeaders("grace@example.com");
+  try {
+    let now = 1000;
+    let sharedReads = 0;
+    setTransport({ now: () => now, fetch: async (_url, init) => {
+      const { query } = JSON.parse(String(init.body));
+      if (query.includes("projects(first:50")) return Response.json({ data: { teams: { nodes: [] } } });
+      if (++sharedReads === 1) return new Response(null, { status: 429, headers: { "Retry-After": "90" } });
+      return Response.json({ data: { project: { id: "project", name: "Current name" } } });
+    } });
+    const list = async () => (await page.request("/api/projects", { headers })).json();
+    const limited = await list();
+    expect(limited.workspaces).toContainEqual(expect.objectContaining({ id: viewScope, retryAfter: 90 }));
+    expect(limited.projects).toEqual([]);
+    now += 89_000;
+    expect((await list()).workspaces).toContainEqual(expect.objectContaining({ id: viewScope, retryAfter: 1 }));
+    expect(sharedReads).toBe(1);
+    now += 1000;
+    expect((await list()).projects).toContainEqual(expect.objectContaining({ workspace: viewScope, id: "project", name: "Current name" }));
+  } finally {
+    setTransport({ sleep: async () => {} });
+    page.link.stop();
+  }
 });
 
 it("allows each account to join only its shared projects and closes a removed member's link", async () => {

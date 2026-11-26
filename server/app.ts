@@ -36,7 +36,7 @@ import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAut
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { NeedsLinearAccess, sharedLinear, LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
+import { NeedsLinearAccess, sharedLinear, LinearReadLimited, LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, type LinkMember, LinkHub, LinkRoomFull, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
@@ -267,12 +267,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     await next();
   });
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
-  type CachedList = { at: number; list: ProjectList | null };
+  type CachedList = { at: number; list: ProjectList | null; limits?: Map<string, LinearReadLimited> };
   const newList = (): CachedList => ({ at: 0, list: null });
+  // Tenant contexts on this host may use the same credential.
+  const readDeadlines = new Map<string, number>();
   const newState = (tenant: Tenant) => ({
     site: siteOf(tenant),
     graphs: new Map<string, ReturnType<typeof createGraphCache>>(),
-    linear: createLinearCache(),
+    linear: createLinearCache(readDeadlines),
     names: newList(), sharedNames: newList(),
     lists: { started: 0, stored: 0 },
     sharedRefresh: undefined as Promise<ProjectList> | undefined,
@@ -922,6 +924,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const address = shareUrl ?? (auth && !readOnly ? `https://${rules.hosted!.host}` : undefined);
         return [{
           id, name, ...(address ? { shareUrl: address } : {}),
+          ...(result.status === "rejected" && result.reason instanceof LinearReadLimited && { retryAfter: Number(result.reason.remaining()) }),
           ...(result.status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
         }];
       }),
@@ -937,6 +940,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if ((tenants || auth || readOnly) && order > lists.stored) {
       lists.stored = order;
       sharedNames.list = shared;
+      sharedNames.limits = new Map(workspaces.flatMap(({ id }, at) => {
+        const result = results[at];
+        return result.status === "rejected" && result.reason instanceof LinearReadLimited ? [[id, result.reason]] : [];
+      }));
       sharedNames.at = Date.now();
     }
     return viewer ? shared : list;
@@ -946,16 +953,27 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const scoped = sharedScope.getStore();
     const list = scoped ? { workspaces: [], projects: [] } : await projectList(viewer);
     const shared = await sharedFor(tenant);
-    const projects = await Promise.all(shared.map(async (entry) => {
+    const sharedRows: ProjectList["workspaces"] = shared.map(sharedEntry);
+    const projects = await Promise.all(shared.map(async (entry, at) => {
       const read = () => gql("query($id:String!){project(id:$id){id name url status{name type}}}", { id: entry.projectId });
-      const data = scoped ? await read() : await runInTenant(entry.owner, () => linearWorkspace.run(entry.workspace, read)).catch(() => null);
+      let data;
+      try {
+        data = scoped ? await read() : await runInTenant(entry.owner, () => linearWorkspace.run(entry.workspace, read));
+      } catch (error) {
+        if (scoped) throw error;
+        if (error instanceof LinearReadLimited) {
+          sharedRows[at].error = "Linear rate limit";
+          sharedRows[at].retryAfter = Number(error.remaining());
+        }
+        return null;
+      }
       const project = data?.project;
       return project?.id === entry.projectId && typeof project.name === "string" ? {
         id: entry.projectId, name: project.name, url: project.url ?? "", status: project.status?.name ?? "",
         statusType: project.status?.type ?? "", workspace: entry.id, workspaceName: entry.name,
       } : null;
     }));
-    return { workspaces: [...list.workspaces, ...shared.map(sharedEntry)],
+    return { workspaces: [...list.workspaces, ...sharedRows],
       projects: [...list.projects, ...projects.filter((project) => project !== null)] };
   };
   api.get("/project-creation/teams", async (c) => {
@@ -1004,6 +1022,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const shared = await sharedFor(scope().tenant);
     const open = list.projects.filter((p) => p.statusType !== "completed" && p.statusType !== "canceled");
     await checkAll(open);
+    const recordLimit = (id: string, seconds: number | undefined) => {
+      const workspace = list.workspaces.find(w => w.id === id);
+      if (workspace && seconds !== undefined) workspace.retryAfter = Math.max(workspace.retryAfter ?? 0, seconds);
+    };
     const summaries: ProjectSummary[] = [];
     const human = sharedScope.getStore()?.member.name ?? serverSite().human;
     let next = 0;
@@ -1015,11 +1037,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         try {
           // The viewer takes no older graph when Linear fails (see the graph route).
           const read = () => linearWorkspace.run(workspace, () => graphs().get(p.id, { fresh: viewer || !!entry }));
-          const { data } = entry ? await runInTenant(entry.owner, read) : await read();
+          const { data, retryAfter } = entry ? await runInTenant(entry.owner, read) : await read();
+          recordLimit(p.workspace, retryAfter);
           const waitNames = await waitNamesFor(entry?.owner ?? scope().tenant, workspace, p.id);
           const summarizeProject = () => summarize(shown(data, viewer || !!entry), p.workspace);
           summaries.push(waitNames ? requestSite.run({ ...serverSite(), human, waitNames }, summarizeProject) : summarizeProject());
         } catch (error) {
+          if (error instanceof LinearReadLimited) recordLimit(p.workspace, Number(error.remaining()));
           summaries.push({ workspace: p.workspace, id: p.id, planned: 0, done: 0, counts: [], you: [], running: 0, review: 0, ready: 0,
             effort: null, freshness: null, updatedAt: null, error: (error as Error).message });
         }
@@ -1039,10 +1063,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const { state } = scope();
     const { sharedNames } = state;
     const find = () => sharedNames.list?.projects.find((p) => p.workspace === workspace && p.id === id);
-    if (id && Date.now() - sharedNames.at > (find() ? 60_000 : 5_000)) {
+    const limited = sharedNames.limits?.get(workspace);
+    if (id && (limited ? Number(limited.remaining()) === 0 : Date.now() - sharedNames.at > (find() ? 60_000 : 5_000))) {
       state.sharedRefresh ??= projectList().finally(() => { state.sharedRefresh = undefined; });
       await state.sharedRefresh;
     }
+    const failed = sharedNames.limits?.get(workspace);
+    if (failed) throw failed;
     if (sharedNames.list?.workspaces.find((w) => w.id === workspace)?.error) throw new LinearError("Linear did not confirm that this project is shared. Try again.", 503);
     if (!id || !find()) throw new LinearError("no shared project with this id", 404);
     return id;
@@ -1056,9 +1083,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // The viewer gets the error of the refresh in its place: an issue of the older graph can be in another project
     // now. A graph in memory can still have an issue that left the project, until its full reload (`FULL_MS`):
     // the check for changes does not see an issue that is in the project no more.
-    const { data, version: graphVersion, stale, error, loadedAt } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
+    const { data, version: graphVersion, stale, error, loadedAt, retryAfter } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
     const waitNames = await waitNamesFor(scope().tenant, linearWorkspace.getStore()!, c.req.param("id"));
     const version = waitNames ? `${graphVersion}:${createHash("sha256").update(JSON.stringify(waitNames)).digest("hex")}` : graphVersion;
+    if (retryAfter !== undefined) c.header("Retry-After", String(retryAfter));
     if (!stale && c.req.query("have") === version) return c.body(null, 204);
     return c.json({ ...shown(data, viewer || !!shared), ...(waitNames && { waitNames }), version, workspace: shared?.id ?? linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
   });
@@ -1590,6 +1618,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // An API request writes its one log line in the request log above. Another route writes the error here.
     if (status === 500 && !c.req.path.startsWith("/api/") && !c.req.path.startsWith("/join/")) console.error(error);
     if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) c.header("Retry-After", "1");
+    if (error instanceof LinearError && error.retryAfter) c.header("Retry-After",
+      error instanceof LinearReadLimited ? error.remaining() : error.retryAfter);
     return c.json({ error: error.message }, status);
   });
   // Linear edits that did not come through this page: for each project with a connected coordinator,

@@ -211,15 +211,42 @@ describe("gql retry and limit", () => {
   it.each([
     ["a network error", () => new TypeError("fetch failed")],
     ["a timeout", timeout],
-    ["HTTP 429", () => json({ errors: [{ message: "Too many requests" }] }, 429)],
     ["HTTP 503", () => json(null, 503)],
-    ["RATELIMITED", rateLimited],
   ] as const)("tries a query again after %s, with a longer delay each time", async (_name, failure) => {
     const make = (): Response | (() => Error) => { const f = failure(); return f instanceof Response ? f : () => f; };
     const fetch = answers(make(), make(), ok());
     expect(await gql("query{ viewer{id} }")).toEqual({ viewer: { id: "me" } });
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(sleeps).toEqual([500, 1000]); // random 0.5: the exponential delay itself
+  });
+
+  it.each([
+    [429, "90", 90], [400, new Date(91_000).toUTCString(), 90], [400, null, 30],
+  ] as const)("holds reads after status %i with Retry-After %s", async (status, header, seconds) => {
+    let now = 1000;
+    const fetch = vi.fn().mockResolvedValueOnce(json({ errors: [{ message: "Limited",
+      extensions: { code: "RATELIMITED" } }] }, status, header ? { "Retry-After": header } : {}))
+      .mockImplementation(async () => ok());
+    setTransport({ fetch, now: () => now, sleep: async () => {} });
+    const read = () => gql("query{ viewer{id} }");
+    await expect(read()).rejects.toMatchObject({ status: 429, retryAfter: String(seconds) });
+    now += seconds * 1000 - 1000;
+    await Promise.all([read(), read()].map(result => expect(result).rejects.toMatchObject({ retryAfter: "1" })));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await linearWorkspace.run({ ...linearWorkspace.getStore()!, key: "other" }, read);
+    now += 1000;
+    await read();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([{}, { "retry-after": "20" }] as Record<string, string>[])("uses the latest exhausted budget reset", async extra => {
+    const response = json({ errors: [{ message: "Limit", extensions: { code: "RATELIMITED" } }] }, 400, {
+      "x-ratelimit-requests-remaining": "0", "x-ratelimit-requests-reset": "91000",
+      "x-ratelimit-endpoint-complexity-remaining": "0", "x-ratelimit-endpoint-complexity-reset": "181000",
+      "x-ratelimit-complexity-remaining": "5", "x-ratelimit-complexity-reset": "601000", ...extra,
+    });
+    answers(response);
+    await expect(gql("query{ viewer{id} }")).rejects.toMatchObject({ status: 429, retryAfter: "180" });
   });
 
   it("stops after three tries and gives the last error", async () => {

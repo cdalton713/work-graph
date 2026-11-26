@@ -11,6 +11,20 @@ export function inboxReply(move: YourMove, readOnly: boolean): InboxReply | null
   return move.answer ? { kind: "issue", ...move.answer } : null;
 }
 
+export function issueReplyReceipt({ answered }: Pick<Comment, "answered">) {
+  if (answered === true) return { text: "sent", signal: "done" } as const;
+  if (answered === false) {
+    return { text: "The comment was saved. The server could not mark it as answered.", signal: "stop" } as const;
+  }
+  return { text: "The comment was saved and was not marked as an answer.", signal: "idle" } as const;
+}
+
+export function needsLinearWriteAccess(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("status" in error) || error.status !== 403 || !("body" in error)) return false;
+  const { body } = error;
+  return !!body && typeof body === "object" && "code" in body && body.code === "needs_linear_access";
+}
+
 export function latestReplyPrompt(comments: Comment[]): string | undefined {
   let latest: Comment | undefined;
   for (const comment of comments) {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { agentReplyLine, agentReplyPending, applyAgentReplyResult, canReplyToAgent, inboxReply, latestReplyPrompt, type AgentReplyReceipt, type InboxReply } from "../lib/reply";
+import { agentReplyLine, agentReplyPending, applyAgentReplyResult, canReplyToAgent, inboxReply, issueReplyReceipt, latestReplyPrompt, type AgentReplyReceipt, type InboxReply } from "../lib/reply";
 import { Reply } from "./Reply";
 import { parseOptions } from "../lib/options";
 import { ownerWords } from "../lib/words";
@@ -10,7 +10,7 @@ import { PROJECT_STATES, type ProjectStateName, type Stall, overviewTitle } from
 import { type AgentReplyResult, type Agents, type Ask, type Presence, type ProjectRef, agentName, agentNeeds, agentState, agentsFresh, agentsShown, projectKey } from "../lib/link";
 import { site } from "../lib/site";
 import { useLink } from "../useLink";
-import type { Project, ProjectList } from "../lib/types";
+import type { Comment, Project, ProjectList } from "../lib/types";
 import { CopyButton, Lamp, Picker, PrLinks, Rich } from "./ui";
 
 const STORE = "wg-overview";
@@ -37,8 +37,8 @@ function stored(): OverviewFilter {
 type SentWorker = { project: Project; move: YourMove };
 type InboxRow = SentWorker & { stall: Stall | null };
 
-function InboxAnswer({ target, project, expanded, sent, onSent }: {
-  target: InboxReply; project: Project; expanded: boolean; sent: boolean; onSent: (labelFailed: boolean) => void;
+function InboxAnswer({ target, project, expanded, submitted, onSent }: {
+  target: InboxReply; project: Project; expanded: boolean; submitted: boolean; onSent: (comment?: Comment) => void;
 }) {
   const issueId = target.kind === "issue" ? target.issueId : null;
   const [prompt, setPrompt] = useState<{ body?: string; error?: string } | null>(null);
@@ -53,24 +53,25 @@ function InboxAnswer({ target, project, expanded, sent, onSent }: {
   }, [expanded, issueId, project.workspace, project.id]);
 
   const body = target.kind === "worker" ? target.ask.body : prompt?.body ?? "";
-  const { question, options } = parseOptions(sent ? "" : body);
+  const { question, options } = parseOptions(submitted ? "" : body);
   return (
     <>
       {target.kind === "worker"
-        ? <Rich text={sent ? body : question} />
+        ? <Rich text={submitted ? body : question} />
         : prompt?.error
           ? <p role="alert" className="sig-fg-stop">Could not load the last comment. {prompt.error}</p>
           : prompt?.body
-            ? <Rich text={sent ? body : question} />
+            ? <Rich text={submitted ? body : question} />
             : !prompt && <p role="status">Loading the last comment…</p>}
-      {!sent && <Reply options={options} label={target.kind === "worker" ? "Reply to the worker" : "Send answer"}
+      {!submitted && <Reply options={options} label={target.kind === "worker" ? "Reply to the worker" : "Send answer"}
+        accessHref={`?${new URLSearchParams({ workspace: project.workspace ?? site.defaultWorkspace, project: project.id })}`}
         placeholder="Write a reply. ⌘↵ sends it." send={async (body) => {
           if (target.kind === "worker") {
             await api.reply(project.id, target.ask.id, body, project.workspace);
-            onSent(false);
+            onSent();
           } else {
             const comment = await api.comment(target.issueId, body, project.workspace, project.id);
-            onSent(comment.answered === false);
+            onSent(comment);
           }
         }} />}
     </>
@@ -164,7 +165,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const waitingIssues = inboxProjects.reduce((n, r) => n + (r.summary?.you.length ?? 0), 0);
   const [active, setActive] = useState(0);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [sentIssues, setSentIssues] = useState<Map<string, boolean>>(() => new Map());
+  const [issueReceipts, setIssueReceipts] = useState<Map<string, ReturnType<typeof issueReplyReceipt>>>(() => new Map());
   const [sentWorkers, setSentWorkers] = useState<Map<string, SentWorker>>(() => new Map());
   const inbox = useMemo<InboxRow[]>(() => rankMoves<InboxRow>(inboxProjects.flatMap(({ project, summary, stalls }) => [
     ...(summary?.you ?? []).map((move) => ({ project, move, stall: null })),
@@ -210,7 +211,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
     if (!("summaries" in list)) return;
     const waiting = new Set(list.summaries.flatMap((summary) => summary.you.flatMap((move) =>
       move.answer ? [`${summaryKey(summary)}:issue:${move.answer.issueId}`] : [])));
-    setSentIssues((old) => {
+    setIssueReceipts((old) => {
       const next = new Map([...old].filter(([key]) => waiting.has(key)));
       return next.size === old.size ? old : next;
     });
@@ -384,7 +385,8 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                 : target?.kind === "issue" ? `${projectKey}:issue:${target.issueId}`
                 : `${projectKey}:${m.agentWait?.id ?? m.identifier}:${stall?.kind ?? ""}`;
               const open = expanded === key;
-              const sent = target?.kind === "worker" ? sentWorkers.has(key) : target?.kind === "issue" && (target.sent || sentIssues.has(key));
+              const receipt = issueReceipts.get(key);
+              const sent = target?.kind === "worker" ? sentWorkers.has(key) : target?.kind === "issue" && target.sent;
               const detailId = `inbox-detail-${encodeURIComponent(key)}`;
               const go = () => onOpen(p, stall ? stall.issue : m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier);
               const stamp = m.agentWait?.at ?? m.updatedAt;
@@ -415,7 +417,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                           {!target && <span className="inbox-effect">answer this agent in Orca</span>}
                         </>}
                         {effect && <span className="inbox-effect">{effect}</span>}
-                        {sent && <span className="inbox-effect sig-fg-done" role="status">sent</span>}
+                        {receipt
+                          ? <span className={`inbox-effect sig-fg-${receipt.signal}`} role="status">{receipt.text}</span>
+                          : sent && <span className="inbox-effect sig-fg-done" role="status">sent</span>}
                       </span>
                       <span className="inbox-project">{p.name}</span>
                       <span className="inbox-age mono">{age ?? ""}</span>
@@ -428,14 +432,13 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                   {target && (
                     <div className="inbox-detail" id={detailId} hidden={!open}>
                       <p className="inbox-why">{why}</p>
-                      <InboxAnswer target={target} project={p} expanded={open} sent={!!sent} onSent={(labelFailed) => {
+                      <InboxAnswer target={target} project={p} expanded={open} submitted={!!sent || !!receipt} onSent={(comment) => {
                         if (document.activeElement?.closest(".inbox-detail")?.id === detailId) {
                           inboxButtons().find((button) => button.getAttribute("aria-controls") === detailId)?.focus();
                         }
                         if (target.kind === "worker") setSentWorkers((old) => new Map(old).set(key, { project: p, move: m }));
-                        else setSentIssues((old) => new Map(old).set(key, labelFailed));
+                        else if (comment) setIssueReceipts((old) => new Map(old).set(key, issueReplyReceipt(comment)));
                       }} />
-                      {sentIssues.get(key) && <p className="warning" role="status">The comment was saved. The server could not mark it as answered.</p>}
                       <button type="button" className="ghost" onClick={go}>{m.identifier === "worker" || m.identifier === "coordinator" ? "Open project" : "Open issue"}</button>
                     </div>
                   )}

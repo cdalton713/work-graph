@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { expireAgentReplies, replyDeadline, type RoomAccount } from "../../server/linkstate";
-import { agentReplyLine, agentReplyPending, applyAgentReplyResult, canReplyToAgent, inboxReply, latestReplyPrompt } from "./reply";
+import { agentReplyLine, agentReplyPending, applyAgentReplyResult, canReplyToAgent, inboxReply, issueReplyReceipt, latestReplyPrompt, needsLinearWriteAccess } from "./reply";
 import type { YourMove } from "./overview";
 
 const move: YourMove = { identifier: "WG-1", title: "Pick a table", why: "Which table?", pullRequests: [], updatedAt: "" };
@@ -98,5 +98,24 @@ describe("agent replies", () => {
     expect(agentReplyPending(sent, deadline - 1)).toBe(true);
     expect(agentReplyPending(sent, deadline)).toBe(false);
     expect(agentReplyLine(sent, deadline)).toEqual({ text: "no result: check Orca before you reply again", signal: "stop" });
+  });
+});
+
+describe("issue reply receipts", () => {
+  it.each([
+    [{ answered: true }, "sent"],
+    [{}, "The comment was saved and was not marked as an answer."],
+    [{ answered: false }, "The comment was saved. The server could not mark it as answered."],
+  ])("shows the result of saving the comment (%j)", (comment, text) => {
+    expect(issueReplyReceipt(comment).text).toBe(text);
+  });
+});
+
+describe("reply access errors", () => {
+  it("offers access help only for the Linear write-access refusal", () => {
+    expect(needsLinearWriteAccess({ status: 403, body: { code: "needs_linear_access" } })).toBe(true);
+    expect(needsLinearWriteAccess({ status: 403, body: { code: "other" } })).toBe(false);
+    expect(needsLinearWriteAccess({ status: 500, body: { code: "needs_linear_access" } })).toBe(false);
+    expect(needsLinearWriteAccess(new Error("offline"))).toBe(false);
   });
 });

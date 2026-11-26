@@ -1,18 +1,20 @@
 import { useRef, useState } from "react";
 import { optionForKey, type ReplyOption } from "../lib/options";
+import { needsLinearWriteAccess } from "../lib/reply";
 
 interface ReplyProps {
   label: string;
   placeholder: string;
   hint?: string;
+  accessHref?: string;
   options?: ReplyOption[];
   send: (body: string) => Promise<void>;
 }
 
-export function Reply({ label, placeholder, hint, options = [], send }: ReplyProps) {
+export function Reply({ label, placeholder, hint, accessHref, options = [], send }: ReplyProps) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; needsAccess: boolean } | null>(null);
   const pending = useRef(false);
 
   async function submit(body: string, fromDraft = false) {
@@ -24,7 +26,7 @@ export function Reply({ label, placeholder, hint, options = [], send }: ReplyPro
       await send(body);
       if (fromDraft) setDraft("");
     } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+      setError({ message: error instanceof Error ? error.message : String(error), needsAccess: needsLinearWriteAccess(error) });
     } finally {
       pending.current = false;
       setSending(false);
@@ -65,7 +67,9 @@ export function Reply({ label, placeholder, hint, options = [], send }: ReplyPro
             e.currentTarget.form?.requestSubmit();
           }
         }} />
-      {error && <p role="alert" className="sig-fg-stop">Send failed. {error}</p>}
+      {error && <p role="alert" className="sig-fg-stop">Send failed. {error.message}
+        {error.needsAccess && accessHref && <> <a href={accessHref}>Open the project for Linear access</a>.</>}
+      </p>}
       <div className="row">
         <button type="submit" className="primary" disabled={!draft.trim() || sending}>{sending ? "Sending…" : label}</button>
         {hint && <span className="ask-hint">{hint}</span>}

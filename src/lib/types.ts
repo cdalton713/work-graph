@@ -136,6 +136,8 @@ export interface RoomCounts { workspace: string; project: string; coordinators: 
 /** `GET /api/status`: the state of the server. It holds no key, no issue text, and no message body. */
 export interface ServerStatus {
   version: string; contract: string | null;
+  /** The caller's display name, when the server reports it. */
+  human?: string;
   /** Seconds since the server started. */
   uptime: number;
   /** For each workspace, the values of its last Linear response; null before the first response. Times are epoch ms. */

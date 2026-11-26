@@ -1255,6 +1255,13 @@ it("allows each account to join only its shared projects and closes a removed me
       expect(await (await get("p1", { ...await rolesHeaders("grace@example.com", grace), "x-workspace": collab.id })).json())
         .toMatchObject({ waitNames: ["Ada"] });
       await accounts.setHuman(grace, "Grace");
+      for (const workspace of [undefined, collab.id]) {
+        const requestHeaders = new Headers(headers(graceToken));
+        if (workspace) requestHeaders.set("x-workspace", workspace);
+        const status = await page.request("/api/status", { headers: requestHeaders });
+        expect(status.status).toBe(200);
+        expect(await status.json()).toMatchObject({ human: "Grace" });
+      }
       expect((await page.request(path(view.id), { headers: headers(viewToken) })).status).toBe(403);
       expect((await page.request(path(collab.id), { headers: headers(viewToken) })).status).toBe(400);
       expect((await page.request(path(collab.id, "other"), { headers: headers(graceToken) })).status).toBe(404);
@@ -2003,6 +2010,7 @@ it("keeps config workspace selection and errors on the same routes", async () =>
   const graph = "/api/projects/p1/graph";
   try {
     expect(await (await ask("/api/config")).json()).toMatchObject({ human: "Ada", defaultWorkspace: "a" });
+    expect(await (await ask("/api/status")).json()).toMatchObject({ human: "Ada" });
     for (const [path, header, selected] of [[graph, undefined, "a"], [graph, "b", "b"],
       [graph + "?workspace=b", undefined, "a"], [graph + "?workspace=bogus", undefined, "a"]] as const) {
       const response = await ask(path, header);

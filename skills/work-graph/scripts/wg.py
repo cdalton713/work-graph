@@ -3256,6 +3256,10 @@ def move(plan_dir, plan, key, status_name, note=None, force=None, keep_worktree=
     if status_name == "Ready to Merge" and node["kind"] == "task":
         require_page_claim(plan, km, key)
     entry = km["nodes"].get(key) or die(f"{key}: not loaded")
+    if status_name == WAIT_STATUS:
+        current = project_claims(plan, km)
+        if runner := other_runners(plan, current).get(key):
+            raise ReadError(f"{key}: {runner} runs this node and sets its wait status")
     ident = entry["identifier"]
     issue = fetch_nodes({"nodes": {key: entry}}).get(entry["id"]) or die(f"{ident}: issue not found")
     if status_name == "Merged" and node["kind"] == "task" and norm(issue["state"], issue_labels(issue)) not in SETTLED:
@@ -3520,7 +3524,7 @@ def tool_problem(args, cwd=None):
     return f"{args[0]}: {command_error(result)}" if result.returncode else None
 
 
-def linear_workflow_check(team):
+def linear_workflow_check(team, *, setup_workspace=None):
     try:
         team_id, state_ids, labels = team_info(team)
     except ReadError as e:
@@ -3533,7 +3537,8 @@ def linear_workflow_check(team):
     expected_types = setup_status_types()
     optional = {"Triage", "Backlog", "Duplicate"}
     missing = sorted((expected_types.keys() - optional - state_ids.keys()) | agents)
-    lines = [("FAIL", f"{team} missing {', '.join(missing)}. Run wg setup.")] if missing else [
+    setup = f"wg setup --workspace {shlex.quote(setup_workspace)} --apply" if setup_workspace else "wg setup"
+    lines = [("FAIL", f"{team} missing {', '.join(missing)}. Run {setup}.")] if missing else [
         ("ok", f"{team} workflow and agent labels")]
     try:
         states = setup_states(team_id)
@@ -3564,7 +3569,8 @@ def preflight(plan_dir, plan, phase):
     team = plan_team(plan)
     try:
         gql("{ viewer { id } }")
-        for level, message in linear_workflow_check(team):
+        options = {"setup_workspace": plan_workspace(plan)} if load_keymap(plan_dir).get("collab") is not None else {}
+        for level, message in linear_workflow_check(team, **options):
             line(level, "linear", message)
     except ReadError as e:
         line("FAIL", "linear", str(e).replace("\n", " "))
@@ -4289,17 +4295,19 @@ def agent_merge_repo(plan_dir):
 CLAIMS_UNAVAILABLE = "claims unavailable"
 
 
-def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
+def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None, current_claims=None):
     """One status line; then what the coordinator does now (do), waits for (wait), and must know (note).
 
     It reads Linear, GitHub, and the run rows. For a shared effort it also maintains the page claims.
     """
     km, live, nodes, st, deps, rows = inputs if inputs is not None else snapshot(plan_dir, plan)
     try:
-        gates = collaboration_lines(plan, km, st, live)
+        current = project_claims(plan, km) if current_claims is None else current_claims
+        gates = collaboration_lines(plan, km, st, live, current)
     except (ClaimRefused, PlanPageUnavailable) as error:
         return CLAIMS_UNAVAILABLE, [("wait", f"claims page: {error}")]
     shared = km["nodes"] if km.get("collab") is not None else None
+    runners = other_runners(plan, current)
     effort = run_rows(km)["effort"]
     level = review_level(km)
     wave = [k for k in effort.get("wave", "").split(",") if k and k not in gates]
@@ -4513,7 +4521,21 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
     for k in order:
         n, s, row = nodes[k], st.get(k), rows.get(k, {})
         if k in gates:
-            if s not in SETTLED or gates[k][0] == "do":
+            runner = runners.get(k)
+            if runner and s and s not in SETTLED:
+                status_name = s.removeprefix("Needs ")
+                wait_label = f"needs-{human_slug(runner)}"
+                if s.startswith("Needs ") and gates[k] == ("wait", f"owner {k}"):
+                    runner = status_name
+                waiting = (status_name != s or s == "Ready to Merge"
+                           or any(label["name"] == wait_label for label in issue_labels(issue(k))))
+            else:
+                waiting = False
+            if waiting:
+                lines.append(("note", f"human {k}: waits on {runner}"))
+                if gates[k][0] == "do" or gates[k][1].startswith("stale "):
+                    lines.append(gates[k])
+            elif s not in SETTLED or gates[k][0] == "do":
                 lines.append(gates[k])
             continue
         if k not in km["nodes"]:
@@ -4540,6 +4562,8 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
             add("do", "reconcile", k, f"{claims[0]} with no job in the run row")
         elif s == WAIT_STATUS:
             add("wait", "human", k, title(k))
+        elif current is not None and s.startswith("Needs "):
+            lines.append(("note", f"human {k}: waits on {s.removeprefix('Needs ')}"))
         elif n["kind"] == "task":
             task(k, s, row)
         elif n["kind"] == "ship-point" and (problem := suite_problem(k, n, row)):
@@ -4577,7 +4601,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
     if idle and not any(open_in_wave(k) for k in wave):
         lines.append(("do", "wave: pick the next wave from " + ",".join(idle)))
     project = km.get("project") or {}
-    if project.get("id"):
+    if project.get("id") and (current is None or current["role"] == "owner"):
         mapped = {entry["id"] for entry in km["nodes"].values()}
         try:
             for found in project_entries(project["id"], "issues", "id identifier title state{name}"):
@@ -4976,8 +5000,8 @@ def dispatch_lease(plan_dir, plan, km, key):
 def claim_gate_keys(lines):
     held = {text.rsplit(": job=", 1)[0].rsplit(" ", 1)[-1] for level, text in lines
             if level == "wait" and text.startswith("collaborator ")}
-    held.update(text.split()[1].rstrip(":") for _, text in lines
-                if text.startswith(("stale ", "owner "))
+    held.update(text.split()[1].rstrip(":") for level, text in lines
+                if text.startswith(("stale ", "owner ")) or (level == "note" and text.startswith("human "))
                 or (text.startswith("reconcile ") and text.split()[1].endswith(":")))
     return held
 
@@ -4998,19 +5022,38 @@ def require_page_claim(plan, km, key):
     claim_request(collab, workspace, "PUT", key, {"job": held["job"]})
 
 
-def collaboration_lines(plan, km, statuses, live):
-    """Return gates by node. Read the project claims once and maintain local claims."""
+OWNER_NODES = {"merge-point", "ship-point", "ops", "decision"}
+
+
+def project_claims(plan, km):
+    if (collab := km.get("collab")) is not None:
+        return claim_request(collab, plan_workspace(plan), "GET")
+    return None
+
+
+def other_runners(plan, current):
+    """The nodes this coordinator must leave to another runner, including stale claims."""
+    if current is None:
+        return {}
+    runners = ({n["key"]: "the owner" for n in plan["nodes"] if n["kind"] in OWNER_NODES}
+               if current["role"] != "owner" else {})
+    runners.update({held["node"]: held["holder"] for held in current["claims"] if not held["mine"]})
+    return runners
+
+
+def collaboration_lines(plan, km, statuses, live, current=None):
+    """Return gates by node and maintain local claims."""
     collab = km.get("collab")
     if collab is None:
         return {}
     workspace = plan_workspace(plan)
-    current = claim_request(collab, workspace, "GET")
+    current = current if current is not None else project_claims(plan, km)
     claims = {claim["node"]: claim for claim in current["claims"]}
     rows = run_rows(km)["nodes"]
     gates = {}
     if current["role"] != "owner":
         gates.update({n["key"]: ("wait", f"owner {n['key']}") for n in plan["nodes"]
-                      if n["kind"] in ("merge-point", "ship-point", "ops")})
+                      if n["kind"] in OWNER_NODES})
     for key, row in rows.items():
         entry = km["nodes"].get(key, {})
         issue = live.get(entry.get("id"), {})
@@ -5932,7 +5975,17 @@ def contract_hash():
     return hashlib.sha256(contract_text().encode()).hexdigest()[:12]
 
 
-def link_lines(messages, keys=None, plan_dir=None):
+def answer_runner(key, current):
+    """Return who should handle a message that this coordinator must skip."""
+    if current is None:
+        return None
+    held = next((claim for claim in current["claims"] if claim["node"] == key), None)
+    if held:
+        return None if held["mine"] else held["holder"]
+    return None if current["role"] == "owner" else "the owner"
+
+
+def link_lines(messages, keys=None, plan_dir=None, current=None):
     """The lines of `wg next` that messages of the page server give, and the ids that these lines settle.
     `changed` gives no line: it makes `wg next` read Linear again at once. `keys` maps identifiers to node keys,
     for an issue whose message names no key."""
@@ -5940,7 +5993,12 @@ def link_lines(messages, keys=None, plan_dir=None):
     lines, settled = [], []
     for m in messages:
         kind, payload = m.get("type"), m.get("payload") or {}
-        if kind == "changed":
+        issue = payload.get("issue") or "-"
+        key = (keys.get(issue) if issue != "-" else payload.get("key")) or "-"
+        if kind in ("answer", "reply") and (runner := answer_runner(key, current)):
+            lines.append(("note", f"{kind} {key} {issue}: waits on {runner}"))
+            settled.append(m["id"])
+        elif kind == "changed":
             settled.append(m["id"])
         elif kind == "answer":
             # The human's comment in the page on a `Needs <human>` issue. The full text is the comment in Linear.
@@ -6099,7 +6157,7 @@ def line_key(text, keys):
     return key, text[len(verb) + len(key) + 2:]
 
 
-def terminal_lines(plan_dir, lines, everything=False, keys=()):
+def terminal_lines(plan_dir, lines, everything=False, keys=(), *, collaborative=False):
     """The lines of `wg next` as the terminal prints them. Each `do` line that one `wg` command does ends with
     ` -> <command>`. Without `everything`, the `wait` lines with the same verb are one line, and the notes that
     are not in NOTES_SHOWN are counted in one line. The status document, the node cards, and the link get the
@@ -6112,7 +6170,8 @@ def terminal_lines(plan_dir, lines, everything=False, keys=()):
         verb, (key, _) = line_verb(text), line_key(text, keys)
         if level == "do" and verb in DO_COMMANDS and key and key != "@effort":
             out.append(f"do {text} -> wg " + DO_COMMANDS[verb].format(dir=here, key=shlex.quote(key)))
-        elif everything or level == "do" or verb in {"collaborator", "owner", "stale"} or (level == "note" and verb in NOTES_SHOWN):
+        elif (everything or level == "do" or verb in {"collaborator", "owner", "stale"}
+              or (level == "note" and (verb in NOTES_SHOWN or (collaborative and verb in {"human", "answer", "reply"})))):
             out.append(f"{level} {text}")
         elif level == "wait":
             if verb not in waits:
@@ -6243,17 +6302,26 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
     try:
         while True:
             try:
-                keys = {e.get("identifier"): k for k, e in load_keymap(plan_dir).get("nodes", {}).items()}
+                km = load_keymap(plan_dir)
+                try:
+                    current = project_claims(plan, km)
+                except (ClaimRefused, PlanPageUnavailable) as error:
+                    print(f"wait claims page: {error}", flush=True)
+                    return 0
+                keys = {e.get("identifier"): k for k, e in km.get("nodes", {}).items()}
                 unique = {m["id"]: m for m in messages}
-                extra, settled = link_lines([m for mid, m in unique.items() if mid not in handled], keys, plan_dir)
+                extra, settled = link_lines([m for mid, m in unique.items() if mid not in handled],
+                                            keys, plan_dir, current)
                 settled.extend(mid for mid in unique if mid in handled)
-                answers = answer_lines(plan_dir)
+                answers = [line for line in answer_lines(plan_dir)
+                           if line[0] != "do" or not answer_runner(line_key(line[1], keys.values())[0], current)]
                 # An answer in Linear and its message give one line; the label also holds after a server restart.
                 marked = {text.split(":", 1)[0] for level, text in answers if level == "do"}
                 extra = answers + [line for line in extra if not (line[0] == "do" and line[1].split(":", 1)[0] in marked)]
                 # Before next_lines: a new review effort applies to the lines of this same wg next.
                 reviews = review_effort_lines(plan_dir, plan)
-                head, lines = next_lines(plan_dir, plan, tolerant=wait)
+                options = {"current_claims": current} if current is not None else {}
+                head, lines = next_lines(plan_dir, plan, tolerant=wait, **options)
                 if head == CLAIMS_UNAVAILABLE:
                     print(f"wait {lines[0][1]}", flush=True)
                     return 0
@@ -6275,7 +6343,8 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                 paused = any(t.startswith("paused @effort") for _, t in lines)
                 if done:
                     print(head)
-                    for line in terminal_lines(plan_dir, lines, everything, [n["key"] for n in plan["nodes"]]):
+                    for line in terminal_lines(plan_dir, lines, everything, [n["key"] for n in plan["nodes"]],
+                                               collaborative=current is not None):
                         print(line, flush=True)
                     for line in context_note(plan_dir):
                         print(line, flush=True)
@@ -6288,6 +6357,9 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                     notify_effort(plan_dir, plan, lines, paused)
                     return 0
                 if link and settled:  # a `changed` that did not wake the coordinator is still read
+                    for level, message in extra:
+                        if level == "note" and message.startswith(("answer ", "reply ")):
+                            print(f"note {message}", flush=True)
                     handled.update(settled)
                     link.send("ack", {"ids": settled})
                 notify_effort(plan_dir, plan, lines, paused)
@@ -7045,13 +7117,13 @@ def coordinator_listens(doc_id):
     return (utc_now() - ran).total_seconds() < 2 * interval
 
 
-def tick_members(inputs, lines, triage):
+def tick_members(inputs, lines, triage, runners=None):
     km, live, nodes, statuses, _, _ = inputs
     said = node_next(lines, nodes)
     members = dict(triage)
     held = claim_gate_keys(lines)
     for key, status in statuses.items():
-        if key not in nodes or key in held or status in {"Done", "Canceled"}:
+        if key not in nodes or key in held or key in (runners or {}) or status in {"Done", "Canceled"}:
             continue
         entry = km["nodes"][key]
         reasons = [part for part in said.get(key, "").splitlines()
@@ -7074,18 +7146,20 @@ def tick_refresh(plan_dir, plan, km, record, notify=False):
         if key not in statuses:
             raise ReadError(f"{key}: ship point is missing from the keymap or Linear")
     complete = all(statuses[key] in {"Done", "Canceled"} for key in ships)
-    if complete and km.get("collab") is not None:
-        collaboration_lines(plan, km, statuses, inputs[1])
+    current = project_claims(plan, km)
+    if complete and current is not None:
+        collaboration_lines(plan, km, statuses, inputs[1], current)
     if complete and record.get("complete"):
         return "complete", None
     triage = {}
     if complete:
         head, lines, members = COMPLETE, [], {}
     else:
-        head, lines = next_lines(plan_dir, plan, inputs=inputs, triage=triage)
+        options = {"current_claims": current} if current is not None else {}
+        head, lines = next_lines(plan_dir, plan, inputs=inputs, triage=triage, **options)
         if head == CLAIMS_UNAVAILABLE:
             raise ReadError(lines[0][1])
-        members = tick_members(inputs, lines, triage)
+        members = tick_members(inputs, lines, triage, other_runners(plan, current))
     skipped = publish(plan_dir, plan, head, lines, expected=km)
     if skipped:
         return skipped, None
@@ -7876,6 +7950,36 @@ def doctor_link(plan_dir, plan):
     return check
 
 
+def check_collaboration_human(page_name):
+    """Check that this token's account and the local wait status use the same human name."""
+    if page_name != HUMAN:
+        raise ReadError(f"page name {page_name!r} differs from config human {HUMAN!r}")
+
+
+def doctor_collaboration_human(plan_dir, plan):
+    km = load_keymap(plan_dir)
+    try:
+        current = project_claims(plan, km)
+    except (PlanPageUnavailable, ClaimRefused, LinkTokenError) as error:
+        return "warn", f"collaboration human: {error}"
+    if current is None:
+        return []
+    names = {held["holder"] for held in current["claims"] if held["mine"]}
+    for name in sorted(names):
+        check_collaboration_human(name)
+    if not names:
+        try:
+            page, headers = collab_page(km["collab"], plan_workspace(plan))
+            status = token_page_request(page, "/api/status", headers["Authorization"].removeprefix("Bearer "))
+        except (PlanPageUnavailable, LinkTokenError) as error:
+            return "warn", f"collaboration human: {error}"
+        name = status.get("human") if isinstance(status, dict) else None
+        if not name:
+            return "warn", "collaboration human: page status has no account name and this account has no claims"
+        check_collaboration_human(name)
+    return "ok", f"collaboration human: {HUMAN} matches the page"
+
+
 def doctor_lines(plan_dir=None, fix=False):
     """Yield the machine and effort check results for `wg doctor [<dir>]`.
     Load the plan first to select the page, then report machine checks before plan checks.
@@ -7926,6 +8030,7 @@ def doctor_lines(plan_dir=None, fix=False):
             for name, step in (("keymap", doctor_keymap(plan_dir, statuses)),
                                ("worktrees", doctor_worktrees(plan_dir, statuses)), ("link", doctor_link(plan_dir, plan))):
                 yield from doctor_run(name, step)
+            yield from doctor_run("collaboration human", lambda: doctor_collaboration_human(plan_dir, plan))
         finally:
             LINEAR_WORKSPACE.reset(token)
 
@@ -8419,6 +8524,8 @@ def dispatch_text(plan_dir, plan, node, entry, issue, row):
     else:
         kind = node.get("role") if node.get("role") in ("hotfix", "sync") else "lane"
         text = render(sections["task"], {"submit": sections[f"submit {kind}"]} | values)
+    if load_keymap(plan_dir).get("collab") is not None:
+        text = text.replace('"Needs <human>"', shlex.quote(WAIT_STATUS))
     # The text of the issue and plan.json is not rendered: a `{name}` in it is not a spec value.
     when = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
     first = (f"Written by `wg dispatch` at {when}: a copy of Linear issue `{entry['identifier']}` and of the node "

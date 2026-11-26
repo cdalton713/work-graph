@@ -78,6 +78,11 @@ pub(super) fn publish(
         }
     }
     let report = e.install.config.report(None)?;
+    let wave: Vec<_> = text(&km["run"]["effort"]["wave"])
+        .split(',')
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect();
     let mut writer = crate::providers::LinearCards::new(e.scope()?, &report);
     for node in e.plan["nodes"].as_array().ok_or("missing nodes")? {
         let key = text(&node["key"]);
@@ -86,7 +91,7 @@ pub(super) fn publish(
             continue;
         };
         let mut want = json!({});
-        if a.wave.iter().any(|k| k == key) {
+        if wave.iter().any(|k| k == key) {
             want["wave"] = json!("yes")
         }
         let mut said = vec![];
@@ -125,7 +130,7 @@ pub(super) fn publish(
         .join("\n")
         .trim_end()
         .to_string();
-    let mut data = json!({"wg":1,"status":a.head,"wave":a.wave,"lines":messages(a)});
+    let mut data = json!({"wg":1,"status":a.head,"wave":wave,"lines":messages(a)});
     let stable = format!("{body}\n\n```json\n{}\n```", document_json(&data)?);
     let sha = format!("{:x}", Sha256::digest(stable));
     let ran = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();

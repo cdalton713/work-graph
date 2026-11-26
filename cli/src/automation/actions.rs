@@ -1,20 +1,16 @@
 //! Compute the next coordinator actions from one scoped workflow snapshot.
-use super::{machine::*, production::Effort};
+use super::{machine::*, production::Effort, pull_requests::PullRequests};
 use crate::{local::satisfied, workflow};
 use serde_json::{Value, json};
-use std::{
-    collections::{BTreeMap, HashMap},
-    process::Command,
-    time::Duration,
-};
+use std::{collections::BTreeMap, process::Command, time::Duration};
 
 pub(super) const COMPLETE: &str = "every ship point is Done or Canceled";
 pub(super) struct Actions {
     pub head: String,
     pub lines: Vec<(String, String)>,
-    pub wave: Vec<String>,
     pub members: BTreeMap<String, Value>,
-    pub runners: BTreeMap<String, String>,
+    pub held: std::collections::BTreeSet<String>,
+    pub current_claims: Option<Value>,
 }
 fn settled(s: &str) -> bool {
     matches!(s, "Done" | "Merged" | "Canceled")
@@ -30,35 +26,27 @@ fn show(v: &Value) -> String {
 fn count(v: &Value) -> u64 {
     v.as_u64().or_else(|| text(v).parse().ok()).unwrap_or(0)
 }
-fn gh_pr(e: &Effort, n: &str) -> Result<Value> {
-    if !n.bytes().all(|b| b.is_ascii_digit()) || n.starts_with('0') || n.is_empty() {
-        return Err(format!("invalid PR number {n:?}").into());
-    }
-    let data = output(
-        Command::new("gh").current_dir(e.dir).args([
-            "pr",
-            "view",
-            n,
-            "--json",
-            "state,headRefOid,isDraft,mergeCommit,mergeable,baseRefName,reviews,comments",
-        ]),
-        Duration::from_secs(30),
-    )?;
-    let pr: Value = serde_json::from_str(&data)?;
-    if !matches!(pr["state"].as_str(), Some("OPEN" | "CLOSED" | "MERGED")) {
-        return Err("invalid PR response".into());
-    }
-    Ok(pr)
+struct TaskPr<'a> {
+    key: &'a str,
+    row: &'a Value,
+    status: &'a str,
+    reviewed: bool,
+    below: Option<(&'a str, &'a str)>,
 }
 fn pr_action(
     e: &Effort,
-    base: &str,
-    row: &Value,
-    status: &str,
+    prs: &mut PullRequests,
     pr: &Value,
-    reviewed: bool,
-    below: Option<(&str, &str)>,
+    base: &str,
+    task: TaskPr,
 ) -> Result<(&'static str, &'static str, String)> {
+    let TaskPr {
+        key,
+        row,
+        status,
+        reviewed,
+        below,
+    } = task;
     let number = text(&row["pr"]);
     let head = text(&pr["headRefOid"]);
     let short = head.chars().take(10).collect::<String>();
@@ -109,7 +97,9 @@ fn pr_action(
             ("wait", "reviewer", format!("{tag} round {}", rounds.max(1)))
         } else if level == "light" {
             ("do", "review", format!("{tag}: read the diff yourself"))
-        } else if let Some(old) = row["review_head"].as_str() {
+        } else if level != "thorough"
+            && let Some(old) = row["review_head"].as_str()
+        {
             (
                 "do",
                 "review",
@@ -205,45 +195,171 @@ fn pr_action(
     if pr["mergeable"] == "CONFLICTING" {
         return Ok(("do", "restack", format!("{tag} conflicts with {base}")));
     }
-    let checks = capture(
-        Command::new("gh").current_dir(e.dir).args([
-            "pr",
-            "checks",
-            number,
-            "--json",
-            "name,bucket",
-        ]),
-        Duration::from_secs(30),
-    )?;
-    let none = String::from_utf8_lossy(&checks.stderr)
-        .to_lowercase()
-        .contains("no checks reported");
-    let checked: Vec<Value> = if checks.stdout.is_empty() && none {
-        vec![]
-    } else {
-        serde_json::from_slice(&checks.stdout)?
-    };
-    if checked.iter().any(|v| v["bucket"] == "fail") {
+    if !prs.passed(key, number)? {
         return Ok(("do", "verify", format!("{tag}: a check failed")));
     }
-    if !checks.status.success() && !none && checks.status.code() != Some(8) {
-        return Err(process_error(&checks).into());
-    }
-    Ok(if effort["autonomy_seen"] == "full" && may_merge(e) {
-        ("do", "merge", tag)
-    } else if status != "Ready to Merge" {
-        ("do", "ask-merge", tag)
-    } else {
-        ("wait", "human", format!("merge PR {tag}"))
-    })
+    Ok(
+        if effort["autonomy_seen"] == "full"
+            && *prs.merge_allowed.get_or_insert_with(|| may_merge(e))
+        {
+            ("do", "merge", tag)
+        } else if status != "Ready to Merge" {
+            ("do", "ask-merge", tag)
+        } else {
+            ("wait", "human", format!("merge PR {tag}"))
+        },
+    )
 }
 
+pub(super) struct Claims {
+    current: Option<Value>,
+    gates: BTreeMap<String, (&'static str, String)>,
+    runners: BTreeMap<String, String>,
+}
+pub(super) fn maintain_claims(
+    e: &Effort,
+    snap: &workflow::Snapshot,
+    claims: Option<Value>,
+) -> Result<Claims> {
+    let mut runners = BTreeMap::new();
+    let rows = &e.km["run"]["nodes"];
+    let status = |key: &str| snap.statuses.get(key).map(String::as_str).unwrap_or("");
+    let mut gates = BTreeMap::new();
+    if let Some(current) = &claims {
+        if current["role"] != "owner" {
+            for n in workflow::ordered(&e.plan)? {
+                if matches!(
+                    n["kind"].as_str(),
+                    Some("merge-point" | "ship-point" | "ops" | "decision")
+                ) {
+                    let key = text(&n["key"]);
+                    gates.insert(key.to_string(), ("wait", format!("owner {key}")));
+                    runners.insert(key.into(), "the owner".into());
+                }
+            }
+        }
+        let held = current["claims"].as_array().ok_or("missing claims")?;
+        let mut session = None;
+        for claim in held {
+            let key = text(&claim["node"]);
+            let holder = text(&claim["holder"]);
+            if claim["mine"] == true {
+                let release = settled(status(key));
+                if !release && rows[key].as_object().is_none_or(|r| r.is_empty()) {
+                    gates.insert(
+                        key.into(),
+                        (
+                            "do",
+                            format!(
+                                "reconcile {key}: this account holds a claim with no local job"
+                            ),
+                        ),
+                    );
+                } else {
+                    let mut update = || -> Result<Option<String>> {
+                        let client = match &session {
+                            Some(client) => client,
+                            None => session.insert(crate::page::ClaimSession::new(
+                                e.install,
+                                e.scope()?,
+                                &e.km["collab"],
+                            )?),
+                        };
+                        Ok(client.update(key, (!release).then_some(&claim["job"]))?)
+                    };
+                    match update() {
+                        Ok(Some(detail)) => {
+                            gates.insert(key.into(), ("do", format!("reconcile {key}: {detail}")));
+                        }
+                        Err(err) if release => {
+                            eprintln!("warn {key}: could not release claim: {err}")
+                        }
+                        other => {
+                            other?;
+                        }
+                    }
+                }
+            } else {
+                runners.insert(key.into(), holder.into());
+                if claim["stale"] == true {
+                    let age = chrono::DateTime::parse_from_rfc3339(text(&claim["leaseUntil"]))
+                        .map(|end| {
+                            format!(
+                                "{}s ago",
+                                (chrono::Utc::now().timestamp() - end.timestamp()).max(0)
+                            )
+                        })
+                        .unwrap_or_else(|_| "at an unknown time".into());
+                    gates
+                        .entry(key.into())
+                        .or_insert(("note", format!("stale {key}: {holder}, lease ended {age}")));
+                } else {
+                    gates.entry(key.into()).or_insert((
+                        "wait",
+                        format!("collaborator {holder} {key}: job={}", text(&claim["job"])),
+                    ));
+                }
+            }
+        }
+        for (key, row) in rows.as_object().into_iter().flatten() {
+            let local_label = row["agent"].as_str().is_some_and(|agent| {
+                let label = format!("agent:{agent}");
+                snap.live
+                    .get(text(&e.km["nodes"][key]["id"]))
+                    .and_then(|i| i["labels"]["nodes"].as_array())
+                    .is_some_and(|labels| labels.iter().any(|l| l["name"] == label))
+            });
+            if (local_label
+                || matches!(
+                    row["state"].as_str(),
+                    Some("creating" | "starting" | "running")
+                ))
+                && !settled(status(key))
+                && !held.iter().any(|c| c["node"] == *key && c["mine"] == true)
+            {
+                let reason = held
+                    .iter()
+                    .find(|c| c["node"] == *key)
+                    .map(|c| format!("{} holds this node now", text(&c["holder"])))
+                    .unwrap_or_else(|| "no claim".into());
+                gates.insert(key.clone(), ("do", format!("reconcile {key}: {reason}")));
+            }
+        }
+    }
+    Ok(Claims {
+        current: claims,
+        gates,
+        runners,
+    })
+}
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum ReadMode {
+    Next,
+    Wait,
+    Tick,
+}
 impl Actions {
-    pub fn read(e: &Effort, snap: &workflow::Snapshot, claims: Option<&Value>) -> Result<Self> {
+    pub fn answer_runner(&self, key: &str) -> Option<&str> {
+        let current = self.current_claims.as_ref()?;
+        if let Some(claim) = current["claims"]
+            .as_array()?
+            .iter()
+            .find(|c| c["node"] == key)
+        {
+            return (claim["mine"] != true).then(|| text(&claim["holder"]));
+        }
+        (current["role"] != "owner").then_some("the owner")
+    }
+    pub fn read(
+        e: &Effort,
+        snap: &workflow::Snapshot,
+        claims_state: Claims,
+        mode: ReadMode,
+    ) -> Result<Self> {
         let nodes = workflow::ordered(&e.plan)?;
         let edges = e.plan["edges"].as_array().ok_or("missing edges")?;
         let phases = e.plan["phases"].as_array().ok_or("missing phases")?;
-        let wave = text(&e.km["run"]["effort"]["wave"])
+        let mut wave = text(&e.km["run"]["effort"]["wave"])
             .split(',')
             .filter(|k| !k.is_empty())
             .map(String::from)
@@ -251,106 +367,36 @@ impl Actions {
         let mut out = Self {
             head: COMPLETE.into(),
             lines: vec![],
-            wave,
             members: BTreeMap::new(),
-            runners: BTreeMap::new(),
+            held: claims_state.gates.keys().cloned().collect(),
+            current_claims: claims_state.current,
         };
         let mut idle = vec![];
-        let mut prs = HashMap::new();
         let status = |key: &str| snap.statuses.get(key).map(String::as_str).unwrap_or("");
         let rows = &e.km["run"]["nodes"];
-        let mut gates = BTreeMap::new();
-        if let Some(current) = claims {
-            if current["role"] != "owner" {
-                for n in &nodes {
-                    if matches!(
-                        n["kind"].as_str(),
-                        Some("merge-point" | "ship-point" | "ops" | "decision")
-                    ) {
-                        let key = text(&n["key"]);
-                        gates.insert(key.to_string(), ("wait", format!("owner {key}")));
-                        out.runners.insert(key.into(), "the owner".into());
-                    }
-                }
-            }
-            let held = current["claims"].as_array().ok_or("missing claims")?;
-            for claim in held {
-                let key = text(&claim["node"]);
-                let holder = text(&claim["holder"]);
-                if claim["mine"] == true {
-                    if settled(status(key)) {
-                        crate::page::update_claim(
-                            e.install,
-                            e.scope()?,
-                            &e.km["collab"],
-                            key,
-                            None,
-                        )?;
-                    } else if rows.get(key).is_none() {
-                        gates.insert(
-                            key.into(),
-                            (
-                                "do",
-                                format!(
-                                    "reconcile {key}: this account holds a claim with no local job"
-                                ),
-                            ),
-                        );
-                    } else {
-                        crate::page::update_claim(
-                            e.install,
-                            e.scope()?,
-                            &e.km["collab"],
-                            key,
-                            Some(&claim["job"]),
-                        )?;
-                    }
-                } else {
-                    out.runners.insert(key.into(), holder.into());
-                    if claim["stale"] == true {
-                        let end = chrono::DateTime::parse_from_rfc3339(text(&claim["leaseUntil"]))?
-                            .timestamp();
-                        gates.entry(key.into()).or_insert((
-                            "note",
-                            format!(
-                                "stale {key}: {holder}, lease ended {}s ago",
-                                (chrono::Utc::now().timestamp() - end).max(0)
-                            ),
-                        ));
-                    } else {
-                        gates.entry(key.into()).or_insert((
-                            "wait",
-                            format!("collaborator {holder} {key}: job={}", text(&claim["job"])),
-                        ));
-                    }
-                }
-            }
-            for (key, row) in rows.as_object().into_iter().flatten() {
-                if matches!(
-                    row["state"].as_str(),
-                    Some("creating" | "starting" | "running")
-                ) && !settled(status(key))
-                    && !held.iter().any(|c| c["node"] == *key && c["mine"] == true)
-                {
-                    let reason = held
-                        .iter()
-                        .find(|c| c["node"] == *key)
-                        .map(|c| format!("{} holds this node now", text(&c["holder"])))
-                        .unwrap_or_else(|| "no claim".into());
-                    gates.insert(key.clone(), ("do", format!("reconcile {key}: {reason}")));
-                }
-            }
-        }
-        out.wave.retain(|k| !gates.contains_key(k));
-        let read_pr = |cache: &mut HashMap<String, Value>, key: &str| -> Result<Value> {
-            if let Some(pr) = cache.get(key) {
-                return Ok(pr.clone());
-            }
-            let pr = gh_pr(e, text(&rows[key]["pr"]))?;
-            cache.insert(key.into(), pr.clone());
-            Ok(pr)
-        };
-        let mut reviewed_keys = std::collections::HashSet::new();
+        let role = out.current_claims.as_ref().and_then(|c| c["role"].as_str());
+        let gates = claims_state.gates;
+        let runners = claims_state.runners;
+        wave.retain(|k| !gates.contains_key(k));
+        let mut prs = PullRequests::new(
+            e.dir,
+            mode == ReadMode::Wait,
+            mode == ReadMode::Tick,
+            rows.as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(key, _)| !gates.contains_key(*key))
+                .filter_map(|(_, r)| r["pr"].as_str()),
+        );
+        out.lines.extend(
+            gates
+                .iter()
+                .filter(|(key, (level, _))| {
+                    *level == "do" && !nodes.iter().any(|n| n["key"] == key.as_str())
+                })
+                .map(|(_, (level, line))| (level.to_string(), line.clone())),
+        );
+
         for node in &nodes {
             let key = text(&node["key"]);
             let s = status(key);
@@ -365,10 +411,46 @@ impl Actions {
             let marked = labels.iter().any(|l| l["name"] == "reviewed");
             let ident = entry["identifier"].as_str().unwrap_or("-");
             if let Some((level, msg)) = gates.get(key) {
-                if !settled(s) || *level == "do" {
+                let runner = runners.get(key);
+                let wait_label = runner.map(|r| {
+                    format!(
+                        "needs-{}",
+                        r.to_lowercase()
+                            .split(|c: char| !c.is_ascii_alphanumeric())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("-")
+                    )
+                });
+                if let Some(runner) = runner
+                    && !s.is_empty()
+                    && !settled(s)
+                    && (s.starts_with("Needs ")
+                        || s == "Ready to Merge"
+                        || labels
+                            .iter()
+                            .any(|l| l["name"].as_str() == wait_label.as_deref()))
+                {
+                    let who = if msg == &format!("owner {key}") {
+                        s.strip_prefix("Needs ").unwrap_or(runner)
+                    } else {
+                        runner
+                    };
+                    out.lines
+                        .push(("note".into(), format!("human {key}: waits on {who}")));
+                    if *level == "do" || msg.starts_with("stale ") {
+                        out.lines.push((level.to_string(), msg.clone()));
+                    }
+                } else if !settled(s) || *level == "do" {
                     out.lines.push((level.to_string(), msg.clone()));
                 }
                 continue;
+            }
+            if matches!(s, "Triage" | "Ready to Merge")
+                || s == format!("Needs {}", text(&e.install.config.settings()["human"]))
+            {
+                out.members
+                    .insert(text(&entry["id"]).into(), json!({"issue":ident,"reason":s}));
             }
             if matches!(s, "Done" | "Canceled" | "Backlog" | "Triage") {
                 continue;
@@ -382,25 +464,44 @@ impl Actions {
                 .filter(|v| v["from"] == key)
                 .filter_map(|edge| nodes.iter().copied().find(|n| n["key"] == edge["to"]))
                 .collect::<Vec<_>>();
-            let blocked = deps.iter().any(|b| {
-                let k = text(&b["key"]);
-                !satisfied(
-                    b,
-                    node,
-                    status(k),
-                    rows[k]["code_done_head"].is_string()
-                        || (claims.is_some()
-                            && e.km["nodes"][k]["pr"].is_string()
-                            && e.km["nodes"][k]["branch"].is_string()),
-                )
-            });
-            let phase_blocked = nodes.iter().any(|n| {
-                n["kind"] == "task"
-                    && n["phase"] == node["phase"]
-                    && (kind == "ship-point"
-                        || !matches!(n["role"].as_str(), Some("sync" | "integration")))
-                    && !settled(status(text(&n["key"])))
-            });
+            let mut blockers: Vec<_> = deps
+                .iter()
+                .filter(|b| {
+                    let k = text(&b["key"]);
+                    !satisfied(
+                        b,
+                        node,
+                        status(k),
+                        rows[k]["code_done_head"].is_string()
+                            || (role.is_some()
+                                && !rows[k]["pr"].is_string()
+                                && e.km["nodes"][k]["pr"].is_string()
+                                && e.km["nodes"][k]["branch"].is_string()),
+                    )
+                })
+                .map(|b| text(&b["key"]))
+                .collect();
+            let blocked = !blockers.is_empty();
+            if matches!(kind, "merge-point" | "ship-point") {
+                for n in e.plan["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|n| {
+                        n["kind"] == "task"
+                            && n["phase"] == node["phase"]
+                            && (kind == "ship-point"
+                                || !matches!(n["role"].as_str(), Some("sync" | "integration")))
+                            && !settled(status(text(&n["key"])))
+                    })
+                {
+                    let k = text(&n["key"]);
+                    if !blockers.contains(&k) {
+                        blockers.push(k);
+                    }
+                }
+            }
+            let phase_blocked = !blockers.is_empty();
             let below = deps
                 .iter()
                 .find(|b| {
@@ -462,28 +563,50 @@ impl Actions {
                 )
             } else if s == format!("Needs {}", text(&e.install.config.settings()["human"])) {
                 ("wait", "human", title.into())
+            } else if role.is_some()
+                && let Some(who) = s.strip_prefix("Needs ")
+            {
+                out.held.insert(key.into());
+                out.lines
+                    .push(("note".into(), format!("human {key}: waits on {who}")));
+                continue;
+            } else if kind == "task"
+                && !matches!(
+                    s,
+                    "Todo"
+                        | "Ready"
+                        | "In Progress"
+                        | "In Review"
+                        | "Ready to Merge"
+                        | "Merged"
+                        | "Verifying"
+                )
+            {
+                ("do", "reconcile", format!("ENG status {s} has no twin"))
             } else if kind == "task" && row["pr"].is_string() {
-                let pr = read_pr(&mut prs, key)?;
-                if row["code_done_head"] == pr["headRefOid"]
-                    && (marked || good(&row["review"]) || pr["isDraft"] == false)
-                {
-                    reviewed_keys.insert(key);
+                let pr = prs.info(key, text(&row["pr"]), s == "Merged")?;
+                if pr.is_null() {
+                    continue;
                 }
                 if s == "Merged" && pr["state"] == "MERGED" {
                     continue;
                 }
                 pr_action(
                     e,
+                    &mut prs,
+                    &pr,
                     if node["role"] == "sync" {
                         "main"
                     } else {
                         text(&phase["target"])
                     },
-                    row,
-                    s,
-                    &pr,
-                    marked,
-                    below.map(|k| (k, status(k))),
+                    TaskPr {
+                        key,
+                        row,
+                        status: s,
+                        reviewed: marked,
+                        below: below.map(|k| (k, status(k))),
+                    },
                 )?
             } else if kind == "task" && s == "Merged" {
                 continue;
@@ -496,13 +619,14 @@ impl Actions {
                     ("do", "reconcile", format!("{s} with no run row"))
                 } else if node["branch"].is_string() || node["pr"].is_string() {
                     ("do", "adopt", String::new())
-                } else if !out.wave.iter().any(|k| k == key) {
+                } else if !wave.iter().any(|k| k == key) {
                     idle.push(key);
                     continue;
                 } else if let Some(b) = below.filter(|b| {
                     rows[*b]["pr"].is_string()
                         && matches!(status(b), "In Review" | "Ready to Merge")
-                }) && read_pr(&mut prs, b)?["headRefOid"] != rows[b]["code_done_head"]
+                }) && prs.info(b, text(&rows[b]["pr"]), false)?["headRefOid"]
+                    != rows[b]["code_done_head"]
                 {
                     (
                         "wait",
@@ -526,9 +650,7 @@ impl Actions {
                 ("do", "full-suite", problem)
             } else if waiting && !blocked {
                 match kind {
-                    "spike" if out.wave.iter().any(|k| k == key) => {
-                        ("do", "dispatch", String::new())
-                    }
+                    "spike" if wave.iter().any(|k| k == key) => ("do", "dispatch", String::new()),
                     "spike" => {
                         idle.push(key);
                         continue;
@@ -539,8 +661,14 @@ impl Actions {
                     "ship-point" if !phase_blocked => ("do", "verifying", String::new()),
                     _ => continue,
                 }
-            } else if kind == "ship-point" && s == "Verifying" && !phase_blocked && !blocked {
-                if let Some(until) = row["soak_until"].as_str() {
+            } else if kind == "ship-point" && s == "Verifying" {
+                if phase_blocked {
+                    (
+                        "wait",
+                        "blockers",
+                        format!("{} opened again", blockers.join(", ")),
+                    )
+                } else if let Some(until) = row["soak_until"].as_str() {
                     if chrono::DateTime::parse_from_rfc3339(until)? > chrono::Utc::now() {
                         ("wait", "soak", format!("until {until}"))
                     } else {
@@ -559,6 +687,9 @@ impl Actions {
                 continue;
             };
             let (level, verb, detail) = action;
+            if verb == "merge" {
+                out.members.remove(text(&entry["id"]));
+            }
             let detail = if detail.is_empty() {
                 detail
             } else {
@@ -569,30 +700,55 @@ impl Actions {
             if matches!(
                 (level, verb),
                 ("wait", "human") | ("do", "ask" | "ask-ready" | "ask-merge")
-            ) || s == "Ready to Merge"
-            {
+            ) {
                 out.members.insert(
                     text(&entry["id"]).into(),
                     json!({"issue":ident,"reason":format!("{level} {verb}{detail}")}),
                 );
             }
         }
-        if !idle.is_empty()
-            && !out.wave.iter().any(|k| {
-                !settled(status(k))
-                    && !(rows[k]["code_done_head"].is_string()
-                        && prs
-                            .get(k)
-                            .is_some_and(|p| p["headRefOid"] == rows[k]["code_done_head"]))
-            })
-        {
+        let code_done = |prs: &mut PullRequests, key: &str| -> Result<bool> {
+            if settled(status(key)) {
+                return Ok(true);
+            }
+            let row = &rows[key];
+            if !row["code_done_head"].is_string() || !row["pr"].is_string() {
+                return Ok(false);
+            }
+            let pr = prs.info(key, text(&row["pr"]), false)?;
+            Ok(pr["state"] == "MERGED"
+                || pr["state"] == "OPEN" && pr["headRefOid"] == row["code_done_head"])
+        };
+        let mut open = false;
+        if !idle.is_empty() {
+            for key in &wave {
+                if let Some(n) = nodes.iter().find(|n| n["key"] == key.as_str())
+                    && (if n["kind"] == "task" {
+                        !code_done(&mut prs, key)?
+                    } else {
+                        !settled(status(key))
+                    })
+                {
+                    open = true;
+                    break;
+                }
+            }
+        }
+        if !idle.is_empty() && !open {
             out.lines.push((
                 "do".into(),
                 format!("wave: pick the next wave from {}", idle.join(",")),
             ));
         }
-        if claims.is_none_or(|c| c["role"] == "owner") {
-            let triage=e.linear()?.pages("query($id:String!,$after:String){project(id:$id){issues(first:50,after:$after,includeArchived:true){nodes{id identifier title state{name}} pageInfo{hasNextPage endCursor}}}}",json!({"id":e.project()?}),"/project/issues")?;
+        if role.is_none_or(|role| role == "owner") {
+            let triage=e.linear()?.pages("query($id:String!,$after:String){project(id:$id){issues(first:50,after:$after,includeArchived:true){nodes{id identifier title state{name}} pageInfo{hasNextPage endCursor}}}}",json!({"id":e.project()?}),"/project/issues");
+            let triage = match triage {
+                Err(e) if mode == ReadMode::Wait => {
+                    eprintln!("warn next: {e}");
+                    vec![]
+                }
+                res => res?,
+            };
             for i in triage {
                 if i["state"]["name"] == "Triage"
                     && !e.km["nodes"]
@@ -631,12 +787,27 @@ impl Actions {
                 .iter()
                 .filter(|k| settled(status(k)) || rows[**k]["code_done_head"].is_string())
                 .count();
-            let reviewed = tasks
-                .iter()
-                .filter(|k| {
-                    !gates.contains_key(**k) && (settled(status(k)) || reviewed_keys.contains(**k))
-                })
-                .count();
+            let mut reviewed = 0;
+            for &key in &tasks {
+                if gates.contains_key(key) {
+                    continue;
+                }
+                if settled(status(key)) {
+                    reviewed += 1;
+                    continue;
+                }
+                if code_done(&mut prs, key)?
+                    && (good(&rows[key]["review"])
+                        || prs.info(key, text(&rows[key]["pr"]), false)?["isDraft"] == false
+                        || snap
+                            .live
+                            .get(text(&e.km["nodes"][key]["id"]))
+                            .and_then(|i| i["labels"]["nodes"].as_array())
+                            .is_some_and(|ls| ls.iter().any(|l| l["name"] == "reviewed")))
+                {
+                    reviewed += 1;
+                }
+            }
             let merged = tasks
                 .iter()
                 .filter(|k| matches!(status(k), "Done" | "Merged"))
@@ -647,8 +818,8 @@ impl Actions {
                 show(&phase["key"]),
                 if n == 1 { "" } else { "s" }
             );
-            if !out.wave.is_empty() {
-                out.head += &format!("; wave {}", out.wave.join(","));
+            if !wave.is_empty() {
+                out.head += &format!("; wave {}", wave.join(","));
             }
         }
         out.lines.sort_by_key(|(level, _)| match level.as_str() {
@@ -665,7 +836,7 @@ fn suite_problem(
     snap: &workflow::Snapshot,
     node: &Value,
     phase: &Value,
-    prs: &mut HashMap<String, Value>,
+    prs: &mut PullRequests,
 ) -> Result<Option<String>> {
     let nodes = e.plan["nodes"].as_array().ok_or("missing nodes")?;
     let status = |n: &Value| {
@@ -692,10 +863,7 @@ fn suite_problem(
         let Some(number) = rows[key]["pr"].as_str() else {
             continue;
         };
-        if !prs.contains_key(key) {
-            prs.insert(key.into(), gh_pr(e, number)?);
-        }
-        if let Some(oid) = prs[key]["mergeCommit"]["oid"].as_str() {
+        if let Some(oid) = prs.info(key, number, false)?["mergeCommit"]["oid"].as_str() {
             merges.push(oid.to_string());
         }
     }

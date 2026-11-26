@@ -1,6 +1,6 @@
 //! Public coordinator and scheduled refresh entry points.
 use super::{
-    actions::{Actions, COMPLETE},
+    actions::{Actions, COMPLETE, ReadMode, maintain_claims},
     machine::*,
     precheck::{Decision, HealthReads},
     production::Effort,
@@ -177,34 +177,61 @@ fn answers(e: &Effort) -> Result<Vec<(String, String)>> {
 struct Run<'a> {
     install: &'a Installation,
     args: &'a arguments::Next,
+    plan: Value,
+    collaborative: bool,
     link: Option<Link>,
     actions: Option<Actions>,
     page_url: String,
     claims_error: Option<String>,
 }
 impl Run<'_> {
+    fn unavailable(&mut self, error: String) -> Refresh {
+        self.claims_error = Some(error);
+        Refresh {
+            actionable: false,
+            complete: false,
+            claims_unavailable: true,
+            settled: vec![],
+        }
+    }
     fn refresh_effort(&mut self, msgs: &[Value]) -> Result<Refresh> {
-        let mut e = Effort::read(self.install, &self.args.dir)?;
-        let claims = match workflow::current_claims(self.install, &e.plan, &e.km) {
-            Ok(c) => c,
-            Err(error) => {
-                self.claims_error = Some(error);
-                return Ok(Refresh {
-                    actionable: false,
-                    complete: false,
-                    claims_unavailable: true,
-                    settled: vec![],
-                });
-            }
+        let mut e = Effort {
+            install: self.install,
+            dir: &self.args.dir,
+            plan: self.plan.clone(),
+            km: crate::state::load_keymap(&self.args.dir)?,
+        };
+        self.collaborative = !e.km["collab"].is_null();
+        let current = match workflow::current_claims(e.install, &e.plan, &e.km) {
+            Ok(claims) => claims,
+            Err(error) => return Ok(self.unavailable(error)),
         };
         let snap = e.snapshot()?;
-        let mut a = Actions::read(&e, &snap, claims.as_ref())?;
+        let gates = match maintain_claims(&e, &snap, current) {
+            Ok(claims) => claims,
+            Err(error) => return Ok(self.unavailable(error.to_string())),
+        };
+        let labels = e.labels()?;
+        let review = label(&labels, "review", "thorough").to_owned();
+        let prior_review = e.km["run"]["effort"]["review_seen"].clone();
+        e.km["run"]["effort"]["review_seen"] = json!(review);
+        let mut a = Actions::read(
+            &e,
+            &snap,
+            gates,
+            if self.args.wait {
+                ReadMode::Wait
+            } else {
+                ReadMode::Next
+            },
+        )?;
+        e.km["run"]["effort"]["review_seen"] = prior_review;
         let mut extra = vec![];
         let mut settled = vec![];
         match answers(&e) {
             Ok(lines) => {
                 for (key, line) in lines {
-                    if !a.runners.contains_key(&key) {
+                    if a.answer_runner(&key).is_none() {
                         extra.push(("do".into(), line));
                     }
                 }
@@ -229,8 +256,19 @@ impl Run<'_> {
                 })
                 .unwrap_or("-");
             let issue = payload["issue"].as_str().unwrap_or("-");
-            match text(&m["type"]) {
-                "answer" if !a.runners.contains_key(key) => {
+            let kind = text(&m["type"]);
+            if matches!(kind, "answer" | "reply")
+                && let Some(runner) = a.answer_runner(key)
+            {
+                extra.push((
+                    "note".into(),
+                    format!("{kind} {key} {issue}: waits on {runner}"),
+                ));
+                settled.push(id.into());
+                continue;
+            }
+            match kind {
+                "answer" => {
                     if !extra
                         .iter()
                         .any(|(_, s)| s.starts_with(&format!("answer {key} {issue}:")))
@@ -241,14 +279,10 @@ impl Run<'_> {
                         ));
                     }
                 }
-                "answer" => extra.push((
-                    "note".into(),
-                    format!("answer {key} {issue}: waits on {}", a.runners[key]),
-                )),
                 "command"
                     if payload["name"] == "dispatch"
-                        && !key.is_empty()
-                        && !a.runners.contains_key(key) =>
+                        && payload["key"].as_str().is_some_and(|k| !k.is_empty())
+                        && !a.held.contains(key) =>
                 {
                     extra.push((
                         "do".into(),
@@ -258,10 +292,6 @@ impl Run<'_> {
                         ),
                     ))
                 }
-                "reply" if a.runners.contains_key(key) => extra.push((
-                    "note".into(),
-                    format!("reply {key} {issue}: waits on {}", a.runners[key]),
-                )),
                 "reply" => {
                     let ask = text(&payload["ask"]);
                     let body = text(&payload["body"]);
@@ -315,7 +345,6 @@ impl Run<'_> {
         }
         extra.append(&mut a.lines);
         a.lines = extra;
-        let labels = e.labels()?;
         levels(&mut e, &mut a, &labels)?;
         let actionable = a.lines.iter().any(|(l, _)| l == "do");
         let complete = a.head == COMPLETE;
@@ -371,6 +400,7 @@ impl Coordinator for Run<'_> {
                 let verb = t.split_whitespace().next().unwrap_or("");
                 if !self.args.all
                     && l == "note"
+                    && !(self.collaborative && matches!(verb, "human" | "answer" | "reply"))
                     && !matches!(
                         verb,
                         "autonomy" | "review" | "health" | "triage" | "doctor" | "page" | "stale"
@@ -437,6 +467,8 @@ pub(super) fn next_command(args: &arguments::Next, watch: bool) -> Result<u8> {
         Some(sender::link(&e)?.0)
     };
     let mut run = Run {
+        plan: e.plan.clone(),
+        collaborative: false,
         install: &install,
         args,
         link,
@@ -494,8 +526,13 @@ pub(super) fn wake_command(dir: &Path) -> Result<u8> {
                 return Ok(Decision::Start(format!("autonomy changed to {autonomy}")));
             }
             let snap = e.snapshot()?;
-            let claims = workflow::current_claims(&install, &e.plan, &e.km)?;
-            let a = Actions::read(&e, &snap, claims.as_ref())?;
+            let Ok(current) = workflow::current_claims(e.install, &e.plan, &e.km) else {
+                return Ok(Decision::Skip("nothing to do: claims unavailable".into()));
+            };
+            let Ok(gates) = maintain_claims(&e, &snap, current) else {
+                return Ok(Decision::Skip("nothing to do: claims unavailable".into()));
+            };
+            let a = Actions::read(&e, &snap, gates, ReadMode::Wait)?;
             if a.head == COMPLETE {
                 return Ok(Decision::Skip("the effort is complete".into()));
             }
@@ -539,7 +576,8 @@ impl scheduled::TickServices for Tick<'_> {
                 .into());
             }
         }
-        let claims = workflow::current_claims(self.0, &e.plan, &e.km)?;
+        let current = workflow::current_claims(e.install, &e.plan, &e.km)?;
+        let gates = maintain_claims(&e, &snap, current)?;
         let complete = e.ships_complete(&snap);
         let outcome = if complete && state[&key]["complete"] == true {
             "skipped: complete".into()
@@ -548,12 +586,12 @@ impl scheduled::TickServices for Tick<'_> {
                 Actions {
                     head: COMPLETE.into(),
                     lines: vec![],
-                    wave: vec![],
                     members: BTreeMap::new(),
-                    runners: BTreeMap::new(),
+                    current_claims: None,
+                    held: Default::default(),
                 }
             } else {
-                Actions::read(&e, &snap, claims.as_ref())?
+                Actions::read(&e, &snap, gates, ReadMode::Tick)?
             };
             if let Some(skip) = publish::publish(&e, &a, None, true)? {
                 format!("skipped: {skip}")

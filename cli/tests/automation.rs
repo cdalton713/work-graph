@@ -147,6 +147,7 @@ fn public_automation_commands_use_fixture_services_and_files() {
     for script in [
         "automation.py",
         "automation-live.py",
+        "automation-decisions.py",
         "automation-parity.py",
     ] {
         let result = std::process::Command::new("python3")

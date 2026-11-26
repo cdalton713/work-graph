@@ -12,7 +12,7 @@ from unittest.mock import patch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from services import Handler, fixture_service
-from suite import run_case
+from suite import help_flags, run_case
 
 
 def page(values):
@@ -242,7 +242,21 @@ else:
 
 candidate = str(Path(sys.argv[1]).resolve())
 frozen = json.loads((HERE / "expected.json").read_bytes())
-for case in ["autonomy effort", "review-effort effort", "service | autonomy effort"]:
+verbs = {"status", "load", "ready", "approve", "move", "archive", "autonomy", "review-effort"}
+# Both parsers indent option definitions. The flag set catches omissions and additions.
+for indent in ("  ", "      "):
+    definition = indent + "--apply  apply changes (see --ignored)"
+    assert help_flags(definition) == ["--apply"]
+    assert help_flags("") != ["--apply"]
+    assert help_flags(definition + "\n" + indent + "--extra") != ["--apply"]
+for verb in sorted(verbs):
+    result = run_case([candidate], [verb, "--help"])
+    assert result["exit"] == 0 and not result["files"] and not result["stderr"], (verb, result)
+    assert help_flags(result["stdout"]) == frozen[f"{verb} --help"], (verb, result)
+cases = [case for case in frozen if case.removeprefix("service | ").split()[0] in verbs
+         and not case.endswith(" --help")]
+assert len(cases) == 9
+for case in cases:
     result = run_case([candidate], case.removeprefix("service | ").split(), case.startswith("service | "))
     assert result == frozen[case], (case, result, frozen[case])
 

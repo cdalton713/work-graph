@@ -101,6 +101,13 @@ def run_case(command, args, service=False):
         return observed
 
 
+def help_flags(help_text):
+    options = [line.strip().split("  ")[0] for line in help_text.splitlines()
+               if re.match(r"^\s+-", line)]
+    flags = re.findall(r"(?<![\w-])(?:--[a-z][a-z-]*|-[A-Za-z]\b)", " ".join(options))
+    return sorted(set(flags))
+
+
 def main():
     os.umask(0o022)
     record = sys.argv[1:] == ["--record"]
@@ -129,10 +136,7 @@ def main():
         help_result = run_case(command, [*verb, "--help"])
         if help_result["exit"] or help_result["stderr"] or help_result["files"]:
             sys.exit(f"{verb} help failed: {help_result}")
-        options = [line.strip().split("  ")[0] for line in help_result["stdout"].splitlines()
-                   if line.startswith("  -")]
-        flags = re.findall(r"(?<![\w-])(?:--[a-z][a-z-]*|-[A-Za-z]\b)", " ".join(options))
-        observed[" ".join(verb) + " --help"] = sorted(set(flags))
+        observed[" ".join(verb) + " --help"] = help_flags(help_result["stdout"])
     for case in cases:
         args = shlex.split(case.removeprefix("service | "))
         result = run_case(command, args, case.startswith("service | "))

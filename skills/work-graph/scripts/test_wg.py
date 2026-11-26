@@ -5775,6 +5775,50 @@ class HealthTests(DirTests):
         self.assertEqual((config["health_interval"], config["health_agent"]), (6, "codex"))
 
 
+
+class AgentsWaitTest(unittest.TestCase):
+    """`wg agents --wait` waits for the running sender to stop, then runs; without it, a second sender exits."""
+
+    def run_sender(self, home, wait, out):
+        class Stop(Exception):
+            pass
+
+        def stop(_):
+            raise Stop
+
+        ns = wg.argparse.Namespace(install=False, uninstall=False, once=False, wait=wait, root=None)
+        with patch.object(Path, "home", return_value=home), patch.object(wg, "watch_poll", return_value=([], False)), \
+                patch.object(wg, "reload_agents_config"), patch.object(wg.time, "sleep", side_effect=stop), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                return wg.watch_command(ns)
+            except Stop:
+                return "ran"
+
+    def test_wait_blocks_until_the_sender_stops(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            with patch.object(Path, "home", return_value=home):
+                lock = wg.agents_state_path().with_suffix(".lock")
+            lock.parent.mkdir(parents=True)
+            held = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+            wg.fcntl.flock(held, wg.fcntl.LOCK_EX)
+            try:
+                skipped = io.StringIO()
+                self.assertEqual(self.run_sender(home, False, skipped), 0)
+                self.assertIn("skipped", skipped.getvalue())
+                result, waited = {}, io.StringIO()
+                worker = threading.Thread(target=lambda: result.update(status=self.run_sender(home, True, waited)))
+                worker.start()
+                worker.join(0.5)
+                self.assertTrue(worker.is_alive())
+                self.assertIn("waiting", waited.getvalue())
+            finally:
+                os.close(held)
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(result["status"], "ran")
+
 if __name__ == "__main__":
     unittest.main()
 

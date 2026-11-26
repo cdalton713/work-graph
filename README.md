@@ -169,8 +169,10 @@ When no report came for 3 minutes, the page shows "agent view stopped". `wg agen
 
 To let a project owner reply to a chat or terminal agent whose turn ended, set `agent_replies` to `true`.
 The default is `false`. Stop the launchd watcher with `wg agents --uninstall` if it runs.
-Then run `wg agents` in your own Orca terminal and keep it open. The launchd watcher can show
+Then install the Orca plugin in `orca-plugin/` (its README): it keeps `wg agents` running in an Orca terminal.
+Without the plugin, run `wg agents` in your own Orca terminal and keep it open. The launchd watcher can show
 agents on the page, but it cannot send replies. Use Orca directly for a prompt with choices.
+`wg agents --wait` waits while another sender runs, then starts.
 
 On the Overview, open the line of a stopped coordinator or worker to read its last message and send a reply.
 The line stays visible for 60 minutes after the agent stops. You can reply during that time.

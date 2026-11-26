@@ -8,7 +8,7 @@
     "dev": "vite",
     "service:dev": "node server/testing/service-dev.ts",
     "start": "node server/main.ts",
-    "test": "vitest run --exclude 'e2e/**'",
+    "test": "vitest run --exclude 'e2e/**' --exclude 'orca-plugin/**'",
     "test:e2e": "pnpm build && playwright test --grep-invert @shots",
     "shots": "pnpm build && playwright test --grep @shots"
   },

@@ -2,3 +2,4 @@ node_modules
 dist
 .vercel
 **/__pycache__
+orca-plugin

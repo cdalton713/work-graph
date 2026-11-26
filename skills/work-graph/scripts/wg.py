@@ -7950,7 +7950,7 @@ def watch_poll(memory, state, roots=None, clock=time.monotonic, *, record_send=N
 
 def watch_command(ns):
     """`wg agents`: read Orca each WATCH_INTERVAL seconds and send each effort's agents to the page. `--once`: one
-    read, and print the rows."""
+    read, and print the rows. `--wait`: when another sender runs, wait for it to stop instead of exiting."""
     if ns.install or ns.uninstall:
         return watch_agent(ns)
     home = Path.home()
@@ -7963,8 +7963,11 @@ def watch_command(ns):
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                print("skipped: wg agents is already running")
-                return 0
+                if not getattr(ns, "wait", False):
+                    print("skipped: wg agents is already running")
+                    return 0
+                print("waiting: wg agents is already running; this one starts when it stops", flush=True)
+                fcntl.flock(fd, fcntl.LOCK_EX)
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         memory, warned, trimmed = {}, None, 0.0
         script = Path(__file__).resolve()
@@ -10322,6 +10325,7 @@ def cli_parser():
     mode.add_argument("--once", action="store_true")
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--uninstall", action="store_true")
+    mode.add_argument("--wait", action="store_true", help="when a sender runs, wait for it to stop, then run")
     login = sub.add_parser("login")
     login.add_argument("page_url", nargs="?")
     login.add_argument("--workspace", choices=tuple(WORKSPACES), default=DEFAULT_WORKSPACE_ID)

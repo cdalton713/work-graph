@@ -1,0 +1,46 @@
+{
+  "manifestVersion": 2,
+  "id": "wg-agents",
+  "name": "work-graph agents",
+  "version": "0.1.0",
+  "description": "Keeps `wg agents` running in an Orca terminal, so that replies from the work-graph page reach your agents.",
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.259"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "capabilities": [
+    { "kind": "workspace:read" },
+    { "kind": "agent:read" },
+    { "kind": "terminal:send" },
+    { "kind": "storage:own" },
+    { "kind": "settings:own" }
+  ],
+  "contributes": {
+    "events": [
+      { "on": "workspace.changed" },
+      { "on": "agent.status.changed" }
+    ],
+    "commands": [
+      { "id": "start", "title": "work-graph: start wg agents" }
+    ],
+    "settings": [
+      {
+        "key": "enabled",
+        "title": "Keep wg agents running",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "workspacePath",
+        "title": "Workspace path",
+        "description": "The local Orca workspace for the terminal. Empty: the first local checkout named work-graph.",
+        "type": "string",
+        "default": "",
+        "placeholder": "/path/to/work-graph"
+      }
+    ]
+  }
+}

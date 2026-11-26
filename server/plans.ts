@@ -18,6 +18,32 @@ const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const tag = (version: number) => `"${version}"`;
 
+function versionTags(header: string | undefined): string[] | undefined {
+  return header?.split(",").flatMap((part) => {
+    const entry = part.trim();
+    const match = /^(?:(?:W\/)?"([0-9]+)"|([0-9]+))$/.exec(entry);
+    return match ? [match[1] ?? match[2]] : entry === "*" ? ["*"] : [];
+  });
+}
+
+function checkJson(value: unknown, depth = 0): string | undefined {
+  if (depth > 64) return "Plan data exceeds the nesting limit of 64";
+  if (typeof value === "string") {
+    if (value.includes("\u0000")) return "Plan data contains a NUL character";
+    if (/[\uD800-\uDFFF]/u.test(value)) return "Plan data contains a lone surrogate";
+  } else if (Array.isArray(value)) {
+    for (const item of value) {
+      const problem = checkJson(item, depth + 1);
+      if (problem) return problem;
+    }
+  } else if (record(value)) {
+    for (const [key, item] of Object.entries(value)) {
+      const problem = checkJson(key) ?? checkJson(item, depth + 1);
+      if (problem) return problem;
+    }
+  }
+}
+
 function validate(input: unknown, name: string): PlanData | string {
   if (!record(input) || !record(input.plan)) return "plan must be an object";
   const { plan, keymap } = input;
@@ -36,7 +62,7 @@ function validate(input: unknown, name: string): PlanData | string {
     || typeof edge.from !== "string" || typeof edge.to !== "string" || !keys.has(edge.from) || !keys.has(edge.to))) {
     return "plan.edges must be an array with from and to keys in plan.nodes";
   }
-  return { plan, keymap };
+  return checkJson({ plan, keymap }) ?? { plan, keymap };
 }
 
 export function planRoutes(access?: (c: Context) => Promise<Access | Response>, telemetry?: Telemetry | null) {
@@ -66,8 +92,8 @@ export function planRoutes(access?: (c: Context) => Promise<Access | Response>, 
     const etag = tag(result.plan.version);
     c.header("ETag", etag);
     c.header("Cache-Control", "private, no-cache");
-    const match = c.req.header("if-none-match")?.split(",").map((value) => value.trim().replace(/^W\//, ""));
-    if (match?.some((value) => value === etag || value === "*" || value === String(result.plan.version))) {
+    const match = versionTags(c.req.header("if-none-match"));
+    if (match?.includes("*") || match?.includes(String(result.plan.version))) {
       return c.body(null, 304);
     }
     return c.json(result.plan);
@@ -96,7 +122,7 @@ export function planRoutes(access?: (c: Context) => Promise<Access | Response>, 
     const data = validate(await c.req.json().catch(() => null), target.name);
     if (typeof data === "string") return c.text(data, 400);
     const result = await target.plans(target.scope, {
-      kind: "put", match: match?.replace(/^"([0-9]+)"$/, "$1"), initialize: none === "*", data,
+      kind: "put", match: versionTags(match), initialize: none === "*", data,
     });
     if (result.status === 403) return forbidden(c);
     if (result.status === 412) {

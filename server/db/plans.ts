@@ -9,7 +9,7 @@ const revisions = `FROM project_plans p LEFT JOIN users u ON u.id = p.writer_use
 const historyColumns = 'p.version, u.name AS writer, p.written_at AS "writtenAt"';
 
 type Operation = { kind: "get"; version?: number } | { kind: "list" }
-  | { kind: "put"; match?: string; initialize: boolean; data: PlanData };
+  | { kind: "put"; match?: string[]; initialize: boolean; data: PlanData };
 
 export function createPlans(sql: Sql) {
   return (scope: ClaimScope, operation: Operation) => sql.transaction(async ({ query }) => {
@@ -38,7 +38,7 @@ export function createPlans(sql: Sql) {
     const [current] = await query<Revision>(
       `SELECT ${historyColumns} ${revisions} ORDER BY p.version DESC LIMIT 1 FOR UPDATE OF p`, project);
     if (!current && role !== "owner") return { status: 403 } as const;
-    if (current ? operation.match !== String(current.version) || operation.initialize : !operation.initialize || operation.match !== undefined) {
+    if (current ? !operation.match?.includes(String(current.version)) || operation.initialize : !operation.initialize || operation.match !== undefined) {
       return { status: 412, version: current?.version ?? null, writer: current?.writer ?? null, role } as const;
     }
 

@@ -19,10 +19,10 @@ const planBody = {
 };
 
 databaseSuites((open) => {
-  it("stores conditional versions and gives one writer the next version", async () => {
+  it("enforces plan access and serves version headers on HEAD", async () => {
     const db = await open();
     try {
-      const { owner, collaborator, viewer, scope, viewScope } = await projectFixture(db);
+      const { owner, collaborator, viewer, outsider, scope, viewScope } = await projectFixture(db);
       const first = { "if-none-match": "*" };
       expect(await (await owner.request(planPath)).text()).toContain("No plan");
       expect((await collaborator.request(planPath, "PUT", planBody, scope, false, first)).status).toBe(403);
@@ -40,24 +40,68 @@ databaseSuites((open) => {
       const other = planPath.replace("/project/", "/other/");
       expect((await collaborator.request(other, "GET", undefined, scope)).status).toBe(404);
       expect((await collaborator.request(other, "PUT", planBody, scope, false, first)).status).toBe(404);
-      const match = { "if-match": '"1"' };
+      for (const [url, method] of [[planPath, "GET"], [planPath, "HEAD"], [planPath, "PUT"],
+        [planPath + "/versions", "GET"], [planPath + "/versions/1", "GET"]]) {
+        expect((await outsider.request(url, method, method === "PUT" ? planBody : undefined, scope, false, first)).status).toBe(404);
+      }
+      const head = await owner.request(planPath, "HEAD");
+      expect(head.status).toBe(200);
+      expect(head.headers.get("etag")).toBe('"1"');
+      expect(await head.text()).toBe("");
+    } finally { await db.close(); }
+  }, 30_000);
+
+  it("serializes concurrent plan creation and updates across accounts", async () => {
+    const db = await open();
+    try {
+      const { owner, collaborator, scope } = await projectFixture(db);
+      const first = { "if-none-match": "*" };
+      const creation = await Promise.all(Array.from({ length: 20 }, () =>
+        owner.request(planPath, "PUT", planBody, undefined, false, first)));
+      expect(creation.map(({ status }) => status).sort()).toEqual([200, ...Array(19).fill(412)]);
+      for (const response of creation) {
+        if (response.status === 412) expect(await response.json()).toMatchObject({ version: 1, writer: "Ada" });
+      }
+      const match = { "if-match": "1" };
       const writes = Array.from({ length: 20 }, (_, index) => ({ ...planBody, keymap: { build: "WG-" + (index + 10) } }));
-      const responses = await Promise.all(writes.map((body) =>
-        collaborator.request(planPath, "PUT", body, scope, false, match)));
-      const winner = writes[responses.findIndex(({ status }) => status === 200)];
-      expect(await (await collaborator.request(planPath, "GET", undefined, scope)).json()).toEqual({ version: 2, ...winner });
+      const responses = await Promise.all(writes.map((body, index) => index % 2
+        ? collaborator.request(planPath, "PUT", body, scope, false, match)
+        : owner.request(planPath, "PUT", body, undefined, false, match)));
+      expect(responses.map(({ status }) => status).sort()).toEqual([200, ...Array(19).fill(412)]);
+      const index = responses.findIndex(({ status }) => status === 200);
+      const writer = index % 2 ? "Grace" : "Ada";
+      expect(await (await collaborator.request(planPath, "GET", undefined, scope)).json()).toEqual({ version: 2, ...writes[index] });
       expect((await owner.request(planPath, "PUT", planBody, undefined, false, first)).status).toBe(412);
-      expect(responses.filter(({ status }) => status === 200)).toHaveLength(1);
-      const conflicts = responses.filter(({ status }) => status === 412);
-      expect(conflicts).toHaveLength(19);
-      for (const response of conflicts) expect(await response.json()).toMatchObject({ version: 2, writer: "Grace" });
-      const versions = await (await owner.request(planPath + "/versions")).json();
-      expect(versions).toEqual({ versions: [
-        { version: 2, writer: "Grace", writtenAt: expect.any(String) },
+      for (const response of responses) {
+        if (response.status === 412) expect(await response.json()).toMatchObject({ version: 2, writer });
+      }
+      expect(await (await owner.request(planPath + "/versions")).json()).toEqual({ versions: [
+        { version: 2, writer, writtenAt: expect.any(String) },
         { version: 1, writer: "Ada", writtenAt: expect.any(String) },
       ] });
       expect(await (await collaborator.request(planPath + "/versions/1", "GET", undefined, scope)).json())
         .toEqual({ version: 1, ...planBody });
+    } finally { await db.close(); }
+  }, 30_000);
+
+  it("accepts the gzip ETag and version lists as write and read conditions", async () => {
+    const db = await open();
+    try {
+      const { owner } = await projectFixture(db);
+      const body = { ...planBody, keymap: { text: "data".repeat(1000) } };
+      expect((await owner.request(planPath, "PUT", body, undefined, false, { "if-none-match": "*" })).status).toBe(200);
+      const compressed = await owner.request(planPath, "GET", undefined, undefined, false, { "accept-encoding": "gzip" });
+      expect(compressed.headers.get("content-encoding")).toBe("gzip");
+      const etag = compressed.headers.get("etag")!;
+      expect(etag).toBe('W/"1"');
+      await compressed.body?.cancel();
+      const put = (match: string) => owner.request(planPath, "PUT", body, undefined, false, { "if-match": match });
+      expect((await put(etag)).status).toBe(200);
+      expect((await put(etag)).status).toBe(412);
+      for (const match of ['"9", W/"2"', '"9", "2"', '"9", 2']) {
+        expect((await owner.request(planPath, "GET", undefined, undefined, false, { "if-none-match": match })).status).toBe(304);
+      }
+      expect((await put('"9", W/"2"')).status).toBe(200);
     } finally { await db.close(); }
   }, 30_000);
 
@@ -91,7 +135,13 @@ databaseSuites((open) => {
     try {
       const { owner } = await projectFixture(db);
       const first = { "if-none-match": "*" };
+      let deep: unknown = "private plan content";
+      for (let level = 0; level < 65; level++) deep = [deep];
       const bad: [object, string][] = [
+        [{ ...planBody, keymap: { text: deep } }, "nesting"],
+        [{ ...planBody, keymap: { text: "private plan content\u0000" } }, "NUL"],
+        [{ ...planBody, plan: { ...planBody.plan, ["private plan content\ud800"]: true } }, "surrogate"],
+        [{ ...planBody, plan: { ...planBody.plan, nodes: [planBody.plan.nodes[0], planBody.plan.nodes[0]] } }, "unique key"],
         [{ ...planBody, plan: [] }, "plan"],
         [{ ...planBody, keymap: [] }, "keymap"],
         [{ ...planBody, plan: { ...planBody.plan, effort: {} } }, "effort.name"],
@@ -105,7 +155,9 @@ databaseSuites((open) => {
       for (const [body, field] of bad) {
         const response = await owner.request(planPath, "PUT", body, undefined, false, first);
         expect(response.status).toBe(400);
-        expect(await response.text()).toContain(field);
+        const message = await response.text();
+        expect(message).toContain(field);
+        expect(message).not.toContain("private plan content");
       }
       const large = await owner.request(planPath, "PUT", { ...planBody, keymap: { text: "é".repeat(600_000) } }, undefined, false, first);
       expect(large.status).toBe(413);

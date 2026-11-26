@@ -408,7 +408,9 @@ The service stores up to 50 versions of each project plan and keymap. The owner
 uses a coordinator token to store the first version. Owners and collaborators
 can save a new version if the current version still matches. Viewers can read
 the current plan. When a plan exists, only the owner can claim a merge point,
-ship point, or ops node.
+ship point, or ops node. Use the version number in the response body for
+`If-Match` when you save a new version. If the newest plan removed a node,
+claim renewal returns 404 and the holder must stop work on that node.
 
 ### Parts of the service
 

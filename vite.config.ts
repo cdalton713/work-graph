@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { sentryVitePlugin } from "@sentry/vite-plugin";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 
@@ -24,12 +25,28 @@ function compressedAssets(): Plugin {
   };
 }
 
-export default defineConfig({
-  define: { "import.meta.env.WG_CONTRACT_HASH": JSON.stringify(contractHash) },
-  plugins: [react(), compressedAssets()],
-  // `pnpm dev` serves the page; the API still comes from `node server/main.ts`.
-  server: { proxy: {
-    "/api": { target: "http://127.0.0.1:4747", changeOrigin: false, headers: { origin: "http://127.0.0.1:4747", host: "127.0.0.1:4747" } },
-    "/manifest.json": "http://127.0.0.1:4747",
-  } },
+export default defineConfig(({ command }) => {
+  const { SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT_BROWSER, WG_VERSION } = process.env;
+  const upload = command === "build" && SENTRY_AUTH_TOKEN && SENTRY_ORG && SENTRY_PROJECT_BROWSER;
+  return {
+    define: { "import.meta.env.WG_CONTRACT_HASH": JSON.stringify(contractHash) },
+    build: { sourcemap: upload ? "hidden" : false },
+    plugins: [
+      react(),
+      compressedAssets(),
+      upload && sentryVitePlugin({
+        authToken: SENTRY_AUTH_TOKEN,
+        org: SENTRY_ORG,
+        project: SENTRY_PROJECT_BROWSER,
+        telemetry: false,
+        release: { name: WG_VERSION || "dev", setCommits: false },
+        sourcemaps: { assets: "dist/**/*.js", filesToDeleteAfterUpload: "dist/**/*.map" },
+      }),
+    ],
+    // `pnpm dev` serves the page; the API still comes from `node server/main.ts`.
+    server: { proxy: {
+      "/api": { target: "http://127.0.0.1:4747", changeOrigin: false, headers: { origin: "http://127.0.0.1:4747", host: "127.0.0.1:4747" } },
+      "/manifest.json": "http://127.0.0.1:4747",
+    } },
+  };
 });

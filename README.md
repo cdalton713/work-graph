@@ -539,6 +539,10 @@ The Postgres driver also reads `PG*` environment values, such as `PGSSLMODE` for
 
 Set `WG_SENTRY_DSN` to enable server error reports. Set `WG_SENTRY_BROWSER_DSN` to publish the browser DSN in `/api/config`. You can enable either setting independently. Both use `WG_SENTRY_ENVIRONMENT` (default `production`) and `WG_VERSION` (default `dev`).
 
+To upload browser source maps, set all three build variables. Use `SENTRY_AUTH_TOKEN` for the upload token, `SENTRY_ORG` for the organization slug, and `SENTRY_PROJECT_BROWSER` for the browser project slug. Set `WG_VERSION` to the same release at build time and at runtime. Its default is `dev`. The build uploads hidden source maps and removes the map files from `dist`. If any upload variable is empty, the build skips source maps and makes no upload request.
+
+For Vercel, set the variables in the project environment. For Docker, pass `--secret id=SENTRY_AUTH_TOKEN,env=SENTRY_AUTH_TOKEN` and the build arguments `--build-arg SENTRY_ORG --build-arg SENTRY_PROJECT_BROWSER --build-arg WG_VERSION` from the build environment.
+
 Set `WG_SENTRY_TEST_EVENT=1` to send one info event, `work-graph sentry test`, when a server with error reporting enabled starts. Server reports omit request data, exception messages, and source text.
 
 When browser reporting is enabled, the page also sends this test event once per page load if `WG_SENTRY_TEST_EVENT=1`. Browser error reports include error types and stack locations. They omit request data, breadcrumbs, and exception text.

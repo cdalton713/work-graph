@@ -4,6 +4,7 @@ import type { Milestone } from "./types";
 
 export const NODE_W = 264;
 export const NODE_H = 72;
+export const EDGE_TAP_REACH = 12;
 
 export type Point = { x: number; y: number };
 export interface Box { id: string; kind: "phase" | "lane"; label: string; note: string; x: number; y: number; width: number; height: number }

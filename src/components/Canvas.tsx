@@ -1,9 +1,9 @@
-import { BaseEdge, Controls, type Edge, type EdgeProps, Handle, MiniMap, type Node, type NodeProps, Panel as Corner, Position, ReactFlow, ReactFlowProvider, useReactFlow, useViewportStore } from "@xyflow/react";
-import { type CSSProperties, memo, useEffect, useMemo, useRef, useState } from "react";
+import { BaseEdge, Controls, type Edge, type EdgeProps, getViewportForBounds, Handle, MiniMap, type Node, type NodeProps, Panel as Corner, Position, ReactFlow, ReactFlowProvider, useReactFlow, useViewportStore } from "@xyflow/react";
+import { type CSSProperties, type MouseEvent, memo, useEffect, useMemo, useRef, useState } from "react";
 import { type GEdge, type GNode, type Graph, reviewMark, runTime, satisfied, soakLeft, startNode, trace } from "../lib/graph";
-import { type Layout, NODE_H, NODE_W, type Point, arrow, roundedPath, routeAt } from "../lib/layout";
+import { EDGE_TAP_REACH, type Layout, NODE_H, NODE_W, type Point, arrow, roundedPath, routeAt } from "../lib/layout";
 import { PHONE_MAX_WIDTH } from "../lib/screen";
-import { Lamp } from "./ui";
+import { Lamp, Sheet } from "./ui";
 
 import type { ClaimMark } from "../lib/claims";
 
@@ -16,7 +16,16 @@ type PlateNode = Node<{ kind: "phase" | "lane"; label: string; note: string; don
 // Short, so the status has room on the same row. The longest status is "Needs <human>".
 // A touch screen has no pointer that rests on a node. There, a tap also sends a mouse-enter, and a
 // page that changes on it can lose the tap. So the trace of the pointer is for a real pointer only.
-const HAS_POINTER = typeof matchMedia === "function" && matchMedia("(hover: hover)").matches;
+const hoverPointer = () => matchMedia("(hover: hover)").matches;
+const coarsePointer = () => matchMedia("(pointer: coarse)").matches;
+const pointerType = ({ nativeEvent }: MouseEvent) =>
+  "pointerType" in nativeEvent ? nativeEvent.pointerType : undefined;
+const isTouch = (event: MouseEvent) => {
+  const type = pointerType(event);
+  return event.detail > 0 && (type ? type === "touch" : coarsePointer());
+};
+const DOUBLE_TAP_MS = 300;
+const DOUBLE_TAP_REACH = 24;
 // Below this pane width the layout is the phone layout of styles.css.
 const NARROW = PHONE_MAX_WIDTH;
 
@@ -33,6 +42,13 @@ const PLATE_H = 30;
  * the frame in which the panel opens or closes.
  */
 const centred = (at: Point, zoom: number, area: DOMRect) => ({ x: area.width / 2 - (at.x + NODE_W / 2) * zoom, y: area.height / 2 - (at.y + NODE_H / 2) * zoom, zoom });
+
+function boundsOf(points: Point[], boxes: Layout["boxes"] = []) {
+  const rects = [...boxes, ...points.map((p) => ({ ...p, width: NODE_W, height: NODE_H }))];
+  const x = Math.min(...rects.map((r) => r.x)), y = Math.min(...rects.map((r) => r.y));
+  return { x, y, width: Math.max(...rects.map((r) => r.x + r.width)) - x,
+    height: Math.max(...rects.map((r) => r.y + r.height)) - y };
+}
 
 /**
  * The two handles of a station, at fixed places. Each node also has a fixed size, so React Flow has
@@ -107,23 +123,35 @@ function Route({ data }: EdgeProps<RouteEdge>) {
 
 /** What each mark on the canvas means. It uses the classes of the edges, so it cannot differ from them. */
 function Key() {
+  const [open, setOpen] = useState(false);
+  const meaning = "An arrow points from a blocker to the issue that waits on it.";
   const line = (
     <svg className="key-line" width="28" height="10" viewBox="0 0 28 10" aria-hidden>
       <path className="react-flow__edge-path" d="M0,5 L20,5" /><path className="track-head" d="M28,5 L20,1 L20,9 Z" />
     </svg>
   );
+  const marks = (
+    <div className="key-body">
+      <span className="track">{line}waits on blocker</span>
+      <span className="track track-clear">{line}blocker done</span>
+      <span><Lamp signal="running" />pulsing lamp: worker running</span>
+    </div>
+  );
   return (
-    <Corner position="bottom-left" className="key" title="An arrow points from a blocker to the issue that waits on it. Point at a node or an edge to trace it.">
-      {/* Folded, so it does not cover the nodes in the corner. */}
-      <details>
-        <summary>Key</summary>
-        <div className="key-body">
-        <span className="track">{line}waits on blocker</span>
-        <span className="track track-clear">{line}blocker done</span>
-        <span><Lamp signal="running" />pulsing lamp: worker running</span>
-        </div>
-      </details>
-    </Corner>
+    <>
+      <Corner position="bottom-left" className="key">
+        {/* Folded, so it does not cover the nodes in the corner. */}
+        <details title={`${meaning} Point at a node or an edge to trace it.`}>
+          <summary>Key</summary>
+          {marks}
+        </details>
+        <button className="key-trigger" type="button" onClick={() => setOpen(true)}>Key</button>
+      </Corner>
+      <Sheet open={open} title="Graph key" onClose={() => setOpen(false)}>
+        <p>{meaning} Tap a node or an edge to trace it.</p>
+        {marks}
+      </Sheet>
+    </>
   );
 }
 
@@ -141,10 +169,13 @@ function Flow({ graph, marks, now, edges: shown, layout, selectedId, hoverId, st
   const flow = useReactFlow();
   // In steps of 0.05, so a zoom gesture renders the canvas again only a few times.
   const zoom = useViewportStore((s) => Math.round(s.transform[2] * 20) / 20);
-  const far = zoom < FAR;
+  const far = zoom < (coarsePointer() ? 0.8 : FAR);
   const pane = useRef<HTMLDivElement>(null);
+  const tap = useRef<{ id: string | null; x: number; y: number; time: number } | null>(null);
+  const touchStart = useRef<Point | null>(null);
+  const selectTimer = useRef<number | undefined>(undefined);
   // The edge under the pointer, and where the pointer went onto it: the note about the edge shows there.
-  const [pointed, setPointed] = useState<{ id: string; x: number; y: number; left: boolean; up: boolean } | null>(null);
+  const [pointed, setPointed] = useState<{ id: string; x: number; y: number; left: boolean; up: boolean; touch: boolean } | null>(null);
   const routes = useMemo(() => new Map(shown.flatMap((e) => (layout.routes.has(e.id) ? [[e.id, layout.routes.get(e.id)!] as const] : []))), [shown, layout]);
   const lit = useMemo(() => trace(graph, shown, { edge: pointed?.id, hover: hoverId, selected: selectedId }), [graph, shown, pointed?.id, hoverId, selectedId]);
   const dimmed = useMemo(() => new Set(graph.nodes.filter((n) => (lit?.dim ? !lit.nodes.has(n.id) : statusFilter.size > 0 && !statusFilter.has(n.status))).map((n) => n.id)), [graph, lit, statusFilter]);
@@ -203,9 +234,18 @@ function Flow({ graph, marks, now, edges: shown, layout, selectedId, hoverId, st
       const points = [...layout.positions.values()];
       const area = pane.current?.getBoundingClientRect();
       if (!points.length || !area) return;
-      const boxes = [...layout.boxes.map((b) => [b.x, b.y, b.x + b.width, b.y + b.height]), ...points.map((p) => [p.x, p.y, p.x + NODE_W, p.y + NODE_H])];
-      const left = Math.min(...boxes.map((b) => b[0])), top = Math.min(...boxes.map((b) => b[1]));
-      const width = Math.max(...boxes.map((b) => b[2])) - left, height = Math.max(...boxes.map((b) => b[3])) - top;
+      const chosen = selectedId ? layout.positions.get(selectedId) : undefined; // a deep link to an issue
+      if (coarsePointer() && !chosen) {
+        const wave = graph.nodes.flatMap((node) => {
+          const point = layout.positions.get(node.id);
+          return node.card?.wave === "yes" && point ? [point] : [];
+        });
+        if (wave.length) {
+          void flow.setViewport(getViewportForBounds(boundsOf(wave), area.width, area.height, 0.08, 1, 0.25));
+          return;
+        }
+      }
+      const { x: left, y: top, width, height } = boundsOf(points, layout.boxes);
       // A narrow pane shows one node at full size, and the user moves the canvas with a finger.
       const edge = area.width < NARROW ? 16 : 32, least = area.width < NARROW ? 1 : 0.75;
       const zoom = Math.min(1, Math.max(least, Math.min((area.width - edge * 2) / width, (area.height - edge * 2) / height)));
@@ -214,7 +254,6 @@ function Flow({ graph, marks, now, edges: shown, layout, selectedId, hoverId, st
       const start = first && first.width * zoom <= area.width - edge * 2 ? area.width / 2 - (first.x + first.width / 2) * zoom : edge - (first?.x ?? left) * zoom;
       const x = width * zoom < area.width ? (area.width - width * zoom) / 2 - left * zoom : start;
       const y = height * zoom < area.height ? (area.height - height * zoom) / 2 - top * zoom : edge - top * zoom;
-      const chosen = selectedId ? layout.positions.get(selectedId) : undefined; // a deep link to an issue
       // A graph larger than the pane starts on the work that needs an action, not on a finished phase.
       const fits = width * zoom <= area.width && height * zoom <= area.height;
       const action = fits ? undefined : layout.positions.get(startNode(graph)?.id ?? "");
@@ -223,11 +262,32 @@ function Flow({ graph, marks, now, edges: shown, layout, selectedId, hoverId, st
     });
     return () => cancelAnimationFrame(frame);
   }, [layout, flow]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const element = pane.current;
+    if (!element) return;
+    let previous = element.getBoundingClientRect();
+    const observer = new ResizeObserver(() => {
+      const area = element.getBoundingClientRect();
+      if (!area.width || !area.height) return;
+      if (coarsePointer() && previous.width && previous.height) {
+        const dx = (area.width - previous.width) / 2, dy = (area.height - previous.height) / 2;
+        const { x, y, zoom } = flow.getViewport();
+        if (dx || dy) void flow.setViewport({ x: x + dx, y: y + dy, zoom });
+      }
+      previous = area;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [flow]);
+  useEffect(() => () => {
+    tap.current = null;
+    window.clearTimeout(selectTimer.current);
+  }, [layout]);
   // The panel takes the right side of the canvas when it opens. Move the selected node back into
   // view, and only as far as it needs, so the user keeps the place in the graph.
   useEffect(() => {
     // A pick from the board or the panel centres the node (the effect below). Do not move it again here.
-    if (focus?.id === selectedId && Date.now() - focus.tick < 1000) return;
+    if (coarsePointer() || (focus?.id === selectedId && Date.now() - focus.tick < 1000)) return;
     const frame = requestAnimationFrame(() => {
       const at = selectedId && layout.positions.get(selectedId), area = pane.current?.getBoundingClientRect();
       if (!at || !area) return;
@@ -244,33 +304,118 @@ function Flow({ graph, marks, now, edges: shown, layout, selectedId, hoverId, st
     if (at && area) void flow.setViewport(centred(at, Math.max(flow.getZoom(), 0.9), area), { duration: 300 });
   }, [focus]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  function pointAt(screen: Point, touch: boolean) {
+    const area = pane.current?.getBoundingClientRect();
+    if (!area) return;
+    const id = routeAt(routes, flow.screenToFlowPosition(screen),
+      (touch ? EDGE_TAP_REACH : 7) / flow.getZoom());
+    if (!touch && id === (pointed?.id ?? null) && !pointed?.touch) return;
+    const x = screen.x - area.left, y = screen.y - area.top;
+    setPointed(id ? { id, x, y, left: x > area.width - 280, up: y > area.height - 70, touch } : null);
+    return id;
+  }
+
+  function fitGraph(area: DOMRect) {
+    const bounds = boundsOf([...layout.positions.values()], layout.boxes);
+    void flow.setViewport(getViewportForBounds(bounds, area.width, area.height, 0.08, 2, 0.15), { duration: 180 });
+  }
+
+  function tapCanvas(screen: Point, time: number, id: string | null) {
+    const previous = tap.current;
+    const at = { ...screen, id, time };
+    window.clearTimeout(selectTimer.current);
+    if (!id && pointAt(screen, true)) {
+      tap.current = null;
+      if (selectedId) onSelect(null);
+      return;
+    }
+    if (previous && previous.id === id && at.time - previous.time <= DOUBLE_TAP_MS
+      && Math.hypot(at.x - previous.x, at.y - previous.y) <= DOUBLE_TAP_REACH) {
+      tap.current = null;
+      setPointed(null);
+      const position = id && layout.positions.get(id), area = pane.current?.getBoundingClientRect();
+      if (position && area) {
+        const scale = Math.min(2, (area.width - 32) / NODE_W, (area.height - 32) / NODE_H);
+        void flow.setViewport(centred(position, scale, area), { duration: 180 });
+      } else if (!id && area) {
+        fitGraph(area);
+      }
+      return;
+    }
+    tap.current = at;
+    if (id) {
+      setPointed(null);
+      selectTimer.current = window.setTimeout(() => {
+        tap.current = null;
+        onSelect(id);
+      }, DOUBLE_TAP_MS);
+    } else {
+      if (selectedId) onSelect(null);
+    }
+  }
+
   return (
     <ReactFlow
       ref={pane} className={far ? "is-far" : undefined} style={{ "--inv": 1 / Math.max(zoom, 0.05) } as CSSProperties} nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} forceColorMode="dark" minZoom={0.08} maxZoom={2}
       nodesDraggable={false} nodesConnectable={false} edgesFocusable={false} deleteKeyCode={null} onlyRenderVisibleElements attributionPosition="top-right"
-      onNodeClick={(_, n) => n.type === "station" && onSelect(n.id)}
-      onNodeMouseEnter={(_, n) => { if (HAS_POINTER && n.type === "station") { onHover(n.id); setPointed(null); } }}
+      zoomOnDoubleClick={!coarsePointer()}
+      onTouchStartCapture={(event) => {
+        const first = event.touches[0];
+        touchStart.current = event.touches.length === 1 ? { x: first.clientX, y: first.clientY } : null;
+        if (!touchStart.current) tap.current = null;
+      }}
+      onTouchMoveCapture={(event) => {
+        const start = touchStart.current, first = event.touches[0];
+        if (start && Math.hypot(first.clientX - start.x, first.clientY - start.y) > 8) {
+          touchStart.current = null;
+          tap.current = null;
+        }
+      }}
+      onTouchCancelCapture={() => { touchStart.current = null; }}
+      onTouchEndCapture={(event) => {
+        const start = touchStart.current;
+        touchStart.current = null;
+        if (!start || event.touches.length) return;
+        const { clientX: x, clientY: y } = event.changedTouches[0];
+        if (Math.hypot(x - start.x, y - start.y) > 8) return;
+        // The browser can move a synthetic click from a track onto a nearby station.
+        // Use the touch coordinates to identify the station or track before that happens.
+        const hit = document.elementFromPoint(x, y);
+        if (!hit?.closest(".react-flow__pane")) return;
+        const station = hit.closest<HTMLElement>(".react-flow__node-station");
+        tapCanvas({ x, y }, event.timeStamp, station?.dataset.id ?? null);
+      }}
+      onNodeClick={(event, n) => {
+        if (!isTouch(event) && n.type === "station") onSelect(n.id);
+      }}
+      onNodeMouseEnter={(event, n) => {
+        if (hoverPointer() && pointerType(event) !== "touch" && n.type === "station") {
+          onHover(n.id);
+          setPointed(null);
+        }
+      }}
       onNodeMouseLeave={() => onHover(null)}
       // A move on a node also comes up to the pane, so only a move on the pane itself counts. There,
       // no node is under the pointer: a node that left the view while the pointer was on it sent no
       // leave event. An edge takes no pointer events, so the edge under the pointer is found here.
       onPaneMouseMove={(event) => {
-        const area = HAS_POINTER && event.target === event.currentTarget && pane.current?.getBoundingClientRect();
-        if (!area) return;
+        if (!hoverPointer() || pointerType(event) === "touch" || event.target !== event.currentTarget) return;
         if (hoverId) onHover(null);
-        const id = routeAt(routes, flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }), 7 / flow.getZoom());
-        if (id === (pointed?.id ?? null)) return;
-        const x = event.clientX - area.left, y = event.clientY - area.top;
-        setPointed(id ? { id, x, y, left: x > area.width - 280, up: y > area.height - 70 } : null);
+        pointAt({ x: event.clientX, y: event.clientY }, false);
       }}
-      onPaneMouseLeave={() => setPointed(null)}
-      onPaneClick={() => onSelect(null)}
+      onPaneMouseLeave={() => setPointed((current) => current?.touch ? current : null)}
+      onPaneClick={(event) => {
+        if (!isTouch(event)) onSelect(null);
+      }}
     >
-      <Controls showInteractive={false} position="bottom-left" />
+      <Controls showInteractive={false} position="bottom-left" onFitView={() => {
+        const area = pane.current?.getBoundingClientRect();
+        if (area && coarsePointer()) fitGraph(area);
+      }} />
       <Key />
       {showMap && <MiniMap style={{ width: 160, height: 120 }} pannable zoomable position="bottom-right" nodeClassName={(n) => (n.type === "station" ? `mini sig-${(n.data as StationData).node.signal}` : n.type === "box" ? "mini-box" : "mini-none")} />}
       {note && pointed && (
-        <div className="track-note" role="status" style={{ left: pointed.x, top: pointed.y, transform: `translate(${pointed.left ? "calc(-100% - 12px)" : "14px"}, ${pointed.up ? "calc(-100% - 10px)" : "14px"})` }}>
+        <div className={`track-note${pointed.touch ? " track-note-touch" : ""}`} role="status" style={pointed.touch ? undefined : { left: pointed.x, top: pointed.y, transform: `translate(${pointed.left ? "calc(-100% - 12px)" : "14px"}, ${pointed.up ? "calc(-100% - 10px)" : "14px"})` }}>
           <b>{note.to.issue.identifier}</b>{note.clear ? "no longer waits on" : "waits on"}<b>{note.from.issue.identifier}</b><span>{note.from.status}</span>
         </div>
       )}

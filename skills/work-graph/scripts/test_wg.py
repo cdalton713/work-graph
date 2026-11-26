@@ -5888,6 +5888,38 @@ class LinkTests(unittest.TestCase):
         self.assertTrue(all(req.headers.get("Authorization") == f"Bearer {token}" for req in self.requests))
         self.assertNotIn(token, out + err)
 
+    def test_agents_retries_503_and_allows_a_slow_upgrade(self):
+        import logging
+
+        attempts = []
+        server_logger = logging.Logger("agents-test")
+        server_logger.addHandler(logging.NullHandler())
+
+        def upgrade(conn, request):
+            attempts.append(request.path)
+            if len(attempts) == 1:
+                reply = conn.respond(503, "the link is unavailable")
+                reply.headers["Retry-After"] = "0"
+                return reply
+            time.sleep(0.15)
+
+        with ws_server.serve(self.handler, "127.0.0.1", 0, process_request=upgrade, logger=server_logger) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.socket.getsockname()[1]}"
+                with patch.dict(os.environ, {"WG_UI_URL": url}), patch.object(wg, "LINK_OPEN_TIMEOUT", 0.05), \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    wg.send_agents(self.d, self.p, [{"id": "s1"}])
+                    self.assertTrue(self.wait_for("agents"))
+            finally:
+                server.shutdown()
+                thread.join()
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.types(), ["agents"])
+        self.assertEqual(self.got[0]["payload"], {"agents": [{"id": "s1"}]})
+        self.assertEqual(err.getvalue(), "")
+
     def test_agents_send_the_workspace_token_to_an_override_page(self):
         self.p["effort"]["workspace"] = "home"
         with patch.dict(wg.WORKSPACES["home"], {"page_url": "https://home.example.com"}), \
@@ -9485,14 +9517,32 @@ class WatchTests(unittest.TestCase):
         self.poll()
         self.assertEqual([len(rows) for rows in self.sent], [1, 0])
 
-    def test_a_failed_send_is_tried_again_at_the_next_read(self):
+    def test_a_failed_send_warns_once_after_a_minute_then_reports_recovery(self):
         self.agents = [self.agent(self.d)]
-        self.fail_send = OSError("refused")
-        _, _, err = self.poll()
-        self.assertIn("warn link: Example: OSError", err)
+        self.fail_send = TimeoutError()
+        for self.clock in (0, 10, 60):
+            self.assertEqual(self.poll()[2], "")
+        self.clock = 70
+        self.assertIn("warn link: Example: TimeoutError", self.poll()[2])
+        self.clock = 80
+        self.assertEqual(self.poll()[2], "")
         self.fail_send = None
-        self.poll()
+        self.assertIn("Example: agents send recovered", self.poll()[2])
         self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.poll()[2], "")
+
+    def test_agents_doctor_reports_service_and_last_send_for_this_effort(self):
+        self.agents = [self.agent(self.d)]
+        with patch.object(Path, "home", return_value=self.root), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(wg.doctor_agents(self.d), ("warn", "agents: service stopped; last send: none"))
+            self.assertEqual(wg.main(["wg", "agents", "--once", "--root", str(self.root)]), 0)
+            with (self.root / ".local/state/work-graph/agents.lock").open("rb") as lock:
+                wg.fcntl.flock(lock, wg.fcntl.LOCK_EX | wg.fcntl.LOCK_NB)
+                self.assertEqual(wg.doctor_agents(self.d),
+                                 ("ok", "agents: service running; last send: 2026-01-01T12:00:00Z"))
+                self.assertEqual(wg.doctor_agents(self.worker), ("ok", "agents: service running; last send: none"))
+            self.assertEqual(wg.doctor_agents(self.d),
+                             ("warn", "agents: service stopped; last send: 2026-01-01T12:00:00Z"))
 
     def test_one_notice_after_two_reads_and_one_more_when_the_agent_waits_again(self):
         self.agents = [self.agent(self.worker, "blocked", said="Allow the push?")]

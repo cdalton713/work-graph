@@ -5682,9 +5682,10 @@ def link_socket(url, *, workspace, **options):
     token = link_token_for(url, workspace)
     if token:
         options["additional_headers"] = {"Authorization": f"Bearer {token}"}
+    options.setdefault("open_timeout", LINK_OPEN_TIMEOUT)
     try:
         ws = retry_page_request(
-            lambda: connect(url, open_timeout=LINK_OPEN_TIMEOUT, close_timeout=1, **options), ws_response_error,
+            lambda: connect(url, close_timeout=1, **options), ws_response_error,
         )
     except Exception as error:
         if token:
@@ -7269,6 +7270,8 @@ def tick_agent(ns):
 # ---------------------------------------------------------------- agents (the agents of each effort, from Orca)
 
 WATCH_LABEL = TICK_LABEL + ".agents"  # the launchd label of `wg agents --install`
+WATCH_OPEN_TIMEOUT = 20   # seconds for the hosted page to start, resolve the project, and upgrade
+WATCH_WARN_AFTER = 60     # seconds of failed sends before the first warning
 WATCH_INTERVAL = 10       # seconds between two reads of Orca
 WATCH_HEARTBEAT = 60      # seconds: the rows go again at least this often, so the page knows that `wg agents` runs
 WATCH_SAID = 500          # characters of an agent's last message that go to the page
@@ -7317,7 +7320,7 @@ def agent_rows(plan_dir, km, agents, now=None):
 def send_agents(plan_dir, plan, rows):
     """Send the rows to the page server on a short connection with no `hello`, as `wrote` goes."""
     url, project, session, _ = link_target(plan_dir, plan)
-    with link_socket(url, workspace=plan_workspace(plan)) as ws:
+    with link_socket(url, workspace=plan_workspace(plan), open_timeout=WATCH_OPEN_TIMEOUT) as ws:
         ws.send(link_envelope(session, project, "agents", {"agents": rows}))
 
 
@@ -7372,7 +7375,22 @@ def notify_agents(plan, entries, record, now=None):
     return json.dumps(record, sort_keys=True) != before
 
 
-def watch_poll(memory, state, roots=None, clock=time.monotonic):
+def agents_state_path():
+    return Path.home() / ".local/state/work-graph/agents.json"
+
+
+def agents_stamp(plan_dir):
+    key = hashlib.sha256(os.fsencode(Path(plan_dir).resolve())).hexdigest()
+    return agents_state_path().parent / "agent-sends" / f"{key}.json"
+
+
+def record_agents_send(plan_dir):
+    path = agents_stamp(plan_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(path, {"at": f"{utc_now():%Y-%m-%dT%H:%M:%SZ}"}, mode=0o600)
+
+
+def watch_poll(memory, state, roots=None, clock=time.monotonic, *, record_send=None):
     """One read of Orca. For each loaded effort: send its rows when they changed or the heartbeat is due, and
     send the notice of the agents that wait on the human. `memory` lives as long as the process: for each plan
     directory, what was last sent and the wait counts. `state` is the file of the sent notices (agents.json). Returns the
@@ -7396,18 +7414,27 @@ def watch_poll(memory, state, roots=None, clock=time.monotonic):
         due = digest != mine["digest"] or (rows and clock() - mine["at"] >= WATCH_HEARTBEAT)
         # An effort with no agent sends nothing, but for one empty message after its last agent went away.
         if due and (rows or mine["digest"] not in (None, "[]")):
+            started = clock()
             try:
                 send_agents(path, plan, rows)
+            except Exception as error:
+                since = mine.setdefault("failed_since", started)
+                if not mine.get("warned") and clock() - since > WATCH_WARN_AFTER:
+                    if isinstance(error, LinkUnauthorized):
+                        reason = link_unauthorized_message(plan_workspace(plan))
+                    elif isinstance(error, (LinkTokenError, LinkResponseError, ReadError)):
+                        reason = one_line(error, 200)
+                    else:
+                        reason = type(error).__name__
+                    print(f"warn link: {plan['effort']['name']}: {reason}", file=sys.stderr, flush=True)
+                    mine["warned"] = True
+            else:
                 mine.update(digest=digest, at=clock())
-            except LinkUnauthorized:
-                workspace = plan_workspace(plan)
-                warn_link_token(link_unauthorized_message(workspace), workspace)
-            except LinkTokenError as error:
-                warn_link_token(error, plan_workspace(plan))
-            except LinkResponseError as error:
-                print(f"warn link: {plan['effort']['name']}: {error}", file=sys.stderr, flush=True)
-            except Exception as e:  # no server, an old server, or a project that the server does not list: try again
-                print(f"warn link: {plan['effort']['name']}: {type(e).__name__}", file=sys.stderr, flush=True)
+                mine.pop("failed_since", None)
+                if mine.pop("warned", False):
+                    print(f"ok link: {plan['effort']['name']}: agents send recovered", file=sys.stderr, flush=True)
+                if record_send:
+                    record_send(path)
         key = f"{plan_workspace(plan)}/{project}"
         entries = agent_entries(rows, mine["seen"])
         if CONFIG.get("notify") and (entries or key in state):
@@ -7426,7 +7453,7 @@ def watch_command(ns):
     if ns.install or ns.uninstall:
         return watch_agent(ns)
     home = Path.home()
-    state_path = home / ".local/state/work-graph/agents.json"
+    state_path = agents_state_path()
     state_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(state_path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
     token = COMMAND_TIMEOUT.set(30)
@@ -7441,7 +7468,7 @@ def watch_command(ns):
         memory, warned, trimmed = {}, None, 0.0
         while True:
             try:
-                found, changed = watch_poll(memory, state, ns.root)
+                found, changed = watch_poll(memory, state, ns.root, record_send=record_agents_send)
                 if changed:
                     save_json(state_path, state, mode=0o600)
                 warned = None
@@ -7685,6 +7712,26 @@ def doctor_watch():
     return "ok", f"agents: {WATCH_LABEL} loaded"
 
 
+def doctor_agents(plan_dir):
+    # Only the continuous sender holds this lock. A stale lock file is harmless.
+    running = False
+    try:
+        with agents_state_path().with_suffix(".lock").open("rb") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                running = True
+    except FileNotFoundError:
+        pass
+    last = "none"
+    try:
+        last = json.loads(agents_stamp(plan_dir).read_text())["at"]
+    except FileNotFoundError:
+        pass
+    level, detail = ("ok", "running") if running else ("warn", "stopped")
+    return level, f"agents: service {detail}; last send: {last}"
+
+
 def wake_trigger(automation, cron=WAKE_SCHEDULE, forms=None):
     """True when the Orca automation runs at the times of `cron` (default: each 5 minutes, WAKE_SCHEDULE), False
     when it runs at other times, None when its trigger is not readable. Orca keeps the trigger as `rrule`; a
@@ -7905,7 +7952,7 @@ def doctor_lines(plan_dir=None, fix=False):
     if CONFIG.get("page_url"):
         pages.setdefault(PAGE_URL.rstrip("/"), None)
     checks += [(f"link token for {url}", lambda w=w: doctor_link_token(w)) for url, w in pages.items()]
-    checks += [("tick", doctor_tick), ("agents", doctor_watch)]
+    checks += [("tick", doctor_tick), ("agents", (lambda: doctor_agents(plan_dir)) if plan_dir else doctor_watch)]
     if plan_dir:
         plans.add(Path(plan_dir).resolve())
     checks += [("autostart", doctor_autostart(sorted(plans))), ("health", doctor_health(sorted(plans)))]

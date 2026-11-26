@@ -3,6 +3,9 @@ use std::process::ExitCode;
 const USAGE: &str = "Usage: wg-preview --version";
 
 fn main() -> ExitCode {
+    if std::env::args_os().nth(1).is_some_and(|v| v == "usage") {
+        return wg_preview::usage::command(std::env::args().skip(2));
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("setup")) {
         return wg_preview::linear::run_setup(std::env::args_os().skip(2));
     }

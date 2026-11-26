@@ -96,10 +96,26 @@ it("puts the first ranked inbox reason on the row and counts the remaining entri
   expect(selectedState(withInbox)).toEqual({ state: "waits", reason: "WG-14 · Approve the plan +1" });
 });
 
-it("puts a stall above inbox, moving work, and an idle reason", () => {
-  for (const s of [withInbox, idle, { ...idle, externalBlocker: "WG-19" }]) {
+it("puts a stall above inbox and moving work", () => {
+  for (const s of [withInbox, idle]) {
     expect(selectedState({ ...s, liveJobs: [job] }, presence(ago(0), true))).toMatchObject({ state: "stalled", reason: expect.stringContaining("No agent view") });
   }
+});
+
+it("puts a missing coordinator stall above an idle reason without a live job", () => {
+  const blocked = { ...idle, externalBlocker: "WG-19", nextLines: [duty], effort: { status: "wave 1", at: ago(20) } };
+  expect(selectedState(blocked, presence(ago(15, 1)))).toEqual({ state: "idle", reason: "Waits for WG-19 outside the project" });
+  expect(selectedState(blocked, presence(ago(15)))).toMatchObject({ state: "stalled", reason: expect.stringContaining("No coordinator") });
+});
+
+it("keeps a project moving while a live job finishes after a pause", () => {
+  const moving = { state: "moving", reason: "Worker on WG-12" };
+  expect(selectedState({ ...summary, paused: true }, presence(ago(0), true))).toEqual(moving);
+  expect(projectState(summary, { now, project: { statusType: "paused" } })).toEqual(moving);
+});
+
+it("gives an unavailable reason when the project graph fails to load", () => {
+  expect(selectedState({ ...idle, error: "Could not load issues" })).toEqual({ state: "idle", reason: "Project details unavailable" });
 });
 
 it("shows moving work until link data confirms a stall", () => {
@@ -124,7 +140,7 @@ it("puts moving ahead of idle when a job runs or a coordinator acts on a do line
 });
 
 it.each([
-  [{ paused: true, liveJobs: [job] }, "Paused"],
+  [{ paused: true }, "Paused"],
   [{ nextLines: [{ level: "wait", text: "soak ship WG-13: until 14:00" }] }, "soak until 14:00"],
   [{ externalBlocker: "WG-19" }, "Waits for WG-19 outside the project"],
   [{ nextLines: [{ level: "wait", text: "collaborator Ada page: job=dispatch" }] }, "Waits for Ada"],
@@ -132,6 +148,9 @@ it.each([
   [{ nextLines: [{ level: "wait", text: "collaborator Ada Example page: job=dispatch" }] }, "Waits for Ada Example"],
   [{ collaborator: "Ada" }, "Waits for Ada"],
   [{}, "Not started"],
+  [{ planned: 2, done: 1 }, "No work running"],
+  [{ running: 1 }, "No live job reported"],
+  [{ review: 1 }, "No live job reported"],
   [{ done: 1 }, "Each node is done"],
 ] satisfies [Partial<ProjectSummary>, string][])("explains why a project is idle (%o)", (change, reason) => {
   expect(selectedState({ ...idle, ...change })).toEqual({ state: "idle", reason });

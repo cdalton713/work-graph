@@ -133,21 +133,20 @@ export function projectState(summary: ProjectSummary | null, activity: ProjectAc
   }
 
   const idle = (reason: string): ProjectState => ({ state: "idle", reason });
-  if (paused) return idle("Paused");
   if (project?.statusType === "canceled") return idle("Canceled");
   if (complete) return idle("Each node is done");
-  if (summary?.error) return idle(summary.error);
-  if (!summary) return idle("Project details are loading");
-
-  const hasDuty = summary.nextLines?.some((line) => line.level === "do" && agentLine(line));
+  const hasDuty = summary?.nextLines?.some((line) => line.level === "do" && agentLine(line));
   const mode = presenceText(presence, now, agents)?.state;
   const coordinatorWorks = mode === "working" || mode === "listening"
     || (agentsFresh(agents, now) && agents.agents.some((row) => row.role === "coordinator" && row.state === "working"));
-  const job = summary.liveJobs?.[0];
-  if (job || (hasDuty && coordinatorWorks)) {
+  const job = summary?.liveJobs?.[0];
+  if (summary && (job || (hasDuty && coordinatorWorks))) {
     return { state: "moving", reason: nextStep(summary, now) ?? (job ? `Worker on ${job.identifier}` : "Coordinator working") };
   }
 
+  if (summary?.error) return idle("Project details unavailable");
+  if (paused) return idle("Paused");
+  if (!summary) return idle("Project details are loading");
   if (summary.planned > 0 && summary.done === summary.planned) return idle("Each node is done");
   const soak = summary.nextLines?.find(({ level, text }) => level === "wait" && text.startsWith("soak "));
   if (soak) return idle(nextStep({ ...summary, nextLines: [soak] }, now) ?? soak.text);
@@ -156,8 +155,11 @@ export function projectState(summary: ProjectSummary | null, activity: ProjectAc
   if (collaborator?.text.startsWith("owner ")) return idle("Waits for the owner");
   const holder = collaborator?.text.match(/^collaborator (.+) \S+(?:: job=.*)$/)?.[1] ?? summary.collaborator;
   if (holder) return idle(`Waits for ${holder}`);
-  const next = !hasDuty && nextStep(summary, now);
-  return idle(next || (hasDuty ? "Waits for the coordinator" : "Not started"));
+  if (hasDuty) return idle("Waits for the coordinator");
+  const next = nextStep(summary, now);
+  if (next) return idle(next);
+  if (summary.running || summary.review) return idle("No live job reported");
+  return idle(summary.done || summary.counts.some(({ signal }) => signal === "merged") ? "No work running" : "Not started");
 }
 
 export function overviewTitle(inboxCount: number): string {

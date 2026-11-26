@@ -158,6 +158,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
               {s && s.review > 0 && <span className="sig-fg-review" title="In Review or Verifying"><Lamp signal="review" />{s.review} in review</span>}
               {s && s.ready > 0 && <span className="sig-fg-ready" title="Not started, and no blocker holds it back"><Lamp signal="ready" />{s.ready} can start</span>}
             </span>
+            {s?.error && <span className="ov-error sig-fg-stop">{s.error}</span>}
           </button>
           <CopyButton text={p.name} label="Copy the project name" className="ov-copy" />
           {s?.effort && (

@@ -159,6 +159,13 @@ describe("overviewRows", () => {
     expect(rows.find(({ project }) => project.id === "a")).toMatchObject({ attention: { state: "moving" }, stalls: [] });
   });
 
+  it("keeps the reason accurate for viewers with started issues and no wg next lines", () => {
+    const rows = overviewRows({
+      ...list, workspaces: list.workspaces.map((w) => ({ ...w, role: "viewer" })),
+    }, { text: "", workspace: "work", closed: false });
+    expect(rows.find(({ project }) => project.id === "c")?.attention).toEqual({ state: "idle", reason: "No live job reported" });
+  });
+
   it("works with the project list alone, before the first summaries", () => {
     const { summaries: _, ...plain } = list;
     expect(overviewRows(plain, { text: "", workspace: null, closed: false }).map((r) => r.summary)).toEqual([null, null, null, null]);

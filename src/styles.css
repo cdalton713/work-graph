@@ -362,6 +362,7 @@ button.copy.is-copied { color: var(--lamp-done); }
 .ov-state { grid-column: 1 / -1; display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 12px; }
 .ov-state-label { flex: none; font-weight: 600; }
 .ov-reason { min-width: 0; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-error { grid-column: 1 / -1; padding-left: 17px; font-size: 12px; overflow-wrap: anywhere; }
 .ov-name { display: flex; align-items: center; gap: 9px; min-width: 0; padding-left: 17px; }
 .ov-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 500; color: var(--ink-1); }
 .ov-ws { flex: none; font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-4); }

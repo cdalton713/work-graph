@@ -97,6 +97,10 @@ export function Picker(props: {
   useEffect(() => {
     if (!open || sheet) return;
     setActive(Math.max(0, shown.findIndex((o) => value.includes(o.id))));
+    if (coarse) {
+      list.current?.focus();
+      return;
+    }
     (list.current?.querySelector(".picker-filter") as HTMLElement | null ?? list.current)?.focus();
   }, [open, sheet]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { list.current?.querySelector(".is-active")?.scrollIntoView({ block: "nearest" }); }, [active]);
@@ -300,6 +304,7 @@ export function Sheet({ open, title, onClose, children }: {
   useLayoutEffect(() => {
     const panel = dialog.current;
     if (!open || !panel) return;
+    if (closeButton.current) closeButton.current.autofocus = true;
     panel.showModal();
     closeButton.current?.focus({ preventScroll: true });
     return () => panel.close();

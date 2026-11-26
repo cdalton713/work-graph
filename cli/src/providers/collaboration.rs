@@ -3,11 +3,7 @@ use crate::{
     CredentialProvider,
     page::{Collaboration, LockedEffort, Output, ProjectAccess, Result},
 };
-use std::{
-    ffi::OsStr,
-    os::unix::{ffi::OsStrExt, fs::MetadataExt},
-    process::Command,
-};
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt, process::Command};
 
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = Command::new("git")
@@ -34,34 +30,6 @@ fn existing(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
         }
     }
     Ok(None)
-}
-fn post_join(cmd: &str, path: &Path) -> Result<Output> {
-    let current =
-        fs::metadata(env::current_exe().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let exe = env::split_paths(&env::var_os("PATH").unwrap_or_default())
-        .map(|dir| dir.join("wg"))
-        .find_map(|p| {
-            let m = fs::metadata(&p).ok()?;
-            (m.is_file()
-                && m.mode() & 0o111 != 0
-                && (m.dev() != current.dev() || m.ino() != current.ino()))
-            .then_some(p)
-        })
-        .ok_or("post-join requires the reference wg on PATH")?;
-    let out = Command::new(exe)
-        .arg(cmd)
-        .arg(path)
-        .output()
-        .map_err(|e| e.to_string())?;
-    Ok(Output {
-        status: out.status.code().unwrap_or(1) as u8,
-        stdout: String::from_utf8_lossy(&out.stdout)
-            .trim_end_matches('\n')
-            .into(),
-        stderr: String::from_utf8_lossy(&out.stderr)
-            .trim_end_matches('\n')
-            .into(),
-    })
 }
 impl Collaboration for Installation {
     fn lock(&self, dir: &Path) -> Result<Box<dyn LockedEffort + '_>> {
@@ -151,11 +119,11 @@ impl Collaboration for Installation {
         }
         Ok((path, lock))
     }
-    fn preflight(&self, path: &Path, _: &str, _: &Value) -> Result<Output> {
-        post_join("preflight", path)
+    fn preflight(&self, path: &Path, _: &str, plan: &Value) -> Result<Output> {
+        crate::integration::preflight(self, path, plan, None)
     }
     fn next(&self, path: &Path, _: &str, _: &Value) -> Result<Output> {
-        post_join("next", path)
+        crate::automation::joined_next(path)
     }
     fn normalize(&self, plan: &mut Value) -> Result<()> {
         self.config

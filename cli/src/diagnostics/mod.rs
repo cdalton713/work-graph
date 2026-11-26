@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+mod hosted;
 mod services;
 
 pub type Lines = Vec<(String, String)>;
@@ -292,6 +293,16 @@ pub fn collect(
     {
         Ok(services) => lines.extend(services),
         Err(e) => lines.push(failure("config", e)),
+    }
+    // Effort-specific hosted checks require a readable plan for credential selection.
+    if dir.is_none_or(|p| p.join("plan.json").is_file()) {
+        match state::Config::discover()
+            .map_err(Into::into)
+            .and_then(|config| hosted::inspect(dir, &config))
+        {
+            Ok(found) => lines.extend(found),
+            Err(e) => lines.push(failure("hosted diagnostics", e)),
+        }
     }
     match machine::plans(roots) {
         Ok(mut dirs) => {

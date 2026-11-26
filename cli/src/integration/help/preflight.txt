@@ -1,0 +1,8 @@
+usage: wg.py preflight [-h] [--phase PHASE] dir
+
+positional arguments:
+  dir
+
+options:
+  -h, --help     show this help message and exit
+  --phase PHASE

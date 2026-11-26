@@ -51,3 +51,19 @@ fn page_channels_in_status_and_config() {
         }
     }
 }
+
+#[test]
+fn installed_resources_and_legacy_commands() {
+    assert!(
+        Command::new("python3")
+            .arg("-IB")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../tests/cli-parity/diagnostics.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_wg-preview"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}

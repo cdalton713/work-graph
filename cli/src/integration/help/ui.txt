@@ -1,0 +1,11 @@
+usage: wg.py ui [-h] [--workspace {default}] [--port PORT] [--project PROJECT]
+                [--no-open] [--no-tailnet]
+
+options:
+  -h, --help            show this help message and exit
+  --workspace {default}
+  --port PORT
+  --project PROJECT
+  --no-open
+  --no-tailnet          keep the page on this machine; the default also serves
+                        it on the tailnet

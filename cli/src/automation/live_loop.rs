@@ -203,6 +203,7 @@ fn answers(e: &Effort) -> Result<Vec<(String, String)>> {
     Ok(lines)
 }
 struct Run<'a> {
+    output: &'a mut dyn std::io::Write,
     install: &'a Installation,
     args: &'a arguments::Next,
     plan: Value,
@@ -409,7 +410,7 @@ impl Coordinator for Run<'_> {
     }
     fn report(&mut self, result: &Refresh, finished: bool) -> std::result::Result<(), String> {
         if let Some(error) = self.claims_error.take() {
-            println!("wait claims page: {error}");
+            writeln!(self.output, "wait claims page: {error}").map_err(|e| e.to_string())?;
             return Ok(());
         }
         let a = self.actions.as_ref().ok_or("no current actions")?;
@@ -420,12 +421,12 @@ impl Coordinator for Run<'_> {
                         || line.starts_with("reply ")
                         || line.starts_with("replied "))
                 {
-                    println!("note {line}");
+                    writeln!(self.output, "note {line}").map_err(|e| e.to_string())?;
                 }
             }
         }
         if finished {
-            println!("{}", a.head);
+            writeln!(self.output, "{}", a.head).map_err(|e| e.to_string())?;
             let dir = quote(
                 &self
                     .args
@@ -463,16 +464,18 @@ impl Coordinator for Run<'_> {
                 } else {
                     String::new()
                 };
-                println!("{l} {t}{suffix}");
+                writeln!(self.output, "{l} {t}{suffix}").map_err(|e| e.to_string())?;
             }
             if hidden > 0 {
-                println!(
+                writeln!(
+                    self.output,
                     "note other: {hidden} more note line{}; wg next {dir} --all prints them",
                     if hidden == 1 { "" } else { "s" }
                 )
+                .map_err(|e| e.to_string())?;
             }
             if !result.complete {
-                println!("note page {}", self.page_url);
+                writeln!(self.output, "note page {}", self.page_url).map_err(|e| e.to_string())?;
             }
         }
         Ok(())
@@ -484,6 +487,14 @@ impl Coordinator for Run<'_> {
     }
 }
 pub(super) fn next_command(args: &arguments::Next, watch: bool) -> Result<u8> {
+    next_with_output(args, watch, &mut std::io::stdout())
+}
+
+pub(super) fn next_with_output(
+    args: &arguments::Next,
+    watch: bool,
+    output: &mut dyn std::io::Write,
+) -> Result<u8> {
     let interval = Duration::try_from_secs_f64(args.interval)
         .map_err(|_| "--interval must be a positive number of seconds")?;
     let install = Installation::load()?;
@@ -513,6 +524,7 @@ pub(super) fn next_command(args: &arguments::Next, watch: bool) -> Result<u8> {
     let mut run = Run {
         plan: e.plan.clone(),
         collaborative: false,
+        output,
         install: &install,
         args,
         link,

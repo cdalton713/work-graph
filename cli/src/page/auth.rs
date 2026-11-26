@@ -173,6 +173,27 @@ fn save(path: &Path, token: &str) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn verify_token(page: &mut Page) -> Result<Value> {
+    let config = token_json(page, "/api/config")?;
+    if !config["auth"]
+        .as_bool()
+        .ok_or("the page did not report whether sign-in is enabled")?
+    {
+        let path = "/api/link?role=coordinator";
+        let with = token_response(page, path)?.0;
+        if with != 400 {
+            check(with)?;
+        }
+        let credential = page.token.take();
+        let without = token_response(page, path)?.0;
+        page.token = credential;
+        if with != 400 || !matches!(without, 401 | 403) {
+            return Err("the page did not confirm the token".into());
+        }
+    }
+    token_json(page, "/api/status")
+}
+
 pub(super) fn login(settings: &Settings, explicit: Option<&str>, stdin: bool) -> Result<String> {
     let mut page = Page::new(settings, explicit)?;
     let url = explicit
@@ -193,24 +214,7 @@ pub(super) fn login(settings: &Settings, explicit: Option<&str>, stdin: bool) ->
     };
     let (token, value) = header(&raw)?;
     page.token = Some(value);
-    let config = token_json(&page, "/api/config")?;
-    if !config["auth"]
-        .as_bool()
-        .ok_or("the page did not report whether sign-in is enabled")?
-    {
-        let path = "/api/link?role=coordinator";
-        let with = token_response(&page, path)?.0;
-        if with != 400 {
-            check(with)?;
-        }
-        let credential = page.token.take();
-        let without = token_response(&page, path)?.0;
-        page.token = credential;
-        if with != 400 || !matches!(without, 401 | 403) {
-            return Err("the page did not confirm the token".into());
-        }
-    }
-    let status = token_json(&page, "/api/status")?;
+    let status = verify_token(&mut page)?;
     save(&path, &token)?;
     let mut lines = vec![format!("Saved the coordinator token for {url}.")];
     for row in status["workspaces"].as_array().into_iter().flatten() {

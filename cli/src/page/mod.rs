@@ -291,3 +291,42 @@ pub(crate) use collaboration::save_run_keymap;
 pub(crate) use collaboration::{ClaimSession, update_claim};
 
 pub(crate) use collaboration::{acquire_claim, refresh_workflow, shell_quote};
+
+/// Read-only probes use the same URL policy, credential scope and TLS roots as login.
+pub(crate) struct DiagnosticPage(Page);
+
+impl DiagnosticPage {
+    pub(crate) fn new(
+        install: &crate::linear::Installation,
+        scope: &str,
+        url: &str,
+        shared: bool,
+    ) -> Result<Self> {
+        let mut settings = crate::providers::PageSettings(install).resolve(scope)?;
+        settings
+            .page
+            .get_or_insert_with(|| "http://127.0.0.1:4747".into());
+        let mut page = Page::new(&settings, Some(url))?;
+        page.token =
+            page_credential(&settings, url, scope, shared, install)?.map(|c| c.into_header());
+        Ok(Self(page))
+    }
+
+    pub(crate) fn read(&self, path: &str, scope: Option<&str>) -> Result<Value> {
+        let mut request = self.0.request(reqwest::Method::GET, path);
+        if let Some(scope) = scope {
+            request = request.header("x-workspace", scope);
+        }
+        json_response(request)
+    }
+
+    pub(crate) fn verified_account(&mut self) -> Result<Option<Value>> {
+        if self.0.token.is_none() {
+            return Ok(None);
+        }
+        auth::verify_token(&mut self.0).map(Some)
+    }
+    pub(crate) fn authenticated(&self) -> bool {
+        self.0.token.is_some()
+    }
+}

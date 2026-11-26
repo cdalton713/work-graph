@@ -1,0 +1,28 @@
+usage: wg.py [-h]
+             {check,share,pull,preflight,base,status,load,ready,next,watch,wake,health,autostart,approve,dispatch,claim,started,done,move,cleanup,archive,run,log,usage,evidence,autonomy,review-effort,verify,owns,explain,doctor,setup,config,contract,tick,agents,login,logout,join,leave,ui,update}
+             ...
+
+Validate and manage a work-graph effort.
+
+positional arguments:
+  {check,share,pull,preflight,base,status,load,ready,next,watch,wake,health,autostart,approve,dispatch,claim,started,done,move,cleanup,archive,run,log,usage,evidence,autonomy,review-effort,verify,owns,explain,doctor,setup,config,contract,tick,agents,login,logout,join,leave,ui,update}
+    explain             print what to do for a verb of wg next; with no verb,
+                        list the verbs
+    doctor              check this machine and, with a plan directory, that
+                        effort; changes nothing
+    setup               check a Linear team and create missing workflow items
+                        with --apply
+    config              print the config of this machine (no keys) and the
+                        local rules file
+    contract            print what the page must agree with; --write updates
+                        contract.json
+    tick                refresh the page for each loaded effort
+    agents              send each loaded effort's Orca agents to the page,
+                        each 10 seconds
+
+options:
+  -h, --help            show this help message and exit
+
+Managed updates:
+  wg update status
+  wg update rollback

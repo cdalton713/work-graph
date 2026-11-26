@@ -246,3 +246,27 @@ mod live_loop;
 mod publish;
 
 mod notices;
+
+pub(crate) fn joined_next(path: &std::path::Path) -> crate::page::Result<crate::page::Output> {
+    let args = arguments::Next {
+        dir: path.into(),
+        wait: false,
+        interval: 300.0,
+        no_publish: false,
+        all: false,
+    };
+    let mut bytes = Vec::new();
+    let result = live_loop::next_with_output(&args, false, &mut bytes);
+    Ok(crate::page::Output {
+        stdout: String::from_utf8(bytes)
+            .map_err(|e| e.to_string())?
+            .trim_end_matches('\n')
+            .into(),
+        stderr: result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        status: result.unwrap_or(2),
+    })
+}

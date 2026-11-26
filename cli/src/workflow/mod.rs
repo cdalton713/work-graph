@@ -102,7 +102,7 @@ fn workspace<'a>(installation: &'a Installation, plan: &'a Value) -> Result<&'a 
 
 type Linear = Client<'static, Value, LinearHttp, SystemTiming>;
 
-fn client(installation: &Installation, plan: &Value) -> Result<Linear, String> {
+pub(crate) fn client(installation: &Installation, plan: &Value) -> Result<Linear, String> {
     Client::connect(
         workspace(installation, plan)?,
         installation,
@@ -120,6 +120,7 @@ mod load;
 mod transition;
 
 mod settings;
+pub(crate) use settings::coordinator_settings;
 
 fn journal(dir: &std::path::Path, cmd: &str, old: &Value, new: &Value) {
     if let Err(e) = crate::local::record_workflow(dir, cmd, old, new) {

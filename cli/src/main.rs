@@ -37,6 +37,9 @@ fn dispatch(on_io_failure: &dyn Fn(std::io::ErrorKind)) -> ExitCode {
             _ => {}
         }
     }
+    if let Some(status) = wg_preview::integration::command(std::env::args_os().skip(1)) {
+        return status;
+    }
     if matches!(
         std::env::args_os()
             .nth(1)

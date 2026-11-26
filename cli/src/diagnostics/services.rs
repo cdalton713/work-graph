@@ -137,6 +137,18 @@ pub(super) fn inspect(dir: Option<&Path>, config: &crate::state::Config) -> Resu
     let settings = &report["config"];
     let mut lines =
         vec![tick(text(&settings["tick_label"])).unwrap_or_else(|e| failure("tick", e))];
+    let resources = crate::integration::resources::root();
+    lines.push(match &resources {
+        Ok(root) if root.join("orca-plugin/orca-plugin.json").is_file() => line(
+            "ok",
+            format!("installation: skill and plugin at {}", root.display()),
+        ),
+        Ok(root) => line(
+            "warn",
+            format!("installation: no Orca plugin at {}", root.display()),
+        ),
+        Err(e) => line("warn", format!("installation: {e}")),
+    });
     let installed = plugin();
     let finding = match &installed {
         Err(e) => line(
@@ -154,6 +166,18 @@ pub(super) fn inspect(dir: Option<&Path>, config: &crate::state::Config) -> Resu
                     "warn",
                     format!(
                         "agents: the Orca plugin {key} needs a new approval (wg agents --install)"
+                    ),
+                )
+            } else if let Ok(root) = &resources
+                && let Some(folder) = root.join("orca-plugin").to_str()
+                && let Ok(local) = machine::orca(&["plugin", "inspect", folder])
+                && local["contentHash"].is_string()
+                && local["contentHash"] != p["source"]["contentHash"]
+            {
+                line(
+                    "warn",
+                    format!(
+                        "agents: the Orca plugin {key} differs from the installed version (wg agents --install)"
                     ),
                 )
             } else if matches!(p["status"].as_str(), Some("disabled" | "error" | "failed")) {

@@ -127,7 +127,14 @@ def main():
         choices = re.search(r"\{([\w,-]+)\}", help_result["stdout"])
         paths = [line.split() for line in commands if not group or line.startswith(group + " ")]
         listed = {path[len(group.split())] for path in paths}
-        if not choices or set(choices[1].split(",")) != listed:
+        roots = set(choices[1].split(",")) if choices else set()
+        if not group and command != REFERENCE and "update" in roots:
+            roots.remove("update")
+            for control in ("status", "rollback"):
+                result = run_case(command, ["update", control, "--help"])
+                if result["exit"] or result["stderr"] or result["files"] or f"wg update {control}" not in result["stdout"]:
+                    sys.exit(f"Native update {control} help failed: {result}")
+        if not choices or roots != listed:
             sys.exit(f"Update cases.txt for the verbs in {group or 'root'} help:\n{help_result['stdout']}")
     observed = {}
     verbs = {tuple(case.split()[:2] if case.split()[0] in {"owns", "run"} else case.split()[:1])

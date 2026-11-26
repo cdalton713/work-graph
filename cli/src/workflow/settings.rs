@@ -210,6 +210,21 @@ pub(super) fn coordinator(
             e.lines().next().unwrap_or("unknown error")
         );
     }
+    for (_, result, description) in coordinator_settings(dir, cfg, apply) {
+        match result {
+            Ok(true) => changes.push(description),
+            Ok(false) => (),
+            Err(e) => eprintln!("warn: the coordinator settings are not set ({e})"),
+        }
+    }
+}
+
+pub(crate) fn coordinator_settings(
+    dir: &Path,
+    cfg: &Value,
+    apply: bool,
+) -> Vec<(&'static str, io::Result<bool>, String)> {
+    let mut found = Vec::new();
     let mut settings = cfg["coordinator_settings"].clone();
     let limit = cfg["context_limit"].as_i64().unwrap_or(0);
     if limit != 0 {
@@ -236,14 +251,11 @@ pub(super) fn coordinator(
         if key == "claude" && limit != 0 {
             what.push(format!("autoCompactWindow {limit}"));
         }
-        match agent(dir, key, values, apply) {
-            Ok(true) => changes.push(format!(
-                "set {} in {}",
-                what.join(" and "),
-                dir.join(name).display()
-            )),
-            Ok(false) => (),
-            Err(e) => eprintln!("warn: the coordinator settings are not set ({e})"),
-        }
+        found.push((
+            name,
+            agent(dir, key, values, apply),
+            format!("set {} in {}", what.join(" and "), dir.join(name).display()),
+        ));
     }
+    found
 }

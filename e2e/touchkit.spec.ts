@@ -10,7 +10,7 @@ test("the build version uses the native title with a mouse", async ({ page }, te
   await expect(page.locator(".bar-version")).toHaveAttribute("title", buildHint);
 });
 
-test.describe("touch controls", () => {
+test.describe("sheet", () => {
   test.skip(({ isMobile }) => !isMobile, "Check the touch controls on phone projects");
 
   let fixtureScript: string;

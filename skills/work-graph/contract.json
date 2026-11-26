@@ -422,6 +422,11 @@
       "resume",
       "autonomy"
     ],
+    "agent_reply_statuses": [
+      "delivered",
+      "refused",
+      "unconfirmed"
+    ],
     "close_codes": {
       "restart": 1012,
       "recycle": 4001

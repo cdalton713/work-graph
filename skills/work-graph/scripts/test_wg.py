@@ -6037,6 +6037,18 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(self.got[1]["payload"], result)
         deliver.assert_called_once()
 
+    def test_reply_poll_times_out_only_once_for_the_server(self):
+        from unittest.mock import MagicMock
+        socket = MagicMock()
+        socket.recv.side_effect = TimeoutError
+        with patch.dict(wg.CONFIG, {"agent_replies": True}), patch.object(wg, "orca_caller", return_value=True), \
+                patch.object(wg, "link_socket", side_effect=lambda *args, **kwargs: contextlib.nullcontext(socket)):
+            wg.send_agents(self.d, self.p, [])
+            wg.send_agents(self.d, self.p, [])
+        socket.recv.assert_called_once_with(timeout=2)
+        self.assertTrue(json.loads(socket.send.call_args_list[0].args[0])["payload"]["replies"])
+        self.assertFalse(json.loads(socket.send.call_args_list[1].args[0])["payload"]["replies"])
+
     def test_watcher_without_an_orca_identity_advertises_no_replies(self):
         with patch.dict(wg.CONFIG, {"agent_replies": True}), patch.object(wg, "orca_caller", return_value=False):
             self.assertEqual(wg.doctor_agent_replies()[0], "warn")
@@ -10077,7 +10089,7 @@ class WatchTests(unittest.TestCase):
         self.assertEqual((rows[0]["agent"], rows[0]["state"], rows[0]["title"]), ("claude", "working", "Run the effort"))
 
     def test_reply_checks_orca_and_records_worker_mail(self):
-        self.agents = [self.agent(self.worker, "waiting", ident="session-1", kind="chat")]
+        self.agents = [self.agent(self.worker, "done", ident="session-1", kind="chat")]
         reply = {"id": "reply-1", "agent": "session-1", "body": "Hello\r\nContinue\x1b\x85"}
         with patch.dict(wg.CONFIG, {"agent_replies": True}), patch.object(wg, "orca_caller", return_value=True), \
                 patch.object(wg, "orca_mutation", return_value={"message": {"id": "mail-1"}}) as mail, \
@@ -10088,16 +10100,16 @@ class WatchTests(unittest.TestCase):
             self.assertEqual(args[:4], ("orchestration", "send", "--to", "orca_session_id:session-1"))
             record.assert_called_once_with("ia", "Reply to the agent: Hello\nContinue")
 
-    def test_reply_refuses_when_the_agent_is_not_waiting_in_this_effort(self):
+    def test_reply_refuses_when_the_agent_is_not_idle_in_this_effort(self):
         reply = {"id": "reply-1", "agent": "session-1", "body": "Continue"}
         with patch.dict(wg.CONFIG, {"agent_replies": True}), patch.object(wg, "orca_caller", return_value=True), patch.object(wg, "orca_mutation") as mail:
-            for path, state in [(self.root / "other", "waiting"), (self.worker, "working"), (self.worker, "blocked")]:
+            for path, state in [(self.root / "other", "done"), (self.worker, "working"), (self.worker, "blocked"), (self.worker, "waiting")]:
                 self.agents = [self.agent(path, state, ident="session-1", kind="chat")]
                 self.assertEqual(wg.deliver_agent_reply(self.d, self.plan, reply)["status"], "refused")
             mail.assert_not_called()
 
     def test_reply_refuses_a_terminal_with_choices_or_no_screen(self):
-        self.agents = [self.agent(self.d, "waiting", ident="session-1", kind="terminal",
+        self.agents = [self.agent(self.d, "done", ident="session-1", kind="terminal",
                                   paneKey="tab:leaf", worktreeId="worktree")]
         reply = {"id": "reply-1", "agent": "session-1", "body": "Continue"}
         terminal = {"handle": "term_1", "tabId": "tab", "leafId": "leaf", "worktreeId": "worktree",
@@ -10109,7 +10121,7 @@ class WatchTests(unittest.TestCase):
             mail.assert_not_called()
 
     def test_terminal_mail_replays_only_an_orca_request_and_has_no_coordinator_comment(self):
-        self.agents = [self.agent(self.d, "waiting", ident="session-1", kind="terminal",
+        self.agents = [self.agent(self.d, "done", ident="session-1", kind="terminal",
                                   paneKey="tab:leaf", worktreeId="worktree")]
         reply = {"id": "reply-1", "agent": "session-1", "body": "Continue"}
         terminal = {"handle": "term_1", "tabId": "tab", "leafId": "leaf", "worktreeId": "worktree",
@@ -10127,11 +10139,14 @@ class WatchTests(unittest.TestCase):
             record.assert_not_called()
 
     def test_reply_with_no_orca_receipt_is_not_sent_again(self):
-        self.agents = [self.agent(self.d, "waiting", ident="session-1", kind="chat")]
+        self.agents = [self.agent(self.d, "done", ident="session-1", kind="chat")]
         reply = {"id": "reply-1", "agent": "session-1", "body": "Continue"}
         with patch.dict(wg.CONFIG, {"agent_replies": True}), patch.object(wg, "orca_caller", return_value=True), \
                 patch.object(wg, "orca_mutation", side_effect=wg.ReadError("no response")) as mail:
-            self.assertEqual(wg.deliver_agent_reply(self.d, self.plan, reply)["status"], "refused")
+            self.assertEqual(wg.deliver_agent_reply(self.d, self.plan, reply), {
+                "id": "reply-1", "status": "unconfirmed",
+                "reason": "Orca did not confirm the mail. Check Orca before you reply again",
+            })
             mail.assert_called_once()
 
     def test_a_long_message_is_cut_and_the_rows_have_a_limit(self):

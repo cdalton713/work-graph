@@ -3,7 +3,7 @@
 // app.ts feeds it the changes it sees.
 import { createHash, randomUUID } from "node:crypto";
 import {
-  agentsFresh, type AgentReply, type AgentReplyResult, type AgentRow, type CoordinatorPresence, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
+  agentsFresh, type AgentReply, type AgentReplyOutcome, type AgentReplyResult, type AgentRow, type CoordinatorPresence, type Envelope, type FromCoordinator, type Hello, LINK_VERSION,
   type Presence, type ProjectRef, type ToCoordinator, type ToPage, projectKey, RECYCLE_CODE, RECONNECT_GRACE_MS, RESTART_CODE,
 } from "../src/lib/link.ts";
 import type { Site } from "../src/lib/site.ts";
@@ -795,7 +795,7 @@ export class LinkHub {
       if (!agentsFresh(room.agents ?? undefined, now) || !room.agents?.replies || !room.agentSender) return null;
       const row = room.agents.agents.find((row) => row.id === agent);
       if (!row) return { status: 404, error: "Agent not found" } as const;
-      if (row.state !== "waiting") return { status: 409, error: "Answer this agent in Orca" } as const;
+      if (row.state !== "done") return { status: 409, error: "answer this agent in Orca" } as const;
       const queue = room.agentReplies ??= [];
       if (queue.length >= 100) {
         const completed = queue.findIndex((reply) => reply.result);
@@ -978,10 +978,10 @@ export class LinkHub {
         return;
       }
       if (message.type === "agent-reply-result") {
-        const outcome = payload.status === "delivered" && typeof payload.messageId === "string" && payload.messageId
-          ? { status: "delivered" as const, messageId: payload.messageId.slice(0, 200) }
-          : payload.status === "refused" && typeof payload.reason === "string" && payload.reason
-            ? { status: "refused" as const, reason: payload.reason.slice(0, 500) } : null;
+        const outcome: AgentReplyOutcome | null = payload.status === "delivered" && typeof payload.messageId === "string" && payload.messageId
+          ? { status: "delivered", messageId: payload.messageId.slice(0, 200) }
+          : (payload.status === "refused" || payload.status === "unconfirmed") && typeof payload.reason === "string" && payload.reason
+            ? { status: payload.status, reason: payload.reason.slice(0, 500) } : null;
         if (!outcome) return fail("invalid agent reply result");
         const updated = await edit((room) => {
           const entry = stateOf(room)?.agentReplies?.find((reply) => reply.id === payload.id && reply.socket === socket.id);

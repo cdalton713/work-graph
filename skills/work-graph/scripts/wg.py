@@ -2967,6 +2967,7 @@ def contract():
         "satisfied": edges,
         "link": {"version": LINK_VERSION, "path": "/api/link", "to_coordinator": list(LINK_TO_COORDINATOR),
                  "from_coordinator": list(LINK_FROM_COORDINATOR), "commands": list(LINK_COMMANDS),
+                 "agent_reply_statuses": list(AGENT_REPLY_STATUSES),
                  "close_codes": LINK_CLOSE_CODES},
     }
 
@@ -4777,6 +4778,7 @@ LINK_RECONNECT_GRACE = 15
 LINK_OPEN_TIMEOUT = 3
 LINK_TO_COORDINATOR = ("changed", "answer", "reply", "command", "agent-reply")
 LINK_FROM_COORDINATOR = ("hello", "state", "asks", "progress", "ack", "wrote", "agents", "agent-reply-result")
+AGENT_REPLY_STATUSES = ("delivered", "refused", "unconfirmed")
 LINK_COMMANDS = ("next", "dispatch", "pause", "resume", "autonomy")
 
 
@@ -7634,11 +7636,11 @@ def terminal_reply_ready(agent):
     return not any(choices.match(line) for line in screen["tail"])
 
 
-def waiting_agent(plan_dir, km, ident):
+def idle_reply_agent(plan_dir, km, ident):
     agents = orca_agents(local=True)
     matches = [a for a in agents if a.get("orcaSessionId") == ident]
     rows = [r for r in agent_rows(plan_dir, km, matches) if r["id"] == ident]
-    if len(matches) == len(rows) == 1 and rows[0]["state"] == "waiting":
+    if len(matches) == len(rows) == 1 and rows[0]["state"] == "done":
         return matches[0], rows[0]
     return None, None
 
@@ -7649,6 +7651,9 @@ def deliver_agent_reply(plan_dir, plan, reply):
 
     def refused(reason):
         return {"id": reply_id, "status": "refused", "reason": reason}
+
+    unconfirmed = {"id": reply_id, "status": "unconfirmed",
+                   "reason": "Orca did not confirm the mail. Check Orca before you reply again"}
 
     if not agent_replies_enabled():
         return refused("Agent replies require the watcher to run in your Orca terminal")
@@ -7663,16 +7668,16 @@ def deliver_agent_reply(plan_dir, plan, reply):
     token = COMMAND_TIMEOUT.set(3)
     try:
         km = load_keymap(plan_dir)
-        agent, row = waiting_agent(plan_dir, km, ident)
+        agent, row = idle_reply_agent(plan_dir, km, ident)
         if not agent:
-            return refused("The agent is no longer waiting in this effort")
+            return refused("The agent is no longer idle in this effort")
         if agent.get("kind") == "terminal":
             if not terminal_reply_ready(agent):
                 return refused("Answer this agent in Orca")
             km = load_keymap(plan_dir)
-            current, row = waiting_agent(plan_dir, km, ident)
+            current, row = idle_reply_agent(plan_dir, km, ident)
             if not current or any(current.get(k) != agent.get(k) for k in ("paneKey", "worktreeId", "kind")):
-                return refused("The agent is no longer waiting in this effort")
+                return refused("The agent is no longer idle in this effort")
         elif agent.get("kind") != "chat":
             return refused("Answer this agent in Orca")
     except (ReadError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
@@ -7692,13 +7697,14 @@ def deliver_agent_reply(plan_dir, plan, reply):
                 receipt = orca_mutation(*args)
             except OrcaLost as error:
                 receipt = orca_mutation(*args, retry=error.request)
-        mail_id = (receipt.get("message") or {}).get("id")
+        message = receipt.get("message")
+        mail_id = message.get("id") if isinstance(message, dict) else None
         if not isinstance(mail_id, str) or not mail_id:
-            return refused("Orca did not return a mail id")
+            return unconfirmed
     except OrcaRefused:
         return refused("Orca refused the mail. Answer this agent in Orca")
     except (OrcaLost, ReadError, OSError, ValueError, subprocess.SubprocessError):
-        return refused("Orca did not confirm the mail. Check Orca before replying again")
+        return unconfirmed
     finally:
         COMMAND_TIMEOUT.reset(token)
 
@@ -7714,10 +7720,15 @@ def deliver_agent_reply(plan_dir, plan, reply):
     return {"id": reply_id, "status": "delivered", "messageId": mail_id}
 
 
+# Old servers accept rows but give no poll response. Remember this per endpoint until restart.
+_NO_AGENT_REPLY_POLL = set()
+
+
 def send_agents(plan_dir, plan, rows):
     """Publish the agent rows without becoming a coordinator. When enabled, take one queued reply."""
     url, project, session, _ = link_target(plan_dir, plan)
-    enabled = agent_replies_enabled()
+    endpoint = url.partition("?")[0]
+    enabled = endpoint not in _NO_AGENT_REPLY_POLL and agent_replies_enabled()
     deadline = time.monotonic() + WATCH_INTERVAL - 1  # leave one second for the close
     with link_socket(url, workspace=plan_workspace(plan), open_timeout=WATCH_OPEN_TIMEOUT, deadline=deadline) as ws:
         payload = {"agents": rows}
@@ -7728,7 +7739,12 @@ def send_agents(plan_dir, plan, rows):
         ws.send(link_envelope(session, project, "agents", payload))
         if not enabled:
             return
-        message = json.loads(ws.recv(timeout=2))
+        try:
+            raw = ws.recv(timeout=2)
+        except TimeoutError:
+            _NO_AGENT_REPLY_POLL.add(endpoint)
+            return
+        message = json.loads(raw)
         if (not isinstance(message, dict) or message.get("v") != LINK_VERSION
                 or message.get("type") != "agent-reply" or (message.get("project") or {}).get("id") != project):
             return

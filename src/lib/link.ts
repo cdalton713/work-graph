@@ -42,7 +42,8 @@ export type CommandName = (typeof LINK_COMMANDS)[number];
 /** `autonomy` has `level`: the server set the project label to it before it sent the command. */
 export interface Command { name: CommandName; key: string | null; issue: string | null; level?: string }
 export interface AgentReply { id: string; agent: string; body: string }
-export type AgentReplyOutcome = { status: "delivered"; messageId: string } | { status: "refused"; reason: string };
+export const AGENT_REPLY_STATUSES = ["delivered", "refused", "unconfirmed"] as const;
+export type AgentReplyOutcome = { status: "delivered"; messageId: string } | { status: Exclude<(typeof AGENT_REPLY_STATUSES)[number], "delivered">; reason: string };
 export type AgentReplyResult = Pick<AgentReply, "id" | "agent"> & AgentReplyOutcome;
 export interface ToCoordinator { "agent-reply": AgentReply | null; changed: Changed; answer: Answer; reply: Reply; command: Command }
 

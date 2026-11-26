@@ -2751,14 +2751,18 @@ describe("sign-in of the viewer", () => {
     const post = (id = "a", body: unknown = "Please continue", headers = owner) => page.request(
       "/api/projects/p1/agents/" + id + "/reply", { method: "POST", body: JSON.stringify({ body }),
         headers: { ...headers, origin: "https://view.example.com", "x-workspace": "work", "content-type": "application/json" } });
-    const agents = [{ id: "a", state: "waiting" }, { id: "b", state: "blocked" }, { id: "c", state: "working" }];
+    const agents = [{ id: "a", state: "done" }, { id: "b", state: "blocked" }, { id: "c", state: "working" }, { id: "d", state: "waiting" }];
     try {
       await send("agents", { agents });
       expect((await post()).status).toBe(409);
       await send("agents", { agents, replies: true, sender: "watcher" });
       expect((await post("a", "Hello", viewer)).status).toBe(403);
       expect((await post("unknown")).status).toBe(404);
-      expect((await post("b")).status).toBe(409);
+      for (const agent of ["b", "d"]) {
+        const response = await post(agent);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toEqual({ error: "answer this agent in Orca" });
+      }
       expect((await post("c")).status).toBe(409);
       expect((await post("a", "a".repeat(4001))).status).toBe(400);
       const res = await post();
@@ -2776,6 +2780,11 @@ describe("sign-in of the viewer", () => {
       expect(observed.some(({ type }) => type === "agent-reply-result")).toBe(false);
       await claimedBy.receive(result);
       expect(observed.at(-1)).toMatchObject({ type: "agent-reply-result", payload: { id, agent: "a", status: "delivered", messageId: "msg-1" } });
+      const uncertain = await (await post()).json();
+      await send("agents", { agents, replies: true, sender: "watcher" });
+      const reason = "Orca did not confirm the mail. Check Orca before you reply again";
+      await send("agent-reply-result", { id: uncertain.id, status: "unconfirmed", reason });
+      expect(observed.at(-1)).toMatchObject({ type: "agent-reply-result", payload: { id: uncertain.id, status: "unconfirmed", reason } });
       const expired = await (await post()).json();
       now += 120_000;
       await page.link.hub.beat();

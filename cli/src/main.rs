@@ -43,6 +43,17 @@ fn dispatch(on_io_failure: &dyn Fn(std::io::ErrorKind)) -> ExitCode {
             .as_deref()
             .and_then(|s| s.to_str()),
         Some(
+            "base" | "cleanup" | "evidence" | "dispatch" | "claim" | "started" | "done" | "verify"
+        )
+    ) {
+        return wg_preview::jobs::command();
+    }
+    if matches!(
+        std::env::args_os()
+            .nth(1)
+            .as_deref()
+            .and_then(|s| s.to_str()),
+        Some(
             "archive"
                 | "status"
                 | "ready"

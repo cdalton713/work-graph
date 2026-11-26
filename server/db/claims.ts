@@ -73,7 +73,7 @@ export function createClaims(sql: Sql) {
           return { status: 403 } as const;
         }
       }
-      const written = await query<Claim & { action: "claimed" | "renewed" | "taken_over" }>(`
+      const written = await query<Claim & { action: "claimed" | "renewed" | "taken_over"; jobChanged: boolean }>(`
         WITH prior AS (
           SELECT holder_user_id, job, lease_until FROM node_claims c WHERE ${onProject} AND node_key = $4
         ), written AS (
@@ -93,12 +93,13 @@ export function createClaims(sql: Sql) {
         SELECT ${columns}, CASE
           WHEN NOT EXISTS (SELECT 1 FROM prior) THEN 'claimed'
           WHEN EXISTS (SELECT 1 FROM prior WHERE holder_user_id = $5) THEN 'renewed'
-          ELSE 'taken_over' END AS action
+          ELSE 'taken_over' END AS action,
+          EXISTS (SELECT 1 FROM prior WHERE prior.job <> c.job) AS "jobChanged"
         FROM written c JOIN users u ON u.id = c.holder_user_id`,
       [...node, id, operation.lease, operation.kind === "post" ? operation.job : null]);
       if (written.length) {
-        const [{ action, ...claim }] = written;
-        return { status: 200, claim, action, role } as const;
+        const [{ action, jobChanged, ...claim }] = written;
+        return { status: 200, claim, action, jobChanged, role } as const;
       }
     }
     const [current] = await query<Claim & { mine: boolean }>(`SELECT ${columns}, c.holder_user_id = $5 AS mine

@@ -17,7 +17,7 @@ import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from ".
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal, sharedRoutes } from "./access.ts";
 import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
-import { planRoutes } from "./plans.ts";
+import { isLinearIdentifier, planRoutes } from "./plans.ts";
 import { claimRoutes } from "./claims.ts";
 import type { ClaimScope } from "./db/claims.ts";
 import { shareRoutes, type ShareAccess } from "./shares.ts";
@@ -534,6 +534,49 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const pageChanged = async (ref: ProjectRef | null, what: Changed["what"], issues: string[], id?: string) => {
     if (ref) await notify(() => enqueueLink(ref, "changed", { by: "page", what, issues }, undefined, id), undefined);
   };
+  const projectChanged = async (
+    ref: RoomRef, accounts: ShareAccess["accounts"],
+    scope: ClaimScope, nodes?: string[],
+  ) => {
+    if (!linkEnabled || nodes?.length === 0) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    const send = async () => {
+      let keymap: Record<string, unknown> | undefined;
+      if (nodes) {
+        const result = await accounts.plans({ project: scope.project, account: scope.project[0] }, { kind: "get" });
+        keymap = result.plan?.keymap;
+      }
+      let delivered = true;
+      const entries = keymap?.nodes;
+      for (const node of nodes ?? [undefined]) {
+        signal.throwIfAborted();
+        const entry = node && entries && typeof entries === "object" && Object.hasOwn(entries, node)
+          ? (entries as Record<string, unknown>)[node] : undefined;
+        const id = entry && typeof entry === "object" && "identifier" in entry
+          ? entry.identifier : node && keymap?.[node];
+        try {
+          await hub.projectChanged(ref, isLinearIdentifier(id) ? [id] : [], scope.membership ? scope.account : undefined, signal);
+        } catch {
+          delivered = false;
+        }
+      }
+      return delivered;
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<false>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve(false);
+      }, 2_000);
+    });
+    try {
+      const delivered = await Promise.race([send().catch(() => false), deadline]);
+      if (!delivered) console.warn("Project change saved, but the link notice was lost");
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   async function shareProject(tenant: Tenant, workspace: Workspace, id: string) {
     try {
       const data = await runInTenant(tenant, () => linearWorkspace.run(workspace,
@@ -582,11 +625,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }
     const accounts = await accountStore();
     if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
+    const claimScope = { project: [owner.id, connection, id], account: account.id,
+      membership: shared?.id.slice(sharedPrefix.length) } satisfies ClaimScope;
     return {
       claims: accounts.claims,
       plans: accounts.plans,
       name,
-      scope: { project: [owner.id, connection, id], account: account.id, membership: shared?.id.slice(sharedPrefix.length) } satisfies ClaimScope,
+      scope: claimScope,
+      notice: (nodes?: string[]) => projectChanged(roomRef({ workspace: workspace.id, id }, owner), accounts, claimScope, nodes),
       usage: () => usageScope(owner, workspace),
     };
   });
@@ -1270,6 +1316,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     app.route("/api", shareRoutes({
       runLinear,
       access, pageUrl, telemetry,
+      notice: (account, workspace, project, nodes) => projectChanged(
+        roomRef({ workspace, id: project[2] }, account.tenant), account.accounts, { project, account: account.tenant.id }, nodes),
       limit: attemptLimit({ now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX }, "join-attempts:"),
       project: shareProject,
     }));

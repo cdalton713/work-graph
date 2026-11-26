@@ -18,6 +18,7 @@ type Options = {
   limit: (session: string) => Promise<number>;
   pageUrl: string;
   telemetry?: Telemetry | null;
+  notice: (account: ShareAccess, workspace: string, project: [string, string, string], nodes: string[]) => Promise<void>;
 };
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -29,7 +30,7 @@ function shareKind(kind: string | undefined): ShareKind {
   throw unavailable();
 }
 
-export function shareRoutes({ access, project, limit, pageUrl, telemetry, runLinear }: Options) {
+export function shareRoutes({ access, project, limit, pageUrl, telemetry, runLinear, notice }: Options) {
   const routes = new Hono();
   const url = (token: string) => ({ url: `${pageUrl}/join/${token}` });
   const smallBody = bodyLimit({ maxSize: 1024 });
@@ -121,7 +122,7 @@ export function shareRoutes({ access, project, limit, pageUrl, telemetry, runLin
     });
   }));
   async function changeMember(c: Context, edit = false) {
-    return owner(c, async ({ account, key, resolve }) => {
+    return owner(c, async ({ account, workspace, key, resolve }) => {
       const member = c.req.param("member")!;
       let role: MemberRole | undefined;
       if (edit) {
@@ -129,7 +130,10 @@ export function shareRoutes({ access, project, limit, pageUrl, telemetry, runLin
         if (input?.role !== "viewer" && input?.role !== "collaborator") throw new LinearError("Invalid member role", 400);
         role = input.role;
       }
-      if (!uuid.test(member) || !await account.accounts.shares.changeMember(key, member, role)) throw unavailable();
+      if (!uuid.test(member)) throw unavailable();
+      const released = await account.accounts.shares.changeMemberWithClaims(key, member, role);
+      if (!released) throw unavailable();
+      await notice(account, workspace.id, key, released);
       if (!role) telemetry?.emit("member_removed", {}, resolve, key[0]);
       return c.body(null, 204);
     });

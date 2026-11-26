@@ -7,6 +7,7 @@ import type { Telemetry, UsageScope } from "./telemetry.ts";
 
 type Access = {
   plans: ReturnType<typeof createAccounts>["plans"];
+  notice: () => Promise<void>;
   scope: ClaimScope;
   name: string;
   usage: () => Promise<UsageScope | null>;
@@ -17,6 +18,10 @@ const nodeKey = /^[a-z0-9-]{1,40}$/;
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const tag = (version: number) => `"${version}"`;
+
+export function isLinearIdentifier(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Z][A-Z0-9]{0,9}-[0-9]{1,9}$/.test(value);
+}
 
 function versionTags(header: string | undefined): string[] | undefined {
   return header?.split(",").flatMap((part) => {
@@ -57,6 +62,16 @@ function validate(input: unknown, name: string): PlanData | string {
     }
     if (!nodeKinds.has(node.kind)) return "Each plan.nodes entry must have a valid kind";
     keys.add(node.key);
+  }
+  if (record(keymap.nodes) && Object.values(keymap.nodes).some((entry) =>
+    record(entry) && Object.hasOwn(entry, "identifier") && !isLinearIdentifier(entry.identifier))) {
+    return "Each keymap node identifier must be a Linear issue identifier";
+  }
+  for (const key of keys) {
+    const entry = keymap[key];
+    if (typeof entry === "string" && !isLinearIdentifier(entry)) {
+      return "Each keymap node identifier must be a Linear issue identifier";
+    }
   }
   if (!Array.isArray(plan.edges) || plan.edges.some((edge) => !record(edge)
     || typeof edge.from !== "string" || typeof edge.to !== "string" || !keys.has(edge.from) || !keys.has(edge.to))) {
@@ -130,6 +145,7 @@ export function planRoutes(access?: (c: Context) => Promise<Access | Response>, 
       return c.json({ error: "Plan version conflict", version: result.version, writer: result.writer }, 412);
     }
     if (result.status !== 200 || !result.version || !result.role) return missing(c);
+    await target.notice();
     telemetry?.emit("plan_written", { version: result.version, role: result.role }, target.usage, target.scope.project[0]);
     c.header("ETag", tag(result.version));
     return c.json({ version: result.version });

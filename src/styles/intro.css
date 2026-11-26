@@ -22,6 +22,8 @@
 .intro-track li:last-child circle { fill: var(--lamp-done); }
 .intro-track span { padding-inline: 4px; }
 
+.intro-track small { display: block; margin-top: 4px; }
+
 @container (max-width: 32rem) {
   .intro ol.intro-track { grid-template-columns: 1fr; }
   .intro-track li {

@@ -14,8 +14,8 @@ holds two parts:
 ## How Work Graph works
 
 Work Graph turns a big change into a graph of Linear issues in the order they need to happen.
-Agents work on every ready issue at the same time. Each has its own branch and pull request.
-You see what needs your answer, merge the changes, and deploy.
+Ready issues can move together while blocked issues wait. You can see everything that needs your attention in one place.
+You answer questions, merge the changes, and deploy.
 
 ```mermaid
 flowchart LR

@@ -1,5 +1,5 @@
-import { Intro } from "./Intro";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Intro } from "./Intro";
 import { InstalledSignInHelp } from "./SignIn";
 import { accountApi } from "../api";
 import { validateNewTeam, type NewTeam } from "../lib/onboarding";

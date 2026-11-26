@@ -1,11 +1,16 @@
 import { createHmac } from "node:crypto";
+import { claimJobs } from "./db/claims.ts";
 
 const sites = new Set([
   "datadoghq.com", "us3.datadoghq.com", "us5.datadoghq.com", "datadoghq.eu", "ddog-gov.com",
   "us2.ddog-gov.com", "ap1.datadoghq.com", "ap2.datadoghq.com", "uk1.datadoghq.com",
 ]);
 
+const claimFields = { job: claimJobs, role: ["owner", "collaborator"] } as const;
+
 const fields = {
+  node_claimed: claimFields,
+  claim_conflict: claimFields,
   sign_up: {},
   sign_in: {},
   account_deleted: {},

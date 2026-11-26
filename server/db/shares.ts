@@ -93,6 +93,9 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
         const rows = role
           ? await query(`UPDATE project_members SET role = $5 WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member, role])
           : await query(`DELETE FROM project_members WHERE ${scope} AND user_id = $4 RETURNING user_id`, [...project, member]);
+        if (rows.length && role !== "collaborator") {
+          await query(`DELETE FROM node_claims WHERE ${scope} AND holder_user_id = $4`, [...project, member]);
+        }
         return rows.length > 0;
       });
       if (changed) await notify(project[0], true);

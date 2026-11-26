@@ -82,3 +82,4 @@ pub mod usage;
 pub mod providers;
 
 pub mod workflow;
+pub mod automation;

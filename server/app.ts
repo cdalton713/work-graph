@@ -942,7 +942,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const address = shareUrl ?? (auth && !readOnly ? `https://${rules.hosted!.host}` : undefined);
         return [{
           id, name, ...(address ? { shareUrl: address } : {}),
-          ...(result.status === "rejected" && result.reason instanceof LinearReadLimited && !result.reason.endpointOnly && { retryAfter: Number(result.reason.remaining()) }),
+          ...(result.status === "rejected" && result.reason instanceof LinearReadLimited && { retryAfter: result.reason.globalRetryAfter }),
           ...(result.status === "fulfilled" ? {} : { error: `${name} is unavailable. Reload to try again.` }),
         }];
       }),
@@ -969,8 +969,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const projectList = (viewer = false, join = false) => {
     const { pending } = scope().state.lists;
     const existing = pending.get(viewer);
-    if (join && existing) return existing;
-    // The summary can join a directory read. A new directory request still checks for revoked shares.
+    // On a local owner-only page either request can join. Where shares exist,
+    // a directory request checks for revoked access even if a summary is in flight.
+    if (existing && (join || !(tenants || auth || readOnly))) return existing;
     const reading = readProjectList(viewer).finally(() => {
       if (pending.get(viewer) === reading) pending.delete(viewer);
     });
@@ -992,7 +993,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         if (scoped) throw error;
         if (error instanceof LinearReadLimited) {
           sharedRows[at].error = "Linear rate limit";
-          if (!error.endpointOnly) sharedRows[at].retryAfter = Number(error.remaining());
+          sharedRows[at].retryAfter = error.globalRetryAfter;
         }
         return null;
       }
@@ -1079,13 +1080,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
           // The viewer takes no older graph when Linear fails (see the graph route).
           const restricted = viewer || !!entry;
           const read = () => linearWorkspace.run(workspace, () => graphCache(workspace.id, projection(restricted)).get(p.id, { fresh: restricted }));
-          const { data, retryAfter, endpointOnly } = entry ? await runInTenant(entry.owner, read) : await read();
-          if (!endpointOnly) recordLimit(p.workspace, retryAfter);
+          const { data, globalRetryAfter } = entry ? await runInTenant(entry.owner, read) : await read();
+          recordLimit(p.workspace, globalRetryAfter);
           const waitNames = await waitNamesFor(entry?.owner ?? scope().tenant, workspace, p.id);
           const summarizeProject = () => summarize(shown(data, viewer || !!entry), p.workspace);
           summaries.push(waitNames ? requestSite.run({ ...serverSite(), human, waitNames }, summarizeProject) : summarizeProject());
         } catch (error) {
-          if (error instanceof LinearReadLimited && !error.endpointOnly) recordLimit(p.workspace, Number(error.remaining()));
+          if (error instanceof LinearReadLimited) recordLimit(p.workspace, error.globalRetryAfter);
           summaries.push({ workspace: p.workspace, id: p.id, planned: 0, done: 0, counts: [], you: [], running: 0, review: 0, ready: 0,
             effort: null, freshness: null, updatedAt: null, error: (error as Error).message });
         }
@@ -1126,10 +1127,13 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // The viewer gets the error of the refresh in its place: an issue of the older graph can be in another project
     // now. A graph in memory can still have an issue that left the project, until its full reload (`FULL_MS`):
     // the check for changes does not see an issue that is in the project no more.
-    const { data, version: graphVersion, stale, error, loadedAt, retryAfter, endpointOnly } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
+    const { data, version: graphVersion, stale, error, loadedAt, retryAfter, endpointOnly, globalRetryAfter } = await graphs().get(c.req.param("id"), { fresh: viewer || !!shared });
     const waitNames = await waitNamesFor(scope().tenant, linearWorkspace.getStore()!, c.req.param("id"));
     const version = waitNames ? `${graphVersion}:${createHash("sha256").update(JSON.stringify(waitNames)).digest("hex")}` : graphVersion;
-    if (endpointOnly) c.header("X-RateLimit-Scope", "endpoint");
+    if (endpointOnly) {
+      c.header("X-RateLimit-Scope", "endpoint");
+      if (globalRetryAfter !== undefined) c.header("X-RateLimit-Global-Retry-After", String(globalRetryAfter));
+    }
     if (retryAfter !== undefined) c.header("Retry-After", String(retryAfter));
     if (!stale && c.req.query("have") === version) return c.body(null, 204);
     return c.json({ ...shown(data, viewer || !!shared), ...(waitNames && { waitNames }), version, workspace: shared?.id ?? linearWorkspace.getStore()!.id, ...(stale ? { stale, error, loadedAt } : {}) });
@@ -1662,7 +1666,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // An API request writes its one log line in the request log above. Another route writes the error here.
     if (status === 500 && !c.req.path.startsWith("/api/") && !c.req.path.startsWith("/join/")) console.error(error);
     if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) c.header("Retry-After", "1");
-    if (error instanceof LinearReadLimited && error.endpointOnly) c.header("X-RateLimit-Scope", "endpoint");
+    if (error instanceof LinearReadLimited && error.endpointOnly) {
+      c.header("X-RateLimit-Scope", "endpoint");
+      if (error.globalRetryAfter !== undefined) c.header("X-RateLimit-Global-Retry-After", String(error.globalRetryAfter));
+    }
     if (error instanceof LinearError && error.retryAfter) c.header("Retry-After",
       error instanceof LinearReadLimited ? error.remaining() : error.retryAfter);
     return c.json({ error: error.message }, status);

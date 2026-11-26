@@ -64,3 +64,63 @@ test("an anonymous viewer hold applies only to the selected share", async ({ pag
     page.goto("/?project=planned")]);
   await expect(page.locator(".bar-project")).toContainText("Planned project");
 });
+
+for (const globalSeconds of [0, 30]) {
+  test(`endpoint backoff spans graph versions and tabs (global seconds: ${globalSeconds})`, async ({ page, context }) => {
+    const requests: string[] = [];
+    await context.route("**/api/projects", async route => {
+      const response = await route.fetch();
+      const list = await response.json();
+      list.workspaces.push({ id: "other", name: "Other" });
+      list.projects.push({ ...list.projects.find((p: { id: string }) => p.id === "fixture"), workspace: "other" });
+      await route.fulfill({ json: list });
+    });
+    await context.route("**/api/projects/*/graph*", async route => {
+      const url = new URL(route.request().url());
+      const workspace = route.request().headers()["x-workspace"];
+      requests.push(workspace + url.pathname);
+      if (workspace === "other") return route.fulfill({ status: 503, json: { error: "Other workspace reached" } });
+      if (requests.length === 2) {
+        expect(url.searchParams.has("have")).toBe(true);
+        return route.fulfill({ status: 429, json: { error: "Endpoint limited" }, headers: {
+          "Retry-After": "90", "X-RateLimit-Scope": "endpoint",
+          ...(globalSeconds ? { "X-RateLimit-Global-Retry-After": String(globalSeconds) } : {}),
+        } });
+      }
+      return route.fallback();
+    });
+    const start = new Date("2026-01-01T00:00:00Z");
+    await page.clock.install({ time: start });
+    await page.clock.pauseAt(new Date(+start + 1000));
+    await page.goto("/?project=fixture");
+    await expect(page.getByRole("navigation", { name: "Issues by the action they need" })).toBeVisible();
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await expect(page.getByText("Endpoint limited", { exact: false }).first()).toBeVisible();
+    const second = await context.newPage();
+    const limited = second.getByText("Linear rate limit", { exact: false }).first();
+    await second.goto("/?project=fixture");
+    await expect(limited).toBeVisible();
+    expect(requests).toHaveLength(2);
+    await second.goto("/?workspace=other&project=fixture");
+    await expect(second.getByText("Other workspace reached").first()).toBeVisible();
+    await second.goto("/?project=planned");
+    if (globalSeconds) {
+      await expect(limited).toBeVisible();
+      await page.clock.fastForward(globalSeconds * 1000 - 1);
+      await second.reload();
+      await expect(limited).toBeVisible();
+      expect(requests).not.toContain("default/api/projects/planned/graph");
+      await page.clock.fastForward(1);
+      await second.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    }
+    await expect.poll(() => requests.includes("default/api/projects/planned/graph")).toBe(true);
+    await page.clock.fastForward((90 - globalSeconds) * 1000 - 1);
+    await second.goto("/?project=fixture");
+    await expect(limited).toBeVisible();
+    const count = () => requests.filter(path => path === "default/api/projects/fixture/graph").length;
+    expect(count()).toBe(2);
+    await page.clock.fastForward(1);
+    await second.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await expect.poll(count).toBe(3);
+  });
+}

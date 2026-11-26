@@ -275,7 +275,11 @@ describe("gql retry and limit", () => {
       "x-ratelimit-complexity-remaining": "5", "x-ratelimit-complexity-reset": "601000", ...extra,
     });
     answers(response);
-    await expect(boardRead.run(true, gql, "query{ viewer{id} }")).rejects.toMatchObject({ status: 429, retryAfter: "180" });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(boardRead.run(true, gql, "query{ viewer{id} }")).rejects.toMatchObject({
+        status: 429, retryAfter: "180", globalDeadline: 91_000,
+      });
+    }
   });
 
   it("stops after three tries and gives the last error", async () => {

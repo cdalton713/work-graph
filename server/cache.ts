@@ -39,6 +39,7 @@ export interface Versioned {
   loadedAt?: number;
   retryAfter?: number;
   endpointOnly?: boolean;
+  globalRetryAfter?: number;
 }
 interface Entry extends Versioned {
   /**
@@ -123,8 +124,11 @@ export function createGraphCache({ load, changed, changedMany, now = Date.now }:
     const old = last.get(projectId);
     if (!old || now() - old.loadedAt > STALE_MS) throw error;
     const answer: Versioned = { data: old.data, version: old.version, stale: true, error: (error as Error).message, loadedAt: old.loadedAt };
-    if (error instanceof LinearReadLimited) answer.retryAfter = Number(error.remaining());
-    if (error instanceof LinearReadLimited && error.endpointOnly) answer.endpointOnly = true;
+    if (error instanceof LinearReadLimited) {
+      answer.retryAfter = Number(error.remaining());
+      answer.endpointOnly = error.endpointOnly;
+      answer.globalRetryAfter = error.globalRetryAfter;
+    }
     causes.set(answer, error);
     return answer;
   }

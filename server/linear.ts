@@ -32,11 +32,18 @@ export const boardRead = new AsyncLocalStorage<boolean>();
 export class LinearReadLimited extends LinearError {
   readonly deadline: number;
   readonly endpointOnly: boolean;
-  constructor(deadline: number, message = "Linear rate limit", endpointOnly = false) {
+  readonly globalDeadline: number;
+  constructor(global: number, endpoint: number, message = "Linear rate limit") {
     super(message, 429);
-    this.endpointOnly = endpointOnly;
-    this.deadline = deadline;
+    this.globalDeadline = global;
+    this.endpointOnly = endpoint > global;
+    this.deadline = Math.max(global, endpoint);
     this.retryAfter = this.remaining();
+  }
+
+  get globalRetryAfter(): number | undefined {
+    const seconds = Math.ceil((this.globalDeadline - transport.now()) / 1000);
+    return seconds > 0 ? seconds : undefined;
   }
 
   remaining(): string {
@@ -358,13 +365,18 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         if (kind === "oauth" && workspace.connectionId) ids.push(`connection:${workspace.connectionId}`);
         return ids;
       };
+      const readLimit = (ids: string[], message?: string) => new LinearReadLimited(
+        Math.max(...ids.map(id => readDeadlines.get(id) ?? 0)),
+        Math.max(...ids.map(id => readDeadlines.get(id + query) ?? 0)),
+        message,
+      );
       const send = async (value: string) => {
         if (!mutation && boardRead.getStore()) {
           const ids = credentialIds(value);
-          const global = Math.max(...ids.map(id => readDeadlines.get(id) ?? 0));
-          const endpoint = Math.max(...ids.map(id => readDeadlines.get(id + query) ?? 0));
-          const deadline = Math.max(global, endpoint);
-          if (deadline > transport.now()) throw new LinearReadLimited(deadline, undefined, endpoint > global);
+          if (ids.some(id => readDeadlines.has(id) || readDeadlines.has(id + query))) {
+            const limit = readLimit(ids);
+            if (limit.deadline > transport.now()) throw limit;
+          }
         }
         try { return await transport.fetch(ENDPOINT, init(value)); } catch (error) { return failed(error); }
       };
@@ -448,8 +460,6 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
         }
         const ids = credentialIds(sentCredential);
         const budgets = exhaustedBudgets(response.headers);
-        let deadline = 0;
-        let endpointOnly = false;
         for (const endpoint of [false, true]) {
           const resets = [...budgets].filter(([name]) => name.startsWith("endpoint-") === endpoint).map(([, reset]) => reset);
           if (!resets.length && (endpoint || budgets.size)) continue;
@@ -458,9 +468,8 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
           const scopes = ids.map(id => endpoint ? id + query : id);
           const held = Math.max(until, ...scopes.map(scope => readDeadlines.get(scope) ?? 0));
           for (const scope of scopes) readDeadlines.set(scope, held);
-          if (held > deadline) { deadline = held; endpointOnly = endpoint; }
         }
-        if (!mutation && boardRead.getStore()) throw new LinearReadLimited(deadline, error.message, endpointOnly);
+        if (!mutation && boardRead.getStore()) throw readLimit(ids, error.message);
       }
       if (rated && retryAfter) error.retryAfter = retryAfter;
       return { failure, error, retryAfter };

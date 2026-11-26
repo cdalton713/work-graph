@@ -866,28 +866,38 @@ describe("graph cache of the server", () => {
     expect(await saved.json()).toEqual({ ok: true, recorded: true });
     expect(asked.comments).toHaveLength(1);
   });
-  it("projects waiting moves without loading the other boards", async () => {
+  it.each([
+    { summaryFirst: false, account: false },
+    { summaryFirst: true, account: false },
+    { summaryFirst: true, account: true },
+  ])("projects waiting moves without loading the other boards ($summaryFirst summary first, account $account)", async ({ summaryFirst, account }) => {
     const { asked, state } = graphLinear();
-    const server = cached();
+    const server = account ? createApp(hostedRoles, {
+      team: TEAM, dist, workspaces: [workspace()], auth: rolesAuth, linkToken: rolesToken, watchMs: 0, now: () => clock.at,
+    }) : cached();
+    const headers = account ? await rolesHeaders("ada@example.com") : local;
+    // An account directory needs a fresh access check when the summary started first.
+    const extraDirectory = account && summaryFirst ? 1 : 0;
     const issue = rawIssue("i", "TM-1", "p2");
     state.issues.p2 = [{ ...issue, state: { ...issue.state, name: "Triage" } }];
-    const read = async (url: string) => (await server.request(url, { headers: local })).json();
+    const read = async (url: string) => (await server.request(url, { headers })).json();
     const visit = async () => {
-      const [, waiting] = await Promise.all([read("/api/projects"), read("/api/overview?view=waiting"),
-        read("/api/status"), graph(server, "p1")]);
-      return waiting;
+      const paths = ["/api/projects", "/api/overview?view=waiting"];
+      if (summaryFirst) paths.reverse();
+      const results = await Promise.all([...paths.map(read), read("/api/status"), read("/api/projects/p1/graph")]);
+      return results[summaryFirst ? 0 : 1];
     };
     const waiting = await visit();
-    expect(fetch).toHaveBeenCalledTimes(5); // directory, two projections, selected graph head and issue page
+    expect(fetch).toHaveBeenCalledTimes(5 + extraDirectory); // directory, two projections, selected graph head and issue page
     expect(asked.loads).toEqual(["p1"]);
     expect(waiting.summaries.find((p: { id: string }) => p.id === "p2").you).toMatchObject([{ identifier: "TM-1" }]);
     vi.mocked(fetch).mockClear();
     await visit(); // a second tab or immediate visibility change
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1 + extraDirectory);
     vi.mocked(fetch).mockClear();
     clock.at += 60_000;
     await visit();
-    expect(fetch).toHaveBeenCalledTimes(3); // directory, one batch for both projects, selected graph check
+    expect(fetch).toHaveBeenCalledTimes(3 + extraDirectory); // directory, one batch for both projects, selected graph check
     const overview = await read("/api/overview");
     expect(waiting.summaries).toEqual(expect.arrayContaining(overview.summaries.map(({ id, workspace, you }: ProjectSummary) => ({ id, workspace, you }))));
     vi.mocked(fetch).mockClear();
@@ -895,7 +905,7 @@ describe("graph cache of the server", () => {
     clock.at += 60_000;
     state.issues.p2 = [issue];
     expect((await visit()).summaries.every((p: ProjectSummary) => p.you.length === 0)).toBe(true);
-    expect(fetch).toHaveBeenCalledTimes(4); // only the changed waiting projection costs another request
+    expect(fetch).toHaveBeenCalledTimes(4 + extraDirectory); // only the changed waiting projection costs another request
   });
 
   it("refreshes a dispatch prerequisite after a batch check was limited", async () => {
@@ -938,6 +948,27 @@ describe("graph cache of the server", () => {
       expect(fetch).toHaveBeenCalledTimes(1);
       clock.at += 30_000;
       expect((await graph(server, "p2")).status).toBe(200);
+    } finally {
+      setTransport({ sleep: async () => {} });
+    }
+  });
+
+  it.each([false, true])("sends both cooldowns on a limited graph (cached: %s)", async warm => {
+    graphLinear();
+    setTransport({ now: () => clock.at, sleep: async () => {} });
+    try {
+      const server = cached();
+      if (warm) await graph(server, "p1");
+      clock.at += 60_000;
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 429, headers: {
+        "x-ratelimit-requests-remaining": "0", "x-ratelimit-requests-reset": String(clock.at + 30_000),
+        "x-ratelimit-endpoint-requests-remaining": "0", "x-ratelimit-endpoint-requests-reset": String(clock.at + 90_000),
+      } }));
+      const reply = await graph(server, "p1");
+      expect(reply.status).toBe(warm ? 200 : 429);
+      expect(reply.headers.get("retry-after")).toBe("90");
+      expect(reply.headers.get("x-ratelimit-scope")).toBe("endpoint");
+      expect(reply.headers.get("x-ratelimit-global-retry-after")).toBe("30");
     } finally {
       setTransport({ sleep: async () => {} });
     }

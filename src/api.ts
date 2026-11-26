@@ -115,11 +115,16 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
   const graph = /^projects\/[^/]+\/graph(?:\?|$)/.test(path);
   const read = method === "GET" && (directory || graph);
   const key = readKey(directory ? null : workspace);
-  if (read && deadlineFor(key) > Date.now()) throw new ApiError(429, { error: "Linear rate limit" });
+  const operation = key + ":" + (graph ? path.split("?")[0] : path);
+  if (read && Math.max(deadlineFor(key), deadlineFor(operation)) > Date.now()) throw new ApiError(429, { error: "Linear rate limit" });
   const response = await fetch(`/api/${path}`, { ...init, headers });
   const retry = response.headers?.get?.("Retry-After");
-  if (read && response.headers?.get?.("X-RateLimit-Scope") !== "endpoint" && (response.status === 429 || (response.ok && retry != null))) {
-    holdReads(key, retryDeadline(retry ?? null, Date.now()));
+  if (read && (response.status === 429 || (response.ok && retry != null))) {
+    const endpoint = response.headers?.get?.("X-RateLimit-Scope") === "endpoint";
+    const now = Date.now();
+    holdReads(endpoint ? operation : key, retryDeadline(retry ?? null, now));
+    const global = response.headers?.get?.("X-RateLimit-Global-Retry-After");
+    if (endpoint && global != null) holdReads(key, retryDeadline(global, now));
   }
   if (response.status === 204) return null as T; // the graph did not change
   const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));

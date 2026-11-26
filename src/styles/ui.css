@@ -111,13 +111,19 @@ html:has(.sheet[open]), body:has(.sheet[open]) { overflow: hidden; }
 .reply-options button > span { grid-column: 1 / -1; overflow-wrap: anywhere; }
 .reply-options kbd { grid-area: 1 / 2; color: var(--ink-3); }
 
-.text-send-actions { align-items: center; flex-wrap: wrap; }
-.text-send-actions button { min-width: 44px; min-height: 44px; }
+.text-send-actions { align-items: center; }
 .text-send-keys { display: none; }
 @media (hover: hover) and (pointer: fine) {
   .text-send-keys { display: inline; }
 }
+@media (min-width: 1280px) and (hover: hover) and (pointer: fine) {
+  .text-send-actions { gap: 4px; }
+  .text-send-actions > .ask-hint { margin-left: 0; }
+  .text-send-actions > button { white-space: nowrap; }
+}
 @media (hover: none), (pointer: coarse) {
+  .text-send-actions { flex-wrap: wrap; }
+  .text-send-actions button { min-width: 44px; min-height: 44px; }
   .reply-options kbd { display: none; }
   .reply-options button { min-height: 44px; }
   .text-send .editor { font-size: 16px; }

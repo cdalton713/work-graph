@@ -1,23 +1,25 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 import type { GraphData } from "../src/lib/types.ts";
-import { projectPath, screens, test } from "./support/screens.ts";
+import { screens, test } from "./support/screens.ts";
 
 const worker = {
   id: "question", key: "panel-task", issue: "WG-14", from: "worker",
   at: "2026-01-01T00:00:00Z", body: "What did you find?",
 };
+const panelProject = "panel";
+const projectFor = (issue: number) => issue === 1 ? "fixture" : panelProject;
 
 async function addQuestion(page: Page) {
   await page.routeWebSocket(/\/api\/link\?/, (socket) => {
     socket.send(JSON.stringify({
-      type: "asks", project: { workspace: "default", id: "fixture" }, payload: { asks: [worker] },
+      type: "asks", project: { workspace: "default", id: panelProject }, payload: { asks: [worker] },
     }));
   });
 }
 
 async function panelFor(page: Page, issue: number) {
   await page.addInitScript(() => localStorage.setItem("wg-board", "off"));
-  await page.goto(`${projectPath}&issue=WG-${issue}`);
+  await page.goto(`/?project=${projectFor(issue)}&issue=WG-${issue}`);
   const panel = page.locator(".panel");
   await expect(panel.getByRole("link", { name: `Open WG-${issue} in Linear` })).toBeVisible();
   return panel;
@@ -27,24 +29,28 @@ function formFor(field: Locator) {
   return field.locator("xpath=ancestor::form");
 }
 
-async function checkControls(page: Page, field: Locator) {
+async function checkControls(page: Page, field: Locator, word?: "answer" | "evidence") {
   const form = formFor(field);
-  const button = form.getByRole("button", { name: /Comment|Reply to the worker|Move to Done/ });
   const touch = await page.evaluate(() => matchMedia("(pointer: coarse)").matches);
   await expect(field).toHaveAttribute("enterkeyhint", "enter");
-  await expect(field).toHaveAttribute("autocapitalize", "off");
-  await expect(field).toHaveAttribute("autocorrect", "off");
-  const size = (await button.boundingBox())!;
-  expect(size.width).toBeGreaterThanOrEqual(44);
-  expect(size.height).toBeGreaterThanOrEqual(44);
+  for (const attribute of ["autocapitalize", "autocorrect"]) {
+    if (word === "evidence") await expect(field).toHaveAttribute(attribute, "off");
+    else expect(await field.getAttribute(attribute)).toBeNull();
+  }
   if (touch) {
+    for (const button of await form.getByRole("button").all()) {
+      const size = (await button.boundingBox())!;
+      expect(size.width).toBeGreaterThanOrEqual(44);
+      expect(size.height).toBeGreaterThanOrEqual(44);
+    }
     await expect(field).toHaveCSS("font-size", "16px");
-    await expect(form.getByText("⌘/Ctrl+Enter to send")).toBeHidden();
+    await expect(form.getByText("⌘/Ctrl+Enter")).toBeHidden();
   } else {
-    await expect(form.getByText("⌘/Ctrl+Enter to send")).toBeVisible();
+    await expect(form.getByText("⌘/Ctrl+Enter")).toBeVisible();
   }
   const viewport = page.viewportSize()!;
-  const widths = viewport.width === 820 ? [768, 820] : viewport.width === 1180 ? [1024, 1180] : [viewport.width];
+  const widths = viewport.width === 1440 ? [1280, 1440]
+    : viewport.width === 820 ? [768, 820] : viewport.width === 1180 ? [1024, 1180] : [viewport.width];
   for (const width of widths) {
     if (page.viewportSize()!.width !== width) await page.setViewportSize({ ...viewport, width });
     const fits = await form.evaluate((element) => {
@@ -52,6 +58,14 @@ async function checkControls(page: Page, field: Locator) {
       return scroller.scrollWidth <= scroller.clientWidth && element.scrollWidth <= element.clientWidth;
     });
     expect(fits).toBe(true);
+    if (!touch) {
+      // Desktop dimensions measured on main before the shared form change.
+      const container = word ? form.locator("xpath=ancestor::div[contains(@class, 'warning')][1]") : form;
+      expect(Math.round((await container.boundingBox())!.height)).toBe(word === "answer" ? 224 : word === "evidence" ? 243 : 112);
+      for (const button of await form.getByRole("button").all()) {
+        expect(Math.round((await button.boundingBox())!.height)).toBe(27);
+      }
+    }
   }
   if (viewport.width === 1440 && await page.locator(".panel").count()) {
     await expect(page.locator(".panel")).toHaveCSS("width", "460px");
@@ -142,10 +156,10 @@ test("comments keep a separate draft per issue and clear it after a successful s
 for (const { issue, word, id } of [
   { issue: 1, word: "answer", id: "issue-1" },
   { issue: 15, word: "evidence", id: "panel-ops" },
-]) {
+] as const) {
   test(`a completion keeps its ${word} until the issue moves`, async ({ page }) => {
     let graph: GraphData;
-    await page.route("**/api/projects/fixture/graph*", async (route) => {
+    await page.route(`**/api/projects/${projectFor(issue)}/graph*`, async (route) => {
       const response = await route.fetch();
       if (response.ok()) graph = await response.json();
       await route.fulfill({ response });
@@ -157,7 +171,7 @@ for (const { issue, word, id } of [
     }
     await openCompletion();
     const field = panel.getByRole("textbox", { name: `The ${word} for WG-${issue}` });
-    await checkControls(page, field);
+    await checkControls(page, field, word);
     await field.fill("Check passed.");
     await checkKeyboard(page, field);
     await page.reload();
@@ -189,7 +203,7 @@ test("the worker reply draft follows the question from the panel to the overview
   const field = page.locator(".overview").getByRole("textbox", { name: label });
   await checkControls(page, field);
   await checkKeyboard(page, field);
-  await exerciseSend(page, field, /\/api\/projects\/fixture\/asks\/question\/reply(?:\?|$)/,
+  await exerciseSend(page, field, /\/api\/projects\/panel\/asks\/question\/reply(?:\?|$)/,
     { ok: true, recorded: true }, "The output is ready.", { body: "The output is ready." });
   await expect(field).toBeHidden();
   await panelFor(page, 14);

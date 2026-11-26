@@ -9,6 +9,7 @@ interface ReplyProps {
   placeholder: string;
   fieldLabel?: string;
   autoFocus?: boolean;
+  literalInput?: boolean;
   rows?: number;
   danger?: boolean;
   cancel?: { label: string; run: () => void };
@@ -43,7 +44,7 @@ export function Reply(props: ReplyProps) {
   return <ReplyForm key={JSON.stringify(props.draftKey)} {...props} />;
 }
 
-function ReplyForm({ label, draftKey, placeholder, fieldLabel = label, autoFocus, rows = 3, danger, cancel, hint, accessHref, options = [], send }: ReplyProps) {
+function ReplyForm({ label, draftKey, placeholder, fieldLabel = label, autoFocus, literalInput, rows = 3, danger, cancel, hint, accessHref, options = [], send }: ReplyProps) {
   const instance = useId();
   const key = draftKey ? JSON.stringify(draftKey) : instance;
   const [localDraft, setLocalDraft] = useState("");
@@ -164,7 +165,8 @@ function ReplyForm({ label, draftKey, placeholder, fieldLabel = label, autoFocus
       <div ref={controls}>
         <textarea className="editor" rows={rows} aria-label={fieldLabel} autoFocus={autoFocus}
           placeholder={placeholder.replace(/ ⌘↵ sends it\.$/, "")}
-          enterKeyHint="enter" autoCapitalize="off" autoCorrect="off"
+          enterKeyHint="enter" autoCapitalize={literalInput ? "off" : undefined}
+          autoCorrect={literalInput ? "off" : undefined}
           value={draft} readOnly={sending} onChange={(e) => {
             if (!pending.has(key)) setDraft(e.target.value);
           }}
@@ -177,7 +179,7 @@ function ReplyForm({ label, draftKey, placeholder, fieldLabel = label, autoFocus
         <div className="row text-send-actions">
           <button type="submit" className={danger ? "danger" : "primary"} disabled={!draft.trim() || sending}>{sending ? "Sending…" : label}</button>
           {cancel && <button type="button" disabled={sending} onClick={cancel.run}>{cancel.label}</button>}
-          <span className="ask-hint text-send-keys">⌘/Ctrl+Enter to send</span>
+          <span className="ask-hint text-send-keys">⌘/Ctrl+Enter</span>
           {hint && <span className="ask-hint">{hint}</span>}
         </div>
       </div>

@@ -305,7 +305,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
                   <Reply autoFocus rows={4} label={moveLabel} fieldLabel={`The ${noteWord} for ${issue.identifier}`}
                     draftKey={[data.workspace ?? site.defaultWorkspace, data.project.id, issue.id, noteWord]}
                     placeholder={noteWord === "evidence" ? "abc1234 to beta at 14:05; check: /healthz and one order; result: 200, order saved" : "Yes: cut over on Monday"}
-                    danger={!!move.warnings.length} cancel={cancel} send={go} />
+                    literalInput={noteWord === "evidence"} danger={!!move.warnings.length} cancel={cancel} send={go} />
                 </>
               ) : (
                 <div className="row">

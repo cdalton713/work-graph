@@ -15,6 +15,56 @@
     "ship-point",
     "spike"
   ],
+  "setup": {
+    "status_types": {
+      "Triage": "triage",
+      "Backlog": "backlog",
+      "Todo": "unstarted",
+      "Ready": "unstarted",
+      "In Progress": "started",
+      "Needs {name}": "started",
+      "In Review": "started",
+      "Ready to Merge": "started",
+      "Merged": "started",
+      "Verifying": "started",
+      "Done": "completed",
+      "Canceled": "canceled",
+      "Duplicate": "duplicate"
+    },
+    "team_issue_labels": [
+      "merge-point",
+      "ship-point",
+      "ops",
+      "decision",
+      "spike",
+      "reviewed",
+      "answered"
+    ],
+    "workspace_label_groups": {
+      "agent": [
+        "agent:codex",
+        "agent:claude",
+        "agent:coordinator"
+      ]
+    },
+    "project_label_groups": {
+      "initiative": [],
+      "autonomy": [
+        "full",
+        "standard",
+        "supervised"
+      ],
+      "review": [
+        "review:thorough",
+        "review:standard",
+        "review:light"
+      ]
+    },
+    "project_labels": [
+      "paused",
+      "shared"
+    ]
+  },
   "status_aliases": {
     "Ready for Deploy": "Merged",
     "External QA": "In Review",

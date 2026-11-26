@@ -58,6 +58,8 @@ class SetupTests(unittest.TestCase):
     def linear(self, query, variables):
         self.workspaces.add(wg.LINEAR_WORKSPACE.get())
         if "teams(" in query:
+            if variables["k"] == "ROOT":
+                return {"teams": {"nodes": [{"id": "root", "key": "ROOT"}]}}
             if self.visibility_error and self.team and self.team["visibility"] == "private":
                 raise wg.ReadError(self.visibility_error)
             return {"teams": {"nodes": [dict(self.team)] if self.team else []}}
@@ -74,6 +76,8 @@ class SetupTests(unittest.TestCase):
         self.writes.append((name, item))
         if name == "teamCreate":
             self.team = {"id": "team", "visibility": "public", "triageEnabled": False}
+            if item.get("parentId") == "root":
+                self.team["parent"] = {"key": "ROOT"}
             self.states = [{"id": "default", "name": "Duplicate", "type": "duplicate"}]
             return {name: {"success": True, "team": self.team}}
         if name == "teamUpdate":
@@ -118,6 +122,22 @@ class SetupTests(unittest.TestCase):
             self.assertRegex(out, rf"(?m)^missing .*{re.escape(name)}")
         for text in ('"team": "WG"', '"team_labels": true', "wg preflight <plan-dir>", "wg doctor"):
             self.assertIn(text, out)
+        self.assertEqual(self.writes, [])
+
+    def test_private_subteam_creation_and_existing_parent_check(self):
+        args = ("--team", "WG", "--name", "Work Graph", "--private", "--parent", "root", "--apply")
+        self.run_setup(*args)
+        self.assertEqual(self.writes[0], ("teamCreate", {"key": "WG", "name": "Work Graph", "parentId": "root"}))
+        self.assertEqual(self.team["visibility"], "private")
+        self.writes.clear()
+        self.assertIn("exists parent ROOT", self.run_setup(*args))
+        self.team["parent"] = None
+        self.assertIn("warn parent ROOT", self.run_setup(*args))
+        self.assertEqual(self.writes, [])
+
+    def test_missing_parent_prevents_creation(self):
+        self.assertIn("parent MISSING", self.run_setup("--team", "WG", "--name", "Work Graph",
+                                                       "--parent", "MISSING", "--apply", code=2))
         self.assertEqual(self.writes, [])
 
     def test_apply_creates_dependencies_first_and_then_makes_no_writes(self):

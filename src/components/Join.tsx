@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { joinProject } from "../api";
-import { BrowserSignInHelp, isInAppBrowser } from "./SignIn";
+import { isStandalone } from "../lib/screen";
+import { BrowserSignInHelp, InstalledSignInHelp, isInAppBrowser } from "./SignIn";
 import type { ProjectJoin, ProjectJoinPreview } from "../lib/types";
 
 export function Join({ path, returnedFromSignIn }: { path: string; returnedFromSignIn: boolean }) {
@@ -13,6 +14,8 @@ export function Join({ path, returnedFromSignIn }: { path: string; returnedFromS
   const token = path.slice("/join/".length);
   const login = "/auth/login?" + new URLSearchParams({ next: path + "?signed-in=1" });
   const inAppBrowser = isInAppBrowser();
+  // The installed app has no address bar: it needs its own way back and its own refresh.
+  const installed = isStandalone();
   useEffect(() => {
     let active = true;
     request.current ??= joinProject(token);
@@ -40,7 +43,7 @@ export function Join({ path, returnedFromSignIn }: { path: string; returnedFromS
     }
   }
 
-  return <main className="account-page">
+  const card = <main className="account-page">
     <div className="account-content share-join">
       <section className="account-card">
         <h1>{joined?.project ?? preview?.project ?? "Join project"}</h1>
@@ -48,6 +51,7 @@ export function Join({ path, returnedFromSignIn }: { path: string; returnedFromS
           <p>{returnedFromSignIn ? "Sign-in did not complete. " : "Sign in to join this project. "}
             <a href={login}>{returnedFromSignIn ? "Try signing in again" : "Sign in"}</a>.
           </p>
+          <InstalledSignInHelp />
           {inAppBrowser && <BrowserSignInHelp />}
         </> :
           error ? <p role="alert">{error}</p> :
@@ -63,4 +67,13 @@ export function Join({ path, returnedFromSignIn }: { path: string; returnedFromS
       </section>
     </div>
   </main>;
+  if (!installed) return card;
+  return <div className="app">
+    <header className="bar">
+      <button type="button" className="installed-back" onClick={() => location.replace("/")}>Overview</button>
+      <span className="station-fill" />
+      <button type="button" className="installed-refresh" onClick={() => location.reload()}>Refresh</button>
+    </header>
+    {card}
+  </div>;
 }

@@ -211,6 +211,11 @@ test("an iOS home-screen app signs in and opens a join link without browser help
   await page.goto(serviceUrl() + "/join/example?signed-in=1");
   await expect(page.getByRole("link", { name: "Try signing in again" })).toBeVisible();
   await expect(page.getByText(/open this page in your browser/i)).toHaveCount(0);
+  // The installed app has no address bar: the join screen gives a way back, a refresh, and the sign-in help.
+  await expect(page.getByText(/finish signing in there/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Refresh" })).toBeVisible();
+  await page.getByRole("button", { name: "Overview" }).click();
+  await expect(page).toHaveURL(serviceUrl() + "/");
 });
 
 async function expectBox(

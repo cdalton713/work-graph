@@ -24,6 +24,6 @@ html:has(:is(.installed-refresh, .installed-sync-age)),
 .signin:has(.installed-signin-help) { padding-inline: 16px; }
 
 @media (pointer: coarse) {
-  .installed-refresh { min-width: 44px; min-height: 44px; }
+  .installed-refresh, .installed-back { min-width: 44px; min-height: 44px; }
   .app:has(.installed-refresh) .signin-go { display: inline-flex; align-items: center; min-height: 44px; }
 }

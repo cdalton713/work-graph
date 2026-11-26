@@ -39,6 +39,7 @@ type Log = Record<string, string>;
 type Metric = { metric: string; tags: string[]; type: 1; interval: 1; points: [{ timestamp: number; value: number }] };
 type Entry = { tenant: string; cancelled?: boolean; prepare(): Promise<{ metric: Metric; log: Log } | null> };
 
+const timeoutMs = 2000;
 const batchSize = 25;
 const queueLimit = 1000;
 
@@ -50,7 +51,12 @@ export function createTelemetry(
   const secret = env.WG_SESSION_SECRET?.trim();
   const workspaceIds = new Set(env.WG_TELEMETRY_WORKSPACES?.toLowerCase().split(/[\s,]+/).filter(Boolean));
   const site = env.DD_SITE?.trim() || "datadoghq.com";
-  if (!key || !workspaceIds.size || !secret || secret.length < 32 || !sites.has(site)) return null;
+  if (!key) return null;
+  if (!secret || secret.length < 32) {
+    console.warn("Usage data is off because WG_SESSION_SECRET must have at least 32 characters");
+    return null;
+  }
+  if (!workspaceIds.size || !sites.has(site)) return null;
 
   const hashKey = createHmac("sha256", secret).update("workgraph-usage-v1").digest();
   const hash = (kind: string, value: string) => createHmac("sha256", hashKey).update(kind + ":" + value).digest("hex");
@@ -70,7 +76,7 @@ export function createTelemetry(
     try {
       const response = await fetcher(url, {
         method: "POST", headers: { "Content-Type": "application/json", "DD-API-KEY": key! },
-        body: JSON.stringify(body), redirect: "error", signal: AbortSignal.timeout(2000),
+        body: JSON.stringify(body), redirect: "error", signal: AbortSignal.timeout(timeoutMs),
       });
       if (!response.ok) warn();
       await response.body?.cancel();
@@ -79,11 +85,29 @@ export function createTelemetry(
     }
   }
 
+  async function prepareWithinDeadline(entry: Entry) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([entry.prepare(), new Promise<null>((resolve) => {
+        timer = setTimeout(() => {
+          entry.cancelled = true;
+          warn();
+          resolve(null);
+        }, timeoutMs);
+      })]);
+    } catch {
+      warn();
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function drain() {
     while (queue.length) {
       const batch = queue.splice(0, batchSize);
       active = batch;
-      const prepared = await Promise.all(batch.map(({ prepare }) => prepare().catch(() => { warn(); return null; })));
+      const prepared = await Promise.all(batch.map(prepareWithinDeadline));
       const series = new Map<string, Metric>();
       const logs: Log[] = [];
       for (const [index, entry] of prepared.entries()) {
@@ -122,7 +146,7 @@ export function createTelemetry(
       const timestamp = Math.floor(now() / 1000);
       queue.push({ tenant, async prepare() {
         const scope = await resolve();
-        if (!scope?.enabled || ![scope.workspace.id, scope.workspace.organization, scope.workspace.configId].some((id) => id && workspaceIds.has(id.toLowerCase()))) return null;
+        if (this.cancelled || !scope?.enabled || ![scope.workspace.id, scope.workspace.organization, scope.workspace.configId].some((id) => id && workspaceIds.has(id.toLowerCase()))) return null;
         if (claim && !await claim(scope)) return null;
         const tags = [`mode:${mode}`, ...Object.entries(accepted).map(([name, value]) => `${name}:${value}`)];
         return {

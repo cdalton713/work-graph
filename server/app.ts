@@ -196,10 +196,22 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     } : null;
   }
 
+  const firstConnectionAttempts = new Map<string, number>();
   function firstConnection(tenant: Tenant) {
     if (!accountStore || !telemetry) return;
-    telemetry.emit("first_connection", {}, () => usageScope(tenant), tenant.id,
-      async () => (await accountStore())?.claimFirstConnection(tenant.id) ?? false);
+    const { id } = tenant;
+    const time = clock();
+    if ((firstConnectionAttempts.get(id) ?? -Infinity) > time) return;
+    firstConnectionAttempts.delete(id);
+    if (firstConnectionAttempts.size >= 4096) {
+      firstConnectionAttempts.delete(firstConnectionAttempts.keys().next().value!);
+    }
+    firstConnectionAttempts.set(id, time + 5 * 60_000);
+    telemetry.emit("first_connection", {}, () => usageScope(tenant), id, async () => {
+      const claimed = await (await accountStore())?.claimFirstConnection(id) ?? false;
+      if (claimed && firstConnectionAttempts.has(id)) firstConnectionAttempts.set(id, Infinity);
+      return claimed;
+    });
   }
   const readSession = (c: Parameters<typeof sessionOf>[0]) =>
     linearAuth ? linearSessionOf(c, linearAuth, clock) : auth ? sessionOf(c, auth, clock) : null;

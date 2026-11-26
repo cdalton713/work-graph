@@ -73,3 +73,33 @@ it("cancels slow intake requests after two seconds and logs one fixed warning", 
     expect(warning.mock.calls).toEqual([["Usage data could not be sent"]]);
   } finally { warning.mockRestore(); }
 });
+
+it("drops a stuck preparation and sends the next event", async () => {
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
+  const jobs: Promise<void>[] = [];
+  try {
+    const telemetry = createTelemetry(env, "service", (job) => jobs.push(job), fetcher)!;
+    telemetry.emit("sign_in", {}, () => new Promise(() => {}));
+    telemetry.emit("node_opened", {}, () => scope);
+    await Promise.race([
+      Promise.all(jobs),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Preparation held the queue open")), 3000).unref();
+      }),
+    ]);
+    const logs = fetcher.mock.calls.find(([url]) => String(url).endsWith("/logs"));
+    expect(JSON.parse(String(logs?.[1]?.body)).map(({ message }: { message: string }) => message)).toEqual(["node_opened"]);
+  } finally { warning.mockRestore(); }
+});
+
+it("warns once when an intake key has no usable session secret", () => {
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    for (const secret of [undefined, "short-secret"]) {
+      warning.mockClear();
+      expect(createTelemetry({ ...env, WG_SESSION_SECRET: secret }, "service")).toBeNull();
+      expect(warning.mock.calls).toEqual([["Usage data is off because WG_SESSION_SECRET must have at least 32 characters"]]);
+    }
+  } finally { warning.mockRestore(); }
+});

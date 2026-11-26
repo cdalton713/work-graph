@@ -82,6 +82,28 @@ databaseSuites((open) => {
     } finally { await t.close(); }
   });
 
+  it("queues and claims the first connection once for repeated coordinator requests", async () => {
+    const t = await setup({
+      DD_API_KEY: "test-key", WG_SESSION_SECRET: auth.secret, WG_TELEMETRY_WORKSPACES: "work",
+    });
+    try {
+      const claim = vi.spyOn(t.tenants.accounts, "claimFirstConnection");
+      const { cookie } = await t.owner("coordinator");
+      const response = await t.request(root + "/tokens", cookie, "POST", { name: "Coordinator" });
+      expect(response.status).toBe(201);
+      const { token } = await response.json();
+      await Promise.all(t.jobs);
+      t.jobs.length = 0;
+
+      for (let i = 0; i < 100; i++) {
+        expect((await t.request("/api/status", "", "GET", undefined, { authorization: "Bearer " + token })).status).toBe(200);
+      }
+      await Promise.all(t.jobs);
+      expect(t.jobs).toHaveLength(1);
+      expect(claim).toHaveBeenCalledTimes(1);
+    } finally { await t.close(); }
+  });
+
   async function setup(telemetryEnv: NodeJS.ProcessEnv = {}) {
     const sql = await open();
     await migrate(sql);

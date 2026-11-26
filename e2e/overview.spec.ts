@@ -323,6 +323,9 @@ test("a pull from the top refreshes the installed overview", async ({ page, cont
   const client = await context.newCDPSession(page);
   const { x, y } = await bounds(stage);
   await expect(page.getByText(/12 Linear requests left/)).toBeVisible();
+  let requests = 0;
+  const isOverview = (url: string) => new URL(url).pathname === "/api/overview";
+  page.on("request", (request) => { if (isOverview(request.url())) requests++; });
   let navigations = 0;
   page.on("domcontentloaded", () => { navigations++; });
   await stage.evaluate((el) => { el.scrollTop = el.scrollHeight; });
@@ -330,8 +333,11 @@ test("a pull from the top refreshes the installed overview", async ({ page, cont
   await pull(client, x + 50, y + 24);
   await stage.evaluate((el) => { el.scrollTop = 0; });
   expect(navigations).toBe(0);
+  expect(requests).toBe(0);
 
-  await pull(client, x + 50, y + 24, () => page.waitForEvent("domcontentloaded"));
+  await pull(client, x + 50, y + 24, () => page.waitForResponse((response) => isOverview(response.url())));
+  expect(requests).toBe(1);
+  expect(navigations).toBe(0);
   await expect(page.getByText(/12 Linear requests left/)).toBeVisible();
   await expect(page.locator(".overview .ov-title").getByText("Example project", { exact: true })).toBeVisible();
 });

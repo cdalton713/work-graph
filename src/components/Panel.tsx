@@ -23,6 +23,7 @@ export interface PanelProps {
   /** Resolves to false when the server refused the change. */
   onPatch: (id: string, patch: IssuePatch, optimistic: Partial<Issue>) => Promise<boolean>;
   onShowInGraph?: () => void;
+  refresh?: () => void; refreshing?: boolean;
   onGo: (id: string) => void; onClose: () => void; onError: (message: string) => void;
   /** Adds or removes the `reviewed` label. Absent when the team has no such label. */
   onReview?: (id: string) => void;
@@ -55,7 +56,7 @@ function Links({ title, ids, graph, onGo, note, clear }: { title: string; ids: s
   );
 }
 
-export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo, onClose, onShowInGraph, onError, onReview, asks, onDispatch, progress, agent, readOnly = false, limitedEdits = false }: PanelProps) {
+export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo, onClose, onShowInGraph, onError, onReview, asks, onDispatch, progress, agent, readOnly = false, limitedEdits = false, refresh, refreshing }: PanelProps) {
   const { issue, card } = node;
   const phone = useNarrow();
   const body = useRef<HTMLDivElement>(null);
@@ -85,6 +86,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
   const [move, setMove] = useState<{ state: State; warnings: string[] } | null>(null);
   // An ops or decision node goes to a done status with its evidence or answer (the rule of `wg move --note`).
   const noteWord = node.kind === "ops" ? "evidence" : node.kind === "decision" ? "answer" : null;
+  const [commentRefresh, setCommentRefresh] = useState(0);
   const [comments, setComments] = useState<Comment[] | null>(null);
   const waitingForReply = !locked && node.status === settings.waitStatus
     && !issue.labels.some((label) => label.name === "answered");
@@ -104,7 +106,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
     void load();
     const timer = setInterval(() => !document.hidden && void load(), COMMENTS_MS);
     return () => { live = false; clearInterval(timer); };
-  }, [issue.id, issue.updatedAt, data.workspace]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [issue.id, issue.updatedAt, data.workspace, commentRefresh]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => setTitle(issue.title), [issue.title]);
 
   const patch = (p: IssuePatch, optimistic: Partial<Issue>) => onPatch(issue.id, p, optimistic);
@@ -200,6 +202,8 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
         {phone && onShowInGraph && (
           <button type="button" className="show-in-graph" onClick={onShowInGraph} aria-label="Show in graph">⌖</button>
         )}
+        {refresh && <button type="button" className="ghost installed-refresh" onClick={() => { refresh(); setCommentRefresh((count) => count + 1); }}
+          disabled={refreshing} aria-label="Refresh issue">Refresh</button>}
         <button type="button" className="ghost" onClick={onClose} aria-label="Close panel">✕</button>
       </header>
 

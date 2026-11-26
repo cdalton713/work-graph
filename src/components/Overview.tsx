@@ -131,6 +131,7 @@ function messageCut(said: string): boolean {
 }
 
 export interface OverviewProps {
+  managedPullRefresh?: boolean;
   /** The project list alone, until the first overview answer comes. */
   list: OverviewData | ProjectList;
   loading: boolean; missing: string | null; now: number; readOnly?: boolean;
@@ -154,7 +155,7 @@ export interface OverviewProps {
  * All projects on one page: which ones wait on the human, how far each is, and what wg next last said.
  * `/` finds a project, the arrow keys move, Enter opens.
  */
-export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, readOnly = false, initiatives = ALL_INITIATIVES, onInitiatives, states = NO_STATES, onStates, budget = [] }: OverviewProps) {
+export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, readOnly = false, initiatives = ALL_INITIATIVES, onInitiatives, states = NO_STATES, onStates, budget = [], managedPullRefresh }: OverviewProps) {
   const narrow = useNarrow();
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filterButton = useRef<HTMLButtonElement>(null);
@@ -282,6 +283,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const root = useRef<HTMLDivElement>(null);
   const inboxRoot = useRef<HTMLElement>(null);
   useEffect(() => {
+    if (managedPullRefresh) return;
     const stage = root.current?.parentElement;
     const installed = window.matchMedia("(display-mode: standalone)").matches
       || (navigator as Navigator & { standalone?: boolean }).standalone;
@@ -335,14 +337,14 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       stage.removeEventListener("touchend", onEnd);
       stage.removeEventListener("touchcancel", reset);
     };
-  }, []);
+  }, [managedPullRefresh]);
   const inboxButtons = () => Array.from(inboxRoot.current?.querySelectorAll<HTMLButtonElement>(".inbox-row:not([hidden]) .inbox-open") ?? []);
   useEffect(() => {
     if (expanded) inboxRoot.current?.querySelector<HTMLTextAreaElement>(".inbox-row:not([hidden]) .inbox-detail:not([hidden]) textarea")?.focus();
   }, [expanded]);
   useEffect(() => setActive(0), [filter, initiatives, states]);
-  // On a phone, keep the inbox in view until the active project changes.
-  const lastScrolledRow = useRef(narrow ? active : null);
+  // On a phone or in the installed app, keep the inbox in view until the active project changes.
+  const lastScrolledRow = useRef(narrow || managedPullRefresh ? active : null);
   useEffect(() => {
     if (lastScrolledRow.current === active) return;
     lastScrolledRow.current = active;

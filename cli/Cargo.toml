@@ -39,3 +39,6 @@ toml = "1"
 [[test]]
 name = "workflow"
 path = "../tests/cli-parity/workflow.rs"
+
+[features]
+update-fixture = []

@@ -105,13 +105,18 @@ fn inspect(root: &Path, link: &str) -> Result<(PathBuf, Manifest)> {
     Ok((relative, manifest))
 }
 
-fn inspect_generation(root: &Path, relative: &Path) -> Result<Manifest> {
+fn generation_version(relative: &Path) -> Result<&str> {
     let version = relative
         .to_str()
         .and_then(|s| s.strip_prefix("versions/"))
         .and_then(|s| s.strip_suffix(&format!("-{TARGET}")))
         .ok_or("invalid generation")?;
     stable(version).ok_or("invalid installed version")?;
+    Ok(version)
+}
+
+fn inspect_generation(root: &Path, relative: &Path) -> Result<Manifest> {
+    let version = generation_version(relative)?;
     let dir = root.join(relative);
     if !dir.symlink_metadata()?.is_dir() {
         return Err("redirected generation".into());
@@ -211,8 +216,20 @@ fn fetch(client: &reqwest::blocking::Client, url: String, limit: u64) -> Result<
 }
 
 fn check(root: &Path, version: &str, repo: &str) -> Result<()> {
+    let (api, assets) = (
+        "https://api.github.com".to_owned(),
+        "https://github.com".to_owned(),
+    );
+    #[cfg(all(debug_assertions, feature = "update-fixture"))]
+    let (api, assets) = match option_env!("WG_FIXTURE_PORT") {
+        Some(port) => {
+            let origin = format!("http://127.0.0.1:{}", port.parse::<u16>()?);
+            (origin.clone(), origin)
+        }
+        None => (api, assets),
+    };
     let client = reqwest::blocking::Client::builder()
-        .https_only(true)
+        .https_only(api.starts_with("https://"))
         .user_agent("wg-updater")
         .timeout(Duration::from_secs(12))
         .build()?;
@@ -226,7 +243,7 @@ fn check(root: &Path, version: &str, repo: &str) -> Result<()> {
     };
     let bytes = fetch(
         &client,
-        format!("https://api.github.com/repos/{repo}/releases/{endpoint}"),
+        format!("{api}/repos/{repo}/releases/{endpoint}"),
         METADATA,
     )?;
     let info: serde_json::Value = serde_json::from_slice(&bytes)?;
@@ -245,7 +262,7 @@ fn check(root: &Path, version: &str, repo: &str) -> Result<()> {
         return Ok(());
     }
     let tag = format!("wg-v{next}");
-    let prefix = format!("https://github.com/{repo}/releases/download/{tag}/{tag}-{TARGET}");
+    let prefix = format!("{assets}/{repo}/releases/download/{tag}/{tag}-{TARGET}");
     let raw = fetch(&client, format!("{prefix}.json"), METADATA)?;
     let sig = fetch(&client, format!("{prefix}.sig"), 64)?;
     let key = release::embedded_key()?;
@@ -288,7 +305,7 @@ fn check(root: &Path, version: &str, repo: &str) -> Result<()> {
     }
     match root.join("previous").symlink_metadata() {
         Ok(_) => {
-            inspect(root, "previous")?;
+            generation_version(&fs::read_link(root.join("previous"))?)?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),

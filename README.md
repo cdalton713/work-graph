@@ -392,7 +392,8 @@ The hosted service stores node claims for each project. A coordinator token can
 claim a node and renew its lease. The lease defaults to ten minutes. The project
 owner can list and release claims. Project members can list claims, and
 collaborators can claim nodes and release their own claims.
-The service tells connected pages and other coordinators when a claim changes.
+The service tells connected pages and other coordinators when a claim changes,
+including when a renewal changes the job.
 
 The service hosts the page and its API. Accounts share a server and keep their workspaces private.
 Each user runs `wg`, Orca, `gh`, `st`, `uv`, and an agent CLI on their own machine.

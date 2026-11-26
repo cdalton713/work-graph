@@ -17,7 +17,7 @@ import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from ".
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal, sharedRoutes } from "./access.ts";
 import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
-import { planRoutes } from "./plans.ts";
+import { isLinearIdentifier, planRoutes } from "./plans.ts";
 import { claimRoutes } from "./claims.ts";
 import type { ClaimScope } from "./db/claims.ts";
 import { shareRoutes, type ShareAccess } from "./shares.ts";
@@ -539,29 +539,42 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     scope: ClaimScope, nodes?: string[],
   ) => {
     if (!linkEnabled || nodes?.length === 0) return;
-    let keymap: Record<string, unknown> | undefined;
-    const lost = () => console.warn("Project change saved, but the link notice was lost");
-    if (nodes) {
-      try {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const send = async () => {
+      let keymap: Record<string, unknown> | undefined;
+      if (nodes) {
         const result = await accounts.plans({ project: scope.project, account: scope.project[0] }, { kind: "get" });
         keymap = result.plan?.keymap;
-      } catch {
-        lost();
-        return;
       }
-    }
-    const entries = keymap?.nodes;
-    for (const node of nodes ?? [undefined]) {
-      const entry = node && entries && typeof entries === "object" && Object.hasOwn(entries, node)
-        ? (entries as Record<string, unknown>)[node] : undefined;
-      const id = entry && typeof entry === "object" && "identifier" in entry
-        ? entry.identifier : node && keymap?.[node];
-      const issues = typeof id === "string" && /^[A-Z][A-Z0-9]*-[0-9]+$/.test(id) ? [id] : [];
-      try {
-        await hub.projectChanged(ref, issues, scope.membership ? scope.account : undefined);
-      } catch {
-        lost();
+      let delivered = true;
+      const entries = keymap?.nodes;
+      for (const node of nodes ?? [undefined]) {
+        signal.throwIfAborted();
+        const entry = node && entries && typeof entries === "object" && Object.hasOwn(entries, node)
+          ? (entries as Record<string, unknown>)[node] : undefined;
+        const id = entry && typeof entry === "object" && "identifier" in entry
+          ? entry.identifier : node && keymap?.[node];
+        try {
+          await hub.projectChanged(ref, isLinearIdentifier(id) ? [id] : [], scope.membership ? scope.account : undefined, signal);
+        } catch {
+          delivered = false;
+        }
       }
+      return delivered;
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<false>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve(false);
+      }, 2_000);
+    });
+    try {
+      const delivered = await Promise.race([send().catch(() => false), deadline]);
+      if (!delivered) console.warn("Project change saved, but the link notice was lost");
+    } finally {
+      clearTimeout(timer);
     }
   };
   async function shareProject(tenant: Tenant, workspace: Workspace, id: string) {

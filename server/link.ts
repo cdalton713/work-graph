@@ -211,8 +211,9 @@ export class LinkHub {
     });
   }
 
-  private async send(events: LinkEvent[], tenant?: string): Promise<void> {
+  private async send(events: LinkEvent[], tenant?: string, signal?: AbortSignal): Promise<void> {
     await this.unsubscribe;
+    signal?.throwIfAborted();
     await this.bus.publish(tenant === undefined ? events : events.map((event) => ({ ...event, tenant })));
   }
 
@@ -701,26 +702,29 @@ export class LinkHub {
     return (await this.enqueue(ref, type, payload)).message;
   }
 
-  async projectChanged(ref: RoomRef, issues: string[], writer?: string) {
+  async projectChanged(ref: RoomRef, issues: string[], writer: string | undefined, signal: AbortSignal) {
     const payload: ToPage["changed"] = { by: "coordinator", what: "issue", issues };
     // A page must hear each change even when the coordinator queues stay the same.
     const pages = (room: LinkRoom) => ({ ...this.pages(room, "changed", payload), sequence: undefined });
     const message = this.envelope(ref, "changed", payload);
     const updated = await this.shared.editExisting(ref, (room) => {
+      signal.throwIfAborted();
       const recipients = roomAccounts(room).filter(([account]) => account !== writer);
       for (const [, account] of recipients) appendMessage(account, message);
       return { room, recipients };
     });
+    signal.throwIfAborted();
     if (!updated) {
       // Redis can track page sockets without storing a coordinator room.
       const room = await this.shared.read(ref);
-      if (room) await this.send([pages(room)], ref.tenant);
+      signal.throwIfAborted();
+      if (room) await this.send([pages(room)], ref.tenant, signal);
       return;
     }
     const { room, recipients } = updated;
     const events = recipients.map(([account, state]) => this.queueEvent(room,
       [...state.coordinators.values()].flatMap(({ socket }) => socket ? [socket] : []), message, false, account));
-    await this.send([...events, pages(room), this.announce(room)], ref.tenant);
+    await this.send([...events, pages(room), this.announce(room)], ref.tenant, signal);
   }
 
   async enqueue<T extends keyof ToCoordinator>(ref: RoomRef, type: T, payload: ToCoordinator[T], answeredAsk?: string, id?: string, member?: LinkMember, writer?: { account?: string }) {

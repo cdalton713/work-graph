@@ -1415,15 +1415,21 @@ it("keeps successful claim and plan writes when the notice store fails", async (
   vi.spyOn(linkState, "editExisting").mockRejectedValue(new Error("Store unavailable"));
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   try {
-    const { app, owner } = await projectFixture(db, "org", { linkState });
+    const { app, owner, collaborator, scope, memberPath } = await projectFixture(db, "org", { linkState });
     try {
       expect((await owner.request(projectPlan, "PUT", storedPlan, undefined, false, { "if-none-match": "*" })).status).toBe(200);
       expect((await owner.request(projectClaim, "POST", claimJob)).status).toBe(200);
       expect(await (await owner.request(projectPlan)).json()).toEqual({ version: 1, ...storedPlan });
       expect(await (await owner.request(projectClaim.replace("/build", ""))).json())
         .toMatchObject({ claims: [{ node: "build" }] });
-      expect(warn.mock.calls).toEqual([["Project change saved, but the link notice was lost"],
-        ["Project change saved, but the link notice was lost"]]);
+      expect((await collaborator.request(projectClaim, "DELETE", undefined, scope)).status).toBe(403);
+      expect((await owner.request(projectClaim, "DELETE")).status).toBe(204);
+      for (const path of [projectClaim, projectClaim.replace("/build", "/check")]) {
+        expect((await collaborator.request(path, "POST", claimJob, scope)).status).toBe(200);
+      }
+      warn.mockClear();
+      expect((await owner.request(memberPath, "DELETE", undefined, undefined, true)).status).toBe(204);
+      expect(warn.mock.calls).toEqual([["Project change saved, but the link notice was lost"]]);
     } finally {
       app.link.stop();
     }
@@ -1432,6 +1438,81 @@ it("keeps successful claim and plan writes when the notice store fails", async (
     await db.close();
   }
 });
+
+it("rejects invalid keymap identifiers on write and omits legacy invalid identifiers from notices", async () => {
+  const db = await pgliteSql();
+  try {
+    const { app, owner } = await projectFixture(db);
+    try {
+      const writePlan = (identifier: unknown) => owner.request(projectPlan, "PUT", {
+        ...storedPlan, keymap: { nodes: { build: { identifier } } },
+      }, undefined, false, { "if-none-match": "*" });
+      const oversized = "WG-" + "1".repeat(500_000);
+      for (const id of [oversized, "ABCDEFGHIJK-1", "WG-1234567890", "1G-1", "WG-1\n", null]) {
+        expect((await writePlan(id)).status).toBe(400);
+      }
+      expect((await writePlan("A123456789-123456789")).status).toBe(200);
+      const changes: unknown[] = [];
+      await app.link.hub.joinPage({ close() {}, send(raw) {
+        const { type, payload } = JSON.parse(raw);
+        if (type === "changed") changes.push(payload);
+      } }, { tenant: owner.id, workspace: "work", id: "project" });
+      expect((await owner.request(projectClaim, "POST", claimJob)).status).toBe(200);
+      await db.query("UPDATE project_plans SET keymap = $1::jsonb", [
+        JSON.stringify({ nodes: { build: { identifier: oversized } } }),
+      ]);
+      expect((await owner.request(projectClaim, "DELETE")).status).toBe(204);
+      expect(changes).toEqual([
+        { by: "coordinator", what: "issue", issues: ["A123456789-123456789"] },
+        { by: "coordinator", what: "issue", issues: [] },
+      ]);
+    } finally { app.link.stop(); }
+  } finally { await db.close(); }
+}, 15_000);
+
+it("returns stored writes when notice delivery exceeds the deadline", async () => {
+  const db = await pgliteSql();
+  const linkState = memoryLinkState();
+  const edit = linkState.editExisting.bind(linkState);
+  let resume!: () => void;
+  const delayed = new Promise<void>((resolve) => { resume = resolve; });
+  vi.spyOn(linkState, "editExisting").mockImplementation(async (ref, change) => {
+    await delayed;
+    return edit(ref, change);
+  });
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const { app, owner } = await projectFixture(db, "org", { linkState });
+    try {
+      const changes: unknown[] = [];
+      await app.link.hub.joinPage({ close() {}, send(raw) {
+        const { type, payload } = JSON.parse(raw);
+        if (type === "changed") changes.push(payload);
+      } }, { tenant: owner.id, workspace: "work", id: "project" });
+      const plan = owner.request(projectPlan, "PUT", storedPlan, undefined, false, { "if-none-match": "*" });
+      const claim = owner.request(projectClaim, "POST", claimJob);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const deadline = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("The writes waited for the notice store")), 2_750);
+        });
+        const responses = await Promise.race([Promise.all([plan, claim]), deadline]);
+        expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+        expect(warn.mock.calls).toEqual(Array.from({ length: 2 }, () => ["Project change saved, but the link notice was lost"]));
+        resume();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(changes).toEqual([]);
+      } finally {
+        clearTimeout(timer);
+        resume();
+        await Promise.allSettled([plan, claim]);
+      }
+    } finally { app.link.stop(); }
+  } finally {
+    warn.mockRestore();
+    await db.close();
+  }
+}, 15_000);
 
 it("keeps queued commands and status in the request tenant", async () => {
   const directory = testTenants(TEAM);

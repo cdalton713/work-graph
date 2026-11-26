@@ -34,7 +34,11 @@ export const screens = {
   },
   async board(page: Page) {
     await screens.project(page);
-    await page.getByRole("button", { name: "Board", exact: true }).click();
+    const toggle = page.getByRole("button", { name: "Board", exact: true });
+    if (!(await toggle.isVisible())) {
+      await page.locator(".bar").getByRole("button", { name: "More", exact: true }).click();
+    }
+    await toggle.click();
     await expect(board(page)).toBeVisible();
   },
   async settings(page: Page) {

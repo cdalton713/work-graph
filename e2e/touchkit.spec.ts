@@ -10,26 +10,8 @@ test("the build version uses the native title with a mouse", async ({ page }, te
   await expect(page.locator(".bar-version")).toHaveAttribute("title", buildHint);
 });
 
-test("the build version opens and dismisses its hint by touch", async ({ page }, testInfo) => {
-  test.skip(!testInfo.project.name.startsWith("phone-"));
-  await screens.project(page);
-  const version = page.locator(".bar-version").getByRole("button");
-  const hint = page.getByRole("tooltip", { name: buildHint });
-
-  await version.tap();
-  await expect(hint).toBeVisible();
-  await expect(version).toHaveAccessibleDescription(buildHint);
-  await version.tap();
-  await expect(hint).toBeHidden();
-
-  await version.tap();
-  await expect(hint).toBeVisible();
-  await page.locator("main.stage").tap({ position: { x: 4, y: 4 } });
-  await expect(hint).toBeHidden();
-});
-
 test.describe("sheet", () => {
-  test.skip(({ isMobile }) => !isMobile, "Check the sheet on phone projects");
+  test.skip(({ isMobile }) => !isMobile, "Check the touch controls on phone projects");
 
   let fixtureScript: string;
   let fixtureStyle: string;
@@ -46,7 +28,7 @@ test.describe("sheet", () => {
           return `
             import { createElement as h, useState } from "react";
             import { createRoot } from "react-dom/client";
-            import { Sheet } from "/src/components/ui.tsx";
+            import { Hint, Sheet } from "/src/components/ui.tsx";
             import "/src/styles.css";
 
             function Fixture() {
@@ -56,7 +38,9 @@ test.describe("sheet", () => {
                 h("button", { onClick: () => setSize("tall") }, "Open tall sheet"),
                 h(Sheet, { open: size !== null, title: "Example sheet", onClose: () => setSize(null) },
                   h("div", { style: size === "tall" ? { minHeight: "200vh" } : undefined },
-                    h("button", null, "Last action"))));
+                    h("button", null, "Last action"))),
+                h(Hint, { text: "This is the example hint." }, "Example hint"),
+                h("p", { style: { marginTop: 80 } }, "Outside the hint"));
             }
             createRoot(document.getElementById("root")).render(h(Fixture));
           `;
@@ -83,6 +67,23 @@ test.describe("sheet", () => {
     await page.route("**/touchkit-fixture.js", (route) => route.fulfill({ contentType: "text/javascript", body: fixtureScript }));
     await page.route("**/touchkit-fixture.css", (route) => route.fulfill({ contentType: "text/css", body: fixtureStyle }));
     await page.goto("/touchkit-fixture");
+  });
+
+  test("opens and dismisses a hint by touch", async ({ page }) => {
+    const hintText = "This is the example hint.";
+    const trigger = page.getByRole("button", { name: "Example hint" });
+    const hint = page.getByRole("tooltip", { name: hintText });
+
+    await trigger.tap();
+    await expect(hint).toBeVisible();
+    await expect(trigger).toHaveAccessibleDescription(hintText);
+    await trigger.tap();
+    await expect(hint).toBeHidden();
+
+    await trigger.tap();
+    await expect(hint).toBeVisible();
+    await page.getByText("Outside the hint").tap();
+    await expect(hint).toBeHidden();
   });
 
   test("wraps focus and closes with Escape", async ({ page }) => {

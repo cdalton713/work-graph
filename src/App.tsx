@@ -4,6 +4,7 @@ import { accountApi, api, setOpenProject } from "./api";
 import { Onboarding } from "./components/Onboarding";
 import { AccountError, Settings, useAccountAction } from "./components/Settings";
 import { firstStep } from "./lib/onboarding";
+import { BarMenu, useCompactBar } from "./components/BarMenu";
 import { Board } from "./components/Board";
 import { Canvas } from "./components/Canvas";
 import { Overview } from "./components/Overview";
@@ -20,7 +21,7 @@ import { ownerWords } from "./lib/words";
 import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
 import type { Account, AccountConnection, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
-import { TABLET_OR_WIDER } from "./lib/screen";
+import { TABLET_OR_WIDER, useHover, useNarrow } from "./lib/screen";
 import { useLink } from "./useLink";
 import { canReleaseClaim, claimMarks, matchesClaim, parseClaimFilter, type ClaimFilter, type ProjectClaims } from "./lib/claims";
 
@@ -58,6 +59,7 @@ export function projectFromQuery(directory: ProjectList | null, query: URLSearch
 }
 
 export function ServiceApp() {
+  const compactBar = useCompactBar();
   const [query, navigate] = useQuery();
   const [account, setAccount] = useState<Account | null>(null);
   const { error, busy, run } = useAccountAction();
@@ -89,13 +91,14 @@ export function ServiceApp() {
     if (accountView) pageEvent(accountView, signInWorkspace);
   }, [accountView, signInWorkspace]);
   if (account && page !== "settings" && !showGuide) return <App service connections={account.connections} openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
+  const signOut = <a className="bar-user" href="/auth/logout">Sign out</a>;
   return <div className="app">
     <header className="bar account-bar">
       <span className="brand">work-graph</span><span className="station-fill" />
       {page === "settings" ?
         <button onClick={() => route(null)}>{showGuide ? "Setup guide" : "Overview"}</button> :
         <button onClick={() => route("settings")}>Settings</button>}
-      <a className="bar-user" href="/auth/logout">Sign out</a>
+      {compactBar ? <BarMenu title="Account controls">{() => signOut}</BarMenu> : signOut}
     </header>
     {!account ? <main className="account-page"><div className="account-content">
       {error ? <><AccountError error={error} /><button disabled={busy} onClick={() => void run(async () => { await refresh(); })}>Retry</button></> :
@@ -507,6 +510,9 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   }, [select]);
 
   // The keys of a project page. `j` and `k` step through the issues in board order (Your move first).
+  const hover = useHover();
+  const narrow = useNarrow();
+  const compactBar = useCompactBar();
   const [keys, setKeys] = useState(false);
   const order = useMemo(() => (full ? boardOrder(full, asked, atPrompt).filter(includeClaim) : []), [full, asked, atPrompt, includeClaim]);
   useEffect(() => {
@@ -519,7 +525,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         else if (query.get("issue")) select(null);
         return;
       }
-      if (e.key === "?") { setKeys((on) => !on); return; }
+      if (e.key === "?" && hover) { setKeys((on) => !on); return; }
       if (!full) return;
       const at = selected ? order.findIndex((n) => n.id === selected.id) : -1;
       if ((e.key === "j" || e.key === "k") && order.length) {
@@ -537,7 +543,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
     };
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
-  }, [query, select, full, order, selected, keys]);
+  }, [query, select, full, order, selected, keys, hover]);
 
   const counts = useMemo(() => {
     const tally = new Map<string, { n: number; signal: Signal }>();
@@ -582,81 +588,154 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   // A canceled issue is not work that is left, so it is not in the total that "done" counts to.
   const planned = total - (full?.nodes.filter((n) => n.status === "Canceled").length ?? 0);
 
+  const nativeBarTitles = hover && !compactBar;
+  const overviewHelp = `All projects: which ones wait ${words.onOwner}, and how far each one is.`;
+  const autonomyHelp = `Autonomy level: what the coordinator may do without ${words.owner}.${project?.autonomy ? "" : " No label on the project: standard."} A change tells the coordinator at once.`;
+  const reviewHelp = `Review effort: how much review each PR gets.${project?.review ? "" : " No label on the project: thorough."} A change tells the coordinator at once.`;
+  const sharedHelp = "Each account that may sign in to the viewer can read this project there. It cannot change it.";
+  const stopSharingHelp = "Remove this project from the viewer.";
+  const shareHelp = "Show this project on the read-only viewer, for each account that may sign in there. The link to copy shows here then.";
+  const viewerHelp = "This page changes nothing. The owner of the project changes it on their own page.";
+  const boardHelp = "Show or hide the list of issues by the action they need. Press / to find an issue.";
+  const syncHelp = `Refresh now. The graph also refreshes every 15 s.${syncedAt ? ` Last sync ${syncedAt.toLocaleTimeString()}.` : ""}`;
+  const keysHelp = "Keyboard keys (?)";
+  const signOutHelp = `Signed in as ${site.user}. Select to sign out.`;
+  const closeHelp = "Mark every issue in this project Done and complete the project.";
+  const activeProject = project && project.statusType !== "completed" && project.statusType !== "canceled";
+  const autonomyPicker = !sharedRole && activeProject && (
+    <Picker wide value={[autonomy]} onChange={([level]) => void setAutonomy(level as AutonomyLevel)} disabled={autonomyBusy || viewer} title={nativeBarTitles ? autonomyHelp : undefined}
+      options={AUTONOMY_LEVELS.map((level) => ({ id: level, label: level, hint: AUTONOMY_HINTS[level] }))}>
+      <span className={`bar-autonomy auto-${autonomy}`}>{autonomyBusy ? "Autonomy…" : <>Autonomy <b>{autonomy}</b></>}</span><span className="caret">▾</span>
+    </Picker>
+  );
+  const reviewPicker = !sharedRole && activeProject && (
+    <Picker wide value={[review]} onChange={([level]) => void setReviewEffort(level as ReviewEffort)} disabled={reviewBusy || viewer} title={nativeBarTitles ? reviewHelp : undefined}
+      options={REVIEW_LEVELS.map((level) => ({ id: level, label: level, hint: REVIEW_HINTS[level] }))}>
+      <span className={`bar-review review-${review}`}>{reviewBusy ? "Review…" : <>Review <b>{review}</b></>}</span><span className="caret">▾</span>
+    </Picker>
+  );
+  const shareControl = (dismiss?: () => void) => {
+    if (viewer || sharedRole || !project) return null;
+    if (service && openKey) return (
+      <button type="button" className="ghost bar-share" onClick={() => {
+        dismiss?.();
+        setSharing(openKey);
+        pageEvent("share_dialog_opened", project.workspace);
+      }}>Share</button>
+    );
+    if (!shareLink) return null;
+    if (project.shared) return (
+      <span className="bar-share" title={nativeBarTitles ? sharedHelp : undefined}>
+        <b>Shared</b><CopyButton text={shareLink} label="Copy the viewer link" />
+        <button type="button" className="ghost" disabled={shareBusy} onClick={() => void setShared(false)} aria-label="Stop sharing" title={nativeBarTitles ? stopSharingHelp : undefined}>Stop</button>
+      </span>
+    );
+    return <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void setShared(true)} title={nativeBarTitles ? shareHelp : undefined}>{shareBusy ? "Sharing…" : "Share"}</button>;
+  };
+  const boardControl = (dismiss?: () => void) => full && (
+    <button type="button" className={`toggle toggle-board${board ? " is-on" : ""}`} aria-pressed={board} title={nativeBarTitles ? boardHelp : undefined}
+      onClick={() => { setBoard(!board); dismiss?.(); }}>Board</button>
+  );
+  const viewPicker = full && (
+    <Picker multi align="right" title={nativeBarTitles ? "View options" : undefined} value={[openOnly && "open", allEdges && "edges", map && "map"].filter(Boolean) as string[]}
+      onChange={(ids) => { setOpenOnly(ids.includes("open")); setAllEdges(ids.includes("edges")); setMap(ids.includes("map")); }}
+      options={[
+        { id: "open", label: "Open issues only", hint: "hide done, canceled" },
+        { id: "edges", label: "Every blocks edge", hint: "also implied ones" },
+        { id: "map", label: "Small map" },
+      ]}>
+      <span className="bar-view">View{(openOnly || allEdges) && <i className="bar-view-dot" aria-label="filters on" />}</span><span className="caret">▾</span>
+    </Picker>
+  );
+  const syncTime = syncedAt?.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const serverVersion = versionText(status);
+  const keysControl = hover && (
+    <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} aria-label="Keyboard keys" title={nativeBarTitles ? keysHelp : undefined}>?</button>
+  );
+  const settings = openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>;
+  const signOut = site.user && <a className="bar-user" href="/auth/logout" title={nativeBarTitles ? signOutHelp : undefined}>Sign out</a>;
+  const closeControl = !viewer && !sharedRole && activeProject && (
+    <button type="button" className="ghost bar-close" disabled={closing || busy} onClick={() => void closeProject()} title={nativeBarTitles ? closeHelp : undefined}>
+      {closing ? "Closing…" : "Close project"}
+    </button>
+  );
+  const projectLink = project && new URL(`?${new URLSearchParams({ workspace: project.workspace ?? site.defaultWorkspace, project: project.id })}`, location.href).href;
+
   return (
     <div className={service ? "app service-app" : "app"}>
-      <header className="bar">
+      <header className="bar project-bar">
         <span className="brand">work-graph</span>
         {(project || missing) && (
-          <button type="button" className="bar-home" onClick={home} title={`All projects: which ones wait ${words.onOwner}, and how far each one is.`}>
-            Overview{waitingTotal > 0 && <b className="bar-home-count mono" aria-label={`${waitingTotal} issues wait ${words.onOwner}`}>{waitingTotal}</b>}
+          <button type="button" className="bar-home" onClick={home} title={nativeBarTitles ? overviewHelp : undefined}>
+            <span className="bar-home-label">Overview</span><span className="bar-home-arrow" aria-hidden>←</span>
+            {waitingTotal > 0 && <b className="bar-home-count mono" aria-label={`${waitingTotal} issues wait ${words.onOwner}`}>{waitingTotal}</b>}
           </button>
         )}
         <Picker value={project ? [`${project.workspace}:${project.id}`] : []} onChange={([id]) => {
           const selected = directory?.projects.find((p) => `${p.workspace}:${p.id}` === id);
           if (selected) openProject(selected);
         }} wide options={projectOptions}>
-          <span className="bar-project">{project ? [project.workspaceName, project.initiative, project.name].filter(Boolean).join(" / ") : (directory ? "Open a project" : "Loading projects…")}</span><span className="caret">▾</span>
+          <span className="bar-project">{project
+            ? (narrow ? project.name : [project.workspaceName, project.initiative, project.name].filter(Boolean).join(" / "))
+            : (directory ? "Open a project" : "Loading projects…")}</span><span className="caret">▾</span>
         </Picker>
-        {project && <CopyButton text={project.name} label="Copy the project name" />}
-        {!sharedRole && project && project.statusType !== "completed" && project.statusType !== "canceled" && (
-          <Picker wide value={[autonomy]} onChange={([level]) => void setAutonomy(level as AutonomyLevel)} disabled={autonomyBusy || viewer}
-            title={`Autonomy level: what the coordinator may do without ${words.owner}.${project.autonomy ? "" : " No label on the project: standard."} A change tells the coordinator at once.`}
-            options={AUTONOMY_LEVELS.map((level) => ({ id: level, label: level, hint: AUTONOMY_HINTS[level] }))}>
-            <span className={`bar-autonomy auto-${autonomy}`}>{autonomyBusy ? "Autonomy…" : <>Autonomy <b>{autonomy}</b></>}</span><span className="caret">▾</span>
-          </Picker>
-        )}
-        {!sharedRole && project && project.statusType !== "completed" && project.statusType !== "canceled" && (
-          <Picker wide value={[review]} onChange={([level]) => void setReviewEffort(level as ReviewEffort)} disabled={reviewBusy || viewer}
-            title={`Review effort: how much review each PR gets.${project.review ? "" : " No label on the project: thorough."} A change tells the coordinator at once.`}
-            options={REVIEW_LEVELS.map((level) => ({ id: level, label: level, hint: REVIEW_HINTS[level] }))}>
-            <span className={`bar-review review-${review}`}>{reviewBusy ? "Review…" : <>Review <b>{review}</b></>}</span><span className="caret">▾</span>
-          </Picker>
-        )}
-        {!service && !viewer && !sharedRole && project && shareLink && (project.shared ? (
-          <span className="bar-share" title="Each account that may sign in to the viewer can read this project there. It cannot change it.">
-            <b>Shared</b><CopyButton text={shareLink} label="Copy the viewer link" />
-            <button type="button" className="ghost" disabled={shareBusy} onClick={() => void setShared(false)} title="Remove this project from the viewer.">Stop</button>
-          </span>
-        ) : (
-          <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void setShared(true)}
-            title="Show this project on the read-only viewer, for each account that may sign in there. The link to copy shows here then.">{shareBusy ? "Sharing…" : "Share"}</button>
-        ))}
-        {!viewer && !sharedRole && service && project && openKey && (
-          <button type="button" className="ghost bar-share" onClick={() => {
-            setSharing(openKey);
-            pageEvent("share_dialog_opened", project.workspace);
-          }}>Share</button>
-        )}
+        {!compactBar && <>
+          {project && <CopyButton text={project.name} label="Copy the project name" />}
+          {autonomyPicker}
+          {reviewPicker}
+          {shareControl()}
+        </>}
         <span className="station-fill" />
-        {viewer && <span className="bar-viewer" title="This page changes nothing. The owner of the project changes it on their own page.">view only</span>}
+        {!narrow && viewer && <span className="bar-viewer" title={nativeBarTitles ? viewerHelp : undefined}>view only</span>}
+        {!narrow && boardControl()}
+        {!narrow && viewPicker}
         {full && (
-          <>
-            <button type="button" className={`toggle toggle-board${board ? " is-on" : ""}`} aria-pressed={board} onClick={() => setBoard(!board)}
-              title="Show or hide the list of issues by the action they need. Press / to find an issue.">Board</button>
-            {/* The view options change rarely, so they share one menu and leave the bar to the work. */}
-            <Picker multi align="right" title="View options" value={[openOnly && "open", allEdges && "edges", map && "map"].filter(Boolean) as string[]}
-              onChange={(ids) => { setOpenOnly(ids.includes("open")); setAllEdges(ids.includes("edges")); setMap(ids.includes("map")); }}
-              options={[
-                { id: "open", label: "Open issues only", hint: "hide done, canceled" },
-                { id: "edges", label: "Every blocks edge", hint: "also implied ones" },
-                { id: "map", label: "Small map" },
-              ]}>
-              <span className="bar-view">View{(openOnly || allEdges) && <i className="bar-view-dot" aria-label="filters on" />}</span><span className="caret">▾</span>
-            </Picker>
-            <button type="button" className="sync" onClick={() => project && void load(project)} title={`Refresh now. The graph also refreshes every 15 s.${syncedAt ? ` Last sync ${syncedAt.toLocaleTimeString()}.` : ""}`}>
-              <span className={`sync-dot${busy ? " is-busy" : ""}`} /><span className="sync-time">{syncedAt ? syncedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "…"}</span>
-            </button>
-          </>
+          <button type="button" className="sync" onClick={() => project && void load(project)} aria-label="Refresh project"
+            title={nativeBarTitles ? syncHelp : undefined} aria-description={syncHelp}>
+            <span className={`sync-dot${busy ? " is-busy" : ""}`} /><span className="sync-time">{syncTime ?? "…"}</span>
+          </button>
         )}
-        {versionText(status) && <Hint className="bar-version mono" text={`The build of the server: ${status!.version}`}>{versionText(status)}</Hint>}
-        <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} title="Keyboard keys (?)">?</button>
-        {openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>}
-        {site.user && <a className="bar-user" href="/auth/logout" title={`Signed in as ${site.user}. Select to sign out.`}>Sign out</a>}
-        {/* Apart from the view toggles: it changes every issue of the project in Linear. */}
-        {!viewer && !sharedRole && project && project.statusType !== "completed" && project.statusType !== "canceled" && (
-          <button type="button" className="ghost bar-close" disabled={closing || busy} onClick={() => void closeProject()}
-            title="Mark every issue in this project Done and complete the project.">{closing ? "Closing…" : "Close project"}</button>
-        )}
+        {compactBar ? (
+          <BarMenu key={openKey} title={project ? "Project controls" : "More controls"}>{(dismiss) => <>
+            {viewer && <p>{viewerHelp}</p>}
+            {projectLink && <div className="bar-menu-row"><span>Project link</span><CopyButton text={projectLink} label="Copy the project link" secret /></div>}
+            {project && <div className="bar-menu-row"><span>Copy the project name: {project.name}</span><CopyButton text={project.name} label="Copy the project name" /></div>}
+            {!service && !viewer && !sharedRole && shareLink && <p>{project?.shared ? sharedHelp : shareHelp}</p>}
+            {shareControl(dismiss)}
+            {!service && !viewer && !sharedRole && project?.shared && shareLink && <>
+              <p>Copy the viewer link: {shareLink}</p>
+              <p>{stopSharingHelp}</p>
+            </>}
+            {autonomyPicker && <div className="bar-menu-field">
+              {autonomyPicker}
+              <p>{autonomyHelp}</p>
+            </div>}
+            {reviewPicker && <div className="bar-menu-field">
+              {reviewPicker}
+              <p>{reviewHelp}</p>
+            </div>}
+            {narrow && boardControl(dismiss)}
+            {narrow && viewPicker}
+            {full && <>
+              <p>{boardHelp}</p>
+              <p>View options</p>
+              <p>{syncHelp}</p>
+            </>}
+            {(project || missing) && <p>{overviewHelp}</p>}
+            {serverVersion && <p>The build of the server: <span className="mono">{status?.version}</span></p>}
+            {hover && <button type="button" className="ghost" onClick={() => { dismiss(); setKeys(!keys); }}>{keysHelp}</button>}
+            {!hover && <p>{keysHelp}</p>}
+            {settings}
+            {site.user && <div className="bar-menu-row"><span>{signOutHelp}</span>{signOut}</div>}
+            {closeControl && <div className="bar-menu-danger"><p>{closeHelp}</p>{closeControl}</div>}
+          </>}</BarMenu>
+        ) : <>
+          {serverVersion && <Hint className="bar-version mono" text={`The build of the server: ${status!.version}`}>{serverVersion}</Hint>}
+          {keysControl}
+          {settings}
+          {signOut}
+          {closeControl}
+        </>}
       </header>
 
       {sharing && sharing === openKey && project && <Share id={project.id}
@@ -735,7 +814,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
       {stale && <div className="effort effort-warning" role="status" title={stale.title}>{stale.text}</div>}
       {(closeError || error) && <div className="error" role="alert"><span>{closeError || error}</span><button type="button" className="ghost" onClick={() => { setError(null); setCloseError(null); }}>Dismiss</button></div>}
 
-      {keys && (
+      {hover && keys && (
         <div className="keys" role="dialog" aria-label="Keyboard keys">
           <header><b>Keys</b><button type="button" className="ghost" onClick={() => setKeys(false)} aria-label="Close">✕</button></header>
           <dl>

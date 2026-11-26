@@ -274,6 +274,9 @@ pub(super) fn run(args: &Agents) -> Result<u8> {
     }
     let mut beats: HashMap<PathBuf, activity::Heartbeat> = HashMap::new();
     let mut unsupported = HashSet::new();
+    let mut seen = HashMap::<PathBuf, HashMap<String, usize>>::new();
+    let state_path = home()?.join(".local/state/work-graph/agents.json");
+    let mut previous_settings = Value::Null;
     let mut failures: HashMap<PathBuf, (Instant, bool)> = HashMap::new();
     activity::monitor(
         args.once,
@@ -282,6 +285,9 @@ pub(super) fn run(args: &Agents) -> Result<u8> {
         || {
             let install = Installation::load()?;
             let settings = install.config.settings();
+            let mut state = read_state(&state_path)?;
+            let config_changed = previous_settings != *settings;
+            previous_settings = settings.clone();
             let replies = settings["agent_replies"] == true;
             let local = replies
                 && ["ORCA_AGENT_SESSION_ID", "ORCA_TERMINAL_HANDLE"]
@@ -298,15 +304,23 @@ pub(super) fn run(args: &Agents) -> Result<u8> {
                 |dir, plan, rows| {
                     let beat = beats.entry(dir.into()).or_default();
                     let now = Instant::now();
-                    if !beat.due(rows, now, local) {
-                        return Ok(());
-                    }
+
                     let effort = Effort {
                         install: &install,
                         dir,
                         plan: plan.clone(),
                         km: crate::state::load_keymap(dir)?,
                     };
+                    let before = state.clone();
+                    let entries =
+                        activity::notice_entries(rows, seen.entry(dir.into()).or_default());
+                    super::notices::agent_notices(&effort, entries, &mut state)?;
+                    if before != state {
+                        save_state(&state_path, &state)?;
+                    }
+                    if !beat.due(rows, now, local || config_changed) {
+                        return Ok(());
+                    }
                     let result = (|| -> Result<()> {
                         let (link, endpoint, session) = link(&effort)?;
                         let enabled = local && !unsupported.contains(&endpoint);

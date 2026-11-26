@@ -2,6 +2,7 @@
 use crate::linear::{Client, Installation, LinearHttp, SystemTiming};
 mod command;
 pub use command::command;
+pub(crate) use command::{archive, ordered};
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;

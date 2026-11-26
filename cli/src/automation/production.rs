@@ -220,6 +220,24 @@ impl<'a> Effort<'a> {
             .or(update["id"].as_str())
             .ok_or("no project update returned")?;
         findings.save_published(self.dir, &at, id)?;
+        let rank = |v: &str| match v {
+            "offTrack" => 2,
+            "atRisk" => 1,
+            _ => 0,
+        };
+        if rank(findings.value()) > rank(text(&self.km["run"]["effort"]["health"]))
+            && self.install.config.settings()["notify"]
+                .as_array()
+                .is_some_and(|v| !v.is_empty())
+            && !self.labels()?.iter().any(|l| l["name"] == "paused")
+        {
+            super::notices::health(
+                self,
+                findings.value(),
+                &findings.faults,
+                text(&update["url"]),
+            );
+        }
         Ok(format!(
             "health {}: {} fault(s), {} issue(s) filed or commented; {id}",
             findings.value(),

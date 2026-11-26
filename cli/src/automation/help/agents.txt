@@ -1,0 +1,11 @@
+usage: wg.py agents [-h] [--root ROOT] [--once | --install | --uninstall | --wait] [--approve FINGERPRINT]
+
+options:
+  -h, --help            show this help message and exit
+  --root ROOT
+  --once
+  --install
+  --uninstall
+  --wait                when a sender runs, wait for it to stop, then run
+  --approve FINGERPRINT
+                        with --install: the approval that Orca printed for the plugin

@@ -40,10 +40,17 @@ pub fn orca_path() -> PathBuf {
 
 /// Temporary files allow the child to write either stream without filling a pipe.
 pub fn capture(command: &mut Command, timeout: Duration) -> Result<std::process::Output> {
+    capture_with_input(command, timeout, Stdio::null())
+}
+pub fn capture_with_input(
+    command: &mut Command,
+    timeout: Duration,
+    input: Stdio,
+) -> Result<std::process::Output> {
     let mut out = tempfile::tempfile()?;
     let mut err = tempfile::tempfile()?;
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(input)
         .stdout(out.try_clone()?)
         .stderr(err.try_clone()?)
         .spawn()?;

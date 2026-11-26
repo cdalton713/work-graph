@@ -111,9 +111,53 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
     ) {
         return None;
     }
+    let verb = args[1].to_str()?;
+    let help = match verb {
+        "agents" => include_str!("help/agents.txt"),
+        "tick" => include_str!("help/tick.txt"),
+        "wake" => include_str!("help/wake.txt"),
+        "health" => include_str!("help/health.txt"),
+        "next" => include_str!("help/next.txt"),
+        "watch" => include_str!("help/watch.txt"),
+        "autostart" => include_str!("help/autostart.txt"),
+        _ => return None,
+    };
+    if args[2..]
+        .iter()
+        .take_while(|s| s.as_os_str() != "--")
+        .any(|s| s == "--help" || s == "-h")
+    {
+        print!("{help}");
+        return Some(ExitCode::SUCCESS);
+    }
     let parsed = match Arguments::try_parse_from(args) {
         Ok(args) => args.command,
         Err(error) => {
+            if error.kind() == clap::error::ErrorKind::ArgumentConflict {
+                let modes: &[&str] = match verb {
+                    "health" => &["--install", "--uninstall", "--due", "--report"],
+                    "agents" => &["--install", "--uninstall", "--once", "--wait"],
+                    _ => &["--install", "--uninstall"],
+                };
+                let mut seen = Vec::new();
+                for value in args[2..]
+                    .iter()
+                    .filter_map(|s| s.to_str())
+                    .take_while(|s| *s != "--")
+                {
+                    let flag = value.split('=').next().unwrap_or(value);
+                    if modes.contains(&flag) && !seen.contains(&flag) {
+                        seen.push(flag);
+                    }
+                }
+                if let [first, second, ..] = seen.as_slice() {
+                    eprintln!(
+                        "{}\nwg.py {verb}: error: argument {second}: not allowed with argument {first}",
+                        help.split("\n\n").next().unwrap_or(help)
+                    );
+                    return Some(ExitCode::from(2));
+                }
+            }
             let code = error.exit_code();
             let _ = error.print();
             return Some(ExitCode::from(code as u8));
@@ -179,7 +223,10 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
             {
                 return Err("--interval must be a positive number of seconds".into());
             }
-            _ => return Ok(None),
+            Operation::Next(args) => return Ok(Some(live_loop::next_command(&args, false)?)),
+            Operation::Watch(args) => return Ok(Some(live_loop::next_command(&args, true)?)),
+            Operation::Wake { dir } => return Ok(Some(live_loop::wake_command(&dir)?)),
+            Operation::Tick(args) => return Ok(Some(live_loop::tick_command(&args)?)),
         }
         Ok(Some(0))
     })();
@@ -192,5 +239,10 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
     }
 }
 
+mod actions;
 pub mod activity;
 pub mod findings;
+mod live_loop;
+mod publish;
+
+mod notices;

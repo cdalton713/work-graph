@@ -141,3 +141,108 @@ esac
     assert!(String::from_utf8_lossy(&out.stdout).contains("Example: coordinator codex done"));
     assert_eq!(fs::read_to_string(home.join("mail")).unwrap(), "hello");
 }
+
+#[test]
+fn public_automation_commands_use_fixture_services_and_files() {
+    for script in [
+        "automation.py",
+        "automation-live.py",
+        "automation-parity.py",
+    ] {
+        let result = std::process::Command::new("python3")
+            .arg("-IB")
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../tests/cli-parity")
+                    .join(script),
+            )
+            .arg(env!("CARGO_BIN_EXE_wg-preview"))
+            .status()
+            .unwrap();
+        assert!(result.success(), "{script} failed");
+    }
+}
+
+#[test]
+fn public_next_reconnects_replays_state_and_acknowledges_the_wakeup() {
+    use tungstenite::{
+        Message,
+        protocol::{CloseFrame, frame::coding::CloseCode},
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let page = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let server = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(50);
+        for pass in 0..2 {
+            let stream = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(e) => panic!("missing coordinator connection: {e}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut kinds = std::collections::BTreeSet::new();
+            while kinds.len() < 4 {
+                let frame: Value =
+                    serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+                if kinds.is_empty() {
+                    assert_eq!(frame["type"], "hello");
+                }
+                kinds.insert(frame["type"].as_str().unwrap().to_string());
+            }
+            assert_eq!(
+                kinds,
+                ["asks", "hello", "progress", "state"]
+                    .map(String::from)
+                    .into_iter()
+                    .collect()
+            );
+            if pass == 0 {
+                ws.close(Some(CloseFrame {
+                    code: CloseCode::from(4001),
+                    reason: "planned".into(),
+                }))
+                .unwrap();
+                continue;
+            }
+            ws.send(Message::text(json!({"v":1,"id":"wake","type":"answer","payload":{"key":"a","issue":"EX-1","body":"fixture answer"}}).to_string())).unwrap();
+            loop {
+                let frame: Value =
+                    serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+                if frame["type"] == "ack" {
+                    assert_eq!(frame["payload"]["ids"], json!(["wake"]));
+                    break;
+                }
+            }
+        }
+    });
+    let out = std::process::Command::new("python3")
+        .args([
+            "-IB",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../tests/cli-parity/automation-live.py"
+            ),
+            env!("CARGO_BIN_EXE_wg-preview"),
+            &page,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    server.join().unwrap();
+}

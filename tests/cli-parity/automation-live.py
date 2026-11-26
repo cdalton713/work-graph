@@ -31,6 +31,12 @@ def scenario(root):
     cfg.write_text(json.dumps({"tick_roots": [str(root)], "workspaces": [{"id": "default", "team": "EX"}]}))
     filed = []
     updates = []
+    cards = []
+    documents = []
+    archived = []
+    def page(rows):
+        return {"nodes": list(rows), "pageInfo": {"hasNextPage": False, "endCursor": None}}
+
 
     def post(h):
         assert h.headers["Authorization"] == "fixture-key"
@@ -39,6 +45,27 @@ def scenario(root):
         if "issues(first:25" in q:
             data = {"issues": {"nodes": [{"id": i, "identifier": "EX-1", "state": {"type": "started", "name": "In Progress"},
                                          "labels": {"nodes": []}} for i in v["ids"]]}}
+        elif "issues(first:50,filter:{labels:" in q:
+            data = {"issues": page([])}
+        elif "project(id:" in q and "issues(first:" in q:
+            data = {"project": {"issues": page([])}}
+        elif "commentCreate(" in q or "commentUpdate(" in q:
+            op = "commentUpdate" if "commentUpdate(" in q else "commentCreate"
+            cards.append(v["i"]["body"])
+            data = {op: {"success": True, "comment": {"id": "card"}}}
+        elif "documentCreate(" in q or "documentUpdate(" in q:
+            op = "documentUpdate" if "documentUpdate(" in q else "documentCreate"
+            documents.append(v["i"]["content"])
+            data = {op: {"success": True, "document": {"id": "doc"}}}
+        elif "document(id:" in q:
+            data = {"document": {"content": documents[-1]}}
+        elif "organization{" in q:
+            data = {"organization": {"subscription": None}}
+        elif "issues(first:100" in q:
+            data = {"issues": page([{"id": "settled", "identifier": "EX-3"}] if not archived else [])}
+        elif "issueArchive(" in q:
+            archived.append(v["id"])
+            data = {"issueArchive": {"success": True}}
         elif "teams(filter:" in q:
             data = {"teams": {"nodes": [{"id": "team", "states": {"nodes": [{"name": "Triage", "id": "triage"}]}}]}}
         elif "team(id:" in q:
@@ -80,6 +107,34 @@ def scenario(root):
         row = json.loads((plan / "keymap.json").read_text())["run"]["effort"]
         assert "health_started" not in row and "health_faults" not in row
         assert row["health_update"] == "https://example.invalid/update"
+        keymap = json.loads((plan / "keymap.json").read_text())
+        for key in ("merge","ship"):
+            keymap["nodes"][key] = {"id": key,"identifier": key}
+        (plan / "keymap.json").write_text(json.dumps(keymap))
+        result = run("next", plan, "--no-publish")
+        assert "phase 1: 1 task" in result and "do reconcile a EX-1: In Progress with no run row" in result, result
+        assert not cards and not documents
+        assert run("watch", plan, "--wait", "--interval", ".1", "--no-publish") == result
+        assert run("wake", plan).startswith("start: reconcile a EX-1")
+        run("next", plan)
+        assert len(cards) == 3 and len(documents) == 1
+        assert "work-graph status" not in cards[0]
+        run("tick", "--root", root, "--channel", "none")
+        assert len(documents) == 2 and archived == ["settled"]
+        assert len(cards) == 3
+        assert (root / ".local/state/work-graph/tick.json").is_file()
+        if len(sys.argv) > 2:
+            keymap = json.loads((plan / "keymap.json").read_text())
+            keymap["run"]["nodes"]["a"].update(state="running", job="work", dispatch="d")
+            (plan / "keymap.json").write_text(json.dumps(keymap))
+            env.update(WG_UI_URL=sys.argv[2], WG_LINK="on")
+            settings = json.loads(cfg.read_text())
+            settings["page_url"] = sys.argv[2]
+            cfg.write_text(json.dumps(settings))
+            result = run("next", plan, "--wait", "--no-publish", "--interval", "10")
+            assert "do answer a EX-1: fixture answer" in result
+
+
 
 
 with tempfile.TemporaryDirectory() as tmp:

@@ -110,6 +110,9 @@ def help_flags(help_text):
 
 def main():
     os.umask(0o022)
+    python_candidate = sys.argv[1:2] == ["--python-candidate"]
+    if python_candidate:
+        del sys.argv[1]
     record = sys.argv[1:] == ["--record"]
     if len(sys.argv) > 2:
         sys.exit("usage: run.sh [PATH-TO-WG | --record]")
@@ -128,7 +131,9 @@ def main():
         paths = [line.split() for line in commands if not group or line.startswith(group + " ")]
         listed = {path[len(group.split())] for path in paths}
         roots = set(choices[1].split(",")) if choices else set()
-        if not group and command != REFERENCE and "update" in roots:
+        if not group and command != REFERENCE and not python_candidate:
+            if "update" not in roots:
+                sys.exit("Native root help must include update")
             roots.remove("update")
             for control in ("status", "rollback"):
                 result = run_case(command, ["update", control, "--help"])

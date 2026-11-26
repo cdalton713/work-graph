@@ -15,6 +15,16 @@
 
 Run `scripts/wg.py` as `wg`: the command uses `uv run --script`, which supplies the `websockets` package for the link to the page (page.md "Link"). `python3 -I <skill-dir>/scripts/wg.py` also works; without `websockets` in that Python, `wg next` polls Linear. `~/.local/bin/wg` is a link to the script. If a shell says `command not found`, make the link again: `ln -s <skill-dir>/scripts/wg.py ~/.local/bin/wg`.
 
+## Use a hosted service
+
+1. Open the hosted page and choose **Sign in with Linear**.
+2. Follow the setup guide to set your name, connect workspaces, and select teams.
+3. Create a coordinator token. Run `wg login https://wg.example.com` with your page URL and paste the token at the prompt.
+4. Run the `wg setup` commands from the guide.
+5. Run `wg doctor` to check the setup and coordinator token.
+
+See [Run the hosted service](../../../README.md#run-the-hosted-service) for service settings and limits.
+
 ## Plan location
 
 Select or create the `<slug>-core` coordinator worktree through Orca before writing the plan: `orca worktree list --json`, else `orca worktree create --name <slug>-core --branch <prefix><slug>-core --no-parent --base-branch origin/<target> --setup skip --json`. It is the only top-level workspace of the effort; every lane parent, spike, and integration workspace nests under it. `wg load --apply` gives it the name of the Linear project as its display name in Orca; its path and its branch stay `<slug>-core`, so find it by its path. Reuse it for the core lane parent when the names match. Keep `PLAN.md`, `plan.json`, `keymap.json`, `journal.jsonl`, `journal.1.jsonl`, `evidence/`, and `specs/` together at its root. Do not commit them unless the human asks; never commit the journal files. If `keymap.json` is lost, follow recovery.md "Failure" before any `wg load --apply`.

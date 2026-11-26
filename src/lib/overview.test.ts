@@ -16,6 +16,24 @@ const graph = (issues: Issue[], status: GraphData["status"] = null): GraphData =
   ({ project: { id: "p", name: "P", url: "" }, milestones: [], issues, teams: {}, labels: [], viewerId: "me", status });
 
 describe("summarize", () => {
+  it("offers an answer only for an issue that waits on the human for a reply", () => {
+    const waiting = state("Needs Ada", "started");
+    const card = (kind: string, next: string) => ({
+      id: "c", body: "**work-graph node card** `k`\n\n```json\n" + JSON.stringify({ wg: 1, kind, next }) + "\n```",
+    });
+    const summary = summarize(graph([
+      issue("1", { state: waiting, card: nextCard("wait human: Which table?") }),
+      issue("2", { state: waiting, card: card("ops", "do ask: Check the release") }),
+      issue("3", { state: waiting, card: nextCard("do ask-merge: #7") }),
+      issue("4", { card: nextCard("wait human: Mark the PR ready") }),
+      issue("5", { state: waiting, external: true }),
+      issue("6", { state: waiting, labels: [{ id: "l", name: "answered", color: "", group: null }] }),
+    ]), "work", 0, createSite("Ada", "work"));
+    expect(summary.you.filter((move) => move.answer).map((move) => move.answer)).toEqual([
+      { issueId: "1", sent: false }, { issueId: "6", sent: true },
+    ]);
+  });
+
   it("keeps the live job and the wait and action lines for a paused effort", () => {
     const started_at = "2026-11-25T11:00:00Z";
     const card = { id: "c", body: `**work-graph node card** \`page\`\n\n\`\`\`json\n${JSON.stringify({ wg: 1, job: "dispatch", state: "running", started_at })}\n\`\`\`` };
@@ -99,7 +117,7 @@ describe("summarize", () => {
     ], { content: '```json\n{"wg":1,"status":"wave 2: 1 running","at":"2026-11-20T10:00:00Z"}\n```', updatedAt: "x" }), "work");
     expect(s).toMatchObject({ workspace: "work", id: "p", planned: 5, done: 1, running: 1, review: 0, ready: 1, updatedAt: "2026-11-06T00:00:00Z" });
     expect(s.you).toEqual([
-      { identifier: "CD-3", title: "t3", why: "Needs Human", pullRequests: [], updatedAt: "2026-11-03T00:00:00Z", blocks: 0, unblocks: 0 },
+      { identifier: "CD-3", title: "t3", why: "Needs Human", pullRequests: [], answer: { issueId: "3", sent: false }, updatedAt: "2026-11-03T00:00:00Z", blocks: 0, unblocks: 0 },
       { identifier: "CD-4", title: "t4", why: "Merge #7", pullRequests: [], updatedAt: "2026-11-04T00:00:00Z", blocks: 0, unblocks: 0 },
     ]);
     expect(s.effort).toEqual({ status: "wave 2: 1 running", at: "2026-11-20T10:00:00Z" });
@@ -233,21 +251,28 @@ describe("movesWithAgents", () => {
 });
 
 describe("movesWithAsks", () => {
-  const move = { identifier: "CD-1", title: "Merge it", why: "Merge #7", pullRequests: [], updatedAt: "2026-11-01T00:00:00Z" };
+  const move = { identifier: "WG-1", title: "Pick a table", why: "Which table?", pullRequests: [], updatedAt: "2026-11-01T00:00:00Z", answer: { issueId: "i1", sent: false } };
   const ask = (id: string, issue: string | null, body = "Which table?\nMore text") => ({ id, key: null, issue, from: "w", body, at: "2026-11-02T00:00:00Z" });
-  it("adds each worker question as a move first, and marks a move that also has one", () => {
-    expect(movesWithAsks([move], [ask("q1", "CD-2"), ask("q2", "CD-1")])).toEqual([
-      { identifier: "CD-2", title: "Which table?", why: "Worker asks:", idle: true, pullRequests: [], updatedAt: "2026-11-02T00:00:00Z" },
-      { ...move, idle: true, why: "Worker asks · Merge #7" },
+  it("adds a worker question as a move and combines it with a waiting issue that can take an answer", () => {
+    expect(movesWithAsks([move], [ask("q1", "WG-2"), ask("q2", "WG-1")])).toEqual([
+      { identifier: "WG-2", title: "Which table?", why: "Worker asks:", idle: true, pullRequests: [], updatedAt: "2026-11-02T00:00:00Z", workerAsk: ask("q1", "WG-2") },
+      { ...move, idle: true, why: "Worker asks · Which table?", workerAsk: ask("q2", "WG-1") },
     ]);
+  });
+
+  it("keeps a merge row and a worker question on that issue as separate actions", () => {
+    const merge = { ...move, answer: undefined, why: "Merge #7" };
+    const question = ask("q1", "WG-1");
+    expect(movesWithAsks([merge], [question])).toMatchObject([{ workerAsk: question }, merge]);
+    expect(movesWithAsks([merge], [question])[1].workerAsk).toBeUndefined();
   });
   it("keeps questions without an account name and omits questions for another person", () => {
     expect(movesWithAsks([], [ask("q1", "CD-1"), { ...ask("q2", "CD-2"), accountName: "Grace" }])
       .map(({ identifier }) => identifier)).toEqual(["CD-1"]);
   });
   it("names an escalation that no coordinator read", () => {
-    expect(movesWithAsks([move], [{ ...ask("e1", "CD-2", "Base differs"), kind: "escalation" as const }, { ...ask("e2", "CD-1"), kind: "escalation" as const }]).map((m) => m.why))
-      .toEqual(["Worker escalates:", "Worker escalates · Merge #7"]);
+    expect(movesWithAsks([move], [{ ...ask("e1", "CD-2", "Base differs"), kind: "escalation" as const }, { ...ask("e2", "WG-1"), kind: "escalation" as const }]).map((m) => m.why))
+      .toEqual(["Worker escalates:", "Worker escalates · Which table?"]);
   });
   it("keeps the moves as they are when no worker asks", () => {
     expect(movesWithAsks([move], [])).toEqual([move]);

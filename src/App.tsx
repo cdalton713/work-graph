@@ -744,7 +744,11 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             <dt><kbd>p</kbd></dt><dd>Open the PR of the issue in GitHub</dd>
             <dt><kbd>b</kbd></dt><dd>Show or hide the board</dd>
             <dt><kbd>/</kbd></dt><dd>Find an issue (board) or a project (overview)</dd>
-            <dt><kbd>Esc</kbd></dt><dd>Close the issue</dd>
+            {!project && <>
+              <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Move between inbox rows when the inbox has focus</dd>
+              <dt><kbd>r</kbd> <kbd>↵</kbd></dt><dd>Open a reply in the inbox</dd>
+            </>}
+            <dt><kbd>Esc</kbd></dt><dd>{project ? "Close the issue" : "Close the inbox reply"}</dd>
             <dt><kbd>⌘</kbd> <kbd>↵</kbd></dt><dd>Send a comment or a reply</dd>
           </dl>
           {!project && <p>Overview order is Stalled, Waits {words.onOwner}, Moving, then Idle by design.</p>}
@@ -753,7 +757,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
 
       <main className="stage">
         {!project && directory && (
-          <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
+          <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} readOnly={viewer} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
             budget={budget} states={overviewStates} onStates={(states) => setQuery({ state: states.join(",") || null }, true)}
             initiative={query.get("initiative")} onInitiative={(name) => setQuery({ initiative: name }, true)} />
         )}

@@ -182,6 +182,9 @@ The Overview shows one state and one reason for each project. It shows stalled p
 projects that wait on you, then moving projects, then projects that are idle by design. Each switch
 shows a count for one state. Select one or more states to filter the projects. The URL keeps the selection.
 
+Select an inbox question to read it and reply in place. Use the arrow keys to move between focused inbox rows.
+Press `r` to open a reply, `⌘↵` to send, or `Esc` to close it.
+
 The Overview inbox also shows stalls, with the time since each one started.
 
 - **Worker silent.** A job has a working agent that last reported 20 minutes ago or earlier.

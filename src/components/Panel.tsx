@@ -7,6 +7,7 @@ import { type AgentRow, type Ask, type Progress, agentNeeds, agentState, liveJob
 import type { ClaimMark } from "../lib/claims";
 import { site } from "../lib/site";
 import { Asks } from "./Asks";
+import { Reply } from "./Reply";
 
 const COMMENTS_MS = 60_000;
 const PRIORITY = ["No priority", "Urgent", "High", "Medium", "Low"];
@@ -79,14 +80,11 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
   const [note, setNote] = useState("");
   const noteWord = node.kind === "ops" ? "evidence" : node.kind === "decision" ? "answer" : null;
   const [comments, setComments] = useState<Comment[] | null>(null);
-  const [reply, setReply] = useState("");
-  const [sending, setSending] = useState(false);
 
   useEffect(() => {
     setDraft(null);
     setMove(null);
     setNote("");
-    setReply("");
     setComments(null);
   }, [issue.id]);
   // A worker comments while the panel is open. Load the comments again when the issue changes, and
@@ -119,19 +117,6 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
     if (warnings.length || (noteWord && state.type === "completed")) setMove({ state, warnings });
     else void patch({ stateId: state.id }, { state });
   };
-  const send = async () => {
-    setSending(true);
-    try {
-      const created = await api.comment(issue.id, reply.trim(), data.workspace);
-      setComments((c) => [...(c ?? []), created]);
-      setReply("");
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setSending(false);
-    }
-  };
-
   const states = team ? sortStates(team.states) : [];
   const teamLabels = data.labels.filter((l) => !l.teamId || l.teamId === issue.teamId);
   const freeLabels = teamLabels.filter((l) => !isProtectedLabel(l));
@@ -180,7 +165,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
             {agent.said && <span className="panel-agent-said">{agent.said}</span>}
           </p>
         )}
-        {asks && asks.length > 0 && <Asks asks={asks} projectId={data.project.id} workspace={data.workspace} now={now} onError={onError} />}
+        {!readOnly && asks && asks.length > 0 && <Asks asks={asks} projectId={data.project.id} workspace={data.workspace} now={now} />}
         {/* `wg load` sets the title of a node from plan.json, so the title of a node is not changed here. */}
         <textarea className="title-input" rows={2} value={title} readOnly={locked || limitedEdits || !!card}
           title={card && !locked ? "plan.json has the title of a wg node. Change it there, then run `wg load --apply`." : undefined} onChange={(e) => setTitle(e.target.value)} onBlur={saveTitle}
@@ -337,11 +322,10 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
             </article>
           ))}
           {!readOnly && (
-            <>
-              <textarea className="editor" rows={3} placeholder="Add a comment (Markdown). ⌘↵ sends it." value={reply} onChange={(e) => setReply(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && reply.trim() && !sending) void send(); }} />
-              <div className="row"><button type="button" className="primary" disabled={!reply.trim() || sending} onClick={() => void send()}>{sending ? "Sending…" : "Comment"}</button></div>
-            </>
+            <Reply key={issue.id} label="Comment" placeholder="Add a comment (Markdown). ⌘↵ sends it." send={async (body) => {
+              const created = await api.comment(issue.id, body, data.workspace, data.project.id);
+              setComments((c) => [...(c ?? []), created]);
+            }} />
           )}
         </section>
       </div>

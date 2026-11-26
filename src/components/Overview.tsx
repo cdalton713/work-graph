@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { api } from "../api";
+import { inboxReply, latestReplyPrompt, type InboxReply } from "../lib/reply";
+import { Reply } from "./Reply";
 import { ownerWords } from "../lib/words";
-import { type OverviewData, type OverviewFilter, type OverviewRow, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
+import { type OverviewData, type OverviewFilter, type OverviewRow, type YourMove, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
 import { ageText, type Signal } from "../lib/graph";
-import { PROJECT_STATES, type ProjectStateName, overviewTitle } from "../lib/attention";
+import { PROJECT_STATES, type ProjectStateName, type Stall, overviewTitle } from "../lib/attention";
 import { type Agents, type Ask, type Presence, agentName, agentState, agentsFresh, agentsShown } from "../lib/link";
 import type { Project, ProjectList } from "../lib/types";
-import { CopyButton, Lamp, Picker, PrLinks } from "./ui";
+import { CopyButton, Lamp, Picker, PrLinks, Rich } from "./ui";
 
 const STORE = "wg-overview";
 /** The inbox items that show before "Show all". */
@@ -28,10 +31,51 @@ function stored(): OverviewFilter {
   }
 }
 
+type SentWorker = { project: Project; move: YourMove };
+type InboxRow = SentWorker & { stall: Stall | null };
+
+function InboxAnswer({ target, project, expanded, sent, onSent }: {
+  target: InboxReply; project: Project; expanded: boolean; sent: boolean; onSent: (labelFailed: boolean) => void;
+}) {
+  const issueId = target.kind === "issue" ? target.issueId : null;
+  const [prompt, setPrompt] = useState<{ body?: string; error?: string } | null>(null);
+  useEffect(() => {
+    if (!expanded || !issueId) return;
+    let live = true;
+    setPrompt(null);
+    api.comments(issueId, project.workspace, project.id)
+      .then((comments) => { if (live) setPrompt({ body: latestReplyPrompt(comments) }); })
+      .catch((error: Error) => { if (live) setPrompt({ error: error.message }); });
+    return () => { live = false; };
+  }, [expanded, issueId, project.workspace, project.id]);
+
+  return (
+    <>
+      {target.kind === "worker"
+        ? <Rich text={target.ask.body} />
+        : prompt?.error
+          ? <p role="alert" className="sig-fg-stop">Could not load the last comment. {prompt.error}</p>
+          : prompt?.body
+            ? <Rich text={prompt.body} />
+            : !prompt && <p role="status">Loading the last comment…</p>}
+      {!sent && <Reply label={target.kind === "worker" ? "Reply to the worker" : "Send answer"}
+        placeholder="Write a reply. ⌘↵ sends it." send={async (body) => {
+          if (target.kind === "worker") {
+            await api.reply(project.id, target.ask.id, body, project.workspace);
+            onSent(false);
+          } else {
+            const comment = await api.comment(target.issueId, body, project.workspace, project.id);
+            onSent(comment.answered === false);
+          }
+        }} />}
+    </>
+  );
+}
+
 export interface OverviewProps {
   /** The project list alone, until the first overview answer comes. */
   list: OverviewData | ProjectList;
-  loading: boolean; missing: string | null; now: number;
+  loading: boolean; missing: string | null; now: number; readOnly?: boolean;
   onOpen: (project: Project, issue?: string) => void;
   /** The coordinators of each project, by `workspace:id`, from the link. */
   presence?: Map<string, Presence>;
@@ -52,7 +96,7 @@ export interface OverviewProps {
  * All projects on one page: which ones wait on the human, how far each is, and what wg next last said.
  * `/` finds a project, the arrow keys move, Enter opens.
  */
-export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, initiative = null, onInitiative, states = NO_STATES, onStates, budget = [] }: OverviewProps) {
+export function Overview({ list: given, loading, missing, now, onOpen, presence, asks, agents, readOnly = false, initiative = null, onInitiative, states = NO_STATES, onStates, budget = [] }: OverviewProps) {
   const words = ownerWords();
   const stateLabel = (state: ProjectStateName) => state === "waits" ? words.waitsFilter : STATE_DISPLAY[state].label;
   const list = useMemo<OverviewData | ProjectList>(() => ("summaries" in given && (asks?.size || agents?.size)
@@ -77,7 +121,11 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const waiting = inboxProjects.filter(({ summary }) => summary?.you.length);
   const waitingIssues = inboxProjects.reduce((n, r) => n + (r.summary?.you.length ?? 0), 0);
   const [active, setActive] = useState(0);
-  const inbox = useMemo(() => rankMoves(inboxProjects.flatMap(({ project, summary, stalls }) => [
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [sentIssues, setSentIssues] = useState<Map<string, boolean>>(() => new Map());
+  const [sentWorkers, setSentWorkers] = useState<Map<string, SentWorker>>(() => new Map());
+  const readOnlyWorkspaces = new Set(list.workspaces.filter((w) => w.role === "viewer").map((w) => w.id));
+  const inbox = useMemo<InboxRow[]>(() => rankMoves<InboxRow>(inboxProjects.flatMap(({ project, summary, stalls }) => [
     ...(summary?.you ?? []).map((move) => ({ project, move, stall: null })),
     ...stalls.map((stall) => ({
       project, stall,
@@ -88,24 +136,80 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       },
     })),
   ])), [inboxProjects]);
-  useEffect(() => {
-    const previous = document.title;
-    document.title = overviewTitle(inbox.length);
-    return () => { document.title = previous; };
-  }, [inbox.length]);
+  const pendingWorkers = [...sentWorkers.values()].filter(({ project, move }) => {
+    const key = summaryKey(project);
+    return !!presence?.get(key)?.queued && !inbox.some((row) => summaryKey(row.project) === key && row.move.workerAsk?.id === move.workerAsk?.id)
+      && inboxProjects.some((row) => summaryKey(row.project) === key);
+  });
   const ranked = inbox.some(({ move }) => move.blocks !== undefined);
   const [allMoves, setAllMoves] = useState(false);
+  const inboxRows = pendingWorkers.length ? rankMoves<InboxRow>([
+    ...inbox,
+    ...pendingWorkers.map(({ project, move }) => ({ project, move, stall: null })),
+  ]) : inbox;
+  useEffect(() => {
+    const previous = document.title;
+    document.title = overviewTitle(inboxRows.length);
+    return () => { document.title = previous; };
+  }, [inboxRows.length]);
+  const shownInbox = allMoves ? inboxRows : inboxRows.slice(0, INBOX);
+  useEffect(() => {
+    // A worker reply leaves the live asks when queued. Keep its receipt until the coordinator drains
+    // the queue. An issue answer stays on its original row until the issue moves.
+    setSentWorkers((old) => {
+      const next = new Map(old);
+      for (const [key, { project, move }] of old) {
+        const projectKey = summaryKey(project);
+        if (presence?.get(projectKey)?.queued === 0 && asks?.get(projectKey)?.every((ask) => ask.id !== move.workerAsk?.id)) next.delete(key);
+      }
+      return next.size === old.size ? old : next;
+    });
+  }, [asks, presence, sentWorkers]);
+  useEffect(() => {
+    if (!("summaries" in list)) return;
+    const waiting = new Set(list.summaries.flatMap((summary) => summary.you.flatMap((move) =>
+      move.answer ? [`${summaryKey(summary)}:issue:${move.answer.issueId}`] : [])));
+    setSentIssues((old) => {
+      const next = new Map([...old].filter(([key]) => waiting.has(key)));
+      return next.size === old.size ? old : next;
+    });
+  }, [list]);
   const find = useRef<HTMLInputElement>(null);
   const root = useRef<HTMLDivElement>(null);
+  const inboxRoot = useRef<HTMLElement>(null);
+  const inboxButtons = () => Array.from(inboxRoot.current?.querySelectorAll<HTMLButtonElement>(".inbox-open") ?? []);
+  useEffect(() => {
+    if (expanded) inboxRoot.current?.querySelector<HTMLTextAreaElement>(".inbox-detail:not([hidden]) textarea")?.focus();
+  }, [expanded]);
   useEffect(() => setActive(0), [filter, initiative, states]);
   useEffect(() => { root.current?.querySelector(".ov-row.is-active")?.scrollIntoView({ block: "nearest" }); }, [active]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (document.querySelector(".picker-list")) return; // an open picker takes the keys
-      const typing = e.target instanceof HTMLElement && e.target.closest("input, textarea, [contenteditable]");
+      if (e.defaultPrevented || document.querySelector(".picker-list, dialog[open], .keys")) return;
+      const element = e.target instanceof HTMLElement ? e.target : null;
+      const typing = element?.closest("input, textarea, select, [contenteditable]");
       const inFind = e.target === find.current;
-      if (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey) {
+      const inInbox = inboxRoot.current?.contains(element);
+      if (e.key === "Escape" && inInbox && expanded) {
+        e.preventDefault();
+        setExpanded(null);
+        inboxButtons().find((button) => button.getAttribute("aria-expanded") === "true")?.focus();
+      } else if (e.key === "r" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const buttons = inboxButtons();
+        const button = element?.closest(".inbox-row")?.querySelector<HTMLButtonElement>(".inbox-open[aria-expanded]")
+          ?? buttons.find((item) => item.hasAttribute("aria-expanded"));
+        if (button) {
+          e.preventDefault();
+          button.focus();
+          if (button.getAttribute("aria-expanded") === "false") button.click();
+        }
+      } else if (inInbox && !typing && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+        const buttons = inboxButtons();
+        const at = buttons.findIndex((button) => button.closest(".inbox-row")?.contains(element));
+        e.preventDefault();
+        buttons[Math.max(0, Math.min(buttons.length - 1, at + (e.key === "ArrowDown" ? 1 : -1)))]?.focus();
+      } else if (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
         find.current?.focus();
         find.current?.select();
@@ -119,7 +223,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
     };
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
-  }, [rows, active, onOpen]);
+  }, [rows, active, onOpen, expanded]);
 
   const multi = list.workspaces.length > 1;
   const closedCount = list.projects.filter((p) => p.statusType === "completed" || p.statusType === "canceled").length;
@@ -209,11 +313,20 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       </div>
       {missing && <p className="empty" role="status">{missing}</p>}
 
-      {inbox.length > 0 && (
-        <section className="inbox" aria-label={`${words.move} in all projects`}>
-          <h2 className="inbox-head"><span>{words.move}</span><b className="mono">{inbox.length}</b><span className="inbox-note">{ranked ? (inbox.some(({ stall }) => stall) ? "stalls and agent waits, most held back, oldest" : "agent waits, most held back, oldest") : "oldest first"}</span></h2>
+      {inboxRows.length > 0 && (
+        <section className="inbox" ref={inboxRoot} aria-label={`${words.move} in all projects`}>
+          <h2 className="inbox-head"><span>{words.move}</span><b className="mono">{inboxRows.length}</b><span className="inbox-note">{ranked ? (inbox.some(({ stall }) => stall) ? "stalls and agent waits, most held back, oldest" : "agent waits, most held back, oldest") : "oldest first"}</span></h2>
           <ul>
-            {(allMoves ? inbox : inbox.slice(0, INBOX)).map(({ project: p, move: m, stall }) => {
+            {shownInbox.map(({ project: p, move: m, stall }) => {
+              const projectKey = summaryKey(p);
+              const target = inboxReply(m, readOnly || readOnlyWorkspaces.has(p.workspace ?? ""));
+              const key = target?.kind === "worker" ? `${projectKey}:worker:${target.ask.id}`
+                : target?.kind === "issue" ? `${projectKey}:issue:${target.issueId}`
+                : `${projectKey}:${m.identifier}:${stall?.kind ?? ""}`;
+              const open = expanded === key;
+              const sent = target?.kind === "worker" ? sentWorkers.has(key) : target?.kind === "issue" && (target.sent || sentIssues.has(key));
+              const detailId = `inbox-detail-${encodeURIComponent(key)}`;
+              const go = () => onOpen(p, stall ? stall.issue : m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier);
               const age = m.updatedAt ? ageText(now - Date.parse(m.updatedAt)) : null;
               // A reason that is the title (a decision: its question) shows once.
               const why = overviewMoveReason(m.why);
@@ -223,31 +336,50 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                 m.blocks && `holds back ${m.blocks}, ${m.unblocks ?? 0} can start`,
               ].filter(Boolean).join(" · ");
               return (
-                <li key={`${summaryKey(p)}:${m.identifier}:${stall?.kind ?? ""}`} className="inbox-row">
-                  <button type="button" className="inbox-open" onClick={() => onOpen(p, stall ? stall.issue : m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier)} title={`${p.name}: ${m.title}`}>
-                    <Lamp signal="stop" />
-                    <span className="inbox-id mono">{m.identifier}</span>
-                    <span>
-                      <span className="inbox-text">
-                        <span className="inbox-why">{why}</span>
-                        {title && <span className="inbox-title">{title}</span>}
+                <li key={key} className="inbox-row">
+                  <div className="inbox-row-head">
+                    <button type="button" className="inbox-open" title={`${p.name}: ${m.title}`}
+                      aria-expanded={target ? open : undefined} aria-controls={target ? detailId : undefined}
+                      onClick={target ? () => setExpanded(open ? null : key) : go}>
+                      <Lamp signal="stop" />
+                      <span className="inbox-id mono">{m.identifier}</span>
+                      <span>
+                        <span className="inbox-text">
+                          <span className="inbox-why">{why}</span>
+                          {title && <span className="inbox-title">{title}</span>}
+                        </span>
+                        {effect && <span className="inbox-effect">{effect}</span>}
+                        {sent && <span className="inbox-effect sig-fg-done" role="status">sent</span>}
                       </span>
-                      {effect && <span className="inbox-effect">{effect}</span>}
+                      <span className="inbox-project">{p.name}</span>
+                      <span className="inbox-age mono">{age ?? ""}</span>
+                    </button>
+                    {/* Always there, so the columns of the rows line up. */}
+                    <span className="inbox-prs">
+                      {m.pullRequests.map((pr) => <span className="ov-pr" key={pr.url}>#{pr.number} <PrLinks pr={pr} compact /></span>)}
                     </span>
-                    <span className="inbox-project">{p.name}</span>
-                    <span className="inbox-age mono">{age ?? ""}</span>
-                  </button>
-                  {/* Always there, so the columns of the rows line up. */}
-                  <span className="inbox-prs">
-                    {m.pullRequests.map((pr) => <span className="ov-pr" key={pr.url}>#{pr.number} <PrLinks pr={pr} compact /></span>)}
-                  </span>
+                  </div>
+                  {target && (
+                    <div className="inbox-detail" id={detailId} hidden={!open}>
+                      <p className="inbox-why">{why}</p>
+                      <InboxAnswer target={target} project={p} expanded={open} sent={!!sent} onSent={(labelFailed) => {
+                        if (document.activeElement?.closest(".inbox-detail")?.id === detailId) {
+                          inboxButtons().find((button) => button.getAttribute("aria-controls") === detailId)?.focus();
+                        }
+                        if (target.kind === "worker") setSentWorkers((old) => new Map(old).set(key, { project: p, move: m }));
+                        else setSentIssues((old) => new Map(old).set(key, labelFailed));
+                      }} />
+                      {sentIssues.get(key) && <p className="warning" role="status">The comment was saved. The server could not mark it as answered.</p>}
+                      <button type="button" className="ghost" onClick={go}>{m.identifier === "worker" || m.identifier === "coordinator" ? "Open project" : "Open issue"}</button>
+                    </div>
+                  )}
                 </li>
               );
             })}
           </ul>
-          {inbox.length > INBOX && (
+          {inboxRows.length > INBOX && (
             <button type="button" className="ghost inbox-more" onClick={() => setAllMoves(!allMoves)}>
-              {allMoves ? "Show fewer" : `Show all ${inbox.length}`}
+              {allMoves ? "Show fewer" : `Show all ${inboxRows.length}`}
             </button>
           )}
         </section>

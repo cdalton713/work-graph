@@ -4,6 +4,7 @@ import type { Workspace } from "../workspaces.ts";
 import { LinearSignInRequired, type OAuthCredential } from "../linearauth.ts";
 import { coordinatorToken, tokenHash, type CredentialCrypto } from "./crypto.ts";
 import type { Query, Sql } from "./sql.ts";
+import { createShares } from "./shares.ts";
 
 export const MAX_CONNECTIONS = 10;
 export const MAX_LIVE_TOKENS = 10;
@@ -109,6 +110,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
   }
 
   return {
+    shares: createShares(sql, notify),
     async signIn(user: User, first: NewConnection, observed?: (id: string, created: boolean, enabled: boolean) => void) {
       const tenant = await sql.transaction(async ({ query }) => {
         // A concurrent first callback waits on the unique identity. For an existing
@@ -405,8 +407,8 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       });
     },
 
-    deleteAccount(tenant: string, revocation?: { id: string; refreshToken: string }) {
-      return change(tenant, async (query, { owner }) => {
+    async deleteAccount(tenant: string, revocation?: { id: string; refreshToken: string }) {
+      const { revoked, affected } = await change(tenant, async (query, { owner }) => {
         let revoked = false;
         if (revocation) {
           // A sign-in or refresh can rotate the credential while revocation is in flight.
@@ -419,9 +421,15 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
             } catch { /* Delete even if the credential cannot be read. */ }
           }
         }
+        // A join holds a key share lock on this user until its membership is saved.
+        await query("SELECT id FROM users WHERE id = $1 FOR UPDATE", [owner]);
+        const affected = await query<{ tenant: string }>(
+          "SELECT DISTINCT tenant_id AS tenant FROM project_members WHERE user_id = $1", [owner]);
         await query("DELETE FROM users WHERE id = $1", [owner]);
-        return revoked;
+        return { revoked, affected };
       });
+      await Promise.all(affected.map(({ tenant }) => notify(tenant)));
+      return revoked;
     },
   };
 }

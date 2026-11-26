@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import type { Server } from "node:http";
 import { createNodeWebSocket } from "@hono/node-ws";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -16,12 +16,13 @@ import { type Changed, type ProjectRef, projectKey, type ToCoordinator } from ".
 import type { GraphData, IssuePatch, Project, ProjectList, ServerStatus, SiteConfig } from "../src/lib/types.ts";
 import { type Rules, linkRefusal, refusal } from "./access.ts";
 import { accountRoutes, attemptLimit, accountUsage } from "./account.ts";
+import { shareRoutes, type ShareAccess } from "./shares.ts";
 import { type Auth, type Session, LOGIN_PATH, authRoutes, clearSessionCookie, sessionOf } from "./auth.ts";
 import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { LinearError, LinearKeyRequired, addComment, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
+import { LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, LinkHub, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
@@ -218,6 +219,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const started = clock();
   const contract = contractHash(contractFile);
   const app = new Hono();
+  app.use("/join/*", async (c, next) => {
+    c.header("Referrer-Policy", "no-referrer");
+    c.header("Cache-Control", "no-store");
+    await next();
+  });
   if (serviceReady) app.use(async (c, next) => {
     const ready = await serviceReady();
     if (ready === "schema-too-new") return c.text("The database schema is newer than this server.", 500);
@@ -415,13 +421,16 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   // or deflate accepts gzip too. The 1 KiB minimum of `compress` applies only to a reply with a Content-Length,
   // and these replies have none.
   app.use(compress({ encoding: "gzip" }));
-  // A slow API request or a server error writes one log line. The line has no body and no query. The path is
+  // A slow API or join request or a server error writes one log line. The line has no body and no query. The path is
   // the encoded path of the URL: `c.req.path` is decoded, so `%0A` in it would start a second line.
-  app.use("/api/*", async (c, next) => {
+  app.use(async (c, next) => {
+    const joining = c.req.path.startsWith("/join/");
+    if (!joining && !c.req.path.startsWith("/api/")) return next();
     const start = clock();
     await next();
     const ms = clock() - start;
-    const path = /^\/api\/account(?:\/|$)/.test(c.req.path) ? "/api/account" : new URL(c.req.url).pathname;
+    const path = joining ? "/join/[link]" :
+      /^\/api\/account(?:\/|$)/.test(c.req.path) ? "/api/account" : new URL(c.req.url).pathname;
     if (!(c.error instanceof RedisUnavailable || c.error instanceof RedisCommandFailed)
         && (ms > SLOW_MS || c.res.status >= 500)) console.warn(`wg api: ${c.req.method} ${path} ${c.res.status} ${Math.round(ms)}ms`);
   });
@@ -982,28 +991,50 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     };
   }));
   if (accountStore) {
+    const pageUrl = rules.hosted ? `https://${rules.hosted.host}` : `http://localhost:${rules.port}`;
+    async function access(c: Context): Promise<ShareAccess | Response> {
+      const reason = refusal(c.req.method, (name) => c.req.header(name), rules);
+      if (reason) return c.json({ error: reason }, 403);
+      const signed = await readSession(c);
+      const read = c.req.method === "GET" || c.req.method === "HEAD";
+      const session = signed && await sessionActive(signed, read) ? signed : null;
+      const membership = session ? await directory.fromSession(session) : null;
+      if (!session || !membership) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
+      if (readOnly || membership.role !== "owner") return c.json({ error: "Account access requires the owner" }, 403);
+      const accounts = await accountStore?.();
+      if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
+      return { accounts, tenant: membership.tenant, session };
+    }
     app.route("/api/account", accountRoutes({
       now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX,
-      telemetry,
-      pageUrl: rules.hosted ? `https://${rules.hosted.host}` : `http://localhost:${rules.port}`,
+      telemetry, pageUrl, access,
       async endSession(c, session) {
         await signOut(session);
         clearSessionCookie(c);
       },
-      async access(c) {
-        const reason = refusal(c.req.method, (name) => c.req.header(name), rules);
-        if (reason) return c.json({ error: reason }, 403);
-        const signed = await readSession(c);
-        const read = c.req.method === "GET" || c.req.method === "HEAD";
-        const session = signed && await sessionActive(signed, read) ? signed : null;
-        const membership = session ? await directory.fromSession(session) : null;
-        if (!session || !membership) return c.json({ error: "sign in", login: LOGIN_PATH }, 401);
-        if (readOnly || membership.role !== "owner") return c.json({ error: "Account access requires the owner" }, 403);
-        const accounts = await accountStore();
-        if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
-        return { accounts, tenant: membership.tenant, session };
+    }));
+    app.route("/api", shareRoutes({
+      access, pageUrl, telemetry,
+      limit: attemptLimit({ now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX }, "join-attempts:"),
+      async project(tenant, workspace, id) {
+        try {
+          const data = await runInTenant(tenant, () => linearWorkspace.run(workspace,
+            () => gql("query($id:String!){project(id:$id){id name}}", { id })));
+          return data.project?.id === id && typeof data.project.name === "string" ? data.project.name : null;
+        } catch (error) {
+          if (error instanceof LinearError && (error.status === 403 || error.status === 404)) return null;
+          throw error;
+        }
       },
     }));
+  } else {
+    const missing = (c: Context) => c.json({ error: "Share route not found" }, 404);
+    app.post("/api/join", missing);
+    app.get("/api/projects/:id/share", missing);
+    app.post("/api/projects/:id/share/:kind/rotate", missing);
+    app.delete("/api/projects/:id/share/:kind", missing);
+    app.patch("/api/projects/:id/members/:member", missing);
+    app.delete("/api/projects/:id/members/:member", missing);
   }
   app.all("/api/account/*", (c) => c.json({ error: "Account route not found" }, 404));
   app.post("/api/events", bodyLimit({ maxSize: 1024 }), async (c) => {
@@ -1048,6 +1079,15 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     } : undefined) : authRoutes(auth!, origin, clock, signOut));
   }
 
+  app.get("/join/*", async (c) => {
+    if (!accountStore) return c.text("not found", 404);
+    const reason = refusal("GET", (name) => c.req.header(name), rules);
+    if (reason) return c.text(reason, 403);
+    const body = await readFile(join(dist, "index.html")).catch(() => null);
+    if (!body) return c.text("not found (run `pnpm build`)", 404);
+    return c.body(body, 200, { "Content-Type": TYPES[".html"] });
+  });
+
   app.get("*", async (c) => {
     const file = normalize(join(dist, c.req.path === "/" ? "index.html" : c.req.path));
     if (!file.startsWith(dist)) return c.text("forbidden", 403);
@@ -1070,7 +1110,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (error instanceof LinearSignInRequired) return c.json({ error: error.message, login: LOGIN_PATH }, 401);
     const status = ((error instanceof RedisUnavailable || error instanceof RedisCommandFailed) ? 503 : error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;
     // An API request writes its one log line in the request log above. Another route writes the error here.
-    if (status === 500 && !c.req.path.startsWith("/api/")) console.error(error);
+    if (status === 500 && !c.req.path.startsWith("/api/") && !c.req.path.startsWith("/join/")) console.error(error);
     if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) c.header("Retry-After", "1");
     return c.json({ error: error.message }, status);
   });

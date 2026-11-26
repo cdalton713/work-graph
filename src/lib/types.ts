@@ -90,6 +90,9 @@ export interface Card {
 }
 
 /** `GET /api/config`: what the page needs before its first render, and what a deploy check compares. */
+export type ProjectShareLinks = Record<"view" | "collab", { url: string } | { exists: true }>;
+export type ProjectJoin = { project: string; role: "viewer" | "collaborator" };
+
 export interface SiteConfig {
   telemetry?: boolean;
   human: string; defaultWorkspace: string;

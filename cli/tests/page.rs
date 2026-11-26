@@ -203,7 +203,7 @@ impl Fixture {
             &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             self,
             self,
-            Some(self),
+            self,
         )
         .and_then(|out| {
             if out.status == 0 {
@@ -835,7 +835,7 @@ fn join_reports_selection_access_and_post_join_status() {
         (200, published(1)),
     ]);
     let fixture = Fixture::new(&server);
-    let run = || page::run(&["join".into()], &fixture, &fixture, Some(&fixture)).unwrap();
+    let run = || page::run(&["join".into()], &fixture, &fixture, &fixture).unwrap();
     let selection = run();
     assert_eq!(selection.status, 2);
     assert_eq!(

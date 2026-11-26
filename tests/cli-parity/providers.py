@@ -1,4 +1,5 @@
 """Exercise both credential scopes and the state transaction through the compiled CLI."""
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -18,6 +19,58 @@ case = "service | run set effort a branch=wg/example"
 expected = json.loads((suite.HERE / "expected.json").read_text())[case]
 actual = suite.run_case([BIN], case.split()[2:], service=True)
 assert actual == expected, actual
+share = suite.run_case([BIN], ["share", "effort"])
+assert share == json.loads((suite.HERE / "expected.json").read_text())["share effort"], share
+
+
+def credential_cases(root, files, run, env, seen):
+    # A pull by the owner uses workspace credentials before the saved page token.
+    owner = root / "owner"
+    owner.mkdir()
+    (owner / "plan.json").write_bytes(files["plan.json"])
+    km = json.loads(files["keymap.json"])
+    km["collab"]["workspace"] = "default"
+    (owner / "keymap.json").write_text(json.dumps(km))
+    home = root / ".config/work-graph"
+    (home / "pages").mkdir(parents=True)
+    cached = home / "pages/page.invalid-token"
+    cached.write_text("page-key\n")
+    cached.chmod(0o600)
+    config = root / "config"
+    original = config.read_bytes()
+    del env["WG_DEFAULT_LINK_TOKEN"]
+    for scoped in (True, False):
+        row = {"id": "default", "team": "EX"}
+        conf = {"workspaces": [row]}
+        (row if scoped else conf)["page_url"] = "https://page.invalid"
+        config.write_text(json.dumps(conf))
+        name = "WG_DEFAULT_LINK_TOKEN" if scoped else "WG_LINK_TOKEN"
+        path = home / ("default-link-token" if scoped else "link-token")
+
+        def check(sent):
+            for command in ([BIN], suite.REFERENCE):
+                start = len(seen)
+                run(command, "pull", owner, code=0 if sent else 2)
+                assert seen[start:] == (["Bearer " + sent] if sent else [])
+
+        check("page-key")
+        env[name] = ""
+        check(None)
+        env[name] = "env-key"
+        check("env-key")
+        del env[name]
+        path.write_text("file-key\n")
+        path.chmod(0o600)
+        check("file-key")
+        path.chmod(0o640)
+        check(None)
+        path.chmod(0o600)
+        path.write_text("   \n")
+        check(None)
+        path.unlink()
+    cached.unlink()
+    config.write_bytes(original)
+    env["WG_DEFAULT_LINK_TOKEN"] = "page-key"
 
 
 def scenario(root, preflight):
@@ -33,13 +86,17 @@ def scenario(root, preflight):
     issue = {"id": "issue-a", "identifier": "EX-1", "project": {"id": "project"}}
     requests = []
     updates = []
+    seen = []
+    reject_put = False
 
     def get(h):
-        if h.headers.get("Authorization") != "Bearer page-key":
+        auth = h.headers.get("Authorization")
+        seen.append(auth)
+        if auth not in ("Bearer page-key", "Bearer env-key", "Bearer file-key"):
             return h.send_error(401)
         if h.path == "/api/status":
             return h.reply({"human": "Human", "workspaces": [membership]})
-        if h.path != "/api/projects/project/plan" or h.headers.get("x-workspace") != "shared:one":
+        if h.path != "/api/projects/project/plan" or h.headers.get("x-workspace") not in ("shared:one", "default"):
             return h.send_error(403)
         if h.headers.get("If-None-Match") == f'"{wire["version"]}"':
             h.send_response(304)
@@ -65,6 +122,9 @@ def scenario(root, preflight):
         elif "comment(id:" in q:
             attached = issue if req["variables"]["id"] == "card" else {"id": "another"}
             data = {"comment": {"issue": attached}}
+        elif "document(id:" in q:
+            owner = "project" if req["variables"]["id"] == "doc" else "outside"
+            data = {"document": {"project": {"id": owner}}}
         elif "commentUpdate(" in q:
             assert req["variables"]["id"] == "card"
             updates.append(req["variables"]["i"]["body"])
@@ -74,10 +134,14 @@ def scenario(root, preflight):
         h.reply({"data": data})
 
     def put(h):
+        creating = h.headers.get("If-None-Match") == "*"
+        scope = "default" if creating else "shared:one"
         if (h.path != "/api/projects/project/plan" or h.headers.get("Authorization") != "Bearer page-key"
-                or h.headers.get("x-workspace") != "shared:one"):
+                or h.headers.get("x-workspace") != scope):
             return h.send_error(403)
-        if h.headers.get("If-Match") != f'"{wire["version"]}"':
+        if reject_put:
+            return h.send_error(403)
+        if not creating and h.headers.get("If-Match") != f'"{wire["version"]}"':
             return h.send_error(412)
         body = json.loads(h.rfile.read(int(h.headers["Content-Length"])))
         wire.update(body, version=wire["version"] + 1)
@@ -107,20 +171,32 @@ def scenario(root, preflight):
                PREFLIGHT=str(preflight))
     with patch.object(Handler, "do_GET", get), patch.object(Handler, "do_POST", post), patch.object(Handler, "do_PUT", put, create=True), fixture_service() as (settings, _):
         env.update(settings)
-        def run(command, *args, code=0):
+        def run(command, *args, code=0, error=None):
             p = subprocess.run(command + list(map(str, args)), cwd=repo, env=env, capture_output=True,
                                text=True, timeout=20)
             assert p.returncode == code, (args, p.returncode, p.stdout, p.stderr)
+            if error is not None:
+                assert error in p.stderr, p.stderr
             return p.stdout
         def snapshot():
             return {name: (work / name).read_bytes() for name in ("plan.json", "keymap.json", "PLAN.md")}
         join = ["join", "--repo", repo]
+        linear_key = env.pop("LINEAR_DEFAULT_API_KEY")
+        run([BIN], *join, code=2)
+        assert not requests and not (work / "keymap.json").exists()
+        env["LINEAR_DEFAULT_API_KEY"] = linear_key
         team["id"] = "other"
         project["teams"] = {"nodes": [{"id": "team"}]}
         run([BIN], *join, code=2)
         assert not (work / "keymap.json").exists()
         team["id"] = "team"
+        preview_bin = root / "preview-bin"
+        preview_bin.mkdir()
+        (preview_bin / "wg").symlink_to(BIN)
+        original_path = env["PATH"]
+        env["PATH"] = str(preview_bin) + os.pathsep + original_path
         output = run([BIN], *join, code=preflight)
+        env["PATH"] = original_path
         assert "ran preflight" in output
         assert calls.read_text().splitlines() == (["preflight"] if preflight else ["preflight", "next"])
         files = snapshot()
@@ -171,6 +247,10 @@ sys.exit(main(sys.argv[1:]))
         run([BIN], "pull", work, code=2)
         assert snapshot() == files
         wire["keymap"]["nodes"]["a"]["card"]["id"] = "card"
+        wire["keymap"]["status_doc"] = {"id": "outside"}
+        run([BIN], "pull", work, code=2)
+        assert snapshot() == files
+        wire["keymap"]["status_doc"]["id"] = "doc"
         reference_dir = root / "reference"
         reference_dir.mkdir()
         for name, data in files.items():
@@ -191,16 +271,57 @@ sys.exit(main(sys.argv[1:]))
         run([BIN], "pull", work)
         assert snapshot() == committed
 
-        run([BIN], "run", "set", work, "a", "branch=wg/sample")
+        original_wire = deepcopy(wire)
+        def mapped(cmd, tree):
+            wire.clear()
+            wire.update(deepcopy(original_wire))
+            updates.clear()
+            results = []
+            for verb, args in [("set", ["branch=wg/sample"]), ("set", ["branch=wg/sample"]), ("reset", [])]:
+                stdout = run(cmd, "run", verb, tree, "a", *args)
+                results.append((stdout, json.loads((tree / "keymap.json").read_text()), deepcopy(wire), list(updates)))
+            assert len(updates) == 2
+            assert wire["keymap"]["nodes"]["a"]["branch"] == "wg/sample"
+            assert results[-1][1]["nodes"]["a"]["card"] == {
+                "id": "card", "sha": hashlib.sha256(updates[-1].encode()).hexdigest()}
+            return results
+        assert mapped([BIN], work) == mapped(suite.REFERENCE, reference_dir)
+
+        reject_put = True
+        run([BIN], "run", "set", work, "a", "branch=wg/retry")
+        def keymap():
+            return json.loads((work / "keymap.json").read_text())
+        pending = keymap()["collab"]["pending"]
+        assert pending["nodes"]["a"]["branch"] == "wg/sample"
+        assert keymap()["run"]["nodes"]["a"]["branch"] == "wg/retry"
+        clean = (work / "plan.json").read_bytes()
+        dirty = clean + b"\n"
+        (work / "plan.json").write_bytes(dirty)
+        reject_put = False
+        run([BIN], "pull", work)
+        assert (work / "plan.json").read_bytes() == dirty
+        assert keymap()["collab"]["pending"] == pending
         assert wire["keymap"]["nodes"]["a"]["branch"] == "wg/sample"
-        run([BIN], "run", "set", work, "a", "branch=wg/sample")
-        assert len(updates) == 1
-        run([BIN], "run", "reset", work, "a")
-        assert len(updates) == 2
-        saved = json.loads((work / "keymap.json").read_text())
-        assert "a" not in saved["run"]["nodes"]
-        assert saved["nodes"]["a"]["card"] == {
-            "id": "card", "sha": hashlib.sha256(updates[-1].encode()).hexdigest()}
+        (work / "plan.json").write_bytes(clean)
+        run([BIN], "pull", work)
+        assert "pending" not in keymap()["collab"]
+        assert wire["keymap"]["nodes"]["a"]["branch"] == "wg/retry"
+
+        if preflight == 0:
+            credential_cases(root, snapshot(), run, env, seen)
+            local = keymap()
+            local["collab"] = {}
+            (work / "keymap.json").write_text(json.dumps(local))
+            count = len(seen)
+            run([BIN], "run", "set", work, "a", "branch=wg/local")
+            assert keymap()["collab"] == {}
+            assert keymap()["nodes"]["a"]["branch"] == "wg/retry"
+            run([BIN], "pull", work, code=2, error="this effort is not shared")
+            assert len(seen) == count
+            assert "shared plan v" in run([BIN], "share", work)
+            assert keymap()["collab"]["workspace"] == "default"
+            (root / "config").write_text(json.dumps({"workspaces": [{"id":"default","key_env":False}]}))
+            run([BIN], "run", "show", work)
 
 for status in (0, 7):
     with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,6 @@
 //! Hosted page commands. The caller supplies installation settings and the collaboration stores.
 mod auth;
+pub(crate) use auth::{page_source, read_page_source};
 mod collaboration;
 pub mod link;
 pub use auth::page_credential;
@@ -195,7 +196,7 @@ pub fn run<C, K>(
     args: &[String],
     config: &C,
     credentials: &K,
-    stores: Option<&dyn Collaboration>,
+    stores: &dyn Collaboration,
 ) -> Result<Output>
 where
     C: ConfigProvider<Settings = Settings, Error = String>,
@@ -242,24 +243,14 @@ where
         Command::Logout { page_url } => {
             auth::logout(&settings, page_url.as_deref()).map(Output::success)
         }
-        command => {
-            let installation;
-            let stores = match stores {
-                Some(stores) => stores,
-                None => {
-                    installation = crate::linear::Installation::load()?;
-                    &installation
-                }
-            };
-            collaboration::run(command, config, credentials, stores)
-        }
+        command => collaboration::run(command, config, credentials, stores),
     }
 }
 
 pub fn preview(args: &[String]) -> Result<Output> {
     let config = crate::linear::Installation::load()?;
     let settings = crate::providers::PageSettings(&config);
-    run(args, &settings, &config, Some(&config))
+    run(args, &settings, &config, &config)
 }
 
 pub(crate) use collaboration::save_run_keymap;

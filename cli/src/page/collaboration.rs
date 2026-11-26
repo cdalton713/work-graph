@@ -353,7 +353,7 @@ fn connect<K: CredentialProvider<Error = String>>(
     collab: &Value,
     scope: &str,
 ) -> Result<Page> {
-    let raw = field(collab, "page")?;
+    let raw = collab["page"].as_str().unwrap_or_default();
     let mut page = Page::new(settings, Some(raw))?;
     let credential = page_credential(
         settings,
@@ -413,7 +413,7 @@ pub(super) fn run<
     let collab = local.keymap["collab"].clone();
     match command {
         Command::Share { .. } => {
-            if collab.is_object() {
+            if truthy(&collab) {
                 return Ok(Output::success("the effort is already shared".into()));
             }
             let project = field(&local.keymap["project"], "id")
@@ -454,7 +454,7 @@ pub(super) fn run<
             accept_settings,
             ..
         } => {
-            if !collab.is_object() {
+            if !truthy(&collab) {
                 return Err("this effort is not shared; run wg share first".into());
             }
             let page = connect(&settings, credentials, &collab, &scope)?;
@@ -1010,7 +1010,7 @@ pub(crate) fn save_run_keymap(
     km: &mut Value,
 ) -> Result<()> {
     let effort = crate::providers::Effort::borrowed(dir, guard);
-    if !km["collab"].is_object() {
+    if !truthy(&km["collab"]) {
         return effort.save_keymap(km);
     }
     let before = effort.keymap()?;

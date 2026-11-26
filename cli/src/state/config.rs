@@ -301,15 +301,6 @@ impl Config {
                     "each workspace needs a unique id of a-z, 0-9 and -",
                 ));
             }
-            if !w["team"].is_null() && !w["team"].is_string() {
-                return Err(problem("workspace team must be a string or null"));
-            }
-            if !w["key_env"]
-                .as_array()
-                .is_some_and(|names| names.iter().all(Value::is_string))
-            {
-                return Err(problem("workspace key_env must be an array of names"));
-            }
             *value = w;
         }
         validate(&config).map_err(|e| problem(&e.to_string()))?;

@@ -3,7 +3,7 @@ mod effort;
 pub(crate) use effort::Effort;
 
 use crate::{
-    ConfigProvider, Credential,
+    ConfigProvider, PageCredential,
     linear::{Client, Installation, LinearHttp, SystemTiming},
     local::CardWriter,
     page::Settings,
@@ -11,8 +11,6 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     env, fs, io,
-    io::Read,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -53,7 +51,7 @@ impl ConfigProvider for PageSettings<'_> {
     }
 }
 
-pub(crate) fn page_key(home: &Path, row: &Value) -> Result<Option<Credential>, String> {
+pub(crate) fn page_key(home: &Path, row: &Value) -> Result<PageCredential, String> {
     let scoped = row["page_url"].as_str().is_some_and(|s| !s.is_empty());
     let id = field(row, "id")?;
     let name = if scoped {
@@ -61,49 +59,18 @@ pub(crate) fn page_key(home: &Path, row: &Value) -> Result<Option<Credential>, S
     } else {
         "WG_LINK_TOKEN".into()
     };
-    let token = match env::var(&name) {
-        Ok(v) => v,
-        Err(env::VarError::NotUnicode(_)) => return Err(format!("invalid {name}")),
+    match env::var(&name) {
+        Ok(raw) => crate::page::page_source(&raw),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("invalid {name}")),
         Err(env::VarError::NotPresent) => {
-            let path = home.join(".config/work-graph").join(if scoped {
+            let file = if scoped {
                 format!("{id}-link-token")
             } else {
                 "link-token".into()
-            });
-            let mut f = match fs::File::open(&path) {
-                Ok(f) => f,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(e.to_string()),
             };
-            if f.metadata()
-                .map_err(|e| e.to_string())?
-                .permissions()
-                .mode()
-                & 0o7777
-                != 0o600
-            {
-                return Err(format!("{} must have mode 600", path.display()));
-            }
-            let mut v = String::new();
-            f.read_to_string(&mut v)
-                .map_err(|_| "cannot read page token")?;
-            if v.ends_with('\n') {
-                v.pop();
-            }
-            v
+            crate::page::read_page_source(&home.join(".config/work-graph").join(file))
         }
-    };
-    if !token.bytes().all(|b| (32..127).contains(&b)) {
-        return Err("invalid page token".into());
     }
-    if token.trim().is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(Credential::new(
-        format!("Bearer {}", token.trim())
-            .parse()
-            .map_err(|_| "invalid page token")?,
-    )))
 }
 
 fn request(

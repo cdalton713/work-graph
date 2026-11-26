@@ -32,6 +32,22 @@ impl fmt::Debug for Credential {
     }
 }
 
+/// A present but empty source disables authentication for this workspace.
+pub enum PageCredential {
+    Missing,
+    Disabled,
+    Token(Credential),
+}
+
+impl PageCredential {
+    pub fn into_token(self) -> Option<Credential> {
+        match self {
+            Self::Token(token) => Some(token),
+            Self::Missing | Self::Disabled => None,
+        }
+    }
+}
+
 /// Look up a credential for one workspace and service. Missing credentials
 /// return Ok(None). Errors must omit secret values.
 pub trait CredentialProvider {
@@ -39,6 +55,12 @@ pub trait CredentialProvider {
 
     fn credential(&self, workspace: &str, service: &str)
     -> Result<Option<Credential>, Self::Error>;
+
+    fn page_source(&self, workspace: &str) -> Result<PageCredential, Self::Error> {
+        Ok(self
+            .credential(workspace, "page")?
+            .map_or(PageCredential::Missing, PageCredential::Token))
+    }
 }
 
 /// Send one HTTP request. Return HTTP error statuses as responses so that

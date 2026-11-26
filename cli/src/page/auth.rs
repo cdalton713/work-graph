@@ -1,5 +1,5 @@
 use super::*;
-use crate::Credential;
+use crate::{Credential, PageCredential};
 use std::{
     fs,
     io::{self, BufRead, Write},
@@ -83,6 +83,37 @@ fn header(raw: &str) -> Result<(String, HeaderValue)> {
     Ok((token.into(), Credential::new(value).into_header()))
 }
 
+pub(crate) fn page_source(raw: &str) -> Result<PageCredential> {
+    if raw.bytes().all(|b| b == b' ') {
+        Ok(PageCredential::Disabled)
+    } else {
+        header(raw).map(|(_, value)| PageCredential::Token(Credential::new(value)))
+    }
+}
+
+pub(crate) fn read_page_source(path: &Path) -> Result<PageCredential> {
+    use std::io::Read;
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(PageCredential::Missing),
+        Err(_) => return Err("cannot read page token".into()),
+    };
+    if file
+        .metadata()
+        .map_err(|_| "cannot inspect token")?
+        .permissions()
+        .mode()
+        & 0o7777
+        != 0o600
+    {
+        return Err(format!("{} must have mode 600", path.display()));
+    }
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)
+        .map_err(|_| "cannot read page token")?;
+    page_source(raw.strip_suffix('\n').unwrap_or(&raw))
+}
+
 /// Resolve the credential for an HTTP or coordinator connection to the specified page.
 pub fn page_credential<K: CredentialProvider<Error = String>>(
     settings: &Settings,
@@ -92,66 +123,33 @@ pub fn page_credential<K: CredentialProvider<Error = String>>(
     provider: &K,
 ) -> Result<Option<Credential>> {
     validated_url(raw.trim_end_matches('/'), settings)?;
-    let mut token = None;
-    let configured = settings
-        .page
-        .as_deref()
-        .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'));
-    let saved = || -> Result<Option<HeaderValue>> {
-        let path = token_path(settings, raw)?;
-        match fs::File::open(&path) {
-            Ok(mut file) => {
-                use std::io::Read;
-                if file
-                    .metadata()
-                    .map_err(|_| "cannot inspect token")?
-                    .permissions()
-                    .mode()
-                    & 0o7777
-                    != 0o600
-                {
-                    return Err(format!("{} must have mode 600", path.display()));
-                }
-                let mut raw = String::new();
-                file.read_to_string(&mut raw)
-                    .map_err(|_| "cannot read token")?;
-                let line = raw.strip_suffix('\n').unwrap_or(&raw);
-                if line.bytes().all(|b| b == b' ') {
-                    return Ok(None);
-                }
-                Ok(Some(header(line)?.1))
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err("cannot read page token".into()),
+    let saved = || Ok(read_page_source(&token_path(settings, raw)?)?.into_token());
+    if shared {
+        if let Some(token) = saved()? {
+            return Ok(Some(token));
         }
-    };
-    if shared || !configured {
-        token = saved()?;
-    }
-    if shared && token.is_none() {
         for (workspace, _, url) in &settings.workspaces {
             if url
                 .as_deref()
                 .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'))
+                && let Some(token) = provider.page_source(workspace)?.into_token()
             {
-                token = provider
-                    .credential(workspace, "page")?
-                    .map(Credential::into_header);
-                if token.is_some() {
-                    break;
-                }
+                return Ok(Some(token));
             }
         }
+        return Ok(None);
     }
-    if !shared && configured && token.is_none() {
-        token = provider
-            .credential(scope, "page")?
-            .map(Credential::into_header);
+    if settings
+        .page
+        .as_deref()
+        .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'))
+    {
+        match provider.page_source(scope)? {
+            PageCredential::Missing => (),
+            source => return Ok(source.into_token()),
+        }
     }
-    if !shared && configured && token.is_none() {
-        token = saved()?;
-    }
-    Ok(token.map(Credential::new))
+    saved()
 }
 
 fn save(path: &Path, token: &str) -> Result<()> {

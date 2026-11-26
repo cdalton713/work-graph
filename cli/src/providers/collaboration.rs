@@ -38,13 +38,15 @@ fn existing(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
 fn post_join(cmd: &str, path: &Path) -> Result<Output> {
     let current =
         fs::metadata(env::current_exe().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let (exe, _) = env::split_paths(&env::var_os("PATH").unwrap_or_default())
+    let exe = env::split_paths(&env::var_os("PATH").unwrap_or_default())
         .map(|dir| dir.join("wg"))
         .find_map(|p| {
             let m = fs::metadata(&p).ok()?;
-            (m.is_file() && m.mode() & 0o111 != 0).then_some((p, m))
+            (m.is_file()
+                && m.mode() & 0o111 != 0
+                && (m.dev() != current.dev() || m.ino() != current.ino()))
+            .then_some(p)
         })
-        .filter(|(_, m)| m.dev() != current.dev() || m.ino() != current.ino())
         .ok_or("post-join requires the reference wg on PATH")?;
     let out = Command::new(exe)
         .arg(cmd)

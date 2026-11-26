@@ -26,7 +26,19 @@ impl Installation {
     pub fn load() -> Result<Self, String> {
         let home = PathBuf::from(env::var_os("HOME").ok_or("missing home directory")?);
         let config = crate::state::Config::discover().map_err(|e| e.to_string())?;
-        Ok(Self { config, home })
+        let installation = Self { config, home };
+        for row in installation.workspaces() {
+            if !row["team"].is_null() && !row["team"].is_string() {
+                return Err("workspace team must be a string or null".into());
+            }
+            if !row["key_env"]
+                .as_array()
+                .is_some_and(|names| names.iter().all(Value::is_string))
+            {
+                return Err("workspace key_env must be an array of names".into());
+            }
+        }
+        Ok(installation)
     }
 
     pub fn workspaces(&self) -> &[Value] {
@@ -47,14 +59,18 @@ impl ConfigProvider for Installation {
 }
 impl CredentialProvider for Installation {
     type Error = String;
+    fn page_source(&self, id: &str) -> Result<crate::PageCredential, String> {
+        crate::providers::page_key(&self.home, &self.resolve(id)?)
+    }
+
     fn credential(&self, id: &str, service: &str) -> Result<Option<Credential>, String> {
-        let row = self.resolve(id)?;
         if service == "page" {
-            return crate::providers::page_key(&self.home, &row);
+            return Ok(self.page_source(id)?.into_token());
         }
         if service != "linear" {
             return Err("unknown credential service".into());
         }
+        let row = self.resolve(id)?;
         let defaults = json!(["LINEAR_API_KEY"]);
         let aliases = row
             .get("key_env")

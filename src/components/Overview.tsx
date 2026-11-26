@@ -22,7 +22,7 @@ const COORDINATOR_DISPLAY = {
   working: { label: "Working", signal: "running" },
   gone: { label: "Offline", signal: "off" },
   needs: { label: "Waiting", signal: "stop" },
-  unknown: { label: "Unknown", signal: "off" },
+  unknown: { label: "None", signal: "off" },
 } satisfies Record<string, { label: string; signal: Signal }>;
 const NO_STATES: ProjectStateName[] = [];
 const STATE_DISPLAY = {
@@ -235,8 +235,18 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
     let start: Touch | undefined;
     const atTop = () => stage.scrollTop === 0 && window.scrollY === 0;
     const reset = () => { start = undefined; };
+    const hasDraft = () => Array.from(stage.querySelectorAll<HTMLTextAreaElement>(".inbox-detail textarea"))
+      .some((editor) => editor.value.length > 0);
+    const blocksPull = (target: EventTarget | null) => {
+      if (!(target instanceof Element) || target.closest("input, textarea, [contenteditable]")) return true;
+      for (let node: Element | null = target; node && node !== stage; node = node.parentElement) {
+        if (node.scrollTop > 0 && /^(auto|scroll|overlay)$/.test(getComputedStyle(node).overflowY)) return true;
+      }
+      return false;
+    };
     const onStart = (event: TouchEvent) => {
-      start = event.touches.length === 1 && atTop() && !document.querySelector("dialog[open], :popover-open")
+      start = event.touches.length === 1 && atTop() && !blocksPull(event.target) && !hasDraft()
+        && !document.querySelector("dialog[open], :popover-open")
         ? event.touches[0] : undefined;
     };
     const onMove = (event: TouchEvent) => {
@@ -254,7 +264,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       const first = start;
       reset();
       const last = Array.from(event.changedTouches).find((touch) => touch.identifier === first?.identifier);
-      if (first && last && atTop() && last.clientY - first.clientY >= 80
+      if (first && last && atTop() && !hasDraft() && last.clientY - first.clientY >= 80
         && Math.abs(last.clientX - first.clientX) <= 40) window.location.reload();
     };
     stage.addEventListener("touchstart", onStart, { passive: true });
@@ -344,17 +354,17 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             <span className="ov-state">
               <Lamp signal={signal} pulse={state === "moving"} />
               <span className={`ov-state-label sig-fg-${signal}`}>{stateLabel(state)}</span>
-              <span className="ov-reason">{reason}</span>
+              <span className="ov-reason" title={reason}>{reason}</span>
             </span>
             <span className="ov-name">
-              <span className="ov-title">{p.name}</span>
+              <span className="ov-title" title={p.name}>{p.name}</span>
               {multi && !grouped && <span className="ov-ws">{p.workspaceName}</span>}
             </span>
             <span className="ov-progress">
               {s && s.planned > 0 && (
                 <>
                   <span className="ov-track" role="img" aria-label={s.counts.map((c) => `${c.status} ${c.n}`).join(", ")}>
-                    {s.counts.map((c) => <i key={c.status} className={`sig-bg-${c.signal}`} style={{ flexGrow: c.n }} />)}
+                    {s.counts.map((c) => <i key={c.status} className={`sig-bg-${c.signal}`} style={{ flexGrow: c.n }} title={`${c.status} · ${c.n}`} />)}
                   </span>
                   <span className="mono ov-done">{s.done}/{s.planned}</span>
                 </>
@@ -364,9 +374,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
               <span className="ov-coord" role="group" aria-label="Coordinator">
                 <Lamp signal={coordinatorDisplay.signal} />{coordinatorDisplay.label}
               </span>
-              {s && s.running > 0 && <span className="sig-fg-running"><Lamp signal="running" pulse />{s.running} running</span>}
-              {s && s.review > 0 && <span className="sig-fg-review"><Lamp signal="review" />{s.review} in review</span>}
-              {s && s.ready > 0 && <span className="sig-fg-ready"><Lamp signal="ready" />{s.ready} can start</span>}
+              {s && s.running > 0 && <span className="sig-fg-running" title="A worker runs on it, or it is In Progress"><Lamp signal="running" pulse />{s.running} running</span>}
+              {s && s.review > 0 && <span className="sig-fg-review" title="In Review or Verifying"><Lamp signal="review" />{s.review} in review</span>}
+              {s && s.ready > 0 && <span className="sig-fg-ready" title="Not started, and no blocker holds it back"><Lamp signal="ready" />{s.ready} can start</span>}
             </span>
             {s?.error && <span className="ov-error sig-fg-stop">{s.error}</span>}
           </button>
@@ -467,7 +477,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
               return (
                 <li key={key} className="inbox-row">
                   <div className="inbox-row-head">
-                    <button type="button" className="inbox-open"
+                    <button type="button" className="inbox-open" title={`${p.name}: ${m.title}`}
                       aria-expanded={target ? open : undefined} aria-controls={target ? detailId : undefined}
                       onClick={target ? () => setExpanded(open ? null : key) : go}>
                       <Lamp signal="stop" />
@@ -537,7 +547,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
         )}
         {grouped && onInitiative && (
           <Picker value={initiative === null ? ["*"] : [`=${initiative}`]} onChange={([id]) => onInitiative(id === "*" ? null : id.slice(1))}
-            options={[
+            title="Show one initiative" options={[
               { id: "*", label: "All initiatives" },
               ...names.map((n) => ({ id: `=${n}`, label: n })),
               { id: `=${NO_INITIATIVE}`, label: "No initiative" },
@@ -557,7 +567,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
           })}
         </div>}
         {closedCount > 0 && (
-          <button type="button" className={`toggle${filter.closed ? " is-on" : ""}`} aria-pressed={filter.closed} onClick={() => set({ closed: !filter.closed })}>Closed <span className="mono">{closedCount}</span></button>
+          <Hint text="Also show the completed and canceled projects." infoLabel="About closed projects">
+            <button type="button" className={`toggle${filter.closed ? " is-on" : ""}`} aria-pressed={filter.closed} onClick={() => set({ closed: !filter.closed })}>Closed <span className="mono">{closedCount}</span></button>
+          </Hint>
         )}
       </div>
 
@@ -573,7 +585,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
           <section key={section.key} className="ov-section" aria-label={section.name ?? "No initiative"}>
             <h2 className="ov-section-head">
               {onInitiative && initiative === null
-                ? <button type="button" className="ov-section-name" onClick={() => onInitiative(section.name ?? NO_INITIATIVE)}>{section.name ?? "No initiative"}</button>
+                ? <Hint text="Show only this initiative" infoLabel="About this initiative filter">
+                  <button type="button" className="ov-section-name" onClick={() => onInitiative(section.name ?? NO_INITIATIVE)}>{section.name ?? "No initiative"}</button>
+                </Hint>
                 : <span className="ov-section-name">{section.name ?? "No initiative"}</span>}
               {multi && <span className="ov-ws">{section.workspaceName}</span>}
               <span className="ov-section-sum mono">

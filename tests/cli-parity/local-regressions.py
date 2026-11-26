@@ -50,16 +50,24 @@ esac
         git.write_text("#!/bin/sh\necho 'src/[note'\n")
         git.chmod(0o755)
 
+    def observe(self, args, *, reference):
+        root = self.dirs[0 if reference else 1]
+        command = [sys.executable, "-I", str(SCRIPT)] if reference else [str(BINARY)]
+        result = subprocess.run(
+            [*command, *args], cwd=root, capture_output=True,
+            env={"PATH": str(self.bin), "HOME": str(root), "WG_CONFIG": "config",
+                 "COLUMNS": "80", "NO_COLOR": "1", "LC_ALL": "C", "WG_LINK": "off"},
+        )
+        stderr = result.stderr
+        if stderr.startswith(b"usage: "):
+            # argparse wraps the synopsis differently across interpreter versions.
+            stderr = re.sub(rb"\n[ \t]+", b" ", stderr)
+        return result.returncode, result.stdout, stderr, snapshot(root)
+
     def compare(self, *args):
-        observed = []
-        for root, command in zip(self.dirs, ([sys.executable, "-I", str(SCRIPT)], [str(BINARY)])):
-            result = subprocess.run(
-                [*command, *args], cwd=root, capture_output=True,
-                env={"PATH": str(self.bin), "HOME": str(root), "WG_CONFIG": "config",
-                     "COLUMNS": "80", "NO_COLOR": "1", "LC_ALL": "C", "WG_LINK": "off"},
-            )
-            observed.append((result.returncode, result.stdout, result.stderr, snapshot(root)))
-        for field, a, b in zip(("exit", "stdout", "stderr", "files"), *observed):
+        expected = self.observe(args, reference=True)
+        actual = self.observe(args, reference=False)
+        for field, a, b in zip(("exit", "stdout", "stderr", "files"), expected, actual):
             assert a == b, (args, field, a, b)
 
     def journal(self, entries):
@@ -78,18 +86,20 @@ def input_cases(pair):
     pair.compare("log", ".", "--tim")
     pair.compare("log", ".", "-n", "0")
     pair.compare("log", ".", "-n", "oops")
-    # 3.12 changed argparse to accept this trailing positional. Pin the reviewed
-    # 3.11 behavior even on runners with a newer reference interpreter.
-    if sys.version_info < (3, 12):
-        pair.compare("log", ".", "-n", "1", "a")
+    canonical = ("log", ".", "a", "-n", "1")
+    interleaved = ("log", ".", "-n", "1", "a")
+    expected = pair.observe(canonical, reference=True)
+    assert expected[0] == 0 and expected[1]
+    assert pair.observe(canonical, reference=False) == expected
+    assert pair.observe(interleaved, reference=False) == expected
+
+    # argparse support for this ordering varies across Python installations.
+    reference = pair.observe(interleaved, reference=True)
+    if reference[0] == 0:
+        assert reference == expected
     else:
-        root = pair.dirs[1]
-        before = snapshot(root)
-        result = subprocess.run([str(BINARY), "log", ".", "-n", "1", "a"], cwd=root,
-                                env={"HOME": str(root), "WG_CONFIG": "config"}, capture_output=True)
-        assert result.returncode == 2 and not result.stdout
-        assert result.stderr.endswith(b"wg.py: error: unrecognized arguments: a\n")
-        assert snapshot(root) == before
+        assert reference[0] == 2 and b"unrecognized arguments: a" in reference[2]
+    pair.compare("log", ".", "a", "-n", "1", "extra")
     pair.compare("run", "set", ".", "merge", "invalid")
 
 

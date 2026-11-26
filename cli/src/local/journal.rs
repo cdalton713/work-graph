@@ -130,7 +130,6 @@ fn log_usage(reason: &str) -> Error {
 pub(super) fn log(dir: &Path, p: &Value, args: &[String], cfg: &Value) -> Result<u8> {
     let mut args = args.iter().map(String::as_str);
     let (mut key, mut raw_since, mut count, mut show_times) = (None, None, 30i64, false);
-    let mut positional = true;
     while let Some(arg) = args.next() {
         let (flag, attached) = arg
             .split_once('=')
@@ -154,9 +153,8 @@ pub(super) fn log(dir: &Path, p: &Value, args: &[String], cfg: &Value) -> Result
             count = v.parse().map_err(|_| {
                 log_usage(&format!("argument -n: invalid int value: {}", repr_str(v)))
             })?;
-        } else if !arg.starts_with('-') && positional && key.is_none() {
+        } else if !arg.starts_with('-') && key.is_none() {
             key = Some(arg);
-            continue;
         } else {
             let extra = std::iter::once(arg)
                 .chain(args)
@@ -167,7 +165,6 @@ pub(super) fn log(dir: &Path, p: &Value, args: &[String], cfg: &Value) -> Result
                 include_str!("help/usage.txt")
             )));
         }
-        positional = false;
     }
     if let Some(k) = key
         && k != "@effort"

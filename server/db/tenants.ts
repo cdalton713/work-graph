@@ -1,3 +1,4 @@
+import { dbPushStore } from "./push.ts";
 import { randomUUID } from "node:crypto";
 import { LINK_PREFIX, type RedisLink } from "../redis.ts";
 import type { SharedWorkspace, Tenant, Tenants } from "../tenants.ts";
@@ -118,6 +119,7 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
   }
 
   return {
+    pushStore: dbPushStore(sql, crypto),
     accounts,
     accountStore: () => accounts,
     signIn: accounts.signIn,
@@ -167,5 +169,5 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
       memberships.clear();
       listeners.clear();
     },
-  } satisfies Tenants & { accounts: typeof accounts; close(): void };
+  } satisfies Tenants & { accounts: typeof accounts; pushStore: ReturnType<typeof dbPushStore>; close(): void };
 }

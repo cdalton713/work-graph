@@ -123,7 +123,14 @@ export interface StarterResult {
   };
 }
 
+export const noticeKinds = ["decision", "merge", "question", "wait"] as const;
+export interface NoticeSettings {
+  enabled: boolean;
+  kinds: (typeof noticeKinds[number])[];
+}
+
 export interface SiteConfig {
+  push?: boolean;
   createProjects?: boolean;
   telemetry?: boolean;
   human: string; defaultWorkspace: string;

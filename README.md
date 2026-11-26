@@ -68,6 +68,30 @@ for workspace keys, team privacy, and label scope.
 
 ## Config
 
+Push notices are optional. For a config installation, set `WG_STATE_DIR` to a private directory outside the
+page directory. The server keeps device subscriptions and account notice settings there. Without a state
+directory or VAPID keys, push is off.
+
+Use one P-256 VAPID key pair for the installation. Set `WG_VAPID_PUBLIC_KEY` and `WG_VAPID_PRIVATE_KEY`
+to the base64url keys, or set `WG_VAPID_FILE` to a private JSON file. To create that file on the server,
+run this command in a private directory. It creates a new file with mode 600 and prints no keys.
+
+```sh
+node --input-type=module - <<'JS'
+import { generateKeyPairSync } from "node:crypto";
+import { writeFileSync } from "node:fs";
+const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+const { x, y, d } = privateKey.export({ format: "jwk" });
+const publicKey = Buffer.concat([Buffer.from([4]), Buffer.from(x, "base64url"), Buffer.from(y, "base64url")]);
+writeFileSync("vapid.json", JSON.stringify({ publicKey: publicKey.toString("base64url"), privateKey: d }),
+  { flag: "wx", mode: 0o600 });
+JS
+```
+
+Each account starts with notices on for decisions and ops steps, merge requests, worker questions, and
+other waits. The account can turn notices off or select the kinds to receive. Removing one device
+keeps the account settings and the other devices.
+
 `wg` and the page server read `~/.config/work-graph/config.json` (or the file `WG_CONFIG`; the server also takes
 the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace with `LINEAR_API_KEY`, the human is
 "Human", there is no hosted page, and each plan needs `effort.test`. Every field is optional:
@@ -498,6 +522,10 @@ identifies the existing project, issues, cards, and milestone.
 
 The service hosts the page and its API. Accounts share a server and keep their workspaces private.
 Each user runs `wg`, Orca, `gh`, `st`, `uv`, and an agent CLI on their own machine.
+
+To enable push for the hosted service, set the same VAPID keys on every instance (see [Config](#config)).
+The service stores subscriptions in Postgres and encrypts them with `WG_DATA_KEY`. Device removal and
+notice settings apply to the signed-in account. A read-only viewer cannot register a device.
 
 ### Parts of the service
 

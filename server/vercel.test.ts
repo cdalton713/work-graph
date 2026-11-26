@@ -137,7 +137,7 @@ it("keeps the signed-in viewer's config and read-only routes", async () => {
   const actor = await sessionHeaders("ada@example.com");
   expect(await (await app.request("/api/config", { headers: actor })).json()).toEqual({
     human: expect.any(String), defaultWorkspace: "work", contract: expect.any(String), version: "test",
-    readOnly: true, auth: true, user: "ada@example.com", role: "viewer", link: null, telemetry: false,
+    readOnly: true, auth: true, user: "ada@example.com", role: "viewer", link: null, telemetry: false, push: false,
   });
   expect((await app.request("/api/projects", { headers })).status).toBe(401);
   expect((await app.request("/api/projects/p1/commands", { method: "POST", headers: actor })).status).toBe(405);

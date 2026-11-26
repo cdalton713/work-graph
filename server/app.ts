@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import type { Server } from "node:http";
+import { sentry } from "./sentry.ts";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { Hono, type Context } from "hono";
 import { matchedRoutes } from "hono/route";
@@ -80,6 +81,7 @@ export interface AppOptions {
   appName?: string;
   tenants?: Tenants;
   linearAuth?: LinearAuth;
+  flushSentry?: boolean;
   telemetryEnv?: NodeJS.ProcessEnv;
   waitUntil?: (job: Promise<void>) => void;
   serviceReady?: () => Promise<boolean | string>;
@@ -166,6 +168,7 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  */
 export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, linkMaxAgeMs, linkPongMs, human, stateDir = process.env.WG_STATE_DIR || undefined,
   appName,
+  flushSentry,
   version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linearAuth, serviceReady, telemetryEnv = process.env, waitUntil, linkToken, linkState, linkBus, redisUrl, redisPrefix, tenants, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   if (linkToken && [...linkToken].length < 32) {
     throw new Error("WG_LINK_TOKEN must have at least 32 characters");
@@ -230,6 +233,14 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const started = clock();
   const contract = contractHash(contractFile);
   const app = new Hono();
+  const sdk = sentry;
+  if (sdk && flushSentry) app.use(async (_c, next) => {
+    try {
+      await next();
+    } finally {
+      await sdk.flush(2000);
+    }
+  });
   app.use("/join/*", async (c, next) => {
     c.header("Referrer-Policy", "no-referrer");
     c.header("Cache-Control", "no-store");
@@ -753,6 +764,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       return c.json<SiteConfig & { createProjects?: boolean; linkStore?: ServerStatus["linkStore"] }>({
         ...(c.var.creationActor && !disconnected && tenant?.workspaces.some(w => w.key && w.team && !w.needsKey)
           ? { createProjects: true } : {}),
+        ...(telemetryEnv.WG_SENTRY_BROWSER_DSN ? { sentry: {
+          dsn: telemetryEnv.WG_SENTRY_BROWSER_DSN,
+          environment: telemetryEnv.WG_SENTRY_ENVIRONMENT || "production",
+          release: telemetryEnv.WG_VERSION || "dev",
+        } } : {}),
         human: site.human, defaultWorkspace: site.defaultWorkspace, contract, version, telemetry: !!telemetry,
         readOnly: viewer, auth: !!(auth || linearAuth), user: membership && !disconnected ? session?.email ?? null : null,
         role: disconnected ? null : role, ...(linearAuth ? { signIn: "linear" as const } : {}),
@@ -1496,6 +1512,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (error instanceof NeedsLinearAccess) return c.json({ error: error.message, code: "needs_linear_access" }, 403);
     if (error instanceof LinearSignInRequired) return c.json({ error: error.message, login: LOGIN_PATH }, 401);
     const status = ((error instanceof RedisUnavailable || error instanceof RedisCommandFailed) ? 503 : error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;
+    if (status >= 500) sentry?.captureException(error);
     // An API request writes its one log line in the request log above. Another route writes the error here.
     if (status === 500 && !c.req.path.startsWith("/api/") && !c.req.path.startsWith("/join/")) console.error(error);
     if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) c.header("Retry-After", "1");

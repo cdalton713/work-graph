@@ -83,6 +83,7 @@ export function createVercelApp(env: NodeJS.ProcessEnv) {
       team: config.workspaces[0].team, dist: join(root, "dist") + sep, human: config.human, workspaces: config.workspaces, auth: config.auth,
       linkToken: env.WG_LINK_TOKEN, telemetryEnv: env, waitUntil,
       ...socketSettings,
+      flushSentry: true,
       redisUrl: env.WG_REDIS_URL,
       redisPrefix: env.WG_REDIS_PREFIX || undefined,
       stateDir: env.WG_STATE_DIR || undefined,
@@ -137,6 +138,7 @@ function createVercelService(env: NodeJS.ProcessEnv) {
   try {
     app = createApp({ port: 443, tailnet: null, hosted: { host: env.WG_HOSTED!.trim().toLowerCase() } }, {
       team: "", workspaces: [], readOnly: false, dist: join(root, "dist") + sep, ...socketSettings, linearAuth, tenants, telemetryEnv: env, waitUntil,
+      flushSentry: true,
       redisUrl: env.WG_REDIS_URL, redisPrefix: env.WG_REDIS_PREFIX || undefined,
       contractFile: join(root, "skills/work-graph/contract.json"),
       version: env.WG_VERSION || env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || "dev",

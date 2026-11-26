@@ -3077,3 +3077,15 @@ describe("usage events", () => {
     expect((await post("node_opened", { ...signed, origin })).status).toBe(429);
   });
 });
+
+it("publishes only the browser DSN with its release and environment", async () => {
+  const telemetryEnv: NodeJS.ProcessEnv = { WG_SENTRY_DSN: "server-only" };
+  const page = createApp(rules, { team: "", dist, telemetryEnv });
+  const config = async () => (await page.request("/api/config", { headers: local })).json();
+  expect(await config()).not.toHaveProperty("sentry");
+  telemetryEnv.WG_SENTRY_BROWSER_DSN = "browser";
+  expect((await config()).sentry).toEqual({ dsn: "browser", environment: "production", release: "dev" });
+  telemetryEnv.WG_VERSION = "build";
+  telemetryEnv.WG_SENTRY_ENVIRONMENT = "preview";
+  expect((await config()).sentry).toEqual({ dsn: "browser", environment: "preview", release: "build" });
+});

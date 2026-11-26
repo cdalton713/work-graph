@@ -14,6 +14,10 @@ import { readConfig } from "./workspaces.ts";
 import { readLinearAuth, serviceSetting } from "./linearauth.ts";
 import { openServiceTenants } from "./tenants.ts";
 
+import { startSentry } from "./sentry.ts";
+
+if (process.env.WG_SENTRY_DSN) await startSentry(process.env);
+
 const { values } = parseArgs({
   options: {
     port: { type: "string", default: "4747" }, project: { type: "string" }, "no-open": { type: "boolean" }, "no-tailnet": { type: "boolean" },

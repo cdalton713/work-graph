@@ -96,6 +96,7 @@ pub mod arguments;
 pub(crate) mod machine;
 pub mod manage;
 pub mod precheck;
+mod production;
 pub mod scheduled;
 
 /// Run machine operations that do not need a live effort connection.
@@ -139,6 +140,27 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
                         &machine::scheduled_program()?
                     )?
                 );
+            }
+            Operation::Health(args) => {
+                let install = crate::linear::Installation::load()?;
+                let mut effort = production::Effort::read(&install, &args.dir)?;
+                if let Some(path) = args.report {
+                    println!("{}", effort.report(&path)?);
+                } else {
+                    let km = effort.km.clone();
+                    let (code, message) = precheck::due(
+                        &args.dir,
+                        &km,
+                        install.config.settings()["health_interval"]
+                            .as_f64()
+                            .ok_or("invalid health interval")?,
+                        chrono::Utc::now(),
+                        &mut effort,
+                    )?
+                    .result();
+                    println!("{message}");
+                    return Ok(Some(code));
+                }
             }
             Operation::Autostart(auto) => {
                 println!(

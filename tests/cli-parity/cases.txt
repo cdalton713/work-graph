@@ -47,3 +47,10 @@ ui --no-open --port invalid
 owns diff effort a main
 owns overlap effort a
 explain dispatch
+health effort
+autostart effort --agent codex --model example
+ui --no-open --no-tailnet
+doctor effort
+service | autonomy effort
+service | run set effort a branch=wg/example
+service | login https://page.invalid --token-stdin

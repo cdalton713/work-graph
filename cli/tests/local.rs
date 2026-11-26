@@ -220,3 +220,21 @@ fn contract_write_uses_the_selected_checkout() {
         }
     }
 }
+
+#[test]
+fn reviewed_command_parity() {
+    assert!(
+        Command::new("python3")
+            .args([
+                "-IB",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../tests/cli-parity/local-regressions.py"
+                ),
+                BIN
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+}

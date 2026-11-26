@@ -1,5 +1,5 @@
 use super::*;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::{
     collections::BTreeSet,
@@ -19,49 +19,7 @@ fn now() -> DateTime<Utc> {
     SystemTime::now().into()
 }
 fn at(s: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|t| t.timestamp())
-        .or_else(|| {
-            s.parse::<NaiveDateTime>()
-                .ok()
-                .map(|t| t.and_utc().timestamp())
-        })
-        .or_else(|| {
-            s.parse::<NaiveDate>()
-                .ok()
-                .map(|t| t.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
-        })
-}
-fn since(s: &str) -> Result<i64> {
-    if let Some(t) = at(s) {
-        return Ok(t);
-    }
-    let mut left = s;
-    let mut delta = 0i64;
-    while !left.is_empty() {
-        let n = left.bytes().take_while(u8::is_ascii_digit).count();
-        let unit = left.as_bytes().get(n);
-        let factor = match unit {
-            Some(b'w') => 604800,
-            Some(b'd') => 86400,
-            Some(b'h') => 3600,
-            Some(b'm') => 60,
-            Some(b's') => 1,
-            _ => break,
-        };
-        let Ok(v) = left[..n].parse::<i64>() else {
-            break;
-        };
-        delta = delta.saturating_add(v.saturating_mul(factor));
-        left = &left[n + 1..];
-        if left.is_empty() {
-            return Ok(now().timestamp().saturating_sub(delta));
-        }
-    }
-    Err(invalid(format!(
-        "invalid --since '{s}': give a duration such as 2h or 3d, or a time such as 2026-01-01T09:00:00Z"
-    )))
+    time::parse(s).ok().map(|t| t.micros)
 }
 fn short(s: String, width: usize) -> String {
     if s.chars().count() > width {
@@ -97,9 +55,9 @@ fn line(e: &Value) -> String {
 }
 fn duration(s: Option<i64>) -> String {
     let Some(s) = s else { return "-".into() };
-    let m = s.div_euclid(60);
-    if m >= 1440 {
-        format!("{}d{:02}h", m / 1440, m % 1440 / 60)
+    let m = s.div_euclid(60_000_000);
+    if m.div_euclid(1440) != 0 {
+        format!("{}d{:02}h", m.div_euclid(1440), m.rem_euclid(1440) / 60)
     } else if m >= 60 {
         format!("{}h{:02}m", m / 60, m % 60)
     } else {
@@ -128,10 +86,10 @@ fn times(p: &Value, entries: &[Value], cfg: &Value) {
                 if changes.get("job").is_some() {
                     job = changes["job"][1].as_str().unwrap_or("")
                 }
-                if dispatch.is_none() && job == "dispatch" && changes["started_at"][1].is_string() {
+                if dispatch.is_none() && job == "dispatch" && truth(&changes["started_at"][1]) {
                     dispatch = Some(t)
                 }
-                if code.is_none() && changes["code_done_head"][1].is_string() {
+                if code.is_none() && truth(&changes["code_done_head"][1]) {
                     code = Some(t)
                 }
             }
@@ -150,7 +108,7 @@ fn times(p: &Value, entries: &[Value], cfg: &Value) {
         if seen {
             any = true;
             if let Some(start) = wait {
-                waited += now().timestamp() - start
+                waited += now().timestamp_micros() - start
             }
             println!(
                 "{k}\tdispatch->code done {}\tcode done->merged {}\twait on {} {}",
@@ -165,37 +123,66 @@ fn times(p: &Value, entries: &[Value], cfg: &Value) {
         println!("no task in the journal")
     }
 }
+fn log_usage(reason: &str) -> Error {
+    let usage = include_str!("help/log.txt").lines().next().unwrap();
+    invalid(format!("{usage}\nwg.py log: error: {reason}"))
+}
 pub(super) fn log(dir: &Path, p: &Value, args: &[String], cfg: &Value) -> Result<u8> {
-    let mut args = args.iter();
-    let (mut key, mut start, mut count, mut show_times) = (None, None, 30i64, false);
+    let mut args = args.iter().map(String::as_str);
+    let (mut key, mut raw_since, mut count, mut show_times) = (None, None, 30i64, false);
+    let mut positional = true;
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--times" => show_times = true,
-            "--since" => {
-                start = Some(since(
-                    args.next()
-                        .ok_or_else(|| invalid("missing --since value"))?,
-                )?)
-            }
-            "-n" => {
-                count = args
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| invalid("-n needs a positive number"))?
-            }
-            s if !s.starts_with('-') && key.is_none() => {
-                if s != "@effort" {
-                    node(p, s)?;
-                }
-                key = Some(s)
-            }
-            _ => return Err(invalid("invalid log arguments")),
+        let (flag, attached) = arg
+            .split_once('=')
+            .map_or((arg, None), |(f, v)| (f, Some(v)));
+        let long = flag.starts_with("--") && flag.len() > 2;
+        if long && "--times".starts_with(flag) && attached.is_none() {
+            show_times = true
+        } else if long && "--since".starts_with(flag) {
+            raw_since = Some(
+                attached
+                    .or_else(|| args.next())
+                    .ok_or_else(|| log_usage("argument --since: expected one argument"))?,
+            );
+        } else if let Some(suffix) = arg.strip_prefix("-n") {
+            let v = if suffix.is_empty() {
+                args.next()
+                    .ok_or_else(|| log_usage("argument -n: expected one argument"))?
+            } else {
+                suffix.strip_prefix('=').unwrap_or(suffix)
+            };
+            count = v.parse().map_err(|_| {
+                log_usage(&format!("argument -n: invalid int value: {}", repr_str(v)))
+            })?;
+        } else if !arg.starts_with('-') && positional && key.is_none() {
+            key = Some(arg);
+            continue;
+        } else {
+            let extra = std::iter::once(arg)
+                .chain(args)
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Err(invalid(format!(
+                "{}wg.py: error: unrecognized arguments: {extra}",
+                include_str!("help/usage.txt")
+            )));
         }
+        positional = false;
+    }
+    if let Some(k) = key
+        && k != "@effort"
+    {
+        node(p, k)?;
     }
     if count < 1 {
         return Err(invalid("-n needs a positive number"));
     }
-    let entries = entries(dir)?
+    let entries = entries(dir)?;
+    let start = raw_since
+        .filter(|s| !s.is_empty())
+        .map(|s| time::since(s, now().timestamp_micros()).map_err(invalid))
+        .transpose()?;
+    let entries = entries
         .into_iter()
         .filter(|e| {
             key.is_none_or(|k| e["key"] == k)
@@ -239,13 +226,13 @@ fn sorted_line(mut v: Value) -> String {
 }
 pub(super) fn record(dir: &Path, cmd: &str, before: &Value, after: &Value) -> io::Result<()> {
     let t = now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let mut keys = BTreeSet::from(["@effort"]);
+    let mut keys = BTreeSet::new();
     keys.extend(
         fields(&before["nodes"])
             .chain(fields(&after["nodes"]))
             .map(String::as_str),
     );
-    for k in keys {
+    for k in std::iter::once("@effort").chain(keys) {
         let row = |v: &Value| {
             if k == "@effort" {
                 v["effort"].clone()

@@ -57,7 +57,14 @@ pub(super) fn owns(mode: &str, p: &Value, args: &[String]) -> Result<u8> {
         {
             let matches = |f| {
                 strings(n, f).any(|g| {
-                    glob::Pattern::new(&g.replace("**", "*")).is_ok_and(|pat| pat.matches(path))
+                    let mut pattern = g.replace("**", "*");
+                    // fnmatch treats an unclosed character class as a literal bracket.
+                    if let Some(i) = pattern.rfind('[')
+                        && !pattern[i..].contains(']')
+                    {
+                        pattern.replace_range(i..i + 1, "[[]");
+                    }
+                    glob::Pattern::new(&pattern).is_ok_and(|pat| pat.matches(path))
                 })
             };
             if matches("owns") {
@@ -111,13 +118,6 @@ fn cycle<'a>(
     }
     path.pop();
 }
-fn quoted(v: &Value) -> String {
-    if let Some(s) = v.as_str() {
-        format!("'{s}'")
-    } else {
-        val(v)
-    }
-}
 fn names(keys: &[&str]) -> String {
     format!(
         "[{}]",
@@ -145,7 +145,7 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
                 for (k, v) in fields {
                     match k.as_str(){
                         "agent" if !matches!(v.as_str(),Some("claude"|"codex"))=>errors.push(format!("{path}.agent: must be claude or codex")),
-                        "model"|"effort" if v.as_str().is_none_or(|s|s.is_empty()||s.starts_with('-')||s.chars().any(|c|c.is_control()||c.is_whitespace()))=>errors.push(format!("{path}.{k}: must be nonempty text with no leading dash, spaces, or control characters")),
+                        "model"|"effort" if v.as_str().is_none_or(|s|s.is_empty()||s.starts_with('-')||s.chars().any(|c|!printable(c)||c.is_whitespace()))=>errors.push(format!("{path}.{k}: must be nonempty text with no leading dash, spaces, or control characters")),
                         "model"|"effort"|"agent"=>{},
                         _=>errors.push(format!("{path}.{k}: unknown field"))
                     }
@@ -176,9 +176,12 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
             errors.push("effort.agents: must be an object".into())
         }
     }
-    let phases = list(&p["phases"]);
+    let mut phases = serde_json::Map::new();
+    for phase in list(&p["phases"]) {
+        phases.insert(val(&phase["key"]), phase.clone());
+    }
     let release = text(&cfg["config"], "release_branch");
-    for ph in phases {
+    for ph in phases.values() {
         if text(ph, "target").trim().is_empty() {
             errors.push(format!("phase {}: no target", val(&ph["key"])))
         }
@@ -207,31 +210,24 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
         if k.is_empty() || deps.contains_key(k) {
             errors.push(format!(
                 "node key missing or duplicate: {}",
-                quoted(&n["key"])
+                repr(&n["key"])
             ));
             continue;
         }
         keys.push(k);
         deps.insert(k, vec![]);
-        let kinds = [
-            "decision",
-            "merge-point",
-            "ops",
-            "ship-point",
-            "spike",
-            "task",
-        ];
+        let kinds = contract::KINDS;
         if !kinds.contains(&text(n, "kind")) {
             errors.push(format!(
                 "{k}: kind {} not in {}",
-                quoted(&n["kind"]),
+                repr(&n["kind"]),
                 names(&kinds)
             ))
         }
-        if !phases.iter().any(|ph| val(&ph["key"]) == val(&n["phase"])) {
-            errors.push(format!("{k}: phase {} not in phases", quoted(&n["phase"])))
+        if !phases.contains_key(&val(&n["phase"])) {
+            errors.push(format!("{k}: phase {} not in phases", repr(&n["phase"])))
         }
-        if text(n, "title").is_empty() && text(n, "eng").is_empty() {
+        if !truth(&n["title"]) && !truth(&n["eng"]) {
             errors.push(format!("{k}: no title"))
         }
         if n["kind"] == "task" && text(n, "lane").is_empty() && n["role"] != "integration" {
@@ -240,7 +236,7 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
         if !matches!(text(n, "role"), "" | "hotfix" | "integration" | "sync") {
             errors.push(format!(
                 "{k}: role {} not in ['hotfix', 'integration', 'sync']",
-                quoted(&n["role"])
+                repr(&n["role"])
             ))
         }
         if n.get("eng").is_some() && n.get("issue").is_some() {
@@ -254,7 +250,7 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
             if n["kind"] != "ops" || !allowed.contains(&text(n, "by")) {
                 errors.push(format!(
                     "{k}: by {} needs kind ops and a value in {}",
-                    quoted(by),
+                    repr(by),
                     names(&allowed)
                 ))
             }
@@ -268,7 +264,7 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
                         && !b.is_empty()
                         && b.bytes().all(|c| c.is_ascii_digit())
                 }) {
-                    errors.push(format!("{k}: invalid {f} identifier {}", quoted(v)))
+                    errors.push(format!("{k}: invalid {f} identifier {}", repr(v)))
                 } else if *ids.entry(id).or_insert(k) != k {
                     errors.push(format!("{k}: issue {id} is also used by {}", ids[id]))
                 }
@@ -291,7 +287,7 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
         cycle(k, &mut vec![], &mut done, &deps, &mut errors)
     }
     let mut prev: Option<(String, String)> = None;
-    for phase in phases {
+    for phase in phases.values() {
         let ph = val(&phase["key"]);
         let mine: Vec<_> = keys
             .iter()
@@ -389,7 +385,7 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
                 if role(k) != "hotfix" {
                     errors.push(format!("{k}: {release} pre-merge task needs role hotfix"))
                 }
-                if effort["stacked_hotfix"] != true
+                if !truth(&effort["stacked_hotfix"])
                     && tasks.iter().any(|d| *d != k && reach(k, d, &deps))
                 {
                     errors.push(format!(

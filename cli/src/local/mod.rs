@@ -3,6 +3,7 @@ mod contract;
 mod graph;
 mod journal;
 mod rows;
+pub mod time;
 
 use crate::state::{Config, PlanLock};
 pub use card::CardWriter;
@@ -33,11 +34,66 @@ fn truth(v: &Value) -> bool {
         Value::Object(o) => !o.is_empty(),
     }
 }
+fn printable(c: char) -> bool {
+    use std::sync::LazyLock;
+    static HIDDEN: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"[\p{C}\p{Z}]").unwrap());
+    c == ' ' || !HIDDEN.is_match(c.encode_utf8(&mut [0; 4]))
+}
+fn repr_str(s: &str) -> String {
+    use std::fmt::Write;
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = quote.to_string();
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote || c == '\\' => {
+                out.push('\\');
+                out.push(c)
+            }
+            c if printable(c) => out.push(c),
+            c => {
+                let n = c as u32;
+                if n < 256 {
+                    write!(out, "\\x{n:02x}")
+                } else if n < 65536 {
+                    write!(out, "\\u{n:04x}")
+                } else {
+                    write!(out, "\\U{n:08x}")
+                }
+                .unwrap()
+            }
+        }
+    }
+    out.push(quote);
+    out
+}
+fn repr(v: &Value) -> String {
+    if let Some(s) = v.as_str() {
+        repr_str(s)
+    } else {
+        val(v)
+    }
+}
 fn val(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Null => "None".into(),
         Value::Bool(b) => if *b { "True" } else { "False" }.into(),
+        Value::Array(a) => format!("[{}]", a.iter().map(repr).collect::<Vec<_>>().join(", ")),
+        Value::Object(o) => format!(
+            "{{{}}}",
+            o.iter()
+                .map(|(k, v)| format!("{}: {}", repr_str(k), repr(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         _ => v.to_string(),
     }
 }
@@ -158,7 +214,7 @@ fn execute(args: &[String], cards: Option<&mut dyn CardWriter>) -> Result<u8> {
     } else {
         None
     };
-    let cfg = Config::discover().map_err(ioerr)?;
+    let cfg = Config::discover().map_err(|e| failed(e.to_string()))?;
     let p = cfg.load_plan(dir).map_err(ioerr)?;
     let config = cfg.report(None).map_err(ioerr)?;
     match verb.as_str() {

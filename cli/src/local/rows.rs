@@ -28,7 +28,7 @@ fn show(p: &Value, run: &Value, args: &[String]) -> Result<u8> {
     let mut key = None;
     let mut pretty = false;
     for arg in args {
-        if arg == "--json" {
+        if arg.len() > 2 && arg.starts_with("--") && "--json".starts_with(arg) {
             pretty = true
         } else if key.replace(arg.as_str()).is_some() || arg.starts_with('-') {
             return Err(invalid("invalid run show arguments"));
@@ -126,13 +126,16 @@ fn set(
         )));
     }
     let until = text(&fields, "soak_until");
-    if !until.is_empty()
-        && !chrono::DateTime::parse_from_rfc3339(until)
-            .is_ok_and(|v| v.offset().local_minus_utc() == 0)
-    {
-        return Err(invalid(format!(
-            "{k}: invalid soak_until '{until}': expected UTC offset"
-        )));
+    if !until.is_empty() {
+        let error = |msg: String| {
+            invalid(format!(
+                "{k}: invalid soak_until {}: {msg}",
+                repr_str(until)
+            ))
+        };
+        if time::parse(until).map_err(error)?.offset != Some(0) {
+            return Err(error("expected UTC offset".into()));
+        }
     }
     let o = row
         .as_object_mut()
@@ -169,7 +172,12 @@ fn set(
             let count = if count.is_empty() {
                 0
             } else {
-                count.parse::<i64>().map_err(|e| invalid(e.to_string()))?
+                count.trim().parse::<i64>().map_err(|_| {
+                    invalid(format!(
+                        "invalid literal for int() with base 10: {}",
+                        repr_str(count)
+                    ))
+                })?
             };
             if count >= 2 {
                 return Err(failed(format!(
@@ -229,6 +237,45 @@ fn set(
     }
     Ok(())
 }
+// dict(row) in the reference accepts both objects and sequences of key/value pairs.
+fn baseline_row(row: &Value) -> Result<Value> {
+    if !truth(row) {
+        return Ok(json!({}));
+    }
+    if row.is_object() {
+        return Ok(row.clone());
+    }
+    if row.is_string() {
+        return Err(invalid(
+            "dictionary update sequence element #0 has length 1; 2 is required",
+        ));
+    }
+    let pairs = row
+        .as_array()
+        .ok_or_else(|| invalid("invalid baseline row"))?;
+    let mut result = json!({});
+    for (i, pair) in pairs.iter().enumerate() {
+        let fields = if let Some(s) = pair.as_str() {
+            s.chars().map(|c| Value::from(c.to_string())).collect()
+        } else {
+            pair.as_array()
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "cannot convert dictionary update sequence element #{i} to a sequence"
+                    ))
+                })?
+                .clone()
+        };
+        if fields.len() != 2 {
+            return Err(invalid(format!(
+                "dictionary update sequence element #{i} has length {}; 2 is required",
+                fields.len()
+            )));
+        }
+        result[val(&fields[0])] = fields[1].clone();
+    }
+    Ok(result)
+}
 fn rebuild(dir: &Path, p: &Value, km: &mut Value, apply: bool) -> Result<bool> {
     let entries = journal::entries(dir)?;
     if entries.is_empty() {
@@ -238,8 +285,16 @@ fn rebuild(dir: &Path, p: &Value, km: &mut Value, apply: bool) -> Result<bool> {
         )));
     }
     let i=entries.iter().rposition(|e|e["kind"]=="baseline").ok_or_else(||failed("the journal has no baseline line, so it cannot give complete run rows; nothing is changed (recovery.md)"))?;
-    let mut run = entries[i]["run"].clone();
-    defaults(&mut run)?;
+    let base = &entries[i]["run"];
+    let mut run = json!({"effort":baseline_row(&base["effort"])?,"nodes":{}});
+    if truth(&base["nodes"]) {
+        let nodes = base["nodes"]
+            .as_object()
+            .ok_or_else(|| invalid("invalid baseline nodes"))?;
+        for (key, row) in nodes {
+            run["nodes"][key] = baseline_row(row)?;
+        }
+    }
     for e in &entries[i + 1..] {
         if !e["kind"].is_null() && e["kind"] != "run" {
             continue;

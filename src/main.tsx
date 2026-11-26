@@ -1,10 +1,11 @@
-import { StrictMode, type ReactElement } from "react";
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import { watchStarterSession } from "./lib/starterHandoff";
 import { App, ServiceApp } from "./App";
 import { SignIn } from "./components/SignIn";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Join } from "./components/Join";
 import { configureSite, pageLink } from "./lib/site";
 import { signInSettings } from "./lib/site";
@@ -25,24 +26,24 @@ function loadConfig(): Promise<PageConfig> {
     .catch(() => ({}));
 }
 
-async function renderPage(page: ReactElement, config: PageConfig) {
-  if (config.sentry?.dsn) {
-    try {
-      const { startSentry } = await import("./lib/sentry");
-      const ErrorBoundary = startSentry(config.sentry);
-      page = <ErrorBoundary>{page}</ErrorBoundary>;
-    } catch {
-      // The page can still render if the monitoring chunk fails to load.
-    }
+async function loadMonitoring(config: BrowserSentryConfig) {
+  try {
+    const { startSentry } = await import("./lib/sentry");
+    return startSentry(config);
+  } catch {
+    // Monitoring is optional when the chunk or SDK fails.
+    return undefined;
   }
-  root.render(<StrictMode>{page}</StrictMode>);
 }
 
 const joinPath = location.pathname.startsWith("/join/") ? location.pathname : null;
 if (joinPath) {
   const returnedFromSignIn = new URLSearchParams(location.search).get("signed-in") === "1";
   history.replaceState(null, "", "/?join");
-  void loadConfig().then(config => renderPage(<Join path={joinPath} returnedFromSignIn={returnedFromSignIn} />, config));
+  root.render(<StrictMode><Join path={joinPath} returnedFromSignIn={returnedFromSignIn} /></StrictMode>);
+  void loadConfig().then(config => {
+    if (config.sentry?.dsn) return loadMonitoring(config.sentry);
+  });
 } else {
   void loadConfig()
     .then(config => {
@@ -53,6 +54,11 @@ if (joinPath) {
       pageLink.path = pageLinkPath(config);
       const signIn = !!config.auth && !config.user;
       const page = signIn ? <SignIn /> : config.signIn === "linear" && config.user && !config.readOnly ? <ServiceApp createProjects={config.createProjects} /> : <App createProjects={config.createProjects} />;
-      return renderPage(page, config);
+      const monitoring = config.sentry?.dsn ? loadMonitoring(config.sentry) : undefined;
+      root.render(<StrictMode>{monitoring
+        ? <ErrorBoundary onError={(error, info) => { void monitoring.then(report => report?.(error, info)); }}>
+            {page}
+          </ErrorBoundary>
+        : page}</StrictMode>);
     });
 }

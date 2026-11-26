@@ -1,5 +1,5 @@
-import { captureMessage, globalHandlersIntegration, init } from "@sentry/react";
-import { ErrorBoundary } from "../components/ErrorBoundary";
+import { captureMessage, captureReactException, globalHandlersIntegration, init } from "@sentry/react";
+import type { ErrorInfo } from "react";
 import type { ErrorEvent } from "@sentry/react";
 
 export interface BrowserSentryConfig {
@@ -10,7 +10,11 @@ export interface BrowserSentryConfig {
 }
 
 const testMessage = "work-graph sentry test";
-const errorTypes = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError"]);
+const boundaryMechanism = "auto.function.react.error_boundary";
+const captureMechanisms = new Set([
+  boundaryMechanism, "onerror", "onunhandledrejection",
+  "auto.browser.global_handlers.onerror", "auto.browser.global_handlers.onunhandledrejection",
+]);
 
 function assetPath(url?: string) {
   return url?.split(/[?#]/, 1)[0].match(/\/assets\/[a-zA-Z][\w.-]*-[\w-]{8}\.js$/)?.[0];
@@ -18,9 +22,13 @@ function assetPath(url?: string) {
 
 // Page URLs, breadcrumbs, exception messages and source context can contain private data.
 export function scrubEvent(event: ErrorEvent): ErrorEvent {
-  const values = event.exception?.values?.map(({ type, stacktrace }) => ({
-    type: type && errorTypes.has(type) ? type : "Error",
+  const values = event.exception?.values?.map(({ type, stacktrace, mechanism }) => ({
+    type: type && (type === "DOMException" || /^[A-Z][A-Za-z]{0,40}Error$/.test(type)) ? type : "Error",
     value: "Page error",
+    ...(mechanism && { mechanism: {
+      type: captureMechanisms.has(mechanism.type) ? mechanism.type : "generic",
+      ...(typeof mechanism.handled === "boolean" && { handled: mechanism.handled }),
+    } }),
     stacktrace: { frames: stacktrace?.frames?.map(({ filename, lineno, colno }) => ({
       filename: assetPath(filename) ?? "<source>",
       lineno, colno,
@@ -47,5 +55,7 @@ export function startSentry({ dsn, environment, release, test }: BrowserSentryCo
     transportOptions: { fetchOptions: { credentials: "omit", referrerPolicy: "no-referrer" } },
   });
   if (test === true) captureMessage(testMessage, "info");
-  return ErrorBoundary;
+  return (error: unknown, info: ErrorInfo) => captureReactException(error, info, {
+    mechanism: { type: boundaryMechanism, handled: true },
+  });
 }

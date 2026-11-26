@@ -244,7 +244,12 @@ test("the inbox keeps questions in scope while searching projects", async ({ pag
     const send = (type: string, id: string, payload: unknown) =>
       socket.send(JSON.stringify({ type, project: { workspace: "default", id }, payload }));
     send("asks", "fixture", { asks: [ask] });
-    send("presence", "extra-0", { queued: 0, coordinators: [] });
+    send("agents", "extra-0", { at: now.toISOString(), agents: [
+      { id: "coordinator", role: "coordinator", key: null, issue: null, agent: "coordinator",
+        state: "working", title: "", said: "", at: now.toISOString() },
+      { id: "build-worker", role: "worker", key: "build", issue: "WG-90", agent: "worker",
+        state: "working", title: "Check build", said: "", at: old },
+    ] });
     send("agents", "extra-3", { at: now.toISOString(), agents: [{
       id: "prompt", role: "worker", key: "example", issue: "WG-93", agent: "worker",
       state: "waiting", title: "Waiting for a decision", said: "Which build?", at: now.toISOString(),
@@ -267,9 +272,9 @@ test("the inbox keeps questions in scope while searching projects", async ({ pag
   const inbox = page.locator(".inbox");
   const filters = inbox.getByRole("group", { name: "Inbox category" });
   const questions = filters.getByRole("button", { name: "Questions 3" });
-  const stalls = filters.getByRole("button", { name: "Possible stalls 2" });
+  const stalls = filters.getByRole("button", { name: "Possible stalls 1" });
   const actions = filters.getByRole("button", { name: "Other actions 1" });
-  await expect(inbox.locator(".inbox-open").first()).toContainText(/No agent view|No coordinator/);
+  await expect(inbox.locator(".inbox-open").first()).toContainText("Worker silent");
   await page.getByRole("searchbox").fill("Extra project 9");
   await expect(page.locator(".ov-row")).toHaveCount(1);
   await expect(page.locator(".ov-row")).toContainText(/Last activity.*30 min ago/);
@@ -284,7 +289,7 @@ test("the inbox keeps questions in scope while searching projects", async ({ pag
   const reply = inbox.getByRole("textbox", { name: "Reply to the worker" });
   await reply.fill("Go ahead with the draft.");
   await stalls.click();
-  await expect(inbox.getByText("No coordinator", { exact: true })).toBeVisible();
+  await expect(inbox.getByRole("button", { name: /WG-90.*Worker silent/ })).toBeVisible();
   await expect(reply).toBeHidden();
   await actions.click();
   await expect(inbox.getByText("Merge the change", { exact: true })).toBeVisible();

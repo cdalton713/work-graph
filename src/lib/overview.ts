@@ -27,6 +27,9 @@ export interface ProjectSummary {
   running: number; review: number;
   /** Not started, and no blocker holds it back. */
   ready: number;
+  paused?: boolean;
+  liveJobs?: { identifier: string; title: string; state: string; startedAt: string | null }[];
+  nextLines?: NonNullable<ReturnType<typeof parseStatus>>["lines"];
   /** What `wg next` last said about the effort, and when. */
   effort: { status: string; at: string | null } | null;
   freshness: { state: NonNullable<ReturnType<typeof statusTiming>>["state"]; ran: string | null } | null;
@@ -64,6 +67,11 @@ export function summarize(data: GraphData, workspace: string, now = Date.now(), 
   const counts = [...tally].map(([status, c]) => ({ status, ...c }))
     .sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status));
   const effort = parseStatus(data.status?.content);
+  const nextLines = effort?.lines.filter(({ level }) => level === "wait" || level === "do") ?? [];
+  const liveJobs = graph.nodes.flatMap(({ card, issue }) =>
+    !issue.external && card?.job && card.state && ["creating", "starting", "running"].includes(card.state)
+      ? [{ identifier: issue.identifier, title: issue.title, state: card.state, startedAt: card.started_at ?? null }]
+      : []);
   const hasCards = graph.nodes.some((n) => n.card && !n.issue.external);
   const timing = hasCards ? statusTiming(effort, true, data.status?.updatedAt ?? null, now) : null;
   const updated = data.issues.map((i) => i.updatedAt).sort().at(-1) ?? null;
@@ -77,6 +85,9 @@ export function summarize(data: GraphData, workspace: string, now = Date.now(), 
     running: groups.get("running")?.length ?? 0,
     review: groups.get("review")?.length ?? 0,
     ready: groups.get("next")?.length ?? 0,
+    paused: nextLines.some(({ level, text }) => level === "wait" && text.split(" ", 1)[0] === "paused"),
+    liveJobs,
+    nextLines,
     effort: effort ? { status: effort.status, at: effort.at ?? data.status?.updatedAt ?? null } : null,
     freshness: timing ? { state: timing.state, ran: effort?.ran ?? null } : null,
     updatedAt: updated,

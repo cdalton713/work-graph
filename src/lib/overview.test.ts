@@ -16,6 +16,16 @@ const graph = (issues: Issue[], status: GraphData["status"] = null): GraphData =
   ({ project: { id: "p", name: "P", url: "" }, milestones: [], issues, teams: {}, labels: [], viewerId: "me", status });
 
 describe("summarize", () => {
+  it("keeps the live job and the wait and action lines for a paused effort", () => {
+    const started_at = "2026-11-25T11:00:00Z";
+    const card = { id: "c", body: `**work-graph node card** \`page\`\n\n\`\`\`json\n${JSON.stringify({ wg: 1, job: "dispatch", state: "running", started_at })}\n\`\`\`` };
+    const lines = [{ level: "note", text: "wave 1" }, { level: "wait", text: "paused @effort -" }, { level: "do", text: "dispatch docs WG-2" }];
+    const status = { content: `\`\`\`json\n${JSON.stringify({ wg: 1, status: "wave 1", lines })}\n\`\`\``, updatedAt: started_at };
+    const node = { ...issue("1", { card }), identifier: "WG-1", teamKey: "WG" };
+    expect(summarize(graph([node, { ...issue("2", { card, external: true }), identifier: "WG-2", teamKey: "WG" }], status), "work"))
+      .toMatchObject({ paused: true, liveJobs: [{ identifier: "WG-1", title: "t1", state: "running", startedAt: started_at }], nextLines: lines.slice(1) });
+  });
+
   it("counts open dependents through a chain and fork, and only clears the last blocker", () => {
     const nodes = [
       issue("1", { state: state("Needs Ada", "started") }),

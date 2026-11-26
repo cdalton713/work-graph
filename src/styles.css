@@ -373,6 +373,7 @@ button.copy.is-copied { color: var(--lamp-done); }
 .ov-effort { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; min-width: 0; padding-left: 17px; font-size: 12px; }
 .ov-effort-mark { flex: none; font: 600 9px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-4); }
 .ov-effort-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); }
+.ov-effort-status.is-stalled { color: var(--lamp-stop); }
 .ov-age { font-size: 12px; text-align: right; white-space: nowrap; color: var(--ink-4); }
 .ov-age.is-warning { color: var(--lamp-running); }
 .ov-pr { display: inline-flex; align-items: baseline; gap: 6px; font: 11px var(--mono); color: var(--ink-3); }

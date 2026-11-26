@@ -142,6 +142,10 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const [overviewBusy, setOverviewBusy] = useState(false);
   const [overviewTick, setOverviewTick] = useState(0);
   const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const clock = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(clock);
+  }, []);
   // The build and the Linear budget of the server, with the overview poll. A failed status changes nothing.
   const [status, setStatus] = useState<ServerStatus | null>(null);
   useEffect(() => {

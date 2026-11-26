@@ -172,6 +172,9 @@ fn status() -> Value {
 struct Fixture {
     home: tempfile::TempDir,
     page: String,
+    human: String,
+    credential: HeaderValue,
+    project: (&'static str, &'static str),
     deny: RefCell<Option<String>>,
 }
 impl Fixture {
@@ -179,6 +182,9 @@ impl Fixture {
         Self {
             home: tempfile::tempdir().unwrap(),
             page: server.url.clone(),
+            human: "Tester".into(),
+            credential: HeaderValue::from_static("Bearer fixture"),
+            project: ("p", "Fixture"),
             deny: RefCell::new(None),
         }
     }
@@ -199,6 +205,13 @@ impl Fixture {
             self,
             Some(self),
         )
+        .and_then(|out| {
+            if out.status == 0 {
+                Ok(out.stdout)
+            } else {
+                Err(out.stderr)
+            }
+        })
     }
 }
 impl ConfigProvider for Fixture {
@@ -207,7 +220,7 @@ impl ConfigProvider for Fixture {
     fn resolve(&self, _: &str) -> Result<Settings> {
         Ok(Settings {
             page: Some(self.page.clone()),
-            human: "Tester".into(),
+            human: self.human.clone(),
             token_directory: self.dir().join("tokens"),
             workspaces: vec![("test".into(), "Test".into(), Some(self.page.clone()))],
         })
@@ -217,25 +230,49 @@ impl CredentialProvider for Fixture {
     type Error = String;
     fn credential(&self, _: &str, service: &str) -> Result<Option<Credential>> {
         assert_eq!(service, "page");
-        Ok(Some(Credential::new(HeaderValue::from_static(
-            "Bearer fixture",
-        ))))
+        Ok(Some(Credential::new(self.credential.clone())))
     }
 }
 struct Files(PathBuf);
+impl Files {
+    fn read_plan(&self, force: bool) -> Result<LocalEffort> {
+        let keymap = self.keymap()?;
+        let bytes = match fs::read(self.0.join("plan.json")) {
+            Ok(b) => Some(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.to_string()),
+        };
+        let plan = match bytes
+            .as_ref()
+            .map(|b| serde_json::from_slice(b))
+            .transpose()
+        {
+            Ok(Some(plan)) => plan,
+            _ if force && keymap["collab"]["settings"].is_object() => {
+                json!({"effort":keymap["collab"]["settings"]})
+            }
+            Ok(None) => Value::Null,
+            Err(e) => return Err(e.to_string()),
+        };
+        let sha = bytes.map(|b| format!("{:x}", Sha256::digest(b)));
+        Ok(LocalEffort { plan, keymap, sha })
+    }
+}
 impl LockedEffort for Files {
     fn read(&self) -> Result<LocalEffort> {
-        let bytes = fs::read(self.0.join("plan.json")).ok();
-        let plan = bytes
-            .as_deref()
-            .map(|b| serde_json::from_slice(b).unwrap())
-            .unwrap_or(Value::Null);
-        let sha = bytes.map(|b| format!("{:x}", Sha256::digest(b)));
-        let keymap = fs::read(self.0.join("keymap.json"))
-            .ok()
-            .map(|b| serde_json::from_slice(&b).unwrap())
-            .unwrap_or_else(|| json!({"nodes":{},"milestones":{}}));
-        Ok(LocalEffort { plan, keymap, sha })
+        self.read_plan(false)
+    }
+    fn read_forced(&self) -> Result<LocalEffort> {
+        self.read_plan(true)
+    }
+    fn keymap(&self) -> Result<Value> {
+        match fs::read(self.0.join("keymap.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(json!({"nodes":{},"milestones":{}}))
+            }
+            Err(e) => Err(e.to_string()),
+        }
     }
     fn save_keymap(&self, km: &Value) -> Result<()> {
         fs::write(self.0.join("keymap.json"), km.to_string()).map_err(|e| e.to_string())
@@ -247,7 +284,7 @@ impl LockedEffort for Files {
         prior: Option<&str>,
         heading: Option<&str>,
     ) -> Result<()> {
-        assert_eq!(self.read()?.sha.as_deref(), prior);
+        assert_eq!(self.read_forced()?.sha.as_deref(), prior);
         let bytes = serde_json::to_vec_pretty(plan).unwrap();
         let mut km = km.clone();
         km["collab"]["plan_sha"] = json!(format!("{:x}", Sha256::digest(&bytes)));
@@ -279,10 +316,26 @@ impl Collaboration for Fixture {
         self.allow("worktree")?;
         Ok((self.dir().into(), self.lock(self.dir())?))
     }
-    fn project_workspace(&self, team: &str, project: &str, name: &str) -> Result<String> {
-        assert_eq!((team, project, name), ("T", "p", "Fixture"));
+    fn project_workspace(
+        &self,
+        team: &str,
+        project: &str,
+        name: &str,
+        page: &str,
+        membership: &str,
+    ) -> Result<page::ProjectAccess> {
+        assert_eq!(page, self.page);
+        assert!(membership.starts_with("shared:"));
+        assert_eq!(team, "T");
+        assert_eq!((project, name), self.project);
         self.allow("team")?;
-        Ok("test".into())
+        if self.allow("access").is_err() {
+            return Ok(page::ProjectAccess::Unavailable {
+                setup: "Configure a key".into(),
+                has_key: true,
+            });
+        }
+        Ok(page::ProjectAccess::Workspace("test".into()))
     }
     fn verify_issue(&self, _: &str, project: &str, label: &str, id: Option<&str>) -> Result<()> {
         assert_eq!((project, label), ("p", "T-1"));
@@ -303,6 +356,29 @@ impl Collaboration for Fixture {
     fn verify_card(&self, _: &str, issue: &str, id: &str) -> Result<()> {
         assert_eq!((issue, id), ("issue", "card"));
         self.allow("card")
+    }
+    fn preflight(&self, path: &Path, scope: &str, _: &Value) -> Result<page::Output> {
+        assert!(path.join("PLAN.md").is_file());
+        assert_eq!(scope, "test");
+        Ok(page::Output {
+            stdout: "Preflight complete".into(),
+            status: if self.allow("preflight").is_ok() {
+                0
+            } else {
+                3
+            },
+            ..Default::default()
+        })
+    }
+    fn next(&self, _: &Path, _: &str, _: &Value) -> Result<page::Output> {
+        self.allow("next")?;
+        Ok(page::Output::success("Next task".into()))
+    }
+    fn normalize(&self, plan: &mut Value) -> Result<()> {
+        if plan.get("edges").is_none() {
+            plan["edges"] = json!([]);
+        }
+        Ok(())
     }
     fn normalize_and_check(&self, _: &mut Value) -> Result<()> {
         self.allow("plan")
@@ -606,4 +682,348 @@ fn current_plan_rebases_pending_mapping_after_conditional_write_conflict() {
     let requests = server.requests.lock().unwrap();
     assert!(requests[5].headers.contains("if-match: \"2\""));
     assert_eq!(requests[5].body["keymap"]["nodes"]["node"]["pr"], 123);
+}
+
+#[test]
+fn compiled_login_verifies_the_private_ca_and_matches_the_service_case() {
+    assert!(
+        Command::new("python3")
+            .args([
+                "-I",
+                "../tests/cli-parity/page_login.py",
+                env!("CARGO_BIN_EXE_wg-preview")
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+#[ignore = "started by the local Node page integration test"]
+fn node_page_commands_and_authorized_reconnect() {
+    let url = std::env::var("WG_TEST_PAGE_URL").unwrap();
+    let server = Server {
+        url: url.clone(),
+        requests: Default::default(),
+    };
+    let account = |human: &str, env: &str| {
+        let mut fixture = Fixture::new(&server);
+        fixture.human = human.into();
+        fixture.credential =
+            HeaderValue::from_str(&format!("Bearer {}", std::env::var(env).unwrap())).unwrap();
+        fixture.project = ("project", "Example");
+        fixture
+    };
+    let owner = account("Ada", "WG_TEST_OWNER");
+    let member = account("Grace", "WG_TEST_MEMBER");
+    let viewer = account("Pat", "WG_TEST_VIEWER");
+    let config = owner.dir().join("config.json");
+    fs::write(&config, json!({"page_url":url}).to_string()).unwrap();
+    let preview = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wg-preview"));
+        cmd.env_clear()
+            .env("HOME", owner.dir())
+            .env("WG_CONFIG", &config);
+        cmd
+    };
+    for (token, success) in [
+        (String::from("refused"), false),
+        (std::env::var("WG_TEST_OWNER").unwrap(), true),
+    ] {
+        let mut login = preview()
+            .args(["login", "--token-stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(login.stdin.take().unwrap(), "{token}").unwrap();
+        let result = login.wait_with_output().unwrap();
+        assert_eq!(result.status.success(), success);
+    }
+    assert!(preview().arg("logout").output().unwrap().status.success());
+    let mut seed = plan();
+    seed["effort"]["name"] = json!("Example");
+    seed["effort"]["workspace"] = json!("work");
+    seed["nodes"] = json!([]);
+    fs::write(owner.dir().join("plan.json"), seed.to_string()).unwrap();
+    Files(owner.dir().into())
+        .save_keymap(&json!({"project":{"id":"project"},"nodes":{},"milestones":{}}))
+        .unwrap();
+    assert_eq!(owner.run(&["share", "."]).unwrap(), "shared plan v1");
+    assert!(viewer.run(&["join"]).unwrap_err().contains("read-only"));
+    assert!(
+        member
+            .run(&["join"])
+            .unwrap()
+            .ends_with("Preflight complete\nNext task")
+    );
+    assert_eq!(member.run(&["pull", "."]).unwrap(), "plan v1 is current");
+    assert!(
+        member
+            .run(&["pull", ".", "--force"])
+            .unwrap()
+            .contains("plan v1 by Ada")
+    );
+    let shared_scope = Files(member.dir().into()).keymap().unwrap()["collab"]["workspace"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    member.run(&["leave", "."]).unwrap();
+    assert!(
+        Files(member.dir().into())
+            .keymap()
+            .unwrap()
+            .get("collab")
+            .is_none()
+    );
+
+    let settings = owner.resolve("").unwrap();
+    let hello = json!({"plan":"/fixture","session":"fixture","host":"loopback","wg":"1"});
+    let mut refused = page::link::Link::new(
+        &settings,
+        &url,
+        "work",
+        "project",
+        "bad",
+        hello.clone(),
+        Some(Credential::new(HeaderValue::from_static("Bearer refused"))),
+    )
+    .unwrap();
+    assert!(
+        refused
+            .send("progress", json!({"nodes":[]}))
+            .unwrap_err()
+            .contains("401")
+    );
+    let token = page::page_credential(&settings, &url, "test", true, &member).unwrap();
+    let mut link = page::link::Link::new(
+        &settings,
+        &url,
+        &shared_scope,
+        "project",
+        "fixture",
+        hello,
+        token,
+    )
+    .unwrap();
+    link.send("progress", json!({"nodes":[]})).unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end {
+        if let Some(message) = link.wait(Duration::from_millis(250)).unwrap()
+            && message["type"] == "command"
+            && message["payload"]["name"] == "pause"
+        {
+            return;
+        }
+    }
+    panic!("the page did not deliver the command after restart");
+}
+
+#[test]
+fn join_reports_selection_access_and_post_join_status() {
+    let mut options = status();
+    let mut other = options["workspaces"][0].clone();
+    other["id"] = json!("shared:def");
+    options["workspaces"].as_array_mut().unwrap().push(other);
+    let server = Server::new(vec![
+        (200, options),
+        (200, status()),
+        (200, published(1)),
+        (200, status()),
+        (200, published(1)),
+    ]);
+    let fixture = Fixture::new(&server);
+    let run = || page::run(&["join".into()], &fixture, &fixture, Some(&fixture)).unwrap();
+    let selection = run();
+    assert_eq!(selection.status, 2);
+    assert_eq!(
+        selection.stdout,
+        "Shared projects. Select one with --project:\n  shared:abc  Fixture by Owner (collaborator)\n  shared:def  Fixture by Owner (collaborator)"
+    );
+    *fixture.deny.borrow_mut() = Some("access".into());
+    let denied = run();
+    assert!(
+        denied
+            .stdout
+            .contains("/?workspace=shared%3Aabc&project=p and use Request access")
+    );
+    assert!(!fixture.dir().join("PLAN.md").exists());
+    *fixture.deny.borrow_mut() = Some("preflight".into());
+    let result = run();
+    assert_eq!(result.status, 3);
+    assert!(result.stdout.ends_with("Preflight complete"));
+    assert!(fixture.dir().join("PLAN.md").exists());
+}
+
+#[test]
+fn forced_pull_recovers_corrupt_plan_and_leave_only_needs_the_keymap() {
+    let server = Server::new(vec![
+        (200, status()),
+        (200, published(1)),
+        (200, published(2)),
+        (200, json!({"claims":[]})),
+    ]);
+    let fixture = Fixture::new(&server);
+    fixture.run(&["join"]).unwrap();
+    let path = fixture.dir().join("plan.json");
+    fs::write(&path, b"broken").unwrap();
+    assert!(fixture.run(&["pull", "."]).is_err());
+    assert!(
+        fixture
+            .run(&["pull", ".", "--force"])
+            .unwrap()
+            .contains("discarded local plan changes")
+    );
+    fs::write(&path, b"broken again").unwrap();
+    fixture.run(&["leave", "."]).unwrap();
+    assert_eq!(fs::read(path).unwrap(), b"broken again");
+    assert!(
+        Files(fixture.dir().into())
+            .keymap()
+            .unwrap()
+            .get("collab")
+            .is_none()
+    );
+}
+
+#[test]
+fn pull_reports_backup_and_preserves_raw_fields_and_setting_order() {
+    let mut remote = published(2);
+    remote["plan"]["effort"]["é"] = json!({"b":["é",2],"a":true});
+    let fixture = Fixture::new(&Server::new(vec![
+        (200, status()),
+        (200, published(1)),
+        (200, remote.clone()),
+        (200, remote),
+    ]));
+    fixture.run(&["join"]).unwrap();
+    let files = Files(fixture.dir().into());
+    let mut raw = files.read().unwrap().plan;
+    raw["effort"]["summary"] = json!("local");
+    fs::write(fixture.dir().join("plan.json"), raw.to_string()).unwrap();
+    let local = files.read().unwrap();
+    let sha = local.sha.unwrap();
+    let error = fixture.run(&["pull", "two words"]).unwrap_err();
+    assert!(error.contains("run wg pull 'two words' --force, and make your change again"));
+    let mut km = local.keymap;
+    km["collab"]["load_attempt"] = json!({"sha":sha,"payload":"other"});
+    files.save_keymap(&km).unwrap();
+    let output = fixture.run(&["pull", ".", "--accept-settings"]).unwrap();
+    let backup = format!("plan.conflict-{}.json", &sha[..12]);
+    assert!(output.starts_with(&format!("saved local plan edits in {backup}\n")));
+    assert_eq!(
+        fs::read_to_string(fixture.dir().join(backup)).unwrap(),
+        raw.to_string()
+    );
+    assert!(output.contains(r#"note effort.\u00e9 from Editor: accepted {"b": ["\u00e9", 2], "a": true} (local value was null)"#));
+}
+
+#[test]
+fn share_ignores_unset_run_fields_without_running_graph_validation() {
+    let server = Server::new(vec![(200, json!({"version":1}))]);
+    let fixture = Fixture::new(&server);
+    *fixture.deny.borrow_mut() = Some("plan".into());
+    fs::write(fixture.dir().join("plan.json"), plan().to_string()).unwrap();
+    let mut km = mapping();
+    km["run"] = json!({"nodes":{"node":{"pr":null,"branch":""}}});
+    Files(fixture.dir().into()).save_keymap(&km).unwrap();
+    fixture.run(&["share", "."]).unwrap();
+    let requests = server.requests.lock().unwrap();
+    let published = &requests[0].body["keymap"]["nodes"]["node"];
+    assert!(published.get("pr").is_none() && published.get("branch").is_none());
+}
+
+#[test]
+fn shared_credentials_reject_special_file_mode_bits() {
+    let server = Server::new(vec![]);
+    let fixture = Fixture::new(&server);
+    let settings = fixture.resolve("").unwrap();
+    fs::create_dir(&settings.token_directory).unwrap();
+    let port = server.url.rsplit(':').next().unwrap();
+    let path = settings
+        .token_directory
+        .join(format!("127.0.0.1_{port}-token"));
+    fs::write(&path, "saved\n").unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o1600)).unwrap();
+    assert!(
+        page::page_credential(&settings, &server.url, "test", true, &fixture)
+            .unwrap_err()
+            .contains("mode 600")
+    );
+}
+
+#[test]
+fn link_retries_service_unavailability_and_an_unplanned_disconnect() {
+    use tungstenite::Message;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let page = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let mut unavailable = listener.accept().unwrap().0;
+        let mut reader = BufReader::new(&unavailable);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+        unavailable.write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        drop(unavailable);
+        for n in [1, 2] {
+            let stream = listener.accept().unwrap().0;
+            // A polling call may return before an established link has a message.
+            // Its interval must not put a healthy handshake into backoff.
+            thread::sleep(Duration::from_millis(60));
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let hello: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(hello["type"], "hello");
+            ws.send(Message::text(json!({"v":1,"connection":n}).to_string()))
+                .unwrap();
+        }
+    });
+    let settings = Settings {
+        page: Some(page.clone()),
+        human: String::new(),
+        token_directory: PathBuf::new(),
+        workspaces: vec![],
+    };
+    let mut link =
+        page::link::Link::new(&settings, &page, "test", "p", "s", json!({}), None).unwrap();
+    assert!(link.wait(Duration::from_millis(5)).unwrap().is_none());
+    assert_eq!(
+        link.wait(Duration::from_secs(1)).unwrap().unwrap()["connection"],
+        1
+    );
+    assert_eq!(
+        link.wait(Duration::from_secs(8)).unwrap().unwrap()["connection"],
+        2
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn stalled_upgrade_uses_three_second_budget_and_wait_tolerates_refusal() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let page = format!("http://{}", listener.local_addr().unwrap());
+    let settings = Settings {
+        page: Some(page.clone()),
+        human: String::new(),
+        token_directory: PathBuf::new(),
+        workspaces: vec![],
+    };
+    let mut link =
+        page::link::Link::new(&settings, &page, "test", "p", "s", json!({}), None).unwrap();
+    let start = Instant::now();
+    assert!(
+        link.send("state", json!({}))
+            .unwrap_err()
+            .contains("timed out")
+    );
+    assert!((Duration::from_secs(2)..Duration::from_secs(5)).contains(&start.elapsed()));
+    drop(listener);
+    let mut link =
+        page::link::Link::new(&settings, &page, "test", "p", "s", json!({}), None).unwrap();
+    assert!(link.wait(Duration::from_millis(50)).unwrap().is_none());
 }

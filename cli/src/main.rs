@@ -22,9 +22,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         return match wg_preview::page::preview(&args) {
-            Ok(message) => {
-                println!("{message}");
-                ExitCode::SUCCESS
+            Ok(out) => {
+                if !out.stdout.is_empty() {
+                    println!("{}", out.stdout);
+                }
+                if !out.stderr.is_empty() {
+                    eprintln!("{}", out.stderr);
+                }
+                ExitCode::from(out.status)
             }
             Err(error) => {
                 eprintln!("{error}");

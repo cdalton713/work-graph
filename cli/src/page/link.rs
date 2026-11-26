@@ -1,17 +1,20 @@
 //! A coordinator drives this blocking connection with send and wait.
 use super::{Result, Settings, auth};
 use crate::Credential;
+use futures_util::{SinkExt, StreamExt};
+use reqwest_websocket::{Message, RequestBuilderExt, WebSocket};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    io::ErrorKind,
-    net::{TcpStream, ToSocketAddrs},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tungstenite::{Error, Message, WebSocket, client::IntoClientRequest, stream::MaybeTlsStream};
+use tokio::{
+    runtime::{Builder, Runtime},
+    time::timeout,
+};
 
-type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
+const OPEN_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct Link {
     url: url::Url,
@@ -20,7 +23,9 @@ pub struct Link {
     session: String,
     hello: Value,
     replay: BTreeMap<String, Value>,
-    socket: Option<Socket>,
+    socket: Option<WebSocket>,
+    runtime: Runtime,
+    http: reqwest::Client,
     retry_at: Instant,
     opened: Instant,
     quick_closes: u32,
@@ -53,6 +58,14 @@ impl Link {
         ]);
         let now = Instant::now();
         Ok(Self {
+            runtime: Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "cannot start link runtime")?,
+            http: super::http_builder()?
+                .http1_only()
+                .build()
+                .map_err(|_| "cannot initialize link transport")?,
             url,
             credential,
             project: project.into(),
@@ -72,79 +85,49 @@ impl Link {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        Message::text(json!({"v":1,"type":kind,"id":format!("{}-{ticks}",self.session),
+        Message::Text(json!({"v":1,"type":kind,"id":format!("{}-{ticks}",self.session),
             "project":{"workspace":"","id":self.project},"at":chrono::Utc::now().to_rfc3339(),"payload":payload}).to_string())
     }
-    fn open(&self, deadline: Instant) -> Result<Socket> {
-        let host = self
-            .url
-            .host_str()
-            .ok_or("invalid link host")?
-            .trim_matches(['[', ']']);
-        let port = self
-            .url
-            .port_or_known_default()
-            .ok_or("invalid link port")?;
-        let addresses: Vec<_> = (host, port)
-            .to_socket_addrs()
-            .map_err(|_| "cannot resolve link host")?
-            .collect();
+    async fn open(&self) -> Result<WebSocket> {
         for attempt in 0..4 {
-            let stream = addresses
-                .iter()
-                .find_map(|addr| {
-                    TcpStream::connect_timeout(
-                        addr,
-                        deadline.saturating_duration_since(Instant::now()),
-                    )
-                    .ok()
-                })
-                .ok_or("link connection failed")?;
-            let budget = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or("link timed out")?;
-            stream
-                .set_read_timeout(Some(budget))
-                .and_then(|_| stream.set_write_timeout(Some(budget)))
-                .map_err(|_| "cannot set link timeout")?;
-            let mut req = self
-                .url
-                .as_str()
-                .into_client_request()
-                .map_err(|_| "invalid link URL")?;
-            if let Some(value) = &self.credential {
-                req.headers_mut()
-                    .insert("Authorization", value.clone().into_header());
+            let mut request = self.http.get(self.url.clone());
+            if let Some(token) = &self.credential {
+                request = request.header("Authorization", token.clone().into_header());
             }
             let config =
                 tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(1 << 22));
-            let mut ws = match tungstenite::client_tls_with_config(req, stream, Some(config), None)
-            {
-                Ok((ws, _)) => ws,
-                Err(tungstenite::HandshakeError::Failure(Error::Http(r))) => {
-                    let pause = super::retry_delay(r.headers());
-                    if r.status().as_u16() == 503
-                        && attempt < 3
-                        && Instant::now() + pause < deadline
-                    {
-                        thread::sleep(pause);
-                        continue;
-                    }
-                    return Err(format!("link answered HTTP {}", r.status().as_u16()));
-                }
-                Err(_) => return Err("link handshake failed".into()),
-            };
+            let response = request
+                .upgrade()
+                .web_socket_config(config)
+                .send()
+                .await
+                .map_err(|_| "link connection failed")?;
+            if response.status().as_u16() == 503 && attempt < 3 {
+                let pause = super::retry_delay(response.headers());
+                drop(response);
+                tokio::time::sleep(pause).await;
+                continue;
+            }
+            if response.status().as_u16() != 101 {
+                return Err(format!("link answered HTTP {}", response.status().as_u16()));
+            }
+            let mut ws = response
+                .into_websocket()
+                .await
+                .map_err(|_| "link handshake failed")?;
             ws.send(self.frame("hello", &self.hello))
+                .await
                 .map_err(|_| "cannot send hello")?;
             for (kind, data) in &self.replay {
                 ws.send(self.frame(kind, data))
+                    .await
                     .map_err(|_| "cannot replay link state")?;
             }
             return Ok(ws);
         }
         unreachable!()
     }
-    fn connect(&mut self, deadline: Instant) -> Result<()> {
+    fn connect(&mut self) -> Result<()> {
         if self.socket.is_some() {
             return Ok(());
         }
@@ -152,7 +135,11 @@ impl Link {
         if now < self.retry_at {
             return Err("link reconnect pending".into());
         }
-        match self.open(deadline.min(now + Duration::from_secs(10))) {
+        let opened = self
+            .runtime
+            .block_on(async { timeout(OPEN_TIMEOUT, self.open()).await })
+            .unwrap_or_else(|_| Err("link timed out".into()));
+        match opened {
             Ok(ws) => {
                 self.opened = Instant::now();
                 self.socket = Some(ws);
@@ -201,24 +188,23 @@ impl Link {
         if replayed {
             self.replay.insert(kind.into(), payload.clone());
         }
-        self.connect(Instant::now() + Duration::from_secs(10))?;
+        self.connect()?;
         if !(fresh && replayed) {
             let msg = self.frame(kind, &payload);
-            if self
-                .socket
-                .as_mut()
-                .ok_or("link closed")?
-                .send(msg)
-                .is_err()
-            {
+            let ws = self.socket.as_mut().ok_or("link closed")?;
+            if !matches!(
+                self.runtime
+                    .block_on(async { timeout(OPEN_TIMEOUT, ws.send(msg)).await }),
+                Ok(Ok(()))
+            ) {
                 self.disconnected(false);
                 return Err("link send failed".into());
             }
         }
         Ok(())
     }
-    pub fn wait(&mut self, timeout: Duration) -> Result<Option<Value>> {
-        let end = Instant::now() + timeout;
+    pub fn wait(&mut self, duration: Duration) -> Result<Option<Value>> {
+        let end = Instant::now() + duration;
         while Instant::now() < end {
             if self.socket.is_none() && self.retry_at > Instant::now() {
                 thread::sleep(
@@ -228,40 +214,40 @@ impl Link {
                 );
                 continue;
             }
-            self.connect(end)?;
-            let ws = self.socket.as_mut().ok_or("link closed")?;
-            let stream = match ws.get_ref() {
-                MaybeTlsStream::Plain(stream) => stream,
-                MaybeTlsStream::Rustls(tls) => &tls.sock,
-                _ => return Err("unsupported link transport".into()),
-            };
+            // A short polling interval must not shorten the handshake or start a false backoff.
+            if self.connect().is_err() {
+                continue;
+            }
+            let ws = self.socket.as_mut().expect("connected link");
             let Some(left) = end.checked_duration_since(Instant::now()) else {
                 break;
             };
-            stream
-                .set_read_timeout(Some(left))
-                .map_err(|_| "cannot set link timeout")?;
-            match ws.read() {
-                Ok(Message::Text(msg)) => {
-                    if let Ok(value) = serde_json::from_str::<Value>(&msg)
+            match self
+                .runtime
+                .block_on(async { timeout(left, ws.next()).await })
+            {
+                Err(_) => break,
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    if let Ok(value) = serde_json::from_str::<Value>(&text)
                         && value["v"] == 1
                     {
                         return Ok(Some(value));
                     }
                 }
-                Ok(Message::Close(reason)) => {
-                    let planned = reason.is_some_and(|f| matches!(u16::from(f.code), 1012 | 4001));
-                    let _ = ws.flush();
-                    self.disconnected(planned);
+                Ok(Some(Ok(Message::Close { code, .. }))) => {
+                    self.disconnected(matches!(u16::from(code), 1012 | 4001))
                 }
-                Ok(Message::Ping(_)) => ws.flush().map_err(|_| "cannot send pong")?,
-                Ok(_) => {}
-                Err(Error::Io(e))
-                    if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
-                {
-                    return Ok(None);
+                Ok(Some(Ok(Message::Ping(_)))) => {
+                    if !matches!(
+                        self.runtime
+                            .block_on(async { timeout(left, ws.flush()).await }),
+                        Ok(Ok(()))
+                    ) {
+                        self.disconnected(false);
+                    }
                 }
-                Err(_) => self.disconnected(false),
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(_)) | None) => self.disconnected(false),
             }
         }
         Ok(None)

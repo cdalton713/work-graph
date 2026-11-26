@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub struct LocalEffort {
+    /// The parsed raw plan.json. Preserve field order and all original values for backups and pending writes.
     pub plan: Value,
     pub keymap: Value,
     /// SHA-256 of the exact plan.json bytes, before normalization.
@@ -15,6 +16,11 @@ pub struct LocalEffort {
 pub trait LockedEffort {
     /// Recover an interrupted pair first. For a new join reject dirty worktrees and existing plan files.
     fn read(&self) -> Result<LocalEffort>;
+    /// Read only keymap.json. Leave must work with an absent or damaged plan.json.
+    fn keymap(&self) -> Result<Value>;
+    /// For forced pull with saved collaboration settings, recover an unreadable plan as
+    /// {"effort": settings}. Retain the exact prior digest if the file exists.
+    fn read_forced(&self) -> Result<LocalEffort>;
     fn save_keymap(&self, keymap: &Value) -> Result<()>;
     /// Journal and replace the plan/keymap pair. Create PLAN.md only for a new join.
     fn save_pair(
@@ -27,6 +33,15 @@ pub trait LockedEffort {
     fn backup_conflict(&self, sha: &str, plan: &Value) -> Result<()>;
 }
 
+pub enum ProjectAccess {
+    Workspace(String),
+    /// The provider supplies the configuration and credential instructions for this installation.
+    Unavailable {
+        setup: String,
+        has_key: bool,
+    },
+}
+
 pub trait Collaboration {
     fn lock(&self, dir: &Path) -> Result<Box<dyn LockedEffort + '_>>;
     fn join_worktree(
@@ -36,7 +51,18 @@ pub trait Collaboration {
         membership: &str,
     ) -> Result<(PathBuf, Box<dyn LockedEffort + '_>)>;
     /// Resolve team access and verify the project id and name with the user's own Linear credential.
-    fn project_workspace(&self, team: &str, project: &str, name: &str) -> Result<String>;
+    fn project_workspace(
+        &self,
+        team: &str,
+        project: &str,
+        name: &str,
+        page: &str,
+        membership: &str,
+    ) -> Result<ProjectAccess>;
+    /// After the join files are committed and unlocked, run preflight, then next on success.
+    fn preflight(&self, path: &Path, workspace: &str, plan: &Value) -> Result<Output>;
+    fn next(&self, path: &Path, workspace: &str, plan: &Value) -> Result<Output>;
+    fn normalize(&self, plan: &mut Value) -> Result<()>;
     fn verify_issue(
         &self,
         workspace: &str,
@@ -51,6 +77,16 @@ pub trait Collaboration {
     fn normalize_and_check(&self, plan: &mut Value) -> Result<()>;
 }
 
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(v) => *v,
+        Value::String(s) => !s.is_empty(),
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
+}
 fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key]
         .as_str()
@@ -203,7 +239,7 @@ fn validate(
             .as_array()
             .and_then(|rows| rows.iter().find(|n| n["key"] == key));
         for k in ["eng", "issue"] {
-            if !node[k].is_null() && old.and_then(|n| n.get(k)) != Some(&node[k]) {
+            if truthy(&node[k]) && old.and_then(|n| n.get(k)) != Some(&node[k]) {
                 stores.verify_issue(workspace, project, field(node, k)?, None)?;
             }
         }
@@ -255,7 +291,7 @@ fn validate(
     }
     if let Some(doc) = remote.get("status_doc") {
         obj(doc)?;
-        if doc.get("id").is_some() && doc["id"] != local.keymap["status_doc"]["id"] {
+        if truthy(&doc["id"]) && doc["id"] != local.keymap["status_doc"]["id"] {
             stores.verify_document(workspace, project, field(doc, "id")?)?;
         }
     }
@@ -319,14 +355,15 @@ fn connect<K: CredentialProvider<Error = String>>(
 ) -> Result<Page> {
     let raw = field(collab, "page")?;
     let mut page = Page::new(settings, Some(raw))?;
-    auth::authorize(
-        &mut page,
+    let credential = page_credential(
         settings,
         raw,
         scope,
         field(collab, "workspace")?.starts_with("shared:"),
         credentials,
-    )?;
+    )?
+    .ok_or("no page token; run wg login for the page")?;
+    page.token = Some(credential.into_header());
     Ok(page)
 }
 
@@ -338,7 +375,7 @@ pub(super) fn run<
     config: &C,
     credentials: &K,
     stores: &dyn Collaboration,
-) -> Result<String> {
+) -> Result<Output> {
     let dir = match &command {
         Command::Join {
             page_url,
@@ -358,8 +395,15 @@ pub(super) fn run<
         _ => unreachable!(),
     };
     let lock = stores.lock(dir)?;
-    let mut local = lock.read()?;
     let default = config.resolve("")?;
+    if matches!(command, Command::Leave { .. }) {
+        return leave(lock.as_ref(), &default, credentials).map(Output::success);
+    }
+    let mut local = if matches!(command, Command::Pull { force: true, .. }) {
+        lock.read_forced()?
+    } else {
+        lock.read()?
+    };
     let scope = local.plan["effort"]["workspace"]
         .as_str()
         .or_else(|| default.workspaces.first().map(|w| w.0.as_str()))
@@ -370,21 +414,22 @@ pub(super) fn run<
     match command {
         Command::Share { .. } => {
             if collab.is_object() {
-                return Ok("the effort is already shared".into());
+                return Ok(Output::success("the effort is already shared".into()));
             }
             let project = field(&local.keymap["project"], "id")
                 .map_err(|_| "run wg load --apply before wg share")?;
-            stores.normalize_and_check(&mut local.plan)?;
+            stores.normalize(&mut local.plan)?;
             let effort = &local.plan["effort"];
             let mut c = json!({"page":settings.page,"workspace":scope,"project":project,"name":field(effort,"name")?,"settings":self::settings(effort)?});
             let page = connect(&settings, credentials, &c, &scope)?;
             if let Some(rows) = local.keymap["run"]["nodes"].as_object().cloned() {
                 for (key, row) in rows {
                     if local.keymap["nodes"].get(&key).is_some() {
-                        extend(
-                            &mut local.keymap["nodes"][&key],
-                            &select(&row, &["branch", "pr"]),
-                        )?;
+                        for k in ["branch", "pr"] {
+                            if truthy(&row[k]) {
+                                local.keymap["nodes"][&key][k] = row[k].clone();
+                            }
+                        }
                     }
                 }
             }
@@ -402,44 +447,7 @@ pub(super) fn run<
             c["remote_settings"] = c["settings"].clone();
             local.keymap["collab"] = c;
             lock.save_keymap(&local.keymap)?;
-            Ok(format!("shared plan v{version}"))
-        }
-        Command::Leave { .. } => {
-            if !collab["workspace"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("shared:"))
-            {
-                return Err("This worktree has no collaborator record.".into());
-            }
-            let claims = (|| {
-                let page = connect(&default, credentials, &collab, "")?;
-                let answer =
-                    json_response(project_request(&page, &collab, Method::GET, &["claims"])?)?;
-                for claim in array(&answer, "claims")? {
-                    if claim["mine"] == true {
-                        let result = response(project_request(
-                            &page,
-                            &collab,
-                            Method::DELETE,
-                            &["claims", field(claim, "node")?],
-                        )?);
-                        if !matches!(result, Ok((204 | 200 | 404, _))) {
-                            eprintln!("warn: could not release claim");
-                        }
-                    }
-                }
-                Ok::<_, String>(())
-            })();
-            if claims.is_err() {
-                eprintln!("warn: could not list claims");
-            }
-            local
-                .keymap
-                .as_object_mut()
-                .ok_or("invalid keymap")?
-                .remove("collab");
-            lock.save_keymap(&local.keymap)?;
-            Ok("Removed the local collaboration record. End your membership on the page.".into())
+            Ok(Output::success(format!("shared plan v{version}")))
         }
         Command::Pull {
             force,
@@ -456,12 +464,74 @@ pub(super) fn run<
                 lock.as_ref(),
                 local,
                 &scope,
-                force,
-                accept_settings,
+                PullOptions {
+                    force,
+                    accept: accept_settings,
+                    dir,
+                },
             )
+            .map(Output::success)
         }
         _ => unreachable!(),
     }
+}
+
+fn leave<K: CredentialProvider<Error = String>>(
+    lock: &dyn LockedEffort,
+    default: &Settings,
+    credentials: &K,
+) -> Result<String> {
+    let mut keymap = lock.keymap()?;
+    let collab = &keymap["collab"];
+    if !collab["workspace"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("shared:"))
+    {
+        return Err("This worktree has no collaborator record.".into());
+    }
+    let claims = (|| {
+        let page = connect(default, credentials, collab, "")?;
+        let answer = json_response(project_request(&page, collab, Method::GET, &["claims"])?)?;
+        for claim in array(&answer, "claims")? {
+            if claim["mine"] == true {
+                let result = response(project_request(
+                    &page,
+                    collab,
+                    Method::DELETE,
+                    &["claims", field(claim, "node")?],
+                )?);
+                if !matches!(result, Ok((204 | 200 | 404, _))) {
+                    eprintln!("warn: could not release claim");
+                }
+            }
+        }
+        Ok::<_, String>(())
+    })();
+    if claims.is_err() {
+        eprintln!("warn: could not list claims");
+    }
+    keymap
+        .as_object_mut()
+        .ok_or("invalid keymap")?
+        .remove("collab");
+    lock.save_keymap(&keymap)?;
+    Ok("Removed the local collaboration record. End your membership on the page.".into())
+}
+
+fn display(s: &str) -> String {
+    use unicode_general_category::{GeneralCategory::*, get_general_category};
+    s.chars()
+        .filter(|c| {
+            !matches!(
+                get_general_category(*c),
+                Control | Format | Surrogate | LineSeparator | ParagraphSeparator
+            )
+        })
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(120)
+        .collect::<String>()
 }
 
 fn join<K: CredentialProvider<Error = String>>(
@@ -471,13 +541,17 @@ fn join<K: CredentialProvider<Error = String>>(
     explicit: Option<&str>,
     selection: Option<&str>,
     repo: &Path,
-) -> Result<String> {
+) -> Result<Output> {
     let raw = explicit
         .or(settings.page.as_deref())
-        .ok_or("give wg join the page URL")?
+        .ok_or("Give wg join the page URL. Open the collab link in a browser first.")?
         .trim_end_matches('/');
     let mut page = Page::new(settings, Some(raw))?;
-    auth::authorize(&mut page, settings, raw, "", true, credentials)?;
+    let credential = page_credential(settings, raw, "", true, credentials)?.ok_or_else(|| {
+        let origin=page.url.origin().ascii_serialization();
+        format!("Open the collab link in a browser, sign in, and press Join. Make a coordinator token in Settings and run wg login {origin}.")
+    })?;
+    page.token = Some(credential.into_header());
     let status = token_json(&page, "/api/status")?;
     let mut members = vec![];
     for row in array(&status, "workspaces")? {
@@ -496,6 +570,9 @@ fn join<K: CredentialProvider<Error = String>>(
             members.push(row);
         }
     }
+    if members.is_empty() {
+        return Err("Open the collab link in a browser and press Join first.".into());
+    }
     if let Some(choice) = selection {
         if members.iter().any(|r| r["id"] == choice) {
             members.retain(|r| r["id"] == choice);
@@ -509,26 +586,40 @@ fn join<K: CredentialProvider<Error = String>>(
     }
     let row = match members.as_slice() {
         [row] => *row,
-        [] => {
-            return Err(
-                "no matching shared project; open the collab link and press Join first".into(),
-            );
-        }
+        [] => return Err(
+            "No shared project with that name. Run wg join without --project to see your projects."
+                .into(),
+        ),
         many => {
-            return Err(format!(
-                "Select one shared project with --project: {}",
-                many.iter()
-                    .filter_map(|r| r["id"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            let mut lines = vec!["Shared projects. Select one with --project:".to_owned()];
+            for row in many {
+                lines.push(format!(
+                    "  {}  {} by {} ({})",
+                    field(row, "id")?,
+                    display(field(row, "name")?),
+                    display(field(row, "owner")?),
+                    display(field(row, "role")?)
+                ));
+            }
+            return Ok(Output {
+                stdout: lines.join("\n"),
+                stderr: "Select one shared project by its id.".into(),
+                status: 2,
+            });
         }
     };
     if row["role"] != "collaborator" {
         return Err("A read-only member cannot run wg on this project.".into());
     }
     if status["human"] != settings.human {
-        return Err("page account differs from config human".into());
+        return Err(format!(
+            "page name {} differs from config human {}",
+            status["human"]
+                .as_str()
+                .map(|s| format!("'{}'", display(s)))
+                .unwrap_or_else(|| "None".into()),
+            format_args!("'{}'", settings.human)
+        ));
     }
     let project = field(row, "projectId")?;
     let name = field(row, "name")?;
@@ -546,7 +637,30 @@ fn join<K: CredentialProvider<Error = String>>(
     {
         return Err("invalid shared workspace".into());
     }
-    let scope = stores.project_workspace(field(wire, "team")?, project, name)?;
+    let scope = match stores.project_workspace(
+        field(wire, "team")?,
+        project,
+        name,
+        raw,
+        membership,
+    )? {
+        ProjectAccess::Workspace(scope) => scope,
+        ProjectAccess::Unavailable { mut setup, has_key } => {
+            if has_key {
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("workspace", membership)
+                    .append_pair("project", project)
+                    .finish();
+                if !setup.is_empty() {
+                    setup.push('\n');
+                }
+                setup.push_str(&format!(
+                    "Open {raw}/?{query} and use Request access if your key cannot read the team."
+                ));
+            }
+            return Ok(Output{stdout:setup,status:2,stderr:"Set up your own Linear key with access to the team and project, then run wg join again.".into()});
+        }
+    };
     plan["effort"] = select(wire, &["name", "summary", "slug", "team"]);
     plan["effort"]["workspace"] = json!(scope);
     let empty = LocalEffort {
@@ -565,21 +679,6 @@ fn join<K: CredentialProvider<Error = String>>(
     if existing.sha.is_some() {
         return Err("the coordinator worktree already has plan files".into());
     }
-    let display = |s: &str| {
-        use unicode_general_category::{GeneralCategory::*, get_general_category};
-        s.chars()
-            .filter(|c| {
-                !matches!(
-                    get_general_category(*c),
-                    Control | Format | Surrogate | LineSeparator | ParagraphSeparator
-                )
-            })
-            .collect::<String>()
-            .trim()
-            .chars()
-            .take(120)
-            .collect::<String>()
-    };
     lock.save_pair(
         &plan,
         &km,
@@ -590,10 +689,33 @@ fn join<K: CredentialProvider<Error = String>>(
             display(field(row, "owner")?)
         )),
     )?;
-    Ok(format!(
+    drop(lock);
+    let mut output = Output::success(format!(
         "Joined {}\nThe owner keeps merge points, ship points, and deploys.",
         path.display()
-    ))
+    ));
+    for step in [Collaboration::preflight, Collaboration::next] {
+        let result = step(stores, &path, &scope, &plan).unwrap_or_else(|stderr| Output {
+            status: 2,
+            stderr,
+            ..Output::default()
+        });
+        if !result.stdout.is_empty() {
+            output.stdout.push('\n');
+            output.stdout.push_str(&result.stdout);
+        }
+        if !result.stderr.is_empty() {
+            if !output.stderr.is_empty() {
+                output.stderr.push('\n');
+            }
+            output.stderr.push_str(&result.stderr);
+        }
+        output.status = result.status;
+        if output.status != 0 {
+            break;
+        }
+    }
+    Ok(output)
 }
 
 fn merge_pending(
@@ -631,19 +753,28 @@ fn merge_pending(
 }
 
 // Python json.dumps(sort_keys=True) is part of the saved load_attempt fingerprint.
-fn python_json(v: &Value) -> String {
+pub(super) fn display_json(v: &Value) -> String {
+    json_text(v, false)
+}
+fn json_text(v: &Value, sort: bool) -> String {
     match v {
         Value::Array(rows) => format!(
             "[{}]",
-            rows.iter().map(python_json).collect::<Vec<_>>().join(", ")
+            rows.iter()
+                .map(|v| json_text(v, sort))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Value::Object(map) => {
-            let sorted: std::collections::BTreeMap<_, _> = map.iter().collect();
+            let mut entries: Vec<_> = map.iter().collect();
+            if sort {
+                entries.sort_by_key(|(k, _)| *k);
+            }
             format!(
                 "{{{}}}",
-                sorted
+                entries
                     .into_iter()
-                    .map(|(k, v)| format!("{}: {}", python_json(&json!(k)), python_json(v)))
+                    .map(|(k, v)| format!("{}: {}", json_text(&json!(k), sort), json_text(v, sort)))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -725,15 +856,32 @@ fn publish_pending(
     lock.save_keymap(&after)
 }
 
+struct PullOptions<'a> {
+    force: bool,
+    accept: bool,
+    dir: &'a Path,
+}
+fn shell_quote(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b))
+    {
+        return text.into_owned();
+    }
+    format!("'{}'", text.replace('\'', "'\"'\"'"))
+}
+
 fn pull(
     page: &Page,
     stores: &dyn Collaboration,
     lock: &dyn LockedEffort,
     local: LocalEffort,
     scope: &str,
-    force: bool,
-    accept: bool,
+    options: PullOptions,
 ) -> Result<String> {
+    let PullOptions { force, accept, dir } = options;
     let mut c = local.keymap["collab"].clone();
     if !c["settings"].is_object() {
         c["name"] = local.plan["effort"]["name"].clone();
@@ -777,26 +925,32 @@ fn pull(
         && c["load_attempt"]["payload"]
             == format!(
                 "{:x}",
-                Sha256::digest(python_json(
-                    &json!({"plan":wire,"keymap":shared(&data["keymap"])?})
+                Sha256::digest(json_text(
+                    &json!({"plan":wire,"keymap":shared(&data["keymap"])?}),
+                    true
                 ))
             );
     if dirty && !(force || saved || accept && *version == c["version"]) {
         return Err(format!(
-            "the server has plan v{version} by {writer}; save your change before running wg pull --force"
+            "the server has plan v{version} by {writer}; save your change, run wg pull {} --force, and make your change again",
+            shell_quote(dir)
         ));
     }
     let remote_settings = settings(&wire["effort"])?;
     let mut lines = vec![];
-    for (key, value) in obj(&remote_settings)? {
+    let ordered: std::collections::BTreeMap<_, _> = obj(&remote_settings)?.iter().collect();
+    for (key, value) in ordered {
         if c["settings"].get(key) != Some(value) {
+            let label = display_json(&json!(key));
+            let label = &label[1..label.len() - 1];
             lines.push(if accept {
                 format!(
-                    "note effort.{key} from {writer}: accepted {value} (local value was {})",
-                    c["settings"][key]
+                    "note effort.{label} from {writer}: accepted {} (local value was {})",
+                    display_json(value),
+                    display_json(&c["settings"][key])
                 )
             } else {
-                format!("note effort.{key} from {writer}: kept the local setting")
+                format!("note effort.{label} from {writer}: kept the local setting")
             });
         }
     }
@@ -826,10 +980,13 @@ fn pull(
         .remove("load_attempt");
     after["collab"] = c;
     if dirty && saved && !(force || recovered) {
-        lock.backup_conflict(
-            local.sha.as_deref().ok_or("missing plan hash")?,
-            &local.plan,
-        )?;
+        let sha = local.sha.as_deref().ok_or("missing plan hash")?;
+        let short = sha.get(..12).ok_or("invalid plan hash")?;
+        lock.backup_conflict(sha, &local.plan)?;
+        lines.insert(
+            0,
+            format!("saved local plan edits in plan.conflict-{short}.json"),
+        );
     }
     lock.save_pair(&plan, &after, local.sha.as_deref(), None)?;
     if after["collab"].get("pending").is_some() {

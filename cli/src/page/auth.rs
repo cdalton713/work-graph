@@ -77,7 +77,7 @@ impl CredentialProvider for Installation {
 }
 
 pub(super) fn validated_url(raw: &str, settings: &Settings) -> Result<Url> {
-    let error = "use HTTPS unless the page has a configured HTTP loopback or tailnet URL";
+    let error = "use a page URL with HTTPS, or configured HTTP on loopback or a tailnet";
     if raw.contains(['?', '#', '\\']) || raw.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err(error.into());
     }
@@ -114,7 +114,9 @@ pub(super) fn validated_url(raw: &str, settings: &Settings) -> Result<Url> {
         .chain(settings.page.as_deref())
         .any(|p| p.trim_end_matches('/') == raw);
     if url.scheme() != "https" && !(url.scheme() == "http" && private && configured) {
-        return Err(error.into());
+        return Err(
+            "use HTTPS unless the page has a configured HTTP loopback or tailnet URL".into(),
+        );
     }
     Ok(url)
 }
@@ -149,21 +151,23 @@ fn header(raw: &str) -> Result<(String, HeaderValue)> {
     Ok((token.into(), Credential::new(value).into_header()))
 }
 
-pub(super) fn authorize<K: CredentialProvider<Error = String>>(
-    page: &mut Page,
+/// Resolve the credential for an HTTP or coordinator connection to the specified page.
+pub fn page_credential<K: CredentialProvider<Error = String>>(
     settings: &Settings,
     raw: &str,
     scope: &str,
     shared: bool,
     provider: &K,
-) -> Result<()> {
+) -> Result<Option<Credential>> {
+    validated_url(raw.trim_end_matches('/'), settings)?;
+    let mut token = None;
     let configured = settings
         .page
         .as_deref()
         .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'));
     let saved = || -> Result<Option<HeaderValue>> {
         let path = token_path(settings, raw)?;
-        match fs::File::open(path) {
+        match fs::File::open(&path) {
             Ok(mut file) => {
                 use std::io::Read;
                 if file
@@ -171,54 +175,57 @@ pub(super) fn authorize<K: CredentialProvider<Error = String>>(
                     .map_err(|_| "cannot inspect token")?
                     .permissions()
                     .mode()
-                    & 0o777
+                    & 0o7777
                     != 0o600
                 {
-                    return Err("the page token must have mode 600".into());
+                    return Err(format!("{} must have mode 600", path.display()));
                 }
                 let mut raw = String::new();
                 file.read_to_string(&mut raw)
                     .map_err(|_| "cannot read token")?;
-                Ok(Some(header(raw.strip_suffix('\n').unwrap_or(&raw))?.1))
+                let line = raw.strip_suffix('\n').unwrap_or(&raw);
+                if line.bytes().all(|b| b == b' ') {
+                    return Ok(None);
+                }
+                Ok(Some(header(line)?.1))
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err("cannot read page token".into()),
         }
     };
     if shared || !configured {
-        page.token = saved()?;
+        token = saved()?;
     }
-    if shared && page.token.is_none() {
+    if shared && token.is_none() {
         for (workspace, _, url) in &settings.workspaces {
             if url
                 .as_deref()
                 .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'))
             {
-                page.token = provider
+                token = provider
                     .credential(workspace, "page")?
                     .map(Credential::into_header);
-                if page.token.is_some() {
+                if token.is_some() {
                     break;
                 }
             }
         }
     }
-    if !shared && configured && page.token.is_none() {
-        page.token = provider
+    if !shared && configured && token.is_none() {
+        token = provider
             .credential(scope, "page")?
             .map(Credential::into_header);
     }
-    if !shared && configured && page.token.is_none() {
-        page.token = saved()?;
+    if !shared && configured && token.is_none() {
+        token = saved()?;
     }
-    if page.token.is_none() {
-        return Err("no page token; run wg login for the page".into());
-    }
-    Ok(())
+    Ok(token.map(Credential::new))
 }
 
 fn save(path: &Path, token: &str) -> Result<()> {
     let dir = path.parent().ok_or("invalid token path")?;
+    fs::create_dir_all(dir.parent().ok_or("invalid token directory")?)
+        .map_err(|_| "cannot create token directory")?;
     fs::DirBuilder::new()
         .mode(0o700)
         .recursive(true)
@@ -303,7 +310,9 @@ pub(super) fn login(settings: &Settings, explicit: Option<&str>, stdin: bool) ->
             lines.push(format!("{id} ({name}): configured"));
         } else {
             lines.push(format!("{id} ({name}): set this entry in workspaces"));
-            lines.push(serde_json::json!({"id":id,"name":name,"page_url":url}).to_string());
+            lines.push(collaboration::display_json(
+                &serde_json::json!({"id":id,"name":name,"page_url":url}),
+            ));
         }
     }
     Ok(lines.join("\n").replace(&token, "[redacted]"))

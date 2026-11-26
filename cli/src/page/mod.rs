@@ -2,16 +2,31 @@
 mod auth;
 mod collaboration;
 pub mod link;
+pub use auth::page_credential;
 
 use crate::{ConfigProvider, CredentialProvider};
 use clap::{Parser, Subcommand};
-pub use collaboration::{Collaboration, LocalEffort, LockedEffort};
+pub use collaboration::{Collaboration, LocalEffort, LockedEffort, ProjectAccess};
 use http::HeaderValue;
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::{path::PathBuf, time::Duration};
 use url::Url;
 
+#[derive(Default, Debug)]
+pub struct Output {
+    pub stdout: String,
+    pub stderr: String,
+    pub status: u8,
+}
+impl Output {
+    pub fn success(stdout: String) -> Self {
+        Self {
+            stdout,
+            ..Self::default()
+        }
+    }
+}
 pub type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone)]
@@ -23,7 +38,7 @@ pub struct Settings {
 }
 
 #[derive(Parser)]
-#[command(name = "wg-preview")]
+#[command(name = "wg-preview", infer_long_args = true)]
 struct Arguments {
     #[command(subcommand)]
     command: Command,
@@ -63,6 +78,23 @@ enum Command {
     },
 }
 
+fn http_builder() -> Result<reqwest::ClientBuilder> {
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if let Some(path) = std::env::var_os("SSL_CERT_FILE").filter(|p| !p.is_empty()) {
+        let pem = std::fs::read(path).map_err(|_| "cannot read SSL_CERT_FILE")?;
+        let roots =
+            reqwest::Certificate::from_pem_bundle(&pem).map_err(|_| "invalid SSL_CERT_FILE")?;
+        if roots.is_empty() {
+            return Err("no certificates in SSL_CERT_FILE".into());
+        }
+        builder = builder.tls_built_in_root_certs(false);
+        for root in roots {
+            builder = builder.add_root_certificate(root);
+        }
+    }
+    Ok(builder)
+}
+
 struct Page {
     url: Url,
     token: Option<HeaderValue>,
@@ -75,8 +107,7 @@ impl Page {
             .ok_or("give the page URL")?
             .trim_end_matches('/');
         let url = auth::validated_url(raw, settings)?;
-        let http = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+        let http = reqwest::blocking::ClientBuilder::from(http_builder()?)
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|_| "cannot initialize page transport")?;
@@ -165,7 +196,7 @@ pub fn run<C, K>(
     config: &C,
     credentials: &K,
     stores: Option<&dyn Collaboration>,
-) -> Result<String>
+) -> Result<Output>
 where
     C: ConfigProvider<Settings = Settings, Error = String>,
     K: CredentialProvider<Error = String>,
@@ -192,7 +223,9 @@ where
         std::iter::once("wg-preview").chain(args.iter().map(String::as_str)),
     ) {
         Ok(parsed) => parsed.command,
-        Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => return Ok(e.to_string()),
+        Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => {
+            return Ok(Output::success(e.to_string()));
+        }
         Err(e) => return Err(e.to_string()),
     };
     let workspace = match &cmd {
@@ -205,8 +238,10 @@ where
             page_url,
             token_stdin,
             ..
-        } => auth::login(&settings, page_url.as_deref(), token_stdin),
-        Command::Logout { page_url } => auth::logout(&settings, page_url.as_deref()),
+        } => auth::login(&settings, page_url.as_deref(), token_stdin).map(Output::success),
+        Command::Logout { page_url } => {
+            auth::logout(&settings, page_url.as_deref()).map(Output::success)
+        }
         command => collaboration::run(
             command,
             config,
@@ -216,7 +251,7 @@ where
     }
 }
 
-pub fn preview(args: &[String]) -> Result<String> {
+pub fn preview(args: &[String]) -> Result<Output> {
     let config = auth::Installation::load()?;
     run(args, &config, &config, None)
 }

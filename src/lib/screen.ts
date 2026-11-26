@@ -8,9 +8,13 @@ export const DESKTOP_MIN_WIDTH = 1280;
 export const TABLET_OR_WIDER = `(min-width: ${TABLET_MIN_WIDTH}px)`;
 
 function mediaQuery(query: string) {
-  const getSnapshot = () => window.matchMedia(query).matches;
+  const getMedia = () => typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia(query)
+    : undefined;
+  const getSnapshot = () => getMedia()?.matches ?? false;
   const subscribe = (onChange: () => void) => {
-    const media = window.matchMedia(query);
+    const media = getMedia();
+    if (!media) return () => {};
     media.addEventListener("change", onChange);
     return () => media.removeEventListener("change", onChange);
   };

@@ -32,3 +32,14 @@ it.each([
   media.dispatchEvent(new Event("change"));
   expect(onChange).toHaveBeenCalledOnce();
 });
+
+it("returns false and can unsubscribe without matchMedia", () => {
+  vi.stubGlobal("window", {});
+  useNarrow();
+  const [subscribe, snapshot] = vi.mocked(useSyncExternalStore).mock.lastCall!;
+  const onChange = vi.fn();
+
+  expect(snapshot()).toBe(false);
+  subscribe(onChange)();
+  expect(onChange).not.toHaveBeenCalled();
+});

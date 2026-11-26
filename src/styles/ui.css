@@ -69,7 +69,7 @@ button.hint-trigger {
 html:has(.sheet[open]), body:has(.sheet[open]) { overflow: hidden; }
 .sheet {
   position: fixed; inset: auto 0 0; margin: 0; width: 100%; max-width: none;
-  max-height: calc(100dvh - env(safe-area-inset-top)); padding: 0;
+  max-height: calc(100dvh - env(safe-area-inset-top) - var(--touch)); padding: 0;
   border: 1px solid var(--rail-2); border-bottom: 0; border-radius: var(--r-2) var(--r-2) 0 0;
   color: var(--ink-1); background: var(--cab-3); overflow: hidden;
 }

@@ -1,4 +1,4 @@
-import { type KeyboardEvent, type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useCoarse, useHover } from "../lib/screen";
@@ -159,7 +159,10 @@ export function Rich({ text }: { text: string }) {
   return <div className="rich">{parts}</div>;
 }
 
-/** Use infoLabel when the child has its own action. It names the separate hint button. */
+/**
+ * Keep Hint outside buttons and links. Use infoLabel to wrap an actionable child
+ * from the outside and name the separate hint button.
+ */
 export function Hint({ text, children, className, infoLabel }: {
   text: string;
   children: ReactNode;
@@ -172,8 +175,9 @@ export function Hint({ text, children, className, infoLabel }: {
   const trigger = useRef<HTMLButtonElement>(null);
   const popover = useRef<HTMLSpanElement>(null);
   const nativeTitle = hover && !coarse;
+  const [open, setOpen] = useState(false);
 
-  function position() {
+  const position = useCallback(() => {
     const anchor = trigger.current;
     const tip = popover.current;
     if (!anchor || !tip?.matches(":popover-open")) return;
@@ -193,10 +197,14 @@ export function Hint({ text, children, className, infoLabel }: {
     const y = below + tipRect.height <= top + height - gap ? below : above;
     tip.style.left = `${Math.max(left + gap, Math.min(anchorRect.left, left + width - tipRect.width - gap))}px`;
     tip.style.top = `${Math.max(top + gap, Math.min(y, top + height - tipRect.height - gap))}px`;
-  }
+  }, []);
 
   useEffect(() => {
-    if (nativeTitle) return;
+    if (nativeTitle) {
+      setOpen(false);
+      return;
+    }
+    if (!open) return;
     const viewport = window.visualViewport;
     window.addEventListener("resize", position);
     window.addEventListener("scroll", position, true);
@@ -208,17 +216,27 @@ export function Hint({ text, children, className, infoLabel }: {
       viewport?.removeEventListener("resize", position);
       viewport?.removeEventListener("scroll", position);
     };
-  }, [nativeTitle]);
+  }, [open, nativeTitle, position]);
 
   if (nativeTitle) return <span className={className} title={text}>{children}</span>;
 
   return <span className={className ? `hint ${className}` : "hint"}>
     {infoLabel && children}
     <button type="button" className="hint-trigger"
-      aria-label={infoLabel} aria-describedby={id} popoverTarget={id} ref={trigger}>
+      aria-label={infoLabel} aria-describedby={id} popoverTarget={id} ref={trigger}
+      onClick={(event) => event.stopPropagation()}>
       {infoLabel ? <span className="hint-mark" aria-hidden>i</span> : children}
     </button>
-    <span id={id} className="hint-popover" role="tooltip" popover="auto" ref={popover} onToggle={position}>
+    <span id={id} className="hint-popover" role="tooltip" popover="auto" ref={popover}
+      onBeforeToggle={(event) => { event.currentTarget.style.visibility = "hidden"; }}
+      onToggle={(event) => {
+        const shown = event.currentTarget.matches(":popover-open");
+        if (shown) {
+          position();
+          event.currentTarget.style.visibility = "";
+        }
+        setOpen(shown);
+      }}>
       {text}
     </span>
   </span>;
@@ -233,12 +251,14 @@ export function Sheet({ open, title, onClose, children }: {
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const backdropPress = useRef(false);
+  const closeButton = useRef<HTMLButtonElement>(null);
   const heading = useId();
 
   useLayoutEffect(() => {
     const panel = dialog.current;
     if (!open || !panel) return;
     panel.showModal();
+    closeButton.current?.focus({ preventScroll: true });
     return () => panel.close();
   }, [open]);
 
@@ -263,6 +283,7 @@ export function Sheet({ open, title, onClose, children }: {
   }
 
   return <dialog ref={dialog} className="sheet" aria-labelledby={heading} onKeyDown={keepTabInside}
+    onClose={(event) => { if (open && !event.currentTarget.open) onClose(); }}
     onCancel={(event) => { event.preventDefault(); onClose(); }}
     onPointerDown={(event) => {
       backdropPress.current = event.target === event.currentTarget
@@ -276,7 +297,7 @@ export function Sheet({ open, title, onClose, children }: {
     <div className="sheet-layout">
       <header className="sheet-header">
         <h2 id={heading}>{title}</h2>
-        <button type="button" className="sheet-close" aria-label="Close" onClick={onClose} autoFocus>×</button>
+        <button type="button" className="sheet-close" aria-label="Close" onClick={onClose} ref={closeButton}>×</button>
       </header>
       <div className="sheet-body">{children}</div>
     </div>

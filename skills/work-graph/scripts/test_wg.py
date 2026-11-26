@@ -8079,6 +8079,7 @@ class CollaborativePlanTests(DirTests):
         self.redirect = None
         self.writer_in_plan = False
         self.claims = {"role": "collaborator", "claims": []}
+        self.page_status = {}
         self.claim_responses = {}
         test = self
 
@@ -8108,6 +8109,8 @@ class CollaborativePlanTests(DirTests):
                     self.answer(503)
                 elif test.refused:
                     self.answer(test.refused)
+                elif self.path == "/api/status":
+                    self.answer(200, test.page_status)
                 elif self.path.endswith("/claims"):
                     self.answer(200, test.claims)
                 elif test.redirect:
@@ -8317,14 +8320,185 @@ class CollaborativePlanTests(DirTests):
                 wg.dispatch(self.d, self.p, "a", None, None)
         self.assertEqual(len(self.requests), 1)
 
-    def next_claim_lines(self, *, statuses=None):
-        statuses = statuses or {}
-        live = {key: live_issue(statuses.get(key, "Ready")) for key in self.km["nodes"]}
+    def next_claim_lines(self, *, statuses=None, labels=None):
+        statuses, labels = statuses or {}, labels or {}
+        live = {key: live_issue(statuses.get(key, "Ready"), labels.get(key, ())) for key in self.km["nodes"]}
         with patch.object(wg, "fetch_nodes", return_value=live), \
              patch.object(wg, "project_entries", return_value=[]), \
              patch.object(wg, "pr_batch", return_value={}):
             _, lines = wg.next_lines(self.d, self.p)
         return [f"{level} {line}" for level, line in lines]
+
+    def test_next_names_the_runner_of_each_wait(self):
+        self.p["nodes"].append(node("b"))
+        self.km["nodes"]["b"] = {"id": "b", "identifier": "WG-4"}
+        self.enable_claims()
+        self.claims["claims"] = [
+            {"node": "a", "mine": True, "job": "dispatch", "holder": "Human", "stale": False},
+            {"node": "b", "mine": False, "job": "dispatch", "holder": "Ada", "stale": False},
+        ]
+        lines = self.next_claim_lines(statuses={"a": "Needs Human", "b": "Needs Ada"})
+        self.assertIn("wait human a CD-1: a", lines)
+        self.assertIn("note human b: waits on Ada", lines)
+        self.assertFalse(any(line.startswith("wait human b") for line in lines))
+        self.assertIn("note human b: waits on Ada", self.next_claim_lines(statuses={"b": "Ready to Merge"}))
+
+    def test_next_names_the_runner_when_a_label_marks_the_wait(self):
+        self.enable_claims()
+        self.claims["claims"] = [
+            {"node": "a", "mine": False, "job": "dispatch", "holder": "Ada", "stale": False},
+        ]
+        lines = self.next_claim_lines(statuses={"a": "In Progress"}, labels={"a": ("needs-ada",)})
+        self.assertIn("note human a: waits on Ada", lines)
+
+    def test_collaborator_leaves_decision_and_triage_to_owner(self):
+        self.p["nodes"].append(node("decision", kind="decision"))
+        self.km["nodes"]["decision"] = {"id": "decision", "identifier": "WG-4"}
+        wg.run_rows(self.km)["effort"]["autonomy_seen"] = "full"
+        self.enable_claims()
+        live = {key: live_issue("Ready") for key in self.km["nodes"]}
+        found = {"id": "triage", "identifier": "WG-5", "title": "New work", "state": {"name": "Triage"}}
+        with patch.object(wg, "fetch_nodes", return_value=live), \
+             patch.object(wg, "project_entries", return_value=[found]), \
+             patch.object(wg, "pr_batch", return_value={}):
+            _, lines = wg.next_lines(self.d, self.p)
+        self.assertIn(("wait", "owner decision"), lines)
+        self.assertFalse(any("WG-5" in line for _, line in lines))
+
+    def test_next_acks_other_runners_answers_without_relaying(self):
+        self.enable_claims()
+        self.claims["claims"] = [
+            {"node": "a", "mine": False, "job": "dispatch", "holder": "Ada", "stale": False},
+        ]
+        link = Mock()
+        link.take.return_value = [
+            {"id": kind, "type": kind, "payload": {"issue": "CD-1", "body": "Private answer"}}
+            for kind in ("answer", "reply")
+        ]
+        live = {key: live_issue("Needs Human" if key == "a" else "Ready") for key in self.km["nodes"]}
+        with patch.object(wg.Link, "open", return_value=link), \
+             patch.object(wg, "fetch_nodes", return_value=live), \
+             patch.object(wg, "answer_lines", return_value=[("do", "answer a CD-1: Private answer")]), \
+             patch.object(wg, "pr_batch", return_value={}), \
+             patch.object(wg, "paused_lines", side_effect=lambda d, p, lines: lines), \
+             patch.object(wg, "review_effort_lines", return_value=[]), \
+             patch.object(wg, "autonomy_lines", return_value=[]), \
+             patch.object(wg, "page_contract_note", return_value=[]), \
+             patch.object(wg, "notify_effort"), patch.object(wg, "flush_writes"), \
+             patch.object(wg, "relay_reply") as relay:
+            out, _ = self.call(wg.next_command, self.d, self.p, False, 1)
+        relay.assert_not_called()
+        self.assertIn("note answer a CD-1: waits on Ada", out)
+        self.assertIn("note reply a CD-1: waits on Ada", out)
+        self.assertNotIn("do answer", out)
+        link.send.assert_any_call("ack", {"ids": ["answer", "reply"]})
+
+    def test_answer_and_reply_follow_claim_ownership_and_owner_fallback(self):
+        self.enable_claims()
+        self.km["nodes"]["b"] = {"id": "b", "identifier": "WG-4"}
+        self.km["nodes"]["c"] = {"id": "c", "identifier": "WG-5"}
+        self.p["nodes"].extend([node("b"), node("c")])
+        self.enable_claims()
+        self.claims["claims"] = [
+            {"node": "a", "mine": True, "job": "dispatch", "holder": "Human", "stale": False},
+            {"node": "b", "mine": False, "job": "dispatch", "holder": "Ada", "stale": False},
+        ]
+        live = {key: live_issue("Needs Human") for key in self.km["nodes"]}
+        issues = ("CD-1", "WG-4", "WG-5", "WG-6")
+        messages = [{"id": f"{kind}-{issue}", "type": kind, "payload": {"issue": issue, "body": "Use blue"}}
+                    for issue in issues for kind in ("answer", "reply")]
+        for role, indexes in (("owner", {0, 2, 3}), ("collaborator", {0})):
+            with self.subTest(role=role):
+                self.claims["role"] = role
+                link = Mock()
+                link.take.return_value = messages
+                with patch.object(wg.Link, "open", return_value=link), \
+                     patch.object(wg, "fetch_nodes", return_value=live), \
+                     patch.object(wg, "project_entries", return_value=[]), \
+                     patch.object(wg, "pr_batch", return_value={}), \
+                     patch.object(wg, "paused_lines", side_effect=lambda d, p, lines: lines), \
+                     patch.object(wg, "review_effort_lines", return_value=[]), \
+                     patch.object(wg, "autonomy_lines", return_value=[]), \
+                     patch.object(wg, "page_contract_note", return_value=[]), \
+                     patch.object(wg, "notify_effort"), patch.object(wg, "flush_writes"), \
+                     patch.object(wg, "relay_reply", return_value=("note", "replied a CD-1")) as relay:
+                    out, _ = self.call(wg.next_command, self.d, self.p, False, 1)
+                self.assertEqual({call.args[1]["issue"] for call in relay.call_args_list},
+                                 {issues[index] for index in indexes})
+                for index, issue in enumerate(issues):
+                    prefix = "do answer" if index in indexes else "note answer"
+                    self.assertRegex(out, rf"(?m)^{prefix} \S+ {issue}:")
+                    if index not in indexes:
+                        self.assertRegex(out, rf"(?m)^note reply \S+ {issue}:")
+                link.send.assert_any_call("ack", {"ids": [message["id"] for message in messages]})
+
+    def test_doctor_warns_when_claims_or_status_cannot_be_read(self):
+        self.enable_claims()
+        self.down = True
+        self.assertRegex(self.doctor_human(), r"warn collaboration human: .*503")
+        self.down = False
+        with patch.object(wg, "token_page_request", side_effect=wg.LinkTokenError("status is unavailable")):
+            self.assertIn("warn collaboration human: status is unavailable", self.doctor_human())
+
+    def test_noncollaborative_answer_warning_stays_in_the_notes_summary(self):
+        lines = [("note", "answer @effort -: answers not read (Linear request failed)")]
+        self.assertEqual(wg.terminal_lines(self.d, lines), [
+            f"note other: 1 more note line; wg next {self.d.resolve()} --all prints them",
+        ])
+
+    def test_move_refuses_another_runners_wait_even_with_force(self):
+        self.enable_claims()
+        self.claims["claims"] = [
+            {"node": "a", "mine": False, "job": "dispatch", "holder": "Ada", "stale": False},
+        ]
+        with patch.object(wg, "fetch_nodes") as read, patch.object(wg, "issue_update") as write:
+            with self.assertRaisesRegex(wg.ReadError, "Ada"):
+                wg.move(self.d, self.p, "a", wg.WAIT_STATUS, force="test")
+        read.assert_not_called()
+        write.assert_not_called()
+
+    def test_preflight_names_setup_for_the_local_wait_status(self):
+        self.km["collab"] = {}
+        wg.save_keymap(self.d, self.km, sync=False)
+        states = {name: {"type": kind} for name, kind in wg.setup_status_types().items()
+                  if name != wg.WAIT_STATUS}
+        labels = dict.fromkeys(wg.AGENT_LABELS)
+        with patch.object(wg, "command", return_value=subprocess.CompletedProcess([], 0, "main", "")), \
+             patch.object(wg, "gql"), patch.object(wg, "team_info", return_value=("team", states, labels)), \
+             patch.object(wg, "setup_states", return_value=states):
+            out, _ = self.call(wg.preflight, self.d, self.p, None, code=1)
+        self.assertRegex(out, r"(?m)^FAIL linear: .*Needs Human.*wg setup --workspace work --apply")
+
+    def doctor_human(self, code=0):
+        def run_check(name, check):
+            return doctor_run(name, check) if name in {"plan", "collaboration human"} else []
+
+        doctor_run = wg.doctor_run
+        with patch.object(wg, "doctor_run", side_effect=run_check), patch.object(wg, "tick_plans", return_value=[]), \
+             patch.object(wg, "read_current_plan", return_value=self.p):
+            return self.call(wg.doctor, self.d, code=code)[0]
+
+    def test_doctor_reports_a_claim_name_mismatch(self):
+        self.enable_claims()
+        self.claims["claims"] = [
+            {"node": "a", "mine": True, "job": "dispatch", "holder": "Ada", "stale": False},
+        ]
+        self.assertRegex(self.doctor_human(code=1), r"FAIL collaboration human: .*Ada.*Human")
+
+    def test_doctor_uses_the_page_account_name_when_this_runner_has_no_claims(self):
+        self.enable_claims()
+        self.page_status = {"human": "Ada"}
+        self.assertRegex(self.doctor_human(code=1), r"FAIL collaboration human: .*Ada.*Human")
+        self.page_status = {"human": "Human"}
+        self.assertIn("ok collaboration human: Human matches the page", self.doctor_human())
+        self.page_status = {}
+        self.assertIn("warn collaboration human: page status has no account name", self.doctor_human())
+
+    def test_owned_collaborative_dispatch_spec_uses_local_human(self):
+        self.enable_claims()
+        row = {"branch": "wg/example", "parent": "main", "lower": "origin/main"}
+        path, _ = wg.dispatch_spec(self.d, self.p, self.p["nodes"][0], self.km["nodes"]["a"], {"description": ""}, row)
+        self.assertIn("Needs Human", path.read_text())
 
     def test_next_renews_own_claim_and_reconciles_refusals(self):
         self.enable_claims()
@@ -8413,7 +8587,8 @@ class CollaborativePlanTests(DirTests):
         self.assertIn(("do", "reconcile mp: this account holds a claim with no local job"), publish.call_args.args[3])
 
     def test_next_without_collaboration_makes_no_claim_requests(self):
-        self.next_claim_lines()
+        lines = self.next_claim_lines(statuses={"a": "Needs Human"})
+        self.assertIn("wait human a CD-1: a", lines)
         self.assertEqual(self.requests, [])
 
     def test_share_initializes_once_and_sends_only_shared_fields(self):

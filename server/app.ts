@@ -661,7 +661,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const lookupRevision = revision;
     const read = c.req.method === "GET" || c.req.method === "HEAD";
     const authorization = header("authorization");
-    const coordinator = !!authorization && c.req.method === "GET" && /^\/api\/projects\/[^/]+\/presence$/.test(c.req.path);
+    const coordinator = !!authorization && c.req.method === "GET"
+      && (c.req.path === "/api/status" || /^\/api\/projects\/[^/]+\/presence$/.test(c.req.path));
     const session = authorization ? null : await readSession(c);
     const account = coordinator ? await directory.fromToken(authorization)
       : session && await sessionActive(session, read) ? (await directory.fromSession(session))?.tenant : null;
@@ -766,7 +767,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       const room = await linkRead(() => roomState.read(ref), null);
       const own = room && !c.var.viewer ? roomAccount(room, shared.member.account) : undefined;
       return c.json({
-        version, contract, readOnly: c.var.viewer, link: null,
+        version, contract, human: shared.member.name, readOnly: c.var.viewer, link: null,
         workspaces: [sharedEntry(shared)],
         rooms: room ? [{
           workspace: shared.id, project: shared.projectId,
@@ -781,7 +782,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const rooms = (redis && (readOnly || !redis.ready)) || (!readOnly && c.var.viewer)
       ? [] : await linkRead(() => hub.counts(tenants ? tenant.id : undefined), []);
     return c.json<ServerStatus & Pick<SiteConfig, "readOnly" | "link">>({
-      version, contract, uptime: Math.floor((clock() - started) / 1000),
+      version, contract, human: tenant.human, uptime: Math.floor((clock() - started) / 1000),
       readOnly: c.var.viewer, link: linkEnabled ? "/api/link" : null,
       workspaces: [
         ...tenant.workspaces.map(({ id, name }) => ({ id, name, workspaceId: id })),

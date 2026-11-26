@@ -74,7 +74,7 @@ the caller's claims.
   Ask the human before taking the node. After approval, run
   `wg claim <plan-dir> <key> <job> --takeover`.
 - `wait owner <key>` means the owner handles the merge point, ship point,
-  or ops node.
+  ops node, or decision node.
 - `do reconcile <key>: …` means this machine lost the claim, the node
   changed, or the account holds a claim with no local job. Check the holder,
   the local run row, and the latest plan before starting work.
@@ -82,3 +82,25 @@ the caller's claims.
 If the claims page does not answer, start no new job. Running jobs continue.
 For a node that stacks on someone else's work, use the parent branch from
 the shared keymap. Fetch and track that branch locally if it is missing.
+
+## Who answers
+
+The person who holds the page claim answers questions for that node and
+handles its merge request. The project owner handles decisions, merge
+points, ship points, ops nodes, and project triage.
+
+Use the same display name on the page and in the `human` setting.
+Run `wg doctor <plan-dir>` to check the name in your claims or in the
+page status. A different name makes this check fail. If the page does
+not answer or does not have a name to check, doctor prints a warning.
+Each runner needs their own
+`Needs <name>` status in the project's Linear team. Run
+`wg setup --workspace <id> --apply` for that workspace if preflight
+reports that the status is missing.
+
+`wg next` prints `wait human` for work that waits on your side.
+`note human <key>: waits on <person>` means another person must act.
+Leave that node to its runner. If the page sends your coordinator that
+node's answer or reply, it acknowledges the message and skips it.
+The owner handles answers and replies for unclaimed nodes and issues
+outside the plan. A collaborator acknowledges and skips those messages.

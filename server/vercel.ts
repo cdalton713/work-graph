@@ -79,6 +79,7 @@ export function createVercelApp(env: NodeJS.ProcessEnv) {
   let app: ReturnType<typeof createApp>;
   try {
     app = createApp({ port: 443, tailnet: null, hosted: { host: hostedName.toLowerCase() } }, {
+      appName: config.appName,
       team: config.workspaces[0].team, dist: join(root, "dist") + sep, human: config.human, workspaces: config.workspaces, auth: config.auth,
       linkToken: env.WG_LINK_TOKEN, telemetryEnv: env, waitUntil,
       ...socketSettings,

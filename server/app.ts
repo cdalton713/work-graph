@@ -38,6 +38,7 @@ import { fileStore, isInside, type Store } from "./store.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
 import { createSite, DEFAULT_HUMAN } from "../src/lib/site.ts";
 import { requestSite, serverSite } from "./site.ts";
+import { manifestResponse } from "./manifest.ts";
 import { createTelemetry, type UsageScope, type UsageWorkspace } from "./telemetry.ts";
 import { pageEvents, type PageEvent } from "../src/lib/telemetry.ts";
 import { CONFIG_TENANT_ID, configTenants, TENANT_IDLE_MS, type SharedWorkspace, type Tenant, type Tenants } from "./tenants.ts";
@@ -73,6 +74,7 @@ async function json<T>(body: Promise<T>): Promise<T> {
 }
 
 export interface AppOptions {
+  appName?: string;
   tenants?: Tenants;
   linearAuth?: LinearAuth;
   telemetryEnv?: NodeJS.ProcessEnv;
@@ -160,6 +162,7 @@ function linkStore(stateDir: string | undefined, dist: string, workspaces: Works
  * effect at once. Only the API is guarded: the page itself holds no data.
  */
 export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, linkTimers, linkMaxAgeMs, linkPongMs, human, stateDir = process.env.WG_STATE_DIR || undefined,
+  appName,
   version = process.env.WG_VERSION || "dev", contractFile, readOnly = !!process.env.WG_READ_ONLY && process.env.WG_READ_ONLY !== "0", auth = null, linearAuth, serviceReady, telemetryEnv = process.env, waitUntil, linkToken, linkState, linkBus, redisUrl, redisPrefix, tenants, workspaces = [{ id: "default", name: "Linear", team, key: process.env.LINEAR_API_KEY ?? "", teamLabels: true }] }: AppOptions): App {
   if (linkToken && [...linkToken].length < 32) {
     throw new Error("WG_LINK_TOKEN must have at least 32 characters");
@@ -451,6 +454,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         && (ms > SLOW_MS || c.res.status >= 500)) console.warn(`wg api: ${c.req.method} ${path} ${c.res.status} ${Math.round(ms)}ms`);
   });
   app.get("/healthz", (c) => c.json({ ok: true }));
+  app.get("/manifest.json", () => manifestResponse(appName));
 
   const graphs = () => graphCache(linearWorkspace.getStore()!.id);
   /**

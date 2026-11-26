@@ -9,6 +9,7 @@ export const DEFAULT_HUMAN = "Human";
 export const humanSlug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 export interface Site {
+  push?: boolean;
   /** The human's name, for example "Human". */
   human: string;
   waitNames?: readonly string[];
@@ -31,7 +32,8 @@ export function createSite(human: string, defaultWorkspace: string, readOnly = f
 /** The page settings. Change them only with `configureSite`, before the first render. */
 export const site: Site = createSite(DEFAULT_HUMAN, "default");
 
-export function configureSite({ human, defaultWorkspace, readOnly, user }: { human?: string; defaultWorkspace?: string; readOnly?: boolean; user?: string | null }) {
+export function configureSite({ push, human, defaultWorkspace, readOnly, user }: { push?: boolean; human?: string; defaultWorkspace?: string; readOnly?: boolean; user?: string | null }) {
+  if (push !== undefined) site.push = push;
   Object.assign(site, createSite(human ?? site.human, defaultWorkspace ?? site.defaultWorkspace, readOnly ?? site.readOnly, user === undefined ? site.user : user));
 }
 

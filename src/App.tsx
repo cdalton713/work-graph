@@ -1,3 +1,5 @@
+import { Notices, useNoticeStartup } from "./components/Notices";
+import { updateBadge } from "./lib/push";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { pageEvent } from "./lib/telemetry";
 import { accountApi, api, setOpenProject } from "./api";
@@ -13,7 +15,7 @@ import { Overview } from "./components/Overview";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
 import { PullRefresh } from "./components/PullRefresh";
-import { CopyButton, Hint, Lamp, LazyBoundary, LoadError, Picker } from "./components/ui";
+import { CopyButton, Hint, Lamp, LazyBoundary, LoadError, Picker, Sheet } from "./components/ui";
 import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdges, shapeKey, statusTiming, type GNode, type Signal, toggleReviewed } from "./lib/graph";
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
 import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
@@ -75,6 +77,7 @@ export function projectFromQuery(directory: ProjectList | null, query: URLSearch
 }
 
 export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}) {
+  useNoticeStartup();
   const installed = isStandalone();
   const compactBar = useCompactBar();
   const [query, navigate] = useQuery();
@@ -124,7 +127,7 @@ export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}
         <button onClick={() => route("settings")}>Settings</button>}
       {installed && <button className="installed-refresh" type="button" aria-label="Refresh account"
         disabled={busy} onClick={() => void run(async () => { await refresh(); })}>Refresh</button>}
-      {compactBar ? <BarMenu title="Account controls">{() => signOut}</BarMenu> : signOut}
+      {compactBar ? <BarMenu title="Account controls">{() => <>{site.push && <Notices />}{signOut}</>}</BarMenu> : signOut}
     </header>
     {installed && account && <AccountError error={error} />}
     {!account ? <main className="account-page"><div className="account-content">
@@ -146,6 +149,7 @@ function includePending<T extends ProjectList>(list: T | null, pending: Director
 export function App({ createProjects, openSettings, overviewWorkspace = site.defaultWorkspace, service = false, connections }: {
   createProjects?: boolean; openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
 } = {}) {
+  useNoticeStartup();
   const installed = isStandalone();
   const stage = useRef<HTMLElement>(null);
   const [query, setQuery] = useQuery();
@@ -385,6 +389,8 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   };
   // A worker's question is a move of the human's: it counts in "Your move", the picker, and the badge.
   const yours = useMemo(() => new Map((overview?.summaries ?? []).map((s) => [summaryKey(s), movesWithAgents(movesWithAsks(s.you, link.asksBy.get(summaryKey(s))), link.agentsBy.get(summaryKey(s)), now).length])), [overview, link.asksBy, link.agentsBy, now]);
+  const badgeCount = overview ? [...yours.values()].reduce((sum, count) => sum + count, 0) : null;
+  useEffect(() => { if (site.push && badgeCount !== null && !site.readOnly) updateBadge(badgeCount); }, [badgeCount]);
   const [sharedPresence, setSharedPresence] = useState<{ key: string; data: Awaited<ReturnType<typeof api.sharedPresence>> } | null>(null);
   useEffect(() => {
     if (sharedRole !== "collaborator" || link.connected || !linkRef || !openKey) return;
@@ -791,6 +797,8 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const keysControl = hover && (
     <button type="button" className={`ghost bar-keys${keys ? " is-on" : ""}`} aria-pressed={keys} onClick={() => setKeys(!keys)} aria-label="Keyboard keys" title={nativeBarTitles ? keysHelp : undefined}>?</button>
   );
+  const [noticeSettingsOpen, setNoticeSettingsOpen] = useState(false);
+  const showNoticeSettings = openSettings ?? (() => setNoticeSettingsOpen(true));
   const settings = openSettings && <button type="button" className="ghost bar-settings" onClick={openSettings}>Settings</button>;
   const signOut = site.user && <a className="bar-user" href="/auth/logout" onClick={() => clearStarterHandoffs(site.user)} title={nativeBarTitles ? signOutHelp : undefined}>Sign out</a>;
   const refreshScreen = useCallback(() => {
@@ -831,7 +839,12 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
           {shareControl()}
           {setupButton()}
         </>}
-        <span className="station-fill" />
+        <span className="station-fill">
+          {site.push && !service && !compactBar && <Hint text="Notices" infoLabel="About notices" className="bar-notice-hint">
+            <button type="button" className="ghost bar-notice" aria-label="Notices" aria-haspopup="dialog"
+              onClick={showNoticeSettings}><span aria-hidden>🔔︎</span></button>
+          </Hint>}
+        </span>
         {!narrow && viewer && <span className="bar-viewer" title={nativeBarTitles ? viewerHelp : undefined}>view only</span>}
         {!narrow && boardControl}
         {!narrow && viewPicker}
@@ -877,6 +890,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
             {settings}
             {site.user && <div className="bar-menu-row"><span>{signOutHelp}</span>{signOut}</div>}
             {closeControl && <div className="bar-menu-danger"><p>{closeHelp}</p>{closeControl}</div>}
+            {site.push && <Notices openSettings={() => { dismiss(); showNoticeSettings(); }} />}
           </>}</BarMenu>
         ) : <>
           {serverVersion && <Hint className="bar-version mono" text={`The build of the server: ${status!.version}`}>{serverVersion}</Hint>}
@@ -887,6 +901,9 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         </>}
       </header>
 
+      {noticeSettingsOpen && <Sheet open title="Notice settings" onClose={() => setNoticeSettingsOpen(false)}>
+        <Notices account />
+      </Sheet>}
       {sharing && sharing === openKey && project && <Share id={project.id}
         workspace={project.workspace} team={connections?.find(({ workspace_id }) => workspace_id === project.workspace)?.team}
         close={() => setSharing(null)} />}

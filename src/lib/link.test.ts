@@ -1,8 +1,11 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { Overview } from "../components/Overview";
 import { describe, expect, it } from "vitest";
 import contract from "../../skills/work-graph/contract.json";
 import { ANSWERED_LABEL, AUTONOMY_DEFAULT, AUTONOMY_GROUP, AUTONOMY_LEVELS, autonomyOf, PAUSED_LABEL, pausedOf } from "./autonomy";
 import { REVIEW_DEFAULT, REVIEW_GROUP, REVIEW_LEVELS, REVIEW_PREFIX, reviewOf } from "./review";
-import { type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, RECYCLE_CODE, RESTART_CODE, agentState, agentsShown, liveJob, presenceText, canCommandCoordinator, pageLinkPath, plannedReconnect, plannedRetryAfterFailure, reconnectImmediately } from "./link";
+import { type Agents, type CoordinatorPresence, LINK_COMMANDS, LINK_FROM_COORDINATOR, LINK_TO_COORDINATOR, LINK_VERSION, RECYCLE_CODE, RESTART_CODE, agentState, agentsShown, liveJob, presenceText, canCommandCoordinator, pageLinkPath, plannedReconnect, plannedRetryAfterFailure, reconnectImmediately } from "./link";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
 it("keeps short retries during the planned reconnect window", () => {
@@ -133,4 +136,21 @@ describe("the autonomy label agrees with wg (contract.json)", () => {
     expect(autonomyOf([{ name: "full", parent: null }, { name: "other", parent: { name: "autonomy" } }])).toBeNull();
     expect(autonomyOf(undefined)).toBeNull();
   });
+});
+
+it("shows the agent state and last message under its project in the overview", () => {
+  const html = renderToStaticMarkup(createElement(Overview, {
+    list: {
+      workspaces: [{ id: "work", name: "Work" }],
+      projects: [{ id: "p1", name: "Example", url: "", status: "Started", statusType: "started", workspace: "work", workspaceName: "Work" }],
+    },
+    loading: false, missing: null, now, onOpen: () => {},
+    agents: new Map<string, Agents>([["work:p1", { at: new Date(now).toISOString(), agents: [{
+      id: "worker", role: "worker", key: "build", issue: "WG-1", agent: "codex", state: "working",
+      title: "Build", said: "The tests passed", at: new Date(now).toISOString(),
+    }] }]]),
+  }));
+  expect(html).toContain("Agents of Example in Orca");
+  expect(html).toContain("codex working");
+  expect(html).toContain("The tests passed");
 });

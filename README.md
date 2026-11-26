@@ -155,6 +155,14 @@ it holds back, and how many can start when it closes. The Board uses the same or
 
 `wg agents --once` does one read and prints the rows. `wg agents --install` writes a launchd agent that keeps
 `wg agents` running; run the printed `launchctl bootstrap` command to load it. Logs: `~/Library/Logs/wg-agents/`.
+
+On a hosted page with accounts, only the account that sends the lines can see them. Viewers do not see them.
+Keep `wg agents` running on the machine that runs Orca. Run `wg login` for the workspace page so the sender can
+use the token for that page. `wg doctor <dir>` shows the sender service and the last successful send for that effort.
+
+The sender checks for config and token changes each cycle. If `wg.py` changes, the sender exits so its service
+can start the new code.
+
 When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the agent.
 
 In a workspace on Linear's Free plan (250 issues; archived issues do not count), `wg` archives each completed and

@@ -7,16 +7,23 @@ import { ownerWords } from "../lib/words";
 import { type OverviewData, type OverviewFilter, type OverviewRow, type YourMove, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
 import { ageText, type Signal } from "../lib/graph";
 import { PROJECT_STATES, type ProjectStateName, type Stall, overviewTitle } from "../lib/attention";
-import { type AgentReplyResult, type Agents, type Ask, type Presence, type ProjectRef, agentName, agentNeeds, agentState, agentsFresh, agentsShown, projectKey } from "../lib/link";
+import { type AgentReplyResult, type Agents, type Ask, type Presence, type ProjectRef, agentName, agentNeeds, agentState, agentsFresh, agentsShown, presenceText, projectKey } from "../lib/link";
 import { site } from "../lib/site";
 import { useLink } from "../useLink";
 import type { Comment, Project, ProjectList } from "../lib/types";
-import { CopyButton, Lamp, Picker, PrLinks, Rich } from "./ui";
+import { CopyButton, Hint, Lamp, Picker, PrLinks, Rich } from "./ui";
 
 const STORE = "wg-overview";
 /** The inbox items that show before "Show all". */
 const INBOX = 8;
 const START: OverviewFilter = { text: "", workspace: null, closed: false };
+const COORDINATOR_DISPLAY = {
+  listening: { label: "Listening", signal: "done" },
+  working: { label: "Working", signal: "running" },
+  gone: { label: "Offline", signal: "off" },
+  needs: { label: "Waiting", signal: "stop" },
+  unknown: { label: "Unknown", signal: "off" },
+} satisfies Record<string, { label: string; signal: Signal }>;
 const NO_STATES: ProjectStateName[] = [];
 const STATE_DISPLAY = {
   stalled: { label: "Stalled", signal: "stop" },
@@ -219,6 +226,48 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   const find = useRef<HTMLInputElement>(null);
   const root = useRef<HTMLDivElement>(null);
   const inboxRoot = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const stage = root.current?.parentElement;
+    const installed = window.matchMedia("(display-mode: standalone)").matches
+      || (navigator as Navigator & { standalone?: boolean }).standalone;
+    if (!stage || !installed) return;
+
+    let start: Touch | undefined;
+    const atTop = () => stage.scrollTop === 0 && window.scrollY === 0;
+    const reset = () => { start = undefined; };
+    const onStart = (event: TouchEvent) => {
+      start = event.touches.length === 1 && atTop() && !document.querySelector("dialog[open], :popover-open")
+        ? event.touches[0] : undefined;
+    };
+    const onMove = (event: TouchEvent) => {
+      if (!start) return;
+      const touch = event.touches[0];
+      if (!atTop() || event.touches.length !== 1) {
+        reset();
+        return;
+      }
+      const dy = touch.clientY - start.clientY;
+      if (Math.abs(touch.clientX - start.clientX) > 40 || dy < -10) reset();
+      else if (dy > 0 && event.cancelable) event.preventDefault();
+    };
+    const onEnd = (event: TouchEvent) => {
+      const first = start;
+      reset();
+      const last = Array.from(event.changedTouches).find((touch) => touch.identifier === first?.identifier);
+      if (first && last && atTop() && last.clientY - first.clientY >= 80
+        && Math.abs(last.clientX - first.clientX) <= 40) window.location.reload();
+    };
+    stage.addEventListener("touchstart", onStart, { passive: true });
+    stage.addEventListener("touchmove", onMove, { passive: false });
+    stage.addEventListener("touchend", onEnd);
+    stage.addEventListener("touchcancel", reset);
+    return () => {
+      stage.removeEventListener("touchstart", onStart);
+      stage.removeEventListener("touchmove", onMove);
+      stage.removeEventListener("touchend", onEnd);
+      stage.removeEventListener("touchcancel", reset);
+    };
+  }, []);
   const inboxButtons = () => Array.from(inboxRoot.current?.querySelectorAll<HTMLButtonElement>(".inbox-open") ?? []);
   useEffect(() => {
     if (expanded) inboxRoot.current?.querySelector<HTMLTextAreaElement>(".inbox-detail:not([hidden]) textarea")?.focus();
@@ -280,36 +329,50 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       const fresh = agentsFresh(reported, now);
       const { state, reason } = attention;
       const { signal } = STATE_DISPLAY[state];
+      const coordinator = presenceText(presence?.get(key), now, reported, !owner);
+      const coordinatorDisplay = COORDINATOR_DISPLAY[coordinator?.state ?? "unknown"];
+      const detail = [
+        p.name, reason, coordinator?.title,
+        s?.counts.map((c) => `${c.status} · ${c.n}`).join(", "),
+        s?.running ? "Running: a worker runs on it, or it is In Progress." : "",
+        s?.review ? "In review: In Review or Verifying." : "",
+        s?.ready ? "Can start: not started, and no blocker holds it back." : "",
+      ].filter(Boolean).join("\n");
       return (
         <li key={summaryKey(p)} className={`ov-row${at === active ? " is-active" : ""}${signal === "stop" ? " is-you" : ""}${closed ? " is-closed" : ""}`}>
           <button type="button" className="ov-open" onClick={() => onOpen(p)} onFocus={() => setActive(at)} onMouseEnter={() => setActive(at)}>
             <span className="ov-state">
               <Lamp signal={signal} pulse={state === "moving"} />
               <span className={`ov-state-label sig-fg-${signal}`}>{stateLabel(state)}</span>
-              <span className="ov-reason" title={reason}>{reason}</span>
+              <span className="ov-reason">{reason}</span>
             </span>
             <span className="ov-name">
-              <span className="ov-title" title={p.name}>{p.name}</span>
+              <span className="ov-title">{p.name}</span>
               {multi && !grouped && <span className="ov-ws">{p.workspaceName}</span>}
             </span>
             <span className="ov-progress">
               {s && s.planned > 0 && (
                 <>
                   <span className="ov-track" role="img" aria-label={s.counts.map((c) => `${c.status} ${c.n}`).join(", ")}>
-                    {s.counts.map((c) => <i key={c.status} className={`sig-bg-${c.signal}`} style={{ flexGrow: c.n }} title={`${c.status} · ${c.n}`} />)}
+                    {s.counts.map((c) => <i key={c.status} className={`sig-bg-${c.signal}`} style={{ flexGrow: c.n }} />)}
                   </span>
                   <span className="mono ov-done">{s.done}/{s.planned}</span>
                 </>
               )}
             </span>
             <span className="ov-flow">
-              {s && s.running > 0 && <span className="sig-fg-running" title="A worker runs on it, or it is In Progress"><Lamp signal="running" pulse />{s.running} running</span>}
-              {s && s.review > 0 && <span className="sig-fg-review" title="In Review or Verifying"><Lamp signal="review" />{s.review} in review</span>}
-              {s && s.ready > 0 && <span className="sig-fg-ready" title="Not started, and no blocker holds it back"><Lamp signal="ready" />{s.ready} can start</span>}
+              <span className="ov-coord" role="group" aria-label="Coordinator">
+                <Lamp signal={coordinatorDisplay.signal} />{coordinatorDisplay.label}
+              </span>
+              {s && s.running > 0 && <span className="sig-fg-running"><Lamp signal="running" pulse />{s.running} running</span>}
+              {s && s.review > 0 && <span className="sig-fg-review"><Lamp signal="review" />{s.review} in review</span>}
+              {s && s.ready > 0 && <span className="sig-fg-ready"><Lamp signal="ready" />{s.ready} can start</span>}
             </span>
             {s?.error && <span className="ov-error sig-fg-stop">{s.error}</span>}
           </button>
-          <CopyButton text={p.name} label="Copy the project name" className="ov-copy" />
+          <Hint text={detail} infoLabel="Project details" className="ov-row-tools">
+            <CopyButton text={p.name} label="Copy the project name" className="ov-copy" />
+          </Hint>
           {s?.effort && (
             <details className="ov-effort">
               <summary>wg next</summary>
@@ -327,13 +390,14 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                 return (
                   <li key={a.id}>
                     <details className="ov-agent">
-                      <summary title={a.title || undefined}>
+                      <summary>
                         <Lamp signal={fresh ? state.signal : "off"} pulse={fresh && state.signal === "running"} />
                         <span className="ov-agent-who mono">{agentName(a)}</span>
                         <span className={`ov-agent-state${fresh && state.signal === "stop" ? " sig-fg-stop" : ""}`}>{a.agent} {state.text}</span>
                         <span className="ov-agent-age mono">{a.at ? ageText(now - Date.parse(a.at)) : ""}</span>
                         <span className="ov-agent-said">{a.said || "no message yet"}</span>
                       </summary>
+                      {a.title && <p className="ov-agent-full">{a.title}</p>}
                       <p className="ov-agent-full">{a.said || "no message yet"}{messageCut(a.said) && <span className="ov-agents-note"> (message cut at 500 characters)</span>}</p>
                       {agentNeeds(a) && <p className="ov-agent-full">answer this agent in Orca</p>}
                       {canReplyToAgent(a, reported, now, owner) && (!receipt || !agentReplyPending(receipt, now)) &&
@@ -370,7 +434,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             : "Loading the projects…"}
           {loading && "summaries" in list && <span className="sync-dot is-busy" aria-label="Refreshing" />}
         </p>
-        {budget.map((w) => <span key={w.id} className="ov-budget is-warning mono" role="status" title={w.title}>{w.text}</span>)}
+        {budget.map((w) => <Hint key={w.id} className="ov-budget is-warning mono" text={w.title} infoLabel="Linear budget details">
+          <span role="status">{w.text}</span>
+        </Hint>)}
       </div>
       {missing && <p className="empty" role="status">{missing}</p>}
 
@@ -401,7 +467,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
               return (
                 <li key={key} className="inbox-row">
                   <div className="inbox-row-head">
-                    <button type="button" className="inbox-open" title={`${p.name}: ${m.title}`}
+                    <button type="button" className="inbox-open"
                       aria-expanded={target ? open : undefined} aria-controls={target ? detailId : undefined}
                       onClick={target ? () => setExpanded(open ? null : key) : go}>
                       <Lamp signal="stop" />
@@ -471,7 +537,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
         )}
         {grouped && onInitiative && (
           <Picker value={initiative === null ? ["*"] : [`=${initiative}`]} onChange={([id]) => onInitiative(id === "*" ? null : id.slice(1))}
-            title="Show one initiative" options={[
+            options={[
               { id: "*", label: "All initiatives" },
               ...names.map((n) => ({ id: `=${n}`, label: n })),
               { id: `=${NO_INITIATIVE}`, label: "No initiative" },
@@ -491,8 +557,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
           })}
         </div>}
         {closedCount > 0 && (
-          <button type="button" className={`toggle${filter.closed ? " is-on" : ""}`} aria-pressed={filter.closed} onClick={() => set({ closed: !filter.closed })}
-            title="Also show the completed and canceled projects.">Closed <span className="mono">{closedCount}</span></button>
+          <button type="button" className={`toggle${filter.closed ? " is-on" : ""}`} aria-pressed={filter.closed} onClick={() => set({ closed: !filter.closed })}>Closed <span className="mono">{closedCount}</span></button>
         )}
       </div>
 
@@ -508,7 +573,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
           <section key={section.key} className="ov-section" aria-label={section.name ?? "No initiative"}>
             <h2 className="ov-section-head">
               {onInitiative && initiative === null
-                ? <button type="button" className="ov-section-name" onClick={() => onInitiative(section.name ?? NO_INITIATIVE)} title="Show only this initiative">{section.name ?? "No initiative"}</button>
+                ? <button type="button" className="ov-section-name" onClick={() => onInitiative(section.name ?? NO_INITIATIVE)}>{section.name ?? "No initiative"}</button>
                 : <span className="ov-section-name">{section.name ?? "No initiative"}</span>}
               {multi && <span className="ov-ws">{section.workspaceName}</span>}
               <span className="ov-section-sum mono">

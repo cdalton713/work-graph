@@ -118,7 +118,7 @@ html:has(.sheet[open]), body:has(.sheet[open]) { overflow: hidden; }
 }
 @media (min-width: 1280px) and (hover: hover) and (pointer: fine) {
   .row.text-send-actions { gap: 4px; }
-  .text-send-actions > .ask-hint { margin-left: 0; }
+  .text-send-actions > .ask-hint { margin-left: 0; white-space: nowrap; }
   .text-send-actions > button { white-space: nowrap; }
 }
 @media (hover: none), (pointer: coarse) {

@@ -24,3 +24,29 @@ a { color: inherit; }
 .error { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 16px; background: rgba(239, 91, 76, 0.12); border-bottom: 1px solid rgba(239, 91, 76, 0.4); color: #f6b3ab; }
 .stage { flex: 1; min-height: 0; display: flex; position: relative; }
 .blank { margin: auto; color: var(--ink-3); }
+
+@media (max-width: 720px) {
+  .stage:has(> .view-switch) { --view-switch-height: 45px; padding-bottom: var(--view-switch-height); }
+  .stage:has(> .view-switch) > :is(.board, .panel) { bottom: var(--view-switch-height); }
+  .project-view-list > .react-flow,
+  .project-view-graph > .board,
+  .stage:has(> .panel) > :is(.board, .react-flow) { visibility: hidden; }
+  .panel button.show-in-graph { min-height: 44px; }
+}
+
+@media (721px <= width < 1280px) {
+  .stage > .board,
+  .stage:has(> .panel) > nav.board { display: flex; width: 50%; }
+  .stage > .react-flow { flex: 1; min-width: 0; }
+  .stage > .panel { position: absolute; inset: 0 0 0 0; width: auto; z-index: 10; }
+  .stage:has(> .board) > .panel { inset-inline-start: 50%; }
+  .stage:has(> .panel) > .react-flow { visibility: hidden; }
+}
+
+@media (721px <= width < 1280px) and (orientation: landscape) {
+  .stage > .board,
+  .stage:has(> .panel) > nav.board { width: calc(100% / 3); }
+  .stage > .panel,
+  .stage:has(> .board) > .panel { position: static; width: calc(100% / 3); }
+  .stage:has(> .panel) > .react-flow { visibility: visible; }
+}

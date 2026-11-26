@@ -22,6 +22,7 @@ export interface PanelProps {
   node: GNode; now: number; graph: Graph; data: GraphData;
   /** Resolves to false when the server refused the change. */
   onPatch: (id: string, patch: IssuePatch, optimistic: Partial<Issue>) => Promise<boolean>;
+  onShowInGraph?: () => void;
   onGo: (id: string) => void; onClose: () => void; onError: (message: string) => void;
   /** Adds or removes the `reviewed` label. Absent when the team has no such label. */
   onReview?: (id: string) => void;
@@ -54,7 +55,7 @@ function Links({ title, ids, graph, onGo, note, clear }: { title: string; ids: s
   );
 }
 
-export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo, onClose, onError, onReview, asks, onDispatch, progress, agent, readOnly = false, limitedEdits = false }: PanelProps) {
+export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo, onClose, onShowInGraph, onError, onReview, asks, onDispatch, progress, agent, readOnly = false, limitedEdits = false }: PanelProps) {
   const { issue, card } = node;
   const phone = useNarrow();
   const body = useRef<HTMLDivElement>(null);
@@ -203,6 +204,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
       </header>
 
       <div className="panel-body" key={issue.id} ref={body}>
+        {onShowInGraph && <button type="button" className="show-in-graph" onClick={onShowInGraph}>Show in graph</button>}
         {claim && <div className={`notice${claim.stale ? " is-warning" : ""}`}>
           <div>Runner: {claim.holder} · {claim.job} · since <time dateTime={claim.claimedAt}>{new Date(claim.claimedAt).toLocaleString()}</time></div>
           {claim.stale && <div>⚠ No sign of {claim.holder}'s coordinator since <time dateTime={claim.renewedAt}>{new Date(claim.renewedAt).toLocaleString()}</time></div>}

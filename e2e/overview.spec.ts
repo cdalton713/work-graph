@@ -35,6 +35,8 @@ test.beforeEach(async ({ page }) => {
     const data: OverviewData = await response.json();
     const project = data.projects.find(({ id }) => id === "fixture")!;
     project.initiative = "Example initiative";
+    project.workspaceName = "Build workspace";
+    data.workspaces[0].name = "Build workspace";
     data.workspaces.push({ ...data.workspaces[0], id: "other", name: "Other workspace" });
     data.projects.push({ ...project, id: "closed", statusType: "completed" });
     const summary = data.summaries.find(({ id }) => id === project.id)!;
@@ -111,13 +113,13 @@ test("overview controls fit the screen and show their details", async ({ page },
     expect(await inboxTitle.evaluate(isCut)).toBe(true);
     await expect(reason).toHaveAttribute("title", await reason.textContent() ?? "");
     await expect(row.locator(".ov-track i").first()).toHaveAttribute("title", "Triage · 1");
-    await expect(overview.locator(".inbox-open")).toHaveAttribute("title", `Example project: ${issueTitle}`);
+    await expect(overview.locator(".inbox-open")).toHaveAttribute("title", `Build workspace · Example project: ${issueTitle}`);
     await expect(overview.getByRole("button", { name: "All initiatives" })).toHaveAttribute("title", "Show one initiative");
     await expect(overview.getByTitle("Also show the completed and canceled projects.")).toBeVisible();
     await expect(overview.getByRole("region", { name: "Example initiative" }).getByTitle("Show only this initiative")).toBeVisible();
     await page.setViewportSize({ width: 860, height: page.viewportSize()!.height });
     await expect(inboxTitle).toBeHidden();
-    await expect(overview.locator(".inbox-open")).toHaveAttribute("title", `Example project: ${issueTitle}`);
+    await expect(overview.locator(".inbox-open")).toHaveAttribute("title", `Build workspace · Example project: ${issueTitle}`);
   } else {
     const coordinator = row.getByLabel("Coordinator");
     await expect(coordinator).toHaveText("Listening");
@@ -347,4 +349,56 @@ test("collapsed agents keep their inline reply and delivery receipt", async ({ p
   await expect(agentGroup.getByRole("status")).toBeHidden();
   await disclosure.click();
   await expect(agentGroup.getByRole("status")).toHaveText("delivered");
+});
+
+test("questions use prompt age and identify the workspace before sending", async ({ page }) => {
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  const issueMove = (identifier: string, updatedAt: string) => ({
+    identifier, updatedAt, title: "Choose a release", why: "Choose a release", idle: true, blocks: 1,
+    pullRequests: [], answer: { issueId: identifier, sent: false },
+  });
+  await page.route("**/api/overview*", async (route) => {
+    const response = await route.fetch();
+    const data: OverviewData = await response.json();
+    const project = data.projects.find(({ id }) => id === "fixture")!;
+    const summary = data.summaries.find(({ id }) => id === project.id)!;
+    data.workspaces[0].name = "Build workspace";
+    data.workspaces.push({ ...data.workspaces[0], id: "release", name: "Release workspace" });
+    project.workspaceName = "Build workspace";
+    data.projects = [project, { ...project, workspace: "release", workspaceName: "Release workspace" }];
+    summary.you = [issueMove("WG-11", minutesAgo(60)), issueMove("WG-12", minutesAgo(10))];
+    data.summaries = [summary, { ...summary, workspace: "release", you: [] }];
+    await route.fulfill({ response, json: data });
+  });
+  await page.routeWebSocket(/\/api\/link\?role=page$/, (socket) => {
+    const send = (type: string, workspace: string, payload: unknown) =>
+      socket.send(JSON.stringify({ type, project: { workspace, id: "fixture" }, payload }));
+    const ask: Ask = { id: "same-ask", from: "worker", key: null, issue: null, body: "Can the draft go ahead?", at: minutesAgo(1) };
+    send("asks", "default", { asks: [ask] });
+    send("asks", "release", { asks: [ask] });
+    send("agents", "default", { at: minutesAgo(0), agents: [
+      { id: "newer", issue: "WG-11", at: minutesAgo(5) },
+      { id: "older", issue: "WG-12", at: minutesAgo(25) },
+    ].map((agent) => ({ ...agent, role: "worker", agent: "worker", state: "waiting", title: "Choose a release", said: "Which build?" })) });
+  });
+  await page.route("**/api/projects/fixture/asks/same-ask/reply", async (route) => {
+    expect(route.request().headers()["x-workspace"]).toBe("release");
+    expect(route.request().postDataJSON()).toEqual({ body: "Go ahead." });
+    await route.fulfill({ json: { ok: true, recorded: true } });
+  });
+  await page.goto("/");
+  const inbox = page.getByRole("region", { name: "Inbox" });
+  await inbox.getByRole("button", { name: "Questions 4" }).click();
+  const promptRows = inbox.getByRole("button", { name: /WG-1[12]/ });
+  await expect(promptRows.nth(0)).toHaveAccessibleName(/WG-12.*25 min ago/);
+  await expect(promptRows.nth(1)).toHaveAccessibleName(/WG-11.*5 min ago/);
+
+  await expect(inbox.getByRole("button", { name: /Can the draft go ahead.*Example project.*Build workspace/ })).toBeVisible();
+  const releaseQuestion = inbox.getByRole("button", { name: /Can the draft go ahead.*Example project.*Release workspace/ });
+  await releaseQuestion.click();
+  const detail = inbox.locator(".inbox-detail:not([hidden])");
+  await expect(detail.getByText("Release workspace · Example project", { exact: true })).toBeVisible();
+  await detail.getByRole("textbox", { name: "Reply to the worker" }).fill("Go ahead.");
+  await detail.getByRole("button", { name: "Reply to the worker" }).click();
+  await expect(releaseQuestion.getByRole("status")).toHaveText("sent");
 });

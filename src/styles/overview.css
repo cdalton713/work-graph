@@ -102,7 +102,9 @@ button.ov-section-name:hover { text-decoration: underline; }
 .inbox-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: 12px; }
 .inbox-agent-message { display: block; font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
 .inbox-effect { display: block; color: var(--ink-3); font-size: 12px; }
-.inbox-project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--ink-3); }
+.inbox-project { min-width: 0; font-size: 12px; color: var(--ink-3); }
+.inbox-project-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-workspace { display: block; color: var(--ink-3); font: 11px var(--mono); overflow-wrap: anywhere; }
 .inbox-age { font-size: 11px; text-align: right; color: var(--ink-4); }
 .inbox-prs { flex: none; width: 150px; display: inline-flex; flex-direction: column; gap: 2px; }
 .inbox-prs:empty { visibility: hidden; }
@@ -150,7 +152,7 @@ button.ov-section-name:hover { text-decoration: underline; }
     min-width: 44px; min-height: 44px; padding-inline: 8px;
   }
   .inbox-note { text-align: right; }
-  .inbox-title, .inbox-project, .inbox-why {
+  .inbox-title, .inbox-project-name, .inbox-why {
     display: block; white-space: normal; overflow: visible; overflow-wrap: anywhere;
   }
   .inbox-why { -webkit-line-clamp: unset; }

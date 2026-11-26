@@ -64,9 +64,13 @@ function inboxKey({ project, move, stall }: InboxRow) {
   return `${key}:move:${move.agentWait?.id ?? move.identifier}`;
 }
 
+function inboxTimestamp(move: YourMove) {
+  return move.agentWait?.at ?? move.updatedAt;
+}
+
 function compareInboxRows(a: InboxRow, b: InboxRow) {
   return Number(!!b.stall) - Number(!!a.stall)
-    || compareMoves(a.move, b.move)
+    || compareMoves({ ...a.move, updatedAt: inboxTimestamp(a.move) }, { ...b.move, updatedAt: inboxTimestamp(b.move) })
     || inboxKey(a).localeCompare(inboxKey(b));
 }
 
@@ -525,7 +529,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             const sent = target?.kind === "worker" ? sentWorkers.has(key) : target?.kind === "issue" && target.sent;
             const detailId = `inbox-detail-${encodeURIComponent(key)}`;
             const go = () => onOpen(p, stall ? stall.issue : m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier);
-            const stamp = m.agentWait?.at ?? m.updatedAt;
+            const stamp = inboxTimestamp(m);
+            const destinationWorkspace = multi && !filter.workspace ? p.workspaceName : null;
+            const destination = destinationWorkspace ? `${destinationWorkspace} · ${p.name}` : p.name;
             const age = stamp ? ageText(now - Date.parse(stamp)) : null;
             // A reason that is the title (a decision: its question) shows once.
             const why = overviewMoveReason(m.why);
@@ -537,7 +543,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             return (
               <li key={key} className="inbox-row" hidden={!visible}>
                 <div className="inbox-row-head">
-                  <button type="button" className="inbox-open" title={`${p.name}: ${m.title}`}
+                  <button type="button" className="inbox-open" title={`${destination}: ${m.title}`}
                     aria-expanded={target ? open : undefined} aria-controls={target ? detailId : undefined}
                     onClick={target ? () => {
                       setExpanded(open ? null : key);
@@ -560,7 +566,10 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                         ? <span className={`inbox-effect sig-fg-${receipt.signal}`} role="status">{receipt.text}</span>
                         : sent && <span className="inbox-effect sig-fg-done" role="status">sent</span>}
                     </span>
-                    <span className="inbox-project">{p.name}</span>
+                    <span className="inbox-project">
+                      <span className="inbox-project-name">{p.name}</span>
+                      {destinationWorkspace && <span className="inbox-workspace">{destinationWorkspace}</span>}
+                    </span>
                     <span className="inbox-age mono">{age ?? ""}</span>
                   </button>
                   {/* Always there, so the columns of the rows line up. */}
@@ -570,6 +579,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
                 </div>
                 {target && (
                   <div className="inbox-detail" id={detailId} hidden={!open || !visible}>
+                    {destinationWorkspace && <p className="inbox-workspace">{destination}</p>}
                     <p className="inbox-why">{why}</p>
                     <InboxAnswer target={target} project={p} expanded={open && visible} submitted={!!sent || !!receipt} onSent={(comment) => {
                       if (document.activeElement?.closest(".inbox-detail")?.id === detailId) {

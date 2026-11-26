@@ -953,7 +953,14 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
           </Suspense>
         )}
         {selected && full && data && (
-          <Suspense fallback={<div className="blank">Loading issue…</div>}>
+          <Suspense fallback={
+            <aside className="panel" aria-busy="true">
+              <div className="panel-head">
+                <span role="status">Loading issue…</span>
+                <button type="button" className="ghost" aria-label="Close panel" onClick={() => select(null)}>✕</button>
+              </div>
+            </aside>
+          }>
           <Panel node={selected} claim={selectedClaim} onShowInGraph={narrow ? showInGraph : undefined}
             onRelease={!viewer && linkRef && canReleaseClaim(selectedClaim, claims?.role) ? async (node) => {
               await api.releaseClaim(linkRef.id, linkRef.workspace, node);

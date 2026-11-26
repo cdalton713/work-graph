@@ -18,6 +18,7 @@ export const KIND_LABELS = new Set(["merge-point", "ship-point", "ops", "decisio
 /** An error with the HTTP status that the API answers with. */
 export class LinearError extends Error {
   status: number;
+  retryAfter?: string;
   constructor(message: string, status = 502) {
     super(message);
     this.status = status;
@@ -211,7 +212,13 @@ function transportFailure(error: unknown): { failure: Failure; error: LinearErro
   return { failure, error: new LinearError(`Linear request failed: ${(error as Error).message}`), retryAfter: null };
 }
 
-interface GraphQLError { message: string; extensions?: { code?: string } }
+interface GraphQLError {
+  message: string;
+  userPresentableMessage?: string;
+  extensions?: { code?: string; type?: string; userPresentableMessage?: string };
+}
+
+interface GqlOptions { manageAccess?: true; teamSetup?: true }
 
 export class LinearKeyRequired extends LinearError {
   constructor() { super("Linear refused the workspace key. Replace it in your account.", 401); }
@@ -280,7 +287,7 @@ export const sharedLinear = new AsyncLocalStorage<{ projectId: string; writer?: 
 export class LinearAccessRefused extends Error {}
 
 export async function gql(query: string, variables: Record<string, unknown> = {},
-  options?: { manageAccess: true }): Promise<Data> {
+  options?: GqlOptions): Promise<Data> {
   const mutation = isMutation(query);
   const shared = sharedLinear.getStore();
   const memberWrite = mutation && shared;
@@ -345,6 +352,25 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       if (response.ok && body && !body.errors) return { data: body.data };
       const detail = (kind !== "oauth" && !rejectApiKey ? body?.errors?.map((e) => e.message).join("; ") : undefined) ?? `HTTP ${response.status}`;
       const rated = response.status === 429 || !!body?.errors?.some((e) => e.extensions?.code === "RATELIMITED");
+      if (options?.teamSetup) {
+        const redact = (value: string) => {
+          for (const secret of [...new Set([key, credential, sentCredential])].sort((a, b) => b.length - a.length)) {
+            if (secret) value = value.replaceAll(secret, "[redacted]");
+          }
+          return value;
+        };
+        const errors = body?.errors ?? [];
+        console.warn("Linear team setup request failed", response.status,
+          JSON.stringify(errors.map(e => ({ message: redact(e.message), type: redact(e.extensions?.type ?? ""),
+            code: redact(e.extensions?.code ?? "") }))));
+        const refusal = errors.find(e => e.extensions?.type?.toLowerCase() === "forbidden" ||
+          [e.message, e.userPresentableMessage, e.extensions?.userPresentableMessage].some(m => /feature not accessible/i.test(m ?? "")));
+        if (!rated && (refusal || response.status === 403)) {
+          const error = refusal ?? errors[0];
+          throw new LinearAccessRefused(redact(error?.extensions?.userPresentableMessage || error?.userPresentableMessage ||
+            error?.message || "HTTP 403"));
+        }
+      }
       if (memberWrite && !rated && response.status < 500 &&
           (response.status === 401 || response.status === 403 || response.status === 404 || body?.errors?.some((error) =>
             /forbidden|unauthenticated|unauthorized|permission|not.?found/i.test(error.extensions?.code ?? "") ||
@@ -369,7 +395,9 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
       }
       const failure: Failure = rated ? "rate" : response.status >= 500 ? "server" : "final";
       const retryAfter = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;
-      return { failure, error: new LinearError(rated ? `Linear rate limit: ${detail}` : options?.manageAccess ? "Linear request failed" : `Linear: ${detail}`, rated ? 429 : 502), retryAfter };
+      const error = new LinearError(rated ? `Linear rate limit: ${detail}` : options?.manageAccess ? "Linear request failed" : `Linear: ${detail}`, rated ? 429 : 502);
+      if (rated && retryAfter) error.retryAfter = retryAfter;
+      return { failure, error, retryAfter };
     });
     if ("data" in result) return result.data;
     if (tryNumber >= MAX_TRIES || !retryable(result.failure, mutation)) throw result.error;
@@ -379,11 +407,11 @@ export async function gql(query: string, variables: Record<string, unknown> = {}
   }
 }
 
-async function pages<T>(query: string, variables: Record<string, unknown>, pick: (data: Data) => Connection<T>): Promise<T[]> {
+export async function pages<T>(query: string, variables: Record<string, unknown>, pick: (data: Data) => Connection<T>, options?: GqlOptions): Promise<T[]> {
   const out: T[] = [];
   let after: string | null = null;
   do {
-    const connection: Connection<T> = pick(await gql(query, { ...variables, after }));
+    const connection: Connection<T> = pick(await gql(query, { ...variables, after }, options));
     out.push(...connection.nodes);
     after = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
   } while (after);

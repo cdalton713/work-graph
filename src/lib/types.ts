@@ -202,3 +202,32 @@ export interface AccountTeam {
   key: string;
   name: string;
 }
+
+export interface SetupTeam extends AccountTeam {
+  private: boolean;
+  parent: AccountTeam | null;
+}
+
+export interface SetupTeamInput extends AccountTeam {
+  private: boolean;
+  parent?: string | null;
+}
+
+export interface SetupItem {
+  name: string;
+  state: "exists" | "missing" | "warn";
+}
+
+export interface TeamSetupState {
+  team: SetupTeam | null;
+  plan: { privateTeams: boolean; subTeams: boolean };
+  fallback: string;
+  statuses: (SetupItem & { type: string; detail?: string })[];
+  labels: (SetupItem & { scope: "team" | "workspace" | "project"; group?: string; detail?: string })[];
+}
+
+export interface TeamSetupResult {
+  created: string[];
+  warned: string[];
+  state: TeamSetupState;
+}

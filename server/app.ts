@@ -1367,7 +1367,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       if (!accounts) return c.json({ error: "Account service unavailable" }, 503);
       return { accounts, tenant: membership.tenant, session };
     }
+    const runLinear = (tenant: Tenant, workspace: Workspace): InWorkspace => (run) =>
+      runInTenant(tenant, () => sharedLinear.exit(() => linearWorkspace.run(workspace, run)));
+
     app.route("/api/account", accountRoutes({
+      runLinear,
       now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX,
       telemetry, pageUrl, access,
       async endSession(c, session) {
@@ -1375,8 +1379,6 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         clearSessionCookie(c);
       },
     }));
-    const runLinear = (tenant: Tenant, workspace: Workspace): InWorkspace => (run) =>
-      runInTenant(tenant, () => sharedLinear.exit(() => linearWorkspace.run(workspace, run)));
 
     app.route("/api", memberAccessRoutes(async (c) => {
       const shared = sharedScope.getStore();

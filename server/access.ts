@@ -104,5 +104,8 @@ export const sharedRoutes: Readonly<Record<string, "list" | "project" | "issue" 
   "PUT /api/account/workspaces/:id/key": "denied",
   "PATCH /api/account/workspaces/:id": "denied",
   "GET /api/account/workspaces/:id/teams": "denied",
+  "POST /api/account/workspaces/:id/teams": "denied",
+  "GET /api/account/workspaces/:id/teams/:key/setup": "denied",
+  "POST /api/account/workspaces/:id/teams/:key/setup": "denied",
   "DELETE /api/account/workspaces/:id": "denied",
 };

@@ -5,7 +5,7 @@ import type { ReviewEffort } from "./lib/review";
 import { pageEvent, type PageEvent } from "./lib/telemetry";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
-import type { StarterResult, Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShare, NewShareLink, ShareKind, ShareMember, LinearAccess, AccessGrant, ServerStatus } from "./lib/types";
+import type { SetupTeam, SetupTeamInput, TeamSetupResult, TeamSetupState, StarterResult, Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShare, NewShareLink, ShareKind, ShareMember, LinearAccess, AccessGrant, ServerStatus } from "./lib/types";
 
 /** The open project. A write names it (`x-project`), so the server can tell its coordinator at once. */
 let openProject: string | null = null;
@@ -15,9 +15,9 @@ let reloading = false;
 
 export const linearAccessRequired = "wg-linear-access-required";
 
-type ErrorBody = { error?: string; status?: string; settingsUrl?: string };
+type ErrorBody = { error?: string; status?: string; settingsUrl?: string; fallback?: string; team?: SetupTeam };
 
-class ApiError extends Error {
+export class ApiError extends Error {
   readonly status: number;
   readonly body: ErrorBody;
 
@@ -121,7 +121,14 @@ export async function joinProject(token: string, confirm?: true): Promise<Projec
   return body;
 }
 
+const setupPath = (id: string, key: string) => `/workspaces/${encodeURIComponent(id)}/teams/${encodeURIComponent(key)}/setup`;
+
 export const accountApi = {
+  teamSetup: (id: string, key: string, signal?: AbortSignal) =>
+    call<TeamSetupState>("account" + setupPath(id, key), { signal }),
+  applyTeamSetup: (id: string, key: string) => accountWrite<TeamSetupResult>(setupPath(id, key), "POST"),
+  createTeam: (id: string, input: SetupTeamInput) =>
+    accountWrite<SetupTeam>(`/workspaces/${encodeURIComponent(id)}/teams`, "POST", input),
   read: (signal?: AbortSignal) => call<Account>("account", { signal }),
   saveName: (human: string) => accountWrite("", "PATCH", { human }),
   onboarding: (state: { name?: true; skipped?: boolean; step?: "workspaces" | "teams" | "setup"; complete?: true }) => accountWrite("/onboarding", "POST", state),

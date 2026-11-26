@@ -767,3 +767,9 @@ here. After a change of `wg.py`, write the file again and change the page until 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Sentry error monitoring
+
+Set `WG_SENTRY_DSN` to enable server error reports. Set `WG_SENTRY_BROWSER_DSN` to publish the browser DSN in `/api/config`. You can enable either setting independently. Both use `WG_SENTRY_ENVIRONMENT` (default `production`) and `WG_VERSION` (default `dev`).
+
+Set `WG_SENTRY_TEST_EVENT=1` to send one info event, `work-graph sentry test`, when a server with error reporting enabled starts. Server reports omit request data, exception messages, and source text.

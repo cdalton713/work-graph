@@ -110,3 +110,27 @@ html:has(.sheet[open]), body:has(.sheet[open]) { overflow: hidden; }
 .reply-options button { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; text-align: left; }
 .reply-options button > span { grid-column: 1 / -1; overflow-wrap: anywhere; }
 .reply-options kbd { grid-area: 1 / 2; color: var(--ink-3); }
+
+.text-send-actions { align-items: center; flex-wrap: wrap; }
+.text-send-actions button { min-width: 44px; min-height: 44px; }
+.text-send-keys { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .text-send-keys { display: inline; }
+}
+@media (hover: none), (pointer: coarse) {
+  .reply-options kbd { display: none; }
+  .reply-options button { min-height: 44px; }
+  .text-send .editor { font-size: 16px; }
+  .app.form-viewport-covered {
+    height: var(--form-viewport-bottom, 100dvh);
+  }
+  .form-viewport-covered > :is(.bar, .rail-bar) { display: none; }
+  .text-send-focused { scroll-margin-block: 4px; }
+  .text-send-focused .editor,
+  .text-send .editor:focus {
+    max-height: min(calc(var(--form-viewport-bottom, 100dvh) / 4), 25dvh);
+  }
+}
+@media (pointer: coarse) and (max-height: 460px) {
+  .app:has(.text-send :focus) > :is(.bar, .rail-bar) { display: none; }
+}

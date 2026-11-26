@@ -83,7 +83,6 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
   const [base, setBase] = useState("");
   const [move, setMove] = useState<{ state: State; warnings: string[] } | null>(null);
   // An ops or decision node goes to a done status with its evidence or answer (the rule of `wg move --note`).
-  const [note, setNote] = useState("");
   const noteWord = node.kind === "ops" ? "evidence" : node.kind === "decision" ? "answer" : null;
   const [comments, setComments] = useState<Comment[] | null>(null);
   const waitingForReply = !locked && node.status === settings.waitStatus
@@ -93,7 +92,6 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
   useEffect(() => {
     setDraft(null);
     setMove(null);
-    setNote("");
     setComments(null);
     setMore(false);
   }, [issue.id]);
@@ -123,7 +121,6 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
   };
   const requestMove = (state: State) => {
     const warnings = moveWarnings(graph, issue.id, state);
-    setNote("");
     if (warnings.length || (noteWord && state.type === "completed")) setMove({ state, warnings });
     else void patch({ stateId: state.id }, { state });
   };
@@ -289,32 +286,38 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
 
         {move && (() => {
           const needsNote = !!noteWord && move.state.type === "completed";
-          const go = () => {
-            const text = note.trim();
-            setMove(null);
-            // A refused move gives the form back with its text.
-            void patch({ stateId: move.state.id, ...(needsNote && { note: text }) }, { state: move.state }).then((saved) => { if (!saved) { setMove(move); setNote(text); } });
+          const go = async (note: string) => {
+            const saved = await patch({ stateId: move.state.id, note }, {});
+            if (!saved) throw new Error("The issue update was refused. See the page error for details.");
+            setMove((current) => current === move ? null : current);
           };
+          const moveLabel = move.warnings.length ? "Move anyway" : `Move to ${move.state.name}`;
+          const cancel = { label: `Keep ${issue.state.name}`, run: () => setMove(null) };
           return (
             <div className={move.warnings.length ? "warning" : "warning warning-form"} role={move.warnings.length ? "alert" : "group"}>
               <strong>{issue.identifier} to {move.state.name}{move.warnings.length ? ": this breaks the graph order." : ""}</strong>
               {move.warnings.map((w) => <p key={w}>{w}</p>)}
-              {needsNote && (
+              {needsNote ? (
                 <>
                   <p>{noteWord === "evidence"
                     ? "Give the evidence: what you deployed or ran (commit or version, environment), the check, and its result."
                     : "Give your answer to this decision."} It becomes a comment on the issue, then the issue moves.</p>
-                  <textarea className="editor" autoFocus rows={4} value={note} aria-label={`The ${noteWord} for ${issue.identifier}`}
+                  <Reply autoFocus rows={4} label={moveLabel} fieldLabel={`The ${noteWord} for ${issue.identifier}`}
+                    draftKey={[data.workspace ?? site.defaultWorkspace, data.project.id, issue.id, noteWord]}
                     placeholder={noteWord === "evidence" ? "abc1234 to beta at 14:05; check: /healthz and one order; result: 200, order saved" : "Yes: cut over on Monday"}
-                    onChange={(e) => setNote(e.target.value)} />
+                    danger={!!move.warnings.length} cancel={cancel} send={go} />
                 </>
+              ) : (
+                <div className="row">
+                  <button type="button" className="danger" onClick={() => {
+                    setMove(null);
+                    void patch({ stateId: move.state.id }, { state: move.state }).then((saved) => {
+                      if (!saved) setMove(move);
+                    });
+                  }}>{moveLabel}</button>
+                  <button type="button" onClick={cancel.run}>{cancel.label}</button>
+                </div>
               )}
-              <div className="row">
-                <button type="button" className={move.warnings.length ? "danger" : "primary"} disabled={needsNote && !note.trim()} onClick={go}>
-                  {move.warnings.length ? "Move anyway" : `Move to ${move.state.name}`}
-                </button>
-                <button type="button" onClick={() => setMove(null)}>Keep {issue.state.name}</button>
-              </div>
             </div>
           );
         })()}
@@ -375,7 +378,8 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
             </article>
           ))}
           {!readOnly && (
-            <Reply key={issue.id} options={replyOptions} label="Comment" placeholder="Add a comment (Markdown). ⌘↵ sends it." send={async (body) => {
+            <Reply options={replyOptions} label="Comment" placeholder="Add a comment (Markdown)."
+              draftKey={[data.workspace ?? site.defaultWorkspace, data.project.id, issue.id, "comment"]} send={async (body) => {
               const created = await api.comment(issue.id, body, data.workspace, data.project.id);
               setComments((c) => [...(c ?? []), created]);
             }} />

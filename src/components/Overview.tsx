@@ -71,6 +71,7 @@ function InboxAnswer({ target, project, expanded, submitted, onSent }: {
             ? <Rich text={submitted ? body : question} />
             : !prompt && <p role="status">Loading the last comment…</p>}
       {!submitted && <Reply options={options} label={target.kind === "worker" ? "Reply to the worker" : "Send answer"}
+        draftKey={[project.workspace ?? site.defaultWorkspace, project.id, ...(target.kind === "worker" ? ["worker", target.ask.id] : [target.issueId, "comment"])]}
         accessHref={`?${new URLSearchParams({ workspace: project.workspace ?? site.defaultWorkspace, project: project.id })}`}
         placeholder="Write a reply. ⌘↵ sends it." send={async (body) => {
           if (target.kind === "worker") {

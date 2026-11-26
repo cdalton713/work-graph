@@ -132,6 +132,10 @@ test("overview controls fit the screen and show their details", async ({ page },
     await expect(inboxTitle).toHaveText(issueTitle);
     await expect(detail).toContainText("Triage · 1");
     await projectDetails.tap();
+    await expect(row.getByText("Build started", { exact: true }).first()).toBeHidden();
+    const agents = row.getByText("1 agent", { exact: true });
+    expect((await bounds(agents)).height).toBeGreaterThanOrEqual(44);
+    await agents.tap();
     await row.getByText("Build started", { exact: true }).first().tap();
     await expect(row.getByText("Check build output", { exact: true })).toBeVisible();
     await overview.getByRole("button", { name: "Linear budget details" }).tap();
@@ -211,4 +215,136 @@ test("a pull keeps the unsent inbox reply", async ({ page, context }, testInfo) 
   await pull(client, top.x + 50, top.y + 24);
   await expect(reply).toHaveValue(draft);
   expect(navigations).toBe(0);
+});
+
+test("the inbox keeps questions in scope while searching projects", async ({ page }) => {
+  const now = new Date();
+  const old = new Date(now.getTime() - 30 * 60_000).toISOString();
+  const ask: Ask = { id: "example-ask", from: "worker", key: null, issue: null, body: "Can the draft go ahead?", at: old };
+  await page.route("**/api/overview*", async (route) => {
+    const response = await route.fetch();
+    const data: OverviewData = await response.json();
+    const project = data.projects.find(({ id }) => id === "fixture")!;
+    const summary = data.summaries.find(({ id }) => id === project.id)!;
+    for (const item of data.summaries) item.you = [];
+    const extras = Array.from({ length: 10 }, (_, index) => ({ ...project, id: `extra-${index}`, name: `Extra project ${index}` }));
+    data.projects.push(...extras);
+    data.summaries.push(...extras.map(({ id }) => ({ ...summary, id, you: [], updatedAt: old })));
+    const stalled = data.summaries.find(({ id }) => id === "extra-0")!;
+    stalled.liveJobs = [{ identifier: "WG-90", title: "Check build", state: "running", startedAt: old }];
+    const action = data.summaries.find(({ id }) => id === "extra-1")!;
+    action.you = [{ identifier: "WG-91", title: "Merge the change", why: "Merge the change", idle: false, updatedAt: old, pullRequests: [] }];
+    const question = data.summaries.find(({ id }) => id === "extra-2")!;
+    question.you = [{ identifier: "WG-92", title: "Choose a release", why: "Choose a release", idle: true, updatedAt: old, pullRequests: [], answer: { issueId: "release", sent: false } }];
+    await route.fulfill({ response, json: data });
+  });
+  await page.routeWebSocket(/\/api\/link\?role=page$/, (socket) => {
+    const send = (type: string, id: string, payload: unknown) =>
+      socket.send(JSON.stringify({ type, project: { workspace: "default", id }, payload }));
+    send("asks", "fixture", { asks: [ask] });
+    send("presence", "extra-0", { queued: 0, coordinators: [] });
+    send("agents", "extra-3", { at: now.toISOString(), agents: [{
+      id: "prompt", role: "worker", key: "example", issue: "WG-93", agent: "worker",
+      state: "waiting", title: "Waiting for a decision", said: "Which build?", at: now.toISOString(),
+    }] });
+  });
+  await page.route("**/api/projects/*/asks/*/reply", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    expect(route.request().postDataJSON()).toEqual({ body: "Go ahead with the draft." });
+    await route.fulfill({ json: { ok: true, recorded: true } });
+  });
+  await page.route("**/api/issues/release/comments", async (route) => {
+    const comment = { id: "release-comment", createdAt: old, body: "Which release should ship?" };
+    if (route.request().method() === "GET") await route.fulfill({ json: [comment] });
+    else {
+      expect(route.request().postDataJSON()).toEqual({ body: "Ship the first release." });
+      await route.fulfill({ json: { ...comment, answered: true } });
+    }
+  });
+  await screens.overview(page);
+  const inbox = page.locator(".inbox");
+  const filters = inbox.getByRole("group", { name: "Inbox category" });
+  const questions = filters.getByRole("button", { name: "Questions 3" });
+  const stalls = filters.getByRole("button", { name: "Possible stalls 2" });
+  const actions = filters.getByRole("button", { name: "Other actions 1" });
+  await expect(inbox.locator(".inbox-open").first()).toContainText(/No agent view|No coordinator/);
+  await page.getByRole("searchbox").fill("Extra project 9");
+  await expect(page.locator(".ov-row")).toHaveCount(1);
+  await expect(page.locator(".ov-row")).toContainText(/Last activity.*30 min ago/);
+  await questions.click();
+  await expect(inbox.getByText("Which build?")).toBeVisible();
+  await expect(inbox.getByText("WG-92")).toBeVisible();
+  const visibleRows = inbox.locator(".inbox-row:not([hidden]) .inbox-open");
+  await visibleRows.first().focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(visibleRows.nth(1)).toBeFocused();
+  await inbox.getByRole("button", { name: /Can the draft go ahead/ }).click();
+  const reply = inbox.getByRole("textbox", { name: "Reply to the worker" });
+  await reply.fill("Go ahead with the draft.");
+  await stalls.click();
+  await expect(inbox.getByText("No coordinator", { exact: true })).toBeVisible();
+  await expect(reply).toBeHidden();
+  await actions.click();
+  await expect(inbox.getByText("Merge the change", { exact: true })).toBeVisible();
+  await questions.click();
+  await expect(reply).toHaveValue("Go ahead with the draft.");
+  await reply.press("Control+Enter");
+  await expect(inbox.getByRole("status").filter({ hasText: "sent" })).toBeVisible();
+
+  await inbox.getByRole("button", { name: /WG-92/ }).click();
+  await expect(inbox.getByText("Which release should ship?")).toBeVisible();
+  await inbox.getByRole("textbox", { name: "Send answer" }).fill("Ship the first release.");
+  await inbox.getByRole("button", { name: "Send answer" }).click();
+  await expect(inbox.locator(".inbox-row").filter({ hasText: "WG-92" }).getByRole("status")).toHaveText("sent");
+});
+
+test("incomplete summaries cannot give an all-clear headline", async ({ page }) => {
+  await page.route("**/api/overview*", async (route) => {
+    const response = await route.fetch();
+    const data: OverviewData = await response.json();
+    const summary = data.summaries.find(({ id }) => id === "fixture")!;
+    summary.you = [];
+    summary.error = "The project could not load";
+    data.summaries = [summary];
+    await route.fulfill({ response, json: data });
+  });
+  await screens.overview(page);
+  await expect(page.locator(".ov-sum")).toContainText("Project data incomplete");
+  await page.getByRole("button", { name: "Questions 0" }).click();
+  await expect(page.getByText(/No questions in this scope/)).toBeVisible();
+});
+
+test("collapsed agents keep their inline reply and delivery receipt", async ({ page }) => {
+  const at = new Date().toISOString();
+  const project = { workspace: "default", id: "fixture" };
+  const report: Agents = { at, replies: true, agents: [{
+    id: "finished-agent", role: "worker", key: "finished", issue: "WG-5", agent: "worker",
+    state: "done", title: "Check build output", said: "Build complete", at,
+  }] };
+  await page.routeWebSocket(/\/api\/link\?role=page$/, (socket) => {
+    socket.send(JSON.stringify({ type: "agents", project, payload: report }));
+  });
+  await page.routeWebSocket(/\/api\/link\?role=page&workspace=default&project=fixture$/, (socket) => {
+    socket.send(JSON.stringify({ type: "agent-reply-result", project, payload: {
+      id: "reply-id", agent: "finished-agent", status: "delivered", messageId: "message-id",
+    } }));
+  });
+  await page.route("**/api/projects/fixture/agents/finished-agent/reply", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ body: "Check the release build." });
+    await route.fulfill({ json: { id: "reply-id" } });
+  });
+  await screens.overview(page);
+  const agentGroup = page.locator(".ov-agent-group");
+  const disclosure = agentGroup.getByText("1 agent", { exact: true });
+  const reply = agentGroup.getByRole("textbox", { name: "Reply to the agent" });
+  await expect(reply).toBeHidden();
+  await disclosure.press("Enter");
+  await agentGroup.locator(".ov-agent > summary").press("Enter");
+  await reply.fill("Check the release build.");
+  await agentGroup.getByRole("button", { name: "Reply to the agent" }).click();
+  await expect(agentGroup.getByRole("status")).toHaveText("delivered");
+  await disclosure.click();
+  await expect(agentGroup.getByRole("status")).toBeHidden();
+  await disclosure.click();
+  await expect(agentGroup.getByRole("status")).toHaveText("delivered");
 });

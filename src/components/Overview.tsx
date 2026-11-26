@@ -4,8 +4,8 @@ import { agentReplyLine, agentReplyPending, applyAgentReplyResult, canReplyToAge
 import { Reply } from "./Reply";
 import { parseOptions } from "../lib/options";
 import { ownerWords } from "../lib/words";
-import { type OverviewData, type OverviewFilter, type OverviewRow, type YourMove, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, rankMoves, summaryKey } from "../lib/overview";
-import { ageText, type Signal } from "../lib/graph";
+import { type OverviewData, type OverviewFilter, type OverviewRow, type YourMove, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, summaryKey } from "../lib/overview";
+import { ageText, compareMoves, type Signal } from "../lib/graph";
 import { PROJECT_STATES, type ProjectStateName, type Stall, overviewTitle } from "../lib/attention";
 import { type AgentReplyResult, type Agents, type Ask, type Presence, type ProjectRef, agentName, agentNeeds, agentState, agentsFresh, agentsShown, presenceText, projectKey } from "../lib/link";
 import { site } from "../lib/site";
@@ -43,6 +43,32 @@ function stored(): OverviewFilter {
 
 type SentWorker = { project: Project; move: YourMove };
 type InboxRow = SentWorker & { stall: Stall | null };
+const INBOX_FILTERS = [
+  { id: "all", label: "All", empty: "No inbox items in this scope." },
+  { id: "questions", label: "Questions", empty: "No questions in this scope." },
+  { id: "stalls", label: "Possible stalls", empty: "No possible stalls in this scope." },
+  { id: "actions", label: "Other actions", empty: "No other actions in this scope." },
+] as const;
+type InboxFilter = typeof INBOX_FILTERS[number]["id"];
+
+function inboxCategory({ move, stall }: InboxRow): Exclude<InboxFilter, "all"> {
+  if (stall) return "stalls";
+  return move.workerAsk || move.agentWait || move.answer ? "questions" : "actions";
+}
+
+function inboxKey({ project, move, stall }: InboxRow) {
+  const key = summaryKey(project);
+  if (stall) return `${key}:stall:${stall.kind}:${stall.issue ?? ""}`;
+  if (move.workerAsk) return `${key}:worker:${move.workerAsk.id}`;
+  if (move.answer) return `${key}:issue:${move.answer.issueId}`;
+  return `${key}:move:${move.agentWait?.id ?? move.identifier}`;
+}
+
+function compareInboxRows(a: InboxRow, b: InboxRow) {
+  return Number(!!b.stall) - Number(!!a.stall)
+    || compareMoves(a.move, b.move)
+    || inboxKey(a).localeCompare(inboxKey(b));
+}
 
 function InboxAnswer({ target, project, expanded, submitted, onSent }: {
   target: InboxReply; project: Project; expanded: boolean; submitted: boolean; onSent: (comment?: Comment) => void;
@@ -161,20 +187,26 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
   // Sections only when some project has an initiative; then the rows go in the order of the sections.
   const grouped = names.length > 0;
   const activity = useMemo(() => ({ now, presence, agents }), [now, presence, agents]);
-  const matching = useMemo(() => overviewRows(list, { ...filter, initiative }, activity), [list, filter, initiative, activity]);
+  const inboxProjects = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, initiative }, activity),
+    [list, filter.workspace, initiative, activity]);
+  const matching = useMemo(() => {
+    const projects = filter.closed ? overviewRows(list, { ...filter, text: "", initiative }, activity) : inboxProjects;
+    const words = filter.text.trim().toLowerCase().split(/\s+/);
+    return projects.filter(({ project }) => words.every((word) => project.name.toLowerCase().includes(word)));
+  }, [list, filter, initiative, activity, inboxProjects]);
   const counts = countProjectStates(matching);
   const visible = useMemo(() => filterProjectStates(matching, states), [matching, states]);
   const sections = useMemo(() => grouped ? initiativeSections(visible, list.workspaces) : [], [visible, list.workspaces, grouped]);
   const rows = useMemo(() => grouped ? sections.flatMap((section) => section.rows) : visible, [sections, visible, grouped]);
-  const inboxProjects = useMemo(() => overviewRows(list, { ...START, workspace: filter.workspace, initiative }, activity),
-    [list, filter.workspace, initiative, activity]);
-  const waiting = inboxProjects.filter(({ summary }) => summary?.you.length);
-  const waitingIssues = inboxProjects.reduce((n, r) => n + (r.summary?.you.length ?? 0), 0);
+  const incomplete = !!missing || list.workspaces.some((w) => w.error && (!filter.workspace || w.id === filter.workspace))
+    || inboxProjects.some(({ summary }) => !summary || summary.error);
+  const [category, setCategory] = useState<InboxFilter>("all");
+  const [openedReplies, setOpenedReplies] = useState<Set<string>>(() => new Set());
   const [active, setActive] = useState(0);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [issueReceipts, setIssueReceipts] = useState<Map<string, ReturnType<typeof issueReplyReceipt>>>(() => new Map());
   const [sentWorkers, setSentWorkers] = useState<Map<string, SentWorker>>(() => new Map());
-  const inbox = useMemo<InboxRow[]>(() => rankMoves<InboxRow>(inboxProjects.flatMap(({ project, summary, stalls }) => [
+  const inbox = useMemo<InboxRow[]>(() => inboxProjects.flatMap<InboxRow>(({ project, summary, stalls }) => [
     ...(summary?.you ?? []).map((move) => ({ project, move, stall: null })),
     ...stalls.map((stall) => ({
       project, stall,
@@ -184,24 +216,29 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
         ...(stall.issue ? summary?.moveImpacts?.[stall.issue] : undefined),
       },
     })),
-  ])), [inboxProjects]);
+  ]).sort(compareInboxRows), [inboxProjects]);
   const pendingWorkers = [...sentWorkers.values()].filter(({ project, move }) => {
     const key = summaryKey(project);
     return !!presence?.get(key)?.queued && !inbox.some((row) => summaryKey(row.project) === key && row.move.workerAsk?.id === move.workerAsk?.id)
       && inboxProjects.some((row) => summaryKey(row.project) === key);
   });
-  const ranked = inbox.some(({ move }) => move.blocks !== undefined);
   const [allMoves, setAllMoves] = useState(false);
-  const inboxRows = pendingWorkers.length ? rankMoves<InboxRow>([
+  const inboxRows = pendingWorkers.length ? [
     ...inbox,
     ...pendingWorkers.map(({ project, move }) => ({ project, move, stall: null })),
-  ]) : inbox;
+  ].sort(compareInboxRows) : inbox;
+  const inboxCounts = { all: inboxRows.length, questions: 0, stalls: 0, actions: 0 };
+  for (const row of inboxRows) inboxCounts[inboxCategory(row)]++;
+  const emptyInbox = INBOX_FILTERS.find(({ id }) => id === category)!.empty;
+  const categoryRows = category === "all" ? inboxRows : inboxRows.filter((row) => inboxCategory(row) === category);
+  const shownInbox = new Set((allMoves ? categoryRows : categoryRows.slice(0, INBOX)).map(inboxKey));
+  const workspaceName = list.workspaces.find((w) => w.id === filter.workspace)?.name;
+  const scope = [workspaceName ?? "All workspaces", initiative === null ? "All initiatives" : initiative || "No initiative"].join(" · ");
   useEffect(() => {
     const previous = document.title;
     document.title = overviewTitle(inboxRows.length);
     return () => { document.title = previous; };
   }, [inboxRows.length]);
-  const shownInbox = allMoves ? inboxRows : inboxRows.slice(0, INBOX);
   useEffect(() => {
     // A worker reply leaves the live asks when queued. Keep its receipt until the coordinator drains
     // the queue. An issue answer stays on its original row until the issue moves.
@@ -278,9 +315,9 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       stage.removeEventListener("touchcancel", reset);
     };
   }, []);
-  const inboxButtons = () => Array.from(inboxRoot.current?.querySelectorAll<HTMLButtonElement>(".inbox-open") ?? []);
+  const inboxButtons = () => Array.from(inboxRoot.current?.querySelectorAll<HTMLButtonElement>(".inbox-row:not([hidden]) .inbox-open") ?? []);
   useEffect(() => {
-    if (expanded) inboxRoot.current?.querySelector<HTMLTextAreaElement>(".inbox-detail:not([hidden]) textarea")?.focus();
+    if (expanded) inboxRoot.current?.querySelector<HTMLTextAreaElement>(".inbox-row:not([hidden]) .inbox-detail:not([hidden]) textarea")?.focus();
   }, [expanded]);
   useEffect(() => setActive(0), [filter, initiative, states]);
   useEffect(() => { root.current?.querySelector(".ov-row.is-active")?.scrollIntoView({ block: "nearest" }); }, [active]);
@@ -291,7 +328,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       const element = e.target instanceof HTMLElement ? e.target : null;
       const typing = element?.closest("input, textarea, select, [contenteditable]");
       const inFind = e.target === find.current;
-      const inInbox = inboxRoot.current?.contains(element);
+      const inInbox = element?.closest(".inbox-row");
       if (e.key === "Escape" && inInbox && expanded) {
         e.preventDefault();
         setExpanded(null);
@@ -337,12 +374,19 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       const project = { id: p.id, workspace: p.workspace ?? site.defaultWorkspace };
       const shown = agentsShown(reported, now);
       const fresh = agentsFresh(reported, now);
+      const waitingAgents = shown.filter(agentNeeds).length;
+      const reportAt = Math.max(...[reported?.at, s?.effort?.at, s?.freshness?.ran].map((at) => Date.parse(at ?? "")).filter(Number.isFinite));
+      const issueAt = Date.parse(s?.updatedAt ?? "");
+      const updatedAt = Number.isFinite(issueAt) ? issueAt : -Infinity;
+      const lastAge = ageText(now - Math.max(reportAt, updatedAt));
+      const lastActivity = lastAge ? `${reportAt >= updatedAt ? "Last report" : "Last activity"} · ${lastAge}` : "No activity reported";
       const { state, reason } = attention;
+      const rowReason = !s && !loading && !closed ? "Project details unavailable" : reason;
       const { signal } = STATE_DISPLAY[state];
       const coordinator = presenceText(presence?.get(key), now, reported, !owner);
       const coordinatorDisplay = COORDINATOR_DISPLAY[coordinator?.state ?? "unknown"];
       const detail = [
-        p.name, reason, coordinator?.title,
+        p.name, rowReason, lastActivity, coordinator?.title,
         s?.counts.map((c) => `${c.status} · ${c.n}`).join(", "),
         s?.running ? "Running: a worker runs on it, or it is In Progress." : "",
         s?.review ? "In review: In Review or Verifying." : "",
@@ -354,7 +398,8 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             <span className="ov-state">
               <Lamp signal={signal} pulse={state === "moving"} />
               <span className={`ov-state-label sig-fg-${signal}`}>{stateLabel(state)}</span>
-              <span className="ov-reason" title={reason}>{reason}</span>
+              <span className="ov-reason" title={rowReason}>{rowReason}</span>
+              <span className="ov-age mono">{lastActivity}</span>
             </span>
             <span className="ov-name">
               <span className="ov-title" title={p.name}>{p.name}</span>
@@ -390,41 +435,48 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
             </details>
           )}
           {shown.length > 0 && (
-            <ul className={`ov-agents${fresh ? "" : " is-stale"}`} aria-label={`Agents of ${p.name} in Orca`}>
-              {!fresh && <li className="ov-agents-note is-warning">agent view stopped · last report {ageText(now - Date.parse(reported!.at))} · wg agents does not run</li>}
-              {owner && reported?.replies !== true && <li className="ov-agents-note">To turn on replies, set <code>agent_replies</code> to <code>true</code> and run <code>wg agents</code> in your Orca terminal.</li>}
-              {shown.map((a) => {
-                const state = agentState(a);
-                const receipt = owner ? receipts.find((r) => projectKey(r.project) === key && r.agent === a.id) : undefined;
-                const status = receipt && agentReplyLine(receipt, now);
-                return (
-                  <li key={a.id}>
-                    <details className="ov-agent">
-                      <summary>
-                        <Lamp signal={fresh ? state.signal : "off"} pulse={fresh && state.signal === "running"} />
-                        <span className="ov-agent-who mono">{agentName(a)}</span>
-                        <span className={`ov-agent-state${fresh && state.signal === "stop" ? " sig-fg-stop" : ""}`}>{a.agent} {state.text}</span>
-                        <span className="ov-agent-age mono">{a.at ? ageText(now - Date.parse(a.at)) : ""}</span>
-                        <span className="ov-agent-said">{a.said || "no message yet"}</span>
-                      </summary>
-                      {a.title && <p className="ov-agent-full">{a.title}</p>}
-                      <p className="ov-agent-full">{a.said || "no message yet"}{messageCut(a.said) && <span className="ov-agents-note"> (message cut at 500 characters)</span>}</p>
-                      {agentNeeds(a) && <p className="ov-agent-full">answer this agent in Orca</p>}
-                      {canReplyToAgent(a, reported, now, owner) && (!receipt || !agentReplyPending(receipt, now)) &&
-                        <div className="ov-agent-full">
-                          <Reply label="Reply to the agent" placeholder="Write a reply" send={async (body) => {
-                            const { id } = await api.agentReply(project.id, project.workspace, a.id, body);
-                            const sentAt = Date.now();
-                            setReceipts((previous) => [...previous.filter((r) => projectKey(r.project) !== key || r.agent !== a.id),
-                              { id, agent: a.id, sentAt, project }]);
-                          }} />
-                        </div>}
-                    </details>
-                    {status && <p className={`ov-agent-reply-status sig-fg-${status.signal}`} role="status">{status.text}</p>}
-                  </li>
-                );
-              })}
-            </ul>
+            <details className="ov-agent-group">
+              <summary>
+                {shown.length} {shown.length === 1 ? "agent" : "agents"}
+                {!fresh ? <span className="is-warning"> · Stale report</span>
+                  : waitingAgents > 0 && <span className="sig-fg-stop"> · {waitingAgents} waiting</span>}
+              </summary>
+              <ul className={`ov-agents${fresh ? "" : " is-stale"}`} aria-label={`Agents of ${p.name} in Orca`}>
+                {!fresh && <li className="ov-agents-note is-warning">agent view stopped · last report {ageText(now - Date.parse(reported!.at))} · wg agents does not run</li>}
+                {owner && reported?.replies !== true && <li className="ov-agents-note">To turn on replies, set <code>agent_replies</code> to <code>true</code> and run <code>wg agents</code> in your Orca terminal.</li>}
+                {shown.map((a) => {
+                  const state = agentState(a);
+                  const receipt = owner ? receipts.find((r) => projectKey(r.project) === key && r.agent === a.id) : undefined;
+                  const status = receipt && agentReplyLine(receipt, now);
+                  return (
+                    <li key={a.id}>
+                      <details className="ov-agent">
+                        <summary>
+                          <Lamp signal={fresh ? state.signal : "off"} pulse={fresh && state.signal === "running"} />
+                          <span className="ov-agent-who mono">{agentName(a)}</span>
+                          <span className={`ov-agent-state${fresh && state.signal === "stop" ? " sig-fg-stop" : ""}`}>{a.agent} {state.text}</span>
+                          <span className="ov-agent-age mono">{a.at ? ageText(now - Date.parse(a.at)) : ""}</span>
+                          <span className="ov-agent-said">{a.said || "no message yet"}</span>
+                        </summary>
+                        {a.title && <p className="ov-agent-full">{a.title}</p>}
+                        <p className="ov-agent-full">{a.said || "no message yet"}{messageCut(a.said) && <span className="ov-agents-note"> (message cut at 500 characters)</span>}</p>
+                        {agentNeeds(a) && <p className="ov-agent-full">answer this agent in Orca</p>}
+                        {canReplyToAgent(a, reported, now, owner) && (!receipt || !agentReplyPending(receipt, now)) &&
+                          <div className="ov-agent-full">
+                            <Reply label="Reply to the agent" placeholder="Write a reply" send={async (body) => {
+                              const { id } = await api.agentReply(project.id, project.workspace, a.id, body);
+                              const sentAt = Date.now();
+                              setReceipts((previous) => [...previous.filter((r) => projectKey(r.project) !== key || r.agent !== a.id),
+                                { id, agent: a.id, sentAt, project }]);
+                            }} />
+                          </div>}
+                      </details>
+                      {status && <p className={`ov-agent-reply-status sig-fg-${status.signal}`} role="status">{status.text}</p>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </details>
           )}
         </li>
       );
@@ -436,13 +488,10 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
         <AgentReplyUpdates key={key} project={project} onResult={(result) => receiveResult(key, result)} />)}
       <div className="ov-head">
         <h1>Overview</h1>
-        <p className={`ov-sum${waiting.length ? " is-you" : ""}`} role="status">
-          {"summaries" in list
-            ? waiting.length
-              ? <><Lamp signal="stop" /><b>{waiting.length}</b> {waiting.length === 1 ? "project waits" : "projects wait"} {words.onOwner} · <b>{waitingIssues}</b> {waitingIssues === 1 ? "issue" : "issues"}</>
-              : <><Lamp signal="done" />{words.clear}</>
-            : "Loading the projects…"}
-          {loading && "summaries" in list && <span className="sync-dot is-busy" aria-label="Refreshing" />}
+        <p className="ov-sum" role="status">
+          {inboxCounts.stalls > 0 && <span className="sig-fg-stop"><Lamp signal="stop" /> {inboxCounts.stalls} {inboxCounts.stalls === 1 ? "possible stall" : "possible stalls"}</span>}
+          {incomplete && !(loading && !("summaries" in list)) && <span className="sig-fg-stop">Project data incomplete</span>}
+          {loading && <span className="sync-dot is-busy" aria-label="Refreshing" />}
         </p>
         {budget.map((w) => <Hint key={w.id} className="ov-budget is-warning mono" text={w.title} infoLabel="Linear budget details">
           <span role="status">{w.text}</span>
@@ -450,85 +499,98 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
       </div>
       {missing && <p className="empty" role="status">{missing}</p>}
 
-      {inboxRows.length > 0 && (
-        <section className="inbox" ref={inboxRoot} aria-label={`${words.move} in all projects`}>
-          <h2 className="inbox-head"><span>{words.move}</span><b className="mono">{inboxRows.length}</b><span className="inbox-note">{ranked ? (inbox.some(({ stall }) => stall) ? "stalls and agent waits, most held back, oldest" : "agent waits, most held back, oldest") : "oldest first"}</span></h2>
-          <ul>
-            {shownInbox.map(({ project: p, move: m, stall }) => {
-              const projectKey = summaryKey(p);
-              const target = inboxReply(m, readOnly || viewerWorkspaces.has(p.workspace ?? ""));
-              const key = target?.kind === "worker" ? `${projectKey}:worker:${target.ask.id}`
-                : target?.kind === "issue" ? `${projectKey}:issue:${target.issueId}`
-                : `${projectKey}:${m.agentWait?.id ?? m.identifier}:${stall?.kind ?? ""}`;
-              const open = expanded === key;
-              const receipt = issueReceipts.get(key);
-              const sent = target?.kind === "worker" ? sentWorkers.has(key) : target?.kind === "issue" && target.sent;
-              const detailId = `inbox-detail-${encodeURIComponent(key)}`;
-              const go = () => onOpen(p, stall ? stall.issue : m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier);
-              const stamp = m.agentWait?.at ?? m.updatedAt;
-              const age = stamp ? ageText(now - Date.parse(stamp)) : null;
-              // A reason that is the title (a decision: its question) shows once.
-              const why = overviewMoveReason(m.why);
-              const title = m.agentWait?.said !== m.title && why.trim() !== m.title.trim() && !why.includes(m.title.trim()) ? m.title : null;
-              const effect = [
-                m.idle && !stall && "agent waits",
-                m.blocks && `holds back ${m.blocks}, ${m.unblocks ?? 0} can start`,
-              ].filter(Boolean).join(" · ");
-              return (
-                <li key={key} className="inbox-row">
-                  <div className="inbox-row-head">
-                    <button type="button" className="inbox-open" title={`${p.name}: ${m.title}`}
-                      aria-expanded={target ? open : undefined} aria-controls={target ? detailId : undefined}
-                      onClick={target ? () => setExpanded(open ? null : key) : go}>
-                      <Lamp signal="stop" />
-                      <span className="inbox-id mono">{m.identifier}</span>
-                      <span>
-                        <span className="inbox-text">
-                          <span className="inbox-why">{why}</span>
-                          {title && <span className="inbox-title">{title}</span>}
-                        </span>
-                        {m.agentWait && <>
-                          {m.agentWait.said && <span className="inbox-agent-message">{m.agentWait.said}</span>}
-                          {messageCut(m.agentWait.said) && <span className="inbox-effect">Message cut at 500 characters.</span>}
-                          {!target && <span className="inbox-effect">answer this agent in Orca</span>}
-                        </>}
-                        {effect && <span className="inbox-effect">{effect}</span>}
-                        {receipt
-                          ? <span className={`inbox-effect sig-fg-${receipt.signal}`} role="status">{receipt.text}</span>
-                          : sent && <span className="inbox-effect sig-fg-done" role="status">sent</span>}
-                      </span>
-                      <span className="inbox-project">{p.name}</span>
-                      <span className="inbox-age mono">{age ?? ""}</span>
-                    </button>
-                    {/* Always there, so the columns of the rows line up. */}
-                    <span className="inbox-prs">
-                      {m.pullRequests.map((pr) => <span className="ov-pr" key={pr.url}>#{pr.number} <PrLinks pr={pr} compact /></span>)}
-                    </span>
-                  </div>
-                  {target && (
-                    <div className="inbox-detail" id={detailId} hidden={!open}>
-                      <p className="inbox-why">{why}</p>
-                      <InboxAnswer target={target} project={p} expanded={open} submitted={!!sent || !!receipt} onSent={(comment) => {
-                        if (document.activeElement?.closest(".inbox-detail")?.id === detailId) {
-                          inboxButtons().find((button) => button.getAttribute("aria-controls") === detailId)?.focus();
-                        }
-                        if (target.kind === "worker") setSentWorkers((old) => new Map(old).set(key, { project: p, move: m }));
-                        else if (comment) setIssueReceipts((old) => new Map(old).set(key, issueReplyReceipt(comment)));
-                      }} />
-                      <button type="button" className="ghost" onClick={go}>{m.identifier === "worker" || m.identifier === "coordinator" ? "Open project" : "Open issue"}</button>
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-          {inboxRows.length > INBOX && (
-            <button type="button" className="ghost inbox-more" onClick={() => setAllMoves(!allMoves)}>
-              {allMoves ? "Show fewer" : `Show all ${inboxRows.length}`}
+      <section className="inbox" ref={inboxRoot} aria-label="Inbox">
+        <h2 className="inbox-head">Inbox <span className="inbox-note">{scope}</span></h2>
+        <div className="inbox-filters" role="group" aria-label="Inbox category">
+          {INBOX_FILTERS.map(({ id, label }) => (
+            <button key={id} type="button" className={`toggle${id === category ? " is-on" : ""}`} aria-pressed={id === category}
+              onClick={() => { setCategory(id); setAllMoves(false); }}>
+              {label} <span className="mono">{inboxCounts[id]}</span>
             </button>
-          )}
-        </section>
-      )}
+          ))}
+        </div>
+        {categoryRows.length === 0 && <p className="inbox-empty" role="status">
+          {loading && !("summaries" in list) ? "Loading the inbox…"
+            : <>{emptyInbox}{incomplete && " Project data is incomplete."}</>}
+        </p>}
+        <ul>
+          {inboxRows.map((row) => {
+            const { project: p, move: m, stall } = row;
+            const key = inboxKey(row);
+            const visible = shownInbox.has(key);
+            if (!visible && !openedReplies.has(key)) return null;
+            const target = inboxReply(m, readOnly || viewerWorkspaces.has(p.workspace ?? ""));
+            const open = expanded === key;
+            const receipt = issueReceipts.get(key);
+            const sent = target?.kind === "worker" ? sentWorkers.has(key) : target?.kind === "issue" && target.sent;
+            const detailId = `inbox-detail-${encodeURIComponent(key)}`;
+            const go = () => onOpen(p, stall ? stall.issue : m.identifier === "worker" || m.identifier === "coordinator" ? undefined : m.identifier);
+            const stamp = m.agentWait?.at ?? m.updatedAt;
+            const age = stamp ? ageText(now - Date.parse(stamp)) : null;
+            // A reason that is the title (a decision: its question) shows once.
+            const why = overviewMoveReason(m.why);
+            const title = m.agentWait?.said !== m.title && why.trim() !== m.title.trim() && !why.includes(m.title.trim()) ? m.title : null;
+            const effect = [
+              m.idle && !stall && "agent waits",
+              m.blocks && `holds back ${m.blocks}, ${m.unblocks ?? 0} can start`,
+            ].filter(Boolean).join(" · ");
+            return (
+              <li key={key} className="inbox-row" hidden={!visible}>
+                <div className="inbox-row-head">
+                  <button type="button" className="inbox-open" title={`${p.name}: ${m.title}`}
+                    aria-expanded={target ? open : undefined} aria-controls={target ? detailId : undefined}
+                    onClick={target ? () => {
+                      setExpanded(open ? null : key);
+                      if (!open) setOpenedReplies((old) => new Set(old).add(key));
+                    } : go}>
+                    <Lamp signal="stop" />
+                    <span className="inbox-id mono">{m.identifier}</span>
+                    <span>
+                      <span className="inbox-text">
+                        <span className="inbox-why">{why}</span>
+                        {title && <span className="inbox-title">{title}</span>}
+                      </span>
+                      {m.agentWait && <>
+                        {m.agentWait.said && <span className="inbox-agent-message">{m.agentWait.said}</span>}
+                        {messageCut(m.agentWait.said) && <span className="inbox-effect">Message cut at 500 characters.</span>}
+                        {!target && <span className="inbox-effect">answer this agent in Orca</span>}
+                      </>}
+                      {effect && <span className="inbox-effect">{effect}</span>}
+                      {receipt
+                        ? <span className={`inbox-effect sig-fg-${receipt.signal}`} role="status">{receipt.text}</span>
+                        : sent && <span className="inbox-effect sig-fg-done" role="status">sent</span>}
+                    </span>
+                    <span className="inbox-project">{p.name}</span>
+                    <span className="inbox-age mono">{age ?? ""}</span>
+                  </button>
+                  {/* Always there, so the columns of the rows line up. */}
+                  <span className="inbox-prs">
+                    {m.pullRequests.map((pr) => <span className="ov-pr" key={pr.url}>#{pr.number} <PrLinks pr={pr} compact /></span>)}
+                  </span>
+                </div>
+                {target && (
+                  <div className="inbox-detail" id={detailId} hidden={!open || !visible}>
+                    <p className="inbox-why">{why}</p>
+                    <InboxAnswer target={target} project={p} expanded={open && visible} submitted={!!sent || !!receipt} onSent={(comment) => {
+                      if (document.activeElement?.closest(".inbox-detail")?.id === detailId) {
+                        inboxButtons().find((button) => button.getAttribute("aria-controls") === detailId)?.focus();
+                      }
+                      if (target.kind === "worker") setSentWorkers((old) => new Map(old).set(key, { project: p, move: m }));
+                      else if (comment) setIssueReceipts((old) => new Map(old).set(key, issueReplyReceipt(comment)));
+                    }} />
+                    <button type="button" className="ghost" onClick={go}>{m.identifier === "worker" || m.identifier === "coordinator" ? "Open project" : "Open issue"}</button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+        {categoryRows.length > INBOX && (
+          <button type="button" className="ghost inbox-more" onClick={() => setAllMoves(!allMoves)}>
+            {allMoves ? "Show fewer" : `Show all ${categoryRows.length}`}
+          </button>
+        )}
+      </section>
 
       <div className="ov-filters">
         <div className="ov-find">

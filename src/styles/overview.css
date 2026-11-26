@@ -1,13 +1,10 @@
-/* No project yet: the overview of all projects. The projects that wait on the human come first, with a red
-   edge and their next actions under the row. */
+/* Overview of all projects, with a red edge on rows that need attention. */
 .stage:has(> .overview) { overflow-y: auto; }
 .overview { margin: 0 auto; width: min(1080px, calc(100% - 32px)); padding-block: 20px 40px; }
 .ov-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 12px; }
 .ov-budget { font-size: 11px; color: var(--lamp-running); }
 .ov-head h1 { margin: 0; font: 600 10px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); }
 .ov-sum { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--ink-2); font-size: 13px; }
-.ov-sum b { color: var(--ink-1); font-weight: 600; }
-.ov-sum.is-you b { color: var(--lamp-stop); }
 .ov-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
 .ov-find { position: relative; flex: 1 1 220px; max-width: 320px; }
 .ov-find input { width: 100%; background: var(--inset); border: 1px solid var(--rail-2); border-radius: var(--r-1); padding: 4px 28px 4px 9px; }
@@ -90,14 +87,12 @@ button.ov-section-name:hover { text-decoration: underline; }
   .ov-open { padding-block: 12px; }
 }
 
-/* The inbox: every move that waits on the human, in all projects, the one that waits longest first. */
+/* Inbox actions for the selected workspace and initiative. */
 .inbox { margin-bottom: 20px; border: 1px solid color-mix(in srgb, var(--lamp-stop) 35%, var(--rail)); border-radius: var(--r-2); background: var(--cab-1); overflow: hidden; }
 .inbox-head { display: flex; align-items: baseline; gap: 8px; margin: 0; padding: 9px 14px 7px; border-bottom: 1px solid var(--rail); font: 600 10px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--lamp-stop); }
-.inbox-head b { font-weight: 500; color: var(--ink-1); }
 .inbox-note { margin-left: auto; font-weight: 400; letter-spacing: 0.06em; color: var(--ink-4); }
 .inbox > ul { list-style: none; margin: 0; padding: 0; }
 .inbox-row-head { display: flex; align-items: center; gap: 12px; padding-right: 14px; }
-.inbox-row + .inbox-row { border-top: 1px solid var(--rail); }
 .inbox-open { flex: 1; min-width: 0; display: grid; grid-template-columns: 8px 72px minmax(0, 1fr) minmax(0, 180px) 64px; align-items: center; gap: 12px;
   border: 0; border-radius: 0; padding: 8px 0 8px 14px; text-align: left; color: var(--ink-2); }
 @media (hover: hover) { .inbox-open:hover:not(:disabled) { background: var(--rail); } }
@@ -159,4 +154,36 @@ button.ov-section-name:hover { text-decoration: underline; }
     display: block; white-space: normal; overflow: visible; overflow-wrap: anywhere;
   }
   .inbox-why { -webkit-line-clamp: unset; }
+}
+
+.inbox-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--rail);
+}
+.inbox-filters button[aria-pressed="true"] {
+  border-color: var(--rail-3);
+  background: var(--cab-3);
+  color: var(--ink-1);
+}
+.inbox-filters .mono { margin-inline-start: 4px; }
+.inbox-row[hidden] { display: none; }
+.inbox-row:not([hidden]) ~ .inbox-row:not([hidden]) { border-top: 1px solid var(--rail); }
+.inbox-empty { margin: 0; padding: 12px; color: var(--ink-3); font-size: 12px; }
+.inbox-note { min-width: 0; overflow-wrap: anywhere; }
+.ov-age { margin-inline-start: auto; flex: none; color: var(--ink-3); font-size: 11px; }
+.ov-agent-group { flex: 0 0 100%; min-width: 0; padding: 0 12px 4px 28px; font-size: 12px; }
+.ov-agent-group > summary { width: fit-content; padding-block: 4px; cursor: pointer; color: var(--ink-2); }
+.ov-agent-group[open] > summary { margin-bottom: 4px; }
+.ov-agent-group .ov-agents { padding: 0 0 4px 12px; }
+@media (max-width: 720px) {
+  .ov-state { flex-wrap: wrap; }
+  .ov-reason { flex: 1; }
+  .ov-age { flex-basis: 100%; margin-inline-start: 16px; }
+}
+@media (pointer: coarse) {
+  .ov-agent-group > summary { min-width: 44px; min-height: 44px; align-content: center; }
+  .ov-agent summary { flex-wrap: wrap; }
 }

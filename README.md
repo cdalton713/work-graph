@@ -222,6 +222,8 @@ HTTP 429 or `RATELIMITED`, because Linear can have applied a mutation that timed
 
 ## Host the page
 
+For a service with separate Linear accounts, see [Run the hosted service](#run-the-hosted-service).
+
 **What a host does not do.** The host serves only the page and its API. The coordinator and
 workers run on the user's machine. Each user who runs an effort needs access to Linear and
 local copies of `gh`, `st`, Orca, `uv`, and an agent CLI (Claude Code or Codex).
@@ -382,27 +384,144 @@ After a pause, it checks a timed-out connection with a fresh ping before it reco
 to check the mode (`readOnly` and `link`) and Redis (`linkStore` and `redisReady`). Redis can be
 unavailable while `/healthz` returns 200.
 
-## Sign in with Linear (the service mode)
+## Run the hosted service
 
-Set `DATABASE_URL` to enable the service. The server applies the database migrations at startup. Set `WG_HOSTED` to the public host name, `WG_DATA_KEY` to a base64 key of 32 bytes, and `WG_SESSION_SECRET` to a secret of at least 32 characters. Set `WG_REDIS_URL` on a function host.
+The service hosts the page and its API. Accounts share a server and keep their workspaces private.
+Each user runs `wg`, Orca, `gh`, `st`, `uv`, and an agent CLI on their own machine.
 
-Set `WG_LINEAR_CLIENT_ID` and `WG_LINEAR_CLIENT_SECRET` from the Linear OAuth application. Register `https://<WG_HOSTED>/auth/callback` as the redirect address. The service requests `read` for projects and issues and `write` for comments, labels, and status changes.
+### Parts of the service
 
-To limit sign-up, set `WG_ALLOWED_ORGS` to the Linear workspace URL keys, separated by commas or spaces.
+- Run the container behind an HTTPS proxy that supports WebSocket upgrades. The server listens on the
+  container's loopback address, so the proxy must share its network namespace. See [Host the page](#host-the-page).
+  You can also use a function host that supports WebSockets.
+- Use Postgres for accounts, workspace credentials, and coordinator token records.
+- Use Redis on a function host or when you run more than one instance. Use the same standalone Redis server and prefix on all instances.
+- Create a Linear OAuth application. Register `https://wg.example.com/auth/callback`, with your public host name in place of the example.
+  The server requests the `read` and `write` scopes with `actor=user`. It reads projects and issues and writes comments, labels, and status changes as the user.
 
-After you sign in, you can attach more Linear workspaces with personal API keys. If a key can read more than one team, select a team for that workspace. The service encrypts each key and only uses it for your account. Projects in an attached workspace stay private. If Linear refuses a key later, replace it in your account to restore the workspace.
+### Service environment
 
-Use Linear organization IDs in `WG_ALLOWED_ORGS` for a stable sign-up list. Workspace URL keys can change and another workspace can take an old key. In your account, you can set your name, complete or skip onboarding, and create or revoke coordinator tokens for `wg login`. Copy each token when you create it. If you change your name, set the same `human` in the `wg` config. If you delete your account and Linear cannot revoke its access, remove the app in Linear's settings.
+Set these values in the server environment. Keep secrets in the host's secret store.
 
-The setup guide leads you through your name, Linear workspaces and teams, local `wg` setup, and the first connection. Use Settings to change these details, manage tokens, reopen the guide, or delete your account. To try the guide with a temporary database and stub Linear, run `pnpm build` and `pnpm service:dev`. Open the loopback address shown in the terminal. Use `lin_api_example00000000000000000000` to attach the second workspace. Stop the preview with Ctrl-C.
+| Environment value | Required | Purpose | Secret |
+| --- | --- | --- | --- |
+| `DATABASE_URL` | Yes | Postgres connection URL. Enables service mode. | Yes |
+| `WG_HOSTED` | Yes | Public host name, for example `wg.example.com`. Use the host name alone. | No |
+| `WG_LINEAR_CLIENT_ID` | Yes | Client ID of the Linear OAuth application. | No |
+| `WG_LINEAR_CLIENT_SECRET` | Yes | Client secret of the Linear OAuth application. | Yes |
+| `WG_SESSION_SECRET` | Yes | Signs session cookies. Use at least 32 characters. Also supplies the key material for hashing usage data IDs. | Yes |
+| `WG_DATA_KEY` | Yes | Encrypts Linear credentials in Postgres. Use a base64-encoded 32-byte key. | Yes |
+| `WG_DATA_KEY_OLD` | For key rotation | Earlier data keys, separated by commas or spaces. The server can still read credentials encrypted with these keys. | Yes |
+| `WG_ALLOWED_ORGS` | No | Linear workspaces that can sign in. Separate entries with commas or spaces. | No |
+| `WG_REDIS_URL` | On a function host or with multiple instances | Redis connection URL for link state, account changes, and personal key-check counters. | Yes |
+| `WG_REDIS_PREFIX` | No | Isolates deployments on a Redis server. The default is `wg:link:`. | No |
+| `WG_LINK_MAX_AGE` | No | Maximum socket age in seconds from the join. The server can close the socket up to 10% earlier. The container accepts 60 to 2147483 seconds. Unset or 0 disables the container age limit. See the function limits below. | No |
+| `WG_LINK_PONG_MS` | No | Pong deadline in milliseconds. Use 25000 to 300000. The default is 45000. Use 0 to turn off the deadline if the host drops pong frames. Set a socket age limit in that case. | No |
+| `WG_VERSION` | No | Build version in the API. The default is `dev` unless the function host provides a commit SHA. | No |
+| `VERCEL_GIT_COMMIT_SHA` | No | Function host build commit. The server uses its first seven characters if `WG_VERSION` is unset. | No |
+| `DD_API_KEY` | For usage data | Datadog intake key. See [Usage data](#usage-data). | Yes |
+| `DD_SITE` | No | Datadog intake site. See [Usage data](#usage-data) for the default and accepted sites. | No |
+| `WG_TELEMETRY_WORKSPACES` | For usage data | Workspaces to include. See [Usage data](#usage-data) for entry formats. | No |
+
+The Postgres driver also reads `PG*` environment values, such as `PGSSLMODE` for TLS.
+
+### First start and data key changes
+
+The container applies database migrations at start. On a function host, the first request waits for them.
+If the database schema is newer than the server, run a server version that supports that schema.
+
+To change the encryption key, put the new key in `WG_DATA_KEY` and move the previous key to `WG_DATA_KEY_OLD`.
+Restart all instances with the same keys. The server uses the new key for credential writes. Earlier keys are
+still necessary for credentials that have yet to be written again, and for backups that contain those credentials.
+Startup migrations do not rewrite credentials.
+
+### Sign up and connect
+
+With `WG_ALLOWED_ORGS` unset, any Linear user can sign in. An empty or blank value refuses all sign-ins.
+To allow specific workspaces, list their Linear organization IDs in UUID form. Workspace URL keys also
+work, but can change or be reused. The service creates one account per Linear user in each sign-in workspace.
+
+Choose **Sign in with Linear**. The setup guide walks you through your name, workspaces, teams, and the first
+coordinator connection. You can attach another workspace with a personal Linear API key and select its team.
+If Linear refuses that key later, replace it in Settings.
+
+In the guide, create a coordinator token and copy it when it appears. Run `wg login https://wg.example.com` on
+your machine and paste the token at the prompt. Run the `wg setup` command shown in the guide for each workspace,
+then run `wg doctor`. Settings lets you reopen the guide or manage tokens. If you change your name, update
+`human` in your local `wg` config too.
+
+### Data and privacy
+
+Postgres holds names, email addresses, user IDs, and organization IDs from Linear. It also holds account settings,
+workspace records with team keys, and encrypted Linear OAuth tokens and personal API keys. Coordinator token
+records hold the token hash, name, and creation, last use, and revocation times. The operator holds the key that
+encrypts Linear credentials. The server processes issue text and worker output in memory. With Redis, link traffic and state
+such as queued messages and open worker questions can also pass through Redis. Postgres holds no issue text.
+
+See [Usage data](#usage-data) for setup and controls.
+
+Adapt this privacy text to your installation. Fill in the retention periods before you publish it.
+
+> We use the account and workspace data listed above to run your account. We keep that data,
+> encrypted Linear credentials, and coordinator token records in Postgres while your account is open.
+> Postgres backups expire after [backup retention period].
+>
+> We send queries and requested changes to Linear with your connected credentials. Linear keeps its own
+> project and issue records under your workspace's policies. We process issue text and worker output
+> in server memory and use Redis for link traffic, queued messages, and open worker questions.
+> Cached data can stay in memory while the account is active. Queued messages and open questions
+> can stay in Redis until handled. We remove leftover Redis data after [Redis retention period]
+> and keep Redis backups for [Redis backup retention period, if applicable].
+>
+> Host logs can include request paths with project IDs or keys and the types of coordinator messages.
+> We keep host logs for [host log retention period].
+>
+> When we enable usage data, each account sends data by default for the workspaces we include.
+> We send activity counts and logs to Datadog. These cover sign-in, account and
+> setup activity, coordinator connections, and page actions. Logs include hashed account and workspace
+> IDs. We exclude names, email addresses, project and issue IDs, issue text, and credentials.
+> We keep these records for [Datadog retention period]. Turn off **Send usage data** to stop future events.
+>
+> To delete your account, open **Settings**, choose **Delete account**, and enter `delete` to confirm.
+
+### Delete an account
+
+Account deletion removes the account, its workspace connections and stored credentials, and its coordinator
+token records from Postgres. It ends the current session and attempts to revoke the OAuth grant at Linear.
+If the revoke fails, remove the app under **Authorized applications** in Linear's settings. Manage any
+personal API keys separately in Linear. Project and issue records stay in Linear. Previously sent usage logs follow your Datadog retention policy.
+
+### Service limits
+
+- Each account can have 10 workspace connections including the sign-in workspace, and 10 active coordinator tokens.
+- Each account can make 10 personal key checks in 10 minutes. Attaching a workspace and replacing its key use the same limit.
+- Each server process uses one Linear request limiter for all accounts, with up to six requests in flight.
+- Projects cannot be shared between service accounts.
+- The function configuration allows 300 seconds per invocation. Sockets have a default age of 270 seconds.
+  Use 60 to 280 seconds for a custom age with that configuration. Allow at least 20 seconds before the function limit.
+  Clients reconnect after a close. If the host pauses the instance, the server checks the Redis connection
+  with a fresh ping before reconnecting.
+
+### Checks after a deploy
+
+1. Request `GET /healthz`. Expect HTTP 200 and `{"ok":true}`.
+2. Request `GET /api/config` at the public host name. Expect `auth: true`, `readOnly: false`, and `signIn: "linear"`.
+   Check that `linkStore` is `"redis"` on a function host or on a deployment with multiple instances.
+3. Sign in with an allowed Linear account. Check that the setup guide or the account's workspaces open.
+4. Create a coordinator token, run `wg login https://wg.example.com` and the setup commands, then run `wg doctor`.
+   Check that it accepts the token and that the page shows the coordinator connection.
+
+For local testing, run `pnpm build` and `pnpm service:dev` to start a preview with a temporary database and stub Linear.
+Use the loopback address from the terminal. To attach the second workspace, use the stub key
+`lin_api_example00000000000000000000`. Stop the preview with Ctrl-C.
 
 ## Usage data
 
 Usage data is off by default. To enable it, set these values in the server environment.
 
 - `DD_API_KEY` is the Datadog intake key. Keep it secret.
-- `WG_TELEMETRY_WORKSPACES` lists the Linear workspaces to include. Use a comma or space between entries. An entry can be a Linear organization ID or URL key. A config installation also accepts the workspace ID from the config.
-- `DD_SITE` selects the Datadog site. The default is `datadoghq.com`.
+- `WG_TELEMETRY_WORKSPACES` lists the Linear workspaces to include. Use a comma or space between entries. An entry can be a Linear organization ID or URL key. A config installation also accepts the workspace ID from the config. The list applies to every project in each listed workspace.
+- `DD_SITE` selects the Datadog site. The default is `datadoghq.com` (US1). A value outside the [list of accepted sites](server/telemetry.ts) turns usage data off without a log message.
 - `WG_SESSION_SECRET` must have at least 32 characters. The server derives a separate key from this secret to hash account and workspace IDs.
 
 The server sends count metrics and logs for sign-ups, sign-ins, account changes, setup progress, coordinator connections, page views, node opens, and types of page writes. Account events use the Linear workspace for sign-in. Other events use the workspace where the action occurred. Logs contain hashed account and workspace IDs. The data contains no names, email addresses, project or issue IDs, issue text, or tokens. The page sends its events through the server. The `wg` CLI sends no usage data.

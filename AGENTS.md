@@ -15,6 +15,9 @@ bearer-token WebSocket upgrade, ping and pong frames, and the planned socket clo
 time limit. Keep each new hosting feature off by default. Read deployment names from the installation
 config and environment. Keep deployment-specific settings out of the repository.
 
+Each new service feature stays off until you set its environment value. Keep installation names
+and secrets out of the repository.
+
 ## Before each push
 
 1. `pnpm test` and `pnpm build` (the page).

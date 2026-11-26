@@ -1,7 +1,7 @@
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useCoarse, useHover } from "../lib/screen";
+import { useCoarse, useHover, useNarrow } from "../lib/screen";
 import type { Signal } from "../lib/graph";
 import type { PullRequest } from "../lib/types";
 
@@ -57,32 +57,36 @@ export function PrLinks({ pr, compact }: { pr: PullRequest; compact?: boolean })
 export interface Option { id: string; label: string; hint?: string; lead?: ReactNode; group?: string; dim?: boolean }
 
 /**
- * A trigger with a list below it. `multi` keeps the list open and toggles entries. An option with a
- * `group` starts a new heading when the group changes. The arrow keys move, Enter picks.
+ * A trigger with a list below it or a sheet on touch phones. `multi` toggles entries and keeps
+ * the picker open. An option with a `group` starts a heading when the group changes.
  */
 export function Picker(props: {
   options: Option[]; value: string[]; onChange: (ids: string[]) => void; multi?: boolean;
   children: ReactNode; disabled?: boolean; align?: "left" | "right"; title?: string; wide?: boolean;
 }) {
   const { options, value, onChange, multi, children, disabled, align = "left", title, wide } = props;
+  const narrow = useNarrow();
+  const coarse = useCoarse();
+  const sheet = narrow && coarse;
   const [open, setOpen] = useState(false);
+  const [sheetTitle, setSheetTitle] = useState("");
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(-1);
   const root = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const shown = options.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()));
   useEffect(() => {
-    if (!open) return;
+    if (!open || sheet) return;
     const close = (e: MouseEvent) => { if (!root.current?.contains(e.target as Node)) setOpen(false); };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  }, [open, sheet]);
   // The list opens on the selected entry, so the keys move from there.
   useEffect(() => {
-    if (!open) return;
+    if (!open || sheet) return;
     setActive(Math.max(0, shown.findIndex((o) => value.includes(o.id))));
     (list.current?.querySelector(".picker-filter") as HTMLElement | null ?? list.current)?.focus();
-  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, sheet]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { list.current?.querySelector(".is-active")?.scrollIntoView({ block: "nearest" }); }, [active]);
   const pick = (id: string) => {
     if (!multi) {
@@ -102,38 +106,52 @@ export function Picker(props: {
       if (e.key === "Escape") root.current?.querySelector<HTMLElement>(".picker-trigger")?.focus();
     }
   };
-  return (
-    <div className="picker" ref={root}>
-      <button type="button" className="picker-trigger" disabled={disabled} title={title} aria-expanded={open} aria-haspopup="listbox"
-        onClick={() => { setOpen(!open); setQuery(""); }}>
-        {children}
-      </button>
-      {open && (
-        <div className={`picker-list picker-${align}${wide ? " picker-wide" : ""}`} ref={list} tabIndex={-1} onKeyDown={onKey}>
-          {options.length > 8 && <input className="picker-filter" placeholder="Filter" value={query} aria-label="Filter"
-            onChange={(e) => { setQuery(e.target.value); setActive(0); }} />}
-          <div className="picker-scroll" role="listbox" aria-multiselectable={multi || undefined}>
-            {shown.map((o, i) => {
-              const on = value.includes(o.id);
-              return (
-                <div key={o.id} role="presentation">
-                  {o.group && o.group !== shown[i - 1]?.group && <div className="picker-group" role="presentation">{o.group}</div>}
-                  <button type="button" role="option" aria-selected={on} tabIndex={-1}
-                    className={`picker-option${on ? " is-selected" : ""}${i === active ? " is-active" : ""}${o.dim ? " is-dim" : ""}`}
-                    onMouseMove={() => i !== active && setActive(i)} onClick={() => pick(o.id)}>
-                    {o.lead}<span className="picker-label" title={o.label}>{o.label}</span>
-                    {o.hint && <span className="picker-hint">{o.hint}</span>}
-                    <span className="picker-check" aria-hidden>{on ? "✓" : ""}</span>
-                  </button>
-                </div>
-              );
-            })}
-            {!shown.length && <div className="picker-empty">No match</div>}
+  const contents = <>
+    {(sheet || options.length > 8) && <input className="picker-filter" placeholder="Filter" value={query} aria-label="Filter"
+      onChange={(e) => { setQuery(e.target.value); setActive(0); }} />}
+    {sheet && title && title !== sheetTitle && <p className="picker-description">{title}</p>}
+    <div className="picker-scroll" role="listbox" aria-multiselectable={multi || undefined}>
+      {shown.map((o, i) => {
+        const on = value.includes(o.id);
+        const label = <span className="picker-label" title={sheet ? undefined : o.label}>{o.label}</span>;
+        const hint = o.hint && <span className="picker-hint">{o.hint}</span>;
+        return (
+          <div key={o.id} role="presentation">
+            {o.group && o.group !== shown[i - 1]?.group && <div className="picker-group" role="presentation">{o.group}</div>}
+            <button type="button" role="option" aria-selected={on} tabIndex={sheet ? undefined : -1}
+              className={`picker-option${on ? " is-selected" : ""}${!sheet && i === active ? " is-active" : ""}${o.dim ? " is-dim" : ""}`}
+              onMouseMove={sheet ? undefined : () => i !== active && setActive(i)} onClick={() => pick(o.id)}>
+              {o.lead}
+              {sheet ? <span className="picker-option-text">{label}{hint}</span> : <>{label}{hint}</>}
+              <span className="picker-check" aria-hidden>{on ? "✓" : ""}</span>
+            </button>
           </div>
-        </div>
-      )}
+        );
+      })}
+      {!shown.length && <div className="picker-empty">No match</div>}
     </div>
-  );
+  </>;
+
+  return <div className="picker" ref={root}>
+    <button type="button" className="picker-trigger" disabled={disabled} title={title}
+      aria-expanded={open} aria-haspopup={sheet ? "dialog" : "listbox"}
+      onClick={(event) => {
+        setSheetTitle(event.currentTarget.textContent?.replace(/▾\s*$/, "").trim() || "Options");
+        setOpen(!open);
+        setQuery("");
+      }}>
+      {children}
+    </button>
+    {open && (sheet ? <Sheet open title={sheetTitle} onClose={() => setOpen(false)}>
+      <div className="picker-sheet">
+        {contents}
+        {multi && <button type="button" className="picker-done" onClick={() => setOpen(false)}>Done</button>}
+      </div>
+    </Sheet> : <div className={`picker-list picker-${align}${wide ? " picker-wide" : ""}`}
+      ref={list} tabIndex={-1} onKeyDown={onKey}>
+      {contents}
+    </div>)}
+  </div>;
 }
 
 const markdownComponents: Components = {

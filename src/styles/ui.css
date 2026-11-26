@@ -31,6 +31,19 @@
 .picker-hint { color: var(--ink-3); font-size: 11px; }
 .picker-check { width: 12px; text-align: center; color: var(--lamp-review); font-size: 11px; }
 .picker-empty { padding: 6px 8px; color: var(--ink-3); }
+.picker-sheet .picker-filter { min-height: var(--touch); font-size: 16px; }
+.picker-sheet .picker-description { margin: 4px 8px 8px; color: var(--ink-3); }
+.picker-sheet .picker-scroll { max-height: none; overflow: visible; }
+.picker-sheet .picker-option { min-height: var(--touch); }
+.picker-sheet .picker-option-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.picker-sheet .picker-label { display: block; white-space: normal; }
+.picker-sheet .picker-hint { display: block; }
+.picker-sheet .picker-check { flex: none; font-size: 16px; }
+.picker-done {
+  position: sticky; bottom: 0; width: 100%; min-height: var(--touch);
+  margin-top: var(--touch-gap); background: var(--cab-3);
+}
+.picker > .picker-trigger[aria-haspopup="dialog"] { min-width: var(--touch); min-height: var(--touch); }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 
 .labels { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }

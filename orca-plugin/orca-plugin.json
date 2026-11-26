@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "wg-agents",
   "name": "work-graph agents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Keeps `wg agents` running in an Orca terminal, so that replies from the work-graph page reach your agents.",
   "license": "MIT",
   "engines": {
@@ -12,19 +12,36 @@
   "pluginApi": 1,
   "main": "src/worker.ts",
   "capabilities": [
-    { "kind": "workspace:read" },
-    { "kind": "agent:read" },
-    { "kind": "terminal:send" },
-    { "kind": "storage:own" },
-    { "kind": "settings:own" }
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "agent:read"
+    },
+    {
+      "kind": "terminal:send"
+    },
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "settings:own"
+    }
   ],
   "contributes": {
     "events": [
-      { "on": "workspace.changed" },
-      { "on": "agent.status.changed" }
+      {
+        "on": "workspace.changed"
+      },
+      {
+        "on": "agent.status.changed"
+      }
     ],
     "commands": [
-      { "id": "start", "title": "work-graph: start wg agents" }
+      {
+        "id": "start",
+        "title": "work-graph: start wg agents"
+      }
     ],
     "settings": [
       {
@@ -40,6 +57,16 @@
         "type": "string",
         "default": "",
         "placeholder": "/path/to/work-graph"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "sender",
+        "text": "wg agents",
+        "icon": "agent",
+        "tone": "neutral",
+        "tooltip": "work-graph agents: checking",
+        "command": "start"
       }
     ]
   }

@@ -124,13 +124,12 @@ To remove the schedule, run `wg tick --uninstall` and run the printed
 message `agents` for each loaded effort: the state and the last message of the coordinator agent and of each
 worker agent (README "The agents on the page"). The page shows them on the Overview and counts an agent that
 stopped at a prompt (`blocked` or `waiting` in Orca) as a move of the human's. A coordinator does not run
-`wg agents` and does not read its rows. `wg doctor` reports when the launchd agent of `wg agents` is not loaded.
+`wg agents` and does not read its rows. `wg doctor` reports when the Orca plugin of `wg agents` (`wg agents --install`) is missing or old.
 
 Set `agent_replies: true` in the `wg` config to let a project owner send replies to an idle
-chat or terminal agent (Orca state `done`). The default is off. If the launchd watcher runs, stop it with
-`wg agents --uninstall`. Run `wg agents` in your own Orca terminal. Keep that terminal open.
-The launchd watcher shows the agent rows and does not take replies. `wg doctor` reports
-the switch and warns if the current session lacks an Orca identity.
+chat or terminal agent (Orca state `done`). The default is off. Replies need the sender in an Orca terminal:
+the Orca plugin of `wg agents --install` runs it there. `wg doctor` reports the switch and warns when
+neither the plugin nor the current session can take replies.
 
 The page sends at most 4,000 characters to `POST /api/projects/:id/agents/:agent/reply`.
 The server queues the reply for the watcher that published the rows. A queued reply expires

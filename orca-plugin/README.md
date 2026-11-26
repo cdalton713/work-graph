@@ -14,14 +14,18 @@ This plugin keeps that process running, so you do not have to keep a terminal op
 - It opens the terminal in the Orca workspace that the setting "Workspace path" names. When that is empty,
   it uses the first local checkout named `work-graph`.
 - The palette command "work-graph: start wg agents" runs the check now and shows the result.
+- A `wg agents` item in Orca's status bar shows the state: green check (it runs), yellow warning (no workspace),
+  gray pause (turned off), red error (the check failed). Its tooltip names the time of the last check.
+  Click it to check now. Orca keeps the worker of a plugin with a status bar item running.
 
 ## Install
 
-1. Stop the launchd sender if it runs: `wg agents --uninstall`, then run the `launchctl` command it prints.
-   It cannot send replies, and it holds the lock.
-2. Install the plugin from your checkout: `orca plugin install <checkout>/orca-plugin --json`.
-   Orca prints the access the plugin asks for and the command with `--approve`. Read it, then run that command.
-3. Check: `orca plugin logs <plugin key>` shows `started wg agents`, and `wg doctor <plan-dir>` shows the sender.
+1. Run `wg agents --install`. It prints the access the plugin asks for and a command with `--approve`.
+   It also removes the launchd sender of older versions, which cannot send replies and holds the lock.
+2. Read the access, then run the printed `wg agents --install --approve <fingerprint>`.
+3. Check: `wg doctor` shows `agents: the Orca plugin … keeps wg agents running`.
+
+After you update the checkout, run `wg agents --install` again: it updates the plugin when its files changed.
 
 `wg` must be on the `PATH` of your login shell.
 

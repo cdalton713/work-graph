@@ -45,19 +45,49 @@ export async function ensure(orca: OrcaWorkerApi): Promise<'running' | 'started'
 
 let timer: ReturnType<typeof setInterval> | undefined
 
+type Result = Awaited<ReturnType<typeof ensure>> | 'failed'
+const LOOK: Record<Result, { icon: 'check' | 'warning' | 'pause' | 'error'; tone: 'success' | 'warning' | 'neutral' | 'danger'; tip: string }> = {
+  running: { icon: 'check', tone: 'success', tip: 'wg agents runs in its Orca terminal' },
+  started: { icon: 'check', tone: 'success', tip: 'wg agents started in a new Orca terminal' },
+  'no workspace': { icon: 'warning', tone: 'warning', tip: 'No workspace: set "Workspace path" to a local work-graph checkout' },
+  off: { icon: 'pause', tone: 'neutral', tip: 'Turned off in the plugin settings' },
+  failed: { icon: 'error', tone: 'danger', tip: 'The check failed: see the plugin logs' }
+}
+
+/** Show the result in Orca's status bar. Click: check now. */
+export async function show(orca: OrcaWorkerApi, result: Result, at = new Date()): Promise<void> {
+  const look = LOOK[result]
+  const time = at.toTimeString().slice(0, 5)
+  try {
+    await orca.host.call('statusBar.update', {
+      id: 'sender',
+      text: TITLE,
+      icon: look.icon,
+      tone: look.tone,
+      tooltip: `${look.tip} (checked ${time}). Click to check now.`
+    })
+  } catch {
+    // The status bar is in the desktop app only.
+  }
+}
+
 export default function activate(orca: OrcaWorkerApi): void {
   let running: Promise<unknown> | undefined
   let last = ''
   const check = () => {
     running ??= ensure(orca)
-      .then((result) => {
-        if (result !== last && result !== 'running') orca.log(result === 'no workspace'
+      .catch((error: unknown) => {
+        orca.log(`check failed: ${error instanceof Error ? error.message : String(error)}`)
+        return 'failed' as const
+      })
+      .then(async (result) => {
+        await show(orca, result)
+        if (result !== last && result !== 'running' && result !== 'failed') orca.log(result === 'no workspace'
           ? 'no workspace: set "Workspace path" to a local work-graph checkout'
           : result)
         last = result
         return result
       })
-      .catch((error: unknown) => orca.log(`check failed: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => { running = undefined })
     return running
   }

@@ -32,13 +32,15 @@ git clone https://github.com/cdalton713/work-graph.git ~/Projects/work-graph
 ln -s ~/Projects/work-graph/skills/work-graph ~/.claude/skills/work-graph   # or your agent's skills folder
 ln -s ~/Projects/work-graph/skills/work-graph/scripts/wg.py ~/.local/bin/wg
 wg config                                                                    # what wg will use
+wg agents --install                                                          # the Orca plugin that sends agents to the page
 wg doctor                                                                    # one ok, warn, or FAIL line per check
 ```
 
 `wg doctor` checks this machine and changes nothing: the Python version, the `websockets` package, that `wg` on
 PATH and each skill link point at one checkout and that checkout is not behind its `origin/main`, each workspace
 key (present, mode 600, accepted by Linear) with the request budget that is left, `gh auth`, `st`, the Orca CLI,
-the page server (`/healthz`, and the contract of `/api/config`), the `tick`, `autostart`, and `health` schedules, and
+the page server (`/healthz`, and the contract of `/api/config`), the Orca plugin of `wg agents` (installed, approved,
+and as new as the checkout), the `tick`, `autostart`, and `health` schedules, and
 the session settings of each loaded effort's core worktree (config `coordinator_settings` and `context_limit`).
 `wg doctor --fix` writes those settings; it changes nothing else.
 `wg doctor <plan-dir>` also checks that effort: `wg check`, `keymap.json` against Linear (an issue that is gone, a
@@ -155,24 +157,25 @@ The Overview inbox puts moves with a waiting agent first, then moves that hold b
 When these are equal, the oldest move comes first. Each move shows if an agent waits, how many open issues
 it holds back, and how many can start when it closes. The Board uses the same order for these moves.
 
-`wg agents --once` does one read and prints the rows. `wg agents --install` writes a launchd agent that keeps
-`wg agents` running; run the printed `launchctl bootstrap` command to load it. Logs: `~/Library/Logs/wg-agents/`.
+`wg agents --once` does one read and prints the rows. `wg agents --install` installs the Orca plugin in
+`orca-plugin/` (its README), which keeps `wg agents` running in a background Orca terminal named `wg agents`.
+Orca asks you to approve the plugin's access: the command prints that access and the `wg agents --install
+--approve <fingerprint>` command to run. Run `wg agents --install` again after an update of the checkout; it
+updates the plugin when its files changed. It also removes the launchd sender of older versions.
 
 On a hosted page with accounts, only the account that sends the lines can see them. Viewers do not see them.
 Keep `wg agents` running on the machine that runs Orca. Run `wg login` for the workspace page so the sender can
 use the token for that page. `wg doctor <dir>` shows the sender service and the last successful send for that effort.
 
-The sender checks for config and token changes each cycle. If `wg.py` changes, the sender exits so its service
-can start the new code.
+The sender checks for config and token changes each cycle. If `wg.py` changes, the sender exits, and the
+plugin's terminal starts the new code.
 
-When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the agent.
+When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the plugin.
 
 To let a project owner reply to a chat or terminal agent whose turn ended, set `agent_replies` to `true`.
-The default is `false`. Stop the launchd watcher with `wg agents --uninstall` if it runs.
-Then install the Orca plugin in `orca-plugin/` (its README): it keeps `wg agents` running in an Orca terminal.
-Without the plugin, run `wg agents` in your own Orca terminal and keep it open. The launchd watcher can show
-agents on the page, but it cannot send replies. Use Orca directly for a prompt with choices.
-`wg agents --wait` waits while another sender runs, then starts.
+The default is `false`. Replies need the sender in an Orca terminal: the plugin of `wg agents --install`
+runs it there. Without the plugin, run `wg agents` in your own Orca terminal and keep it open.
+Use Orca directly for a prompt with choices. `wg agents --wait` waits while another sender runs, then starts.
 
 On the Overview, open the line of a stopped coordinator or worker to read its last message and send a reply.
 The line stays visible for 60 minutes after the agent stops. You can reply during that time.

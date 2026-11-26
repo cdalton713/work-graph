@@ -8025,34 +8025,94 @@ def watch_command(ns):
         os.close(fd)
 
 
-def watch_agent(ns):
-    """`wg agents --install`: write the launchd agent that keeps `wg agents` running, and print how to load it."""
-    home = Path.home()
-    path = home / "Library/LaunchAgents" / (WATCH_LABEL + ".plist")
+AGENTS_PLUGIN_ID = "wg-agents"  # the Orca plugin in orca-plugin/ that keeps `wg agents` running in an Orca terminal
+
+
+def agents_plugin_dir():
+    """The plugin folder of the checkout that holds this wg.py."""
+    return Path(__file__).resolve().parents[3] / "orca-plugin"
+
+
+def orca_json(*args):
+    """Run one Orca CLI command with --json. Returns the parsed reply; Orca puts an error in it."""
+    result = command(orca_cli(), *args, "--json")
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        raise ReadError(f"orca {args[0]} {args[1]}: {one_line(command_error(result), 200)}") from None
+
+
+def agents_plugin():
+    """The installed `wg-agents` Orca plugin, or None."""
+    reply = orca_json("plugin", "list")
+    if not reply.get("ok"):
+        raise ReadError(f"orca plugin list: {(reply.get('error') or {}).get('message', 'failed')}")
+    return next((p for p in reply["result"].get("plugins", [])
+                 if p.get("pluginKey", "").rsplit(".", 1)[-1] == AGENTS_PLUGIN_ID), None)
+
+
+def legacy_watch_agent():
+    """Remove the launchd sender of older versions: it cannot send replies, and it holds the sender lock."""
+    path = Path.home() / "Library/LaunchAgents" / (WATCH_LABEL + ".plist")
+    if not path.exists():
+        return
     domain = f"gui/{os.getuid()}"
-    if ns.uninstall:
-        print(f"/bin/launchctl bootout {domain}/{WATCH_LABEL}")
-        path.unlink(missing_ok=True)
+    if sys.platform == "darwin":
+        command("/bin/launchctl", "bootout", f"{domain}/{WATCH_LABEL}")
+    path.unlink(missing_ok=True)
+    print(f"removed the launchd sender {WATCH_LABEL}")
+
+
+def watch_agent(ns):
+    """`wg agents --install`: install or update the Orca plugin that keeps `wg agents` running in an Orca terminal.
+    `--uninstall` removes it. Both remove the launchd sender of older versions."""
+    try:
+        legacy_watch_agent()
+        installed = agents_plugin()
+        if ns.uninstall:
+            if installed:
+                reply = orca_json("plugin", "uninstall", installed["pluginKey"])
+                if not reply.get("ok"):
+                    raise ReadError(f"orca plugin uninstall: {(reply.get('error') or {}).get('message', 'failed')}")
+                print(f"removed the Orca plugin {installed['pluginKey']}")
+            else:
+                print("the Orca plugin is not installed")
+            return 0
+        folder = agents_plugin_dir()
+        if not (folder / "orca-plugin.json").exists():
+            raise ReadError(f"no Orca plugin at {folder}: install wg from a checkout of the repository")
+        local = orca_json("plugin", "inspect", str(folder))
+        if not local.get("ok"):
+            raise ReadError(f"orca plugin inspect: {(local.get('error') or {}).get('message', 'failed')}")
+        source = (installed or {}).get("source") or {}
+        if installed and source.get("contentHash") == local["result"].get("contentHash") \
+                and not installed.get("needsReconsent"):
+            print(f"the Orca plugin {installed['pluginKey']} is installed and current ({installed.get('status')})")
+            return 0
+        args = ("plugin", "update", installed["pluginKey"]) if installed and source.get("reference") == str(folder) \
+            else ("plugin", "install", str(folder))
+        reply = orca_json(*args, *(("--approve", ns.approve) if ns.approve else ()))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ReadError(f"orca: {one_line(error, 200)}") from None
+    if reply.get("ok"):
+        result = reply["result"]
+        print(f"installed the Orca plugin {result.get('pluginKey')} {result.get('version')}: "
+              "it starts wg agents in an Orca terminal now and after each Orca start")
         return 0
-    python = Path(sys.executable).absolute()
-    log = home / "Library/Logs/wg-agents"
-    log.mkdir(parents=True, exist_ok=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    args = [str(python), "-I", str(Path(__file__).resolve()), "agents"]
-    for root in ns.root or []:
-        args.extend(["--root", str(root.expanduser().resolve())])
-    path.write_bytes(plistlib.dumps({
-        "Label": WATCH_LABEL,
-        "ProgramArguments": args,
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "ThrottleInterval": 30,
-        "EnvironmentVariables": {"PATH": ":".join(dict.fromkeys([str(python.parent), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))},
-        "StandardOutPath": str(log / "out.log"),
-        "StandardErrorPath": str(log / "error.log"),
-    }))
-    print(f"/bin/launchctl bootstrap {domain} {shlex.quote(str(path))}")
-    return 0
+    error = reply.get("error") or {}
+    data = error.get("data") or {}
+    if error.get("code") in ("approval_required", "approval_stale"):
+        grants = (data.get("plugin") or {}).get("grants") or data.get("grants") or {}
+        print("The Orca plugin asks for this access:")
+        if grants.get("executionDescription"):
+            print(f"  - {grants['executionDescription']}")
+        for grant in grants.get("capabilities", []):
+            print(f"  - {grant.get('kind')}: {grant.get('description', '')}")
+        fingerprint = re.search(r"--approve (\S+)", data.get("command", ""))
+        if fingerprint:
+            print(f"To approve it, run: wg agents --install --approve {fingerprint.group(1)}")
+        return 3
+    raise ReadError(f"orca {' '.join(args[:2])}: {error.get('message', 'failed')}")
 
 
 # ---------------------------------------------------------------- doctor
@@ -8230,15 +8290,24 @@ def doctor_tick():
 
 
 def doctor_watch():
-    if sys.platform != "darwin":
-        return "warn", "agents: wg agents --install uses launchd (macOS); keep wg agents running another way"
-    path = Path.home() / "Library/LaunchAgents" / (WATCH_LABEL + ".plist")
-    if not path.exists():
-        return "warn", "agents: not installed (wg agents --install); the page does not show the agents"
-    domain = f"gui/{os.getuid()}"
-    if command("/bin/launchctl", "print", f"{domain}/{WATCH_LABEL}").returncode:
-        return "warn", f"agents: {path} is not loaded (/bin/launchctl bootstrap {domain} {shlex.quote(str(path))})"
-    return "ok", f"agents: {WATCH_LABEL} loaded"
+    try:
+        plugin = agents_plugin()
+    except (ReadError, OSError, subprocess.SubprocessError) as error:
+        return "warn", f"agents: cannot read the Orca plugins ({one_line(error, 120)})"
+    if not plugin:
+        return "warn", "agents: the Orca plugin is not installed (wg agents --install); the page does not show the agents"
+    if plugin.get("needsReconsent"):
+        return "warn", f"agents: the Orca plugin {plugin['pluginKey']} needs a new approval (wg agents --install)"
+    try:
+        local = orca_json("plugin", "inspect", str(agents_plugin_dir()))
+        current = (plugin.get("source") or {}).get("contentHash") == (local.get("result") or {}).get("contentHash")
+    except (ReadError, OSError, subprocess.SubprocessError):
+        current = True
+    if not current:
+        return "warn", f"agents: the Orca plugin {plugin['pluginKey']} is older than this checkout (wg agents --install)"
+    if plugin.get("status") in ("disabled", "error", "failed"):
+        return "warn", f"agents: the Orca plugin {plugin['pluginKey']} is {plugin['status']}"
+    return "ok", f"agents: the Orca plugin {plugin['pluginKey']} keeps wg agents running ({plugin.get('status')})"
 
 
 def doctor_agents(plan_dir):
@@ -8263,10 +8332,7 @@ def doctor_agents(plan_dir):
         try:
             sender = json.loads(agents_state_path().with_suffix(".sender").read_text())
         except FileNotFoundError:
-            if sys.platform == "darwin":
-                restart = f"launchctl kickstart -k gui/{os.getuid()}/{WATCH_LABEL}"
-            else:
-                restart = "restart the wg agents service"
+            restart = "close its Orca terminal; the Orca plugin starts a new one"
             return "warn", f"{status}; cannot verify sender settings, {restart}"
         if (sender["source"] != agents_file_stamp(Path(sender["script"]))
                 or sender["config"] != agents_file_stamp(CONFIG_PATH)
@@ -8278,9 +8344,15 @@ def doctor_agents(plan_dir):
 def doctor_agent_replies():
     if CONFIG.get("agent_replies") is not True:
         return "ok", "agent replies: off"
-    if not orca_caller():
-        return "warn", "agent replies: on in config; run wg agents in your Orca terminal to take replies"
-    return "ok", "agent replies: on; this Orca terminal can run the watcher"
+    if orca_caller():
+        return "ok", "agent replies: on; this Orca terminal can run the watcher"
+    try:
+        plugin = agents_plugin()
+    except (ReadError, OSError, subprocess.SubprocessError):
+        plugin = None
+    if plugin and not plugin.get("needsReconsent"):
+        return "ok", f"agent replies: on; the Orca plugin {plugin['pluginKey']} runs the watcher in an Orca terminal"
+    return "warn", "agent replies: on in config; install the Orca plugin (wg agents --install) to take replies"
 
 
 def wake_trigger(automation, cron=WAKE_SCHEDULE, forms=None):
@@ -8533,7 +8605,9 @@ def doctor_lines(plan_dir=None, fix=False):
     if CONFIG.get("page_url"):
         pages.setdefault(PAGE_URL.rstrip("/"), None)
     checks += [(f"link token for {url}", lambda w=w: doctor_link_token(w)) for url, w in pages.items()]
-    checks += [("tick", doctor_tick), ("agents", (lambda: doctor_agents(plan_dir)) if plan_dir else doctor_watch)]
+    checks += [("tick", doctor_tick), ("agents_plugin", doctor_watch)]
+    if plan_dir:
+        checks.append(("agents", lambda: doctor_agents(plan_dir)))
     checks.append(("agent_replies", doctor_agent_replies))
     if plan_dir:
         plans.add(Path(plan_dir).resolve())
@@ -10326,6 +10400,8 @@ def cli_parser():
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--uninstall", action="store_true")
     mode.add_argument("--wait", action="store_true", help="when a sender runs, wait for it to stop, then run")
+    watch_parser.add_argument("--approve", metavar="FINGERPRINT",
+                              help="with --install: the approval that Orca printed for the plugin")
     login = sub.add_parser("login")
     login.add_argument("page_url", nargs="?")
     login.add_argument("--workspace", choices=tuple(WORKSPACES), default=DEFAULT_WORKSPACE_ID)

@@ -39,6 +39,8 @@ test('starts the terminal once, and again after it closes', async () => {
   h.respond('terminal.list', { terminals: [{ id: 't2', title: main.TITLE }], truncated: false })
   assert.equal(await worker.command('start'), 'wg agents: running')
   assert.equal(h.callsOf('terminal.create').length, 2)
+  const bar = h.callsOf('statusBar.update') as { tone: string; icon: string }[]
+  assert.deepEqual([bar.at(-1)?.tone, bar.at(-1)?.icon], ['success', 'check'])
   await worker.deactivate()
 })
 
@@ -47,5 +49,15 @@ test('does nothing when turned off', async () => {
   const worker = await mount(h)
   assert.equal(await worker.command('start'), 'wg agents: off')
   assert.equal(h.callsOf('terminal.create').length, 0)
+  await worker.deactivate()
+})
+
+test('shows a failed check in red', async () => {
+  const h = host({ enabled: true, workspacePath: '' })
+  h.respond('workspace.list', { workspaces: [], truncated: false })
+  const worker = await mount(h)
+  assert.equal(await worker.command('start'), 'wg agents: no workspace')
+  const bar = h.callsOf('statusBar.update') as { tone: string }[]
+  assert.equal(bar.at(-1)?.tone, 'warning')
   await worker.deactivate()
 })

@@ -6094,7 +6094,8 @@ class LinkTests(unittest.TestCase):
         self.assertFalse(json.loads(socket.send.call_args_list[1].args[0])["payload"]["replies"])
 
     def test_watcher_without_an_orca_identity_advertises_no_replies(self):
-        with patch.dict(wg.CONFIG, {"agent_replies": True}), patch.object(wg, "orca_caller", return_value=False):
+        with patch.dict(wg.CONFIG, {"agent_replies": True}), patch.object(wg, "orca_caller", return_value=False), \
+                patch.object(wg, "agents_plugin", return_value=None):
             self.assertEqual(wg.doctor_agent_replies()[0], "warn")
             wg.send_agents(self.d, self.p, [])
             self.assertTrue(self.wait_for("agents"))
@@ -10313,18 +10314,72 @@ class WatchTests(unittest.TestCase):
         self.assertIn("warn link: Example: OSError", err.getvalue())
         self.assertNotIn("secret-token", err.getvalue())
 
-    def test_agents_install_writes_an_agent_that_launchd_keeps_alive(self):
-        python = self.root / "bin/python3"
-        with patch.object(Path, "home", return_value=self.root), patch.object(wg.sys, "executable", str(python)), \
-             contextlib.redirect_stdout(io.StringIO()) as out:
+    def plugin_orca(self, installed=None, local_hash="h1", install=None):
+        """A stand-in for orca_json: the plugin list, inspect, and install or update replies. Records the calls."""
+        calls = []
+
+        def fake(*args):
+            calls.append(args)
+            if args[:2] == ("plugin", "list"):
+                return {"ok": True, "result": {"plugins": [installed] if installed else []}}
+            if args[:2] == ("plugin", "inspect"):
+                return {"ok": True, "result": {"contentHash": local_hash}}
+            if args[:2] in (("plugin", "install"), ("plugin", "update")):
+                return install(args)
+            if args[:2] == ("plugin", "uninstall"):
+                return {"ok": True, "result": {}}
+            raise AssertionError(args)
+        return calls, fake
+
+    def test_agents_install_installs_the_orca_plugin_after_approval(self):
+        def install(args):
+            if "--approve" in args:
+                return {"ok": True, "result": {"pluginKey": "local.wg-agents", "version": "0.1.0"}}
+            return {"ok": False, "error": {"code": "approval_required", "data": {
+                "plugin": {"grants": {"capabilities": [{"kind": "terminal:send", "description": "Open terminals"}]}},
+                "command": "orca plugin install /x --json --approve ap1-abc"}}}
+        calls, fake = self.plugin_orca(install=install)
+        legacy = self.root / "Library/LaunchAgents" / (wg.WATCH_LABEL + ".plist")
+        legacy.parent.mkdir(parents=True)
+        legacy.write_bytes(b"")
+        with patch.object(Path, "home", return_value=self.root), patch.object(wg, "orca_json", side_effect=fake), \
+                patch.object(wg, "command", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(wg.main(["wg", "agents", "--install"]), 3)
+            self.assertFalse(legacy.exists())
+            self.assertIn("terminal:send: Open terminals", out.getvalue())
+            self.assertIn("wg agents --install --approve ap1-abc", out.getvalue())
+            self.assertEqual(wg.main(["wg", "agents", "--install", "--approve", "ap1-abc"]), 0)
+        self.assertEqual(calls[-1][:2], ("plugin", "install"))
+        self.assertEqual(calls[-1][-2:], ("--approve", "ap1-abc"))
+        self.assertIn("installed the Orca plugin local.wg-agents", out.getvalue())
+
+    def test_agents_install_updates_an_older_plugin_and_skips_a_current_one(self):
+        folder = str(wg.agents_plugin_dir())
+        plugin = {"pluginKey": "local.wg-agents", "status": "running",
+                  "source": {"reference": folder, "contentHash": "old"}}
+        calls, fake = self.plugin_orca(installed=plugin, install=lambda args: {"ok": True, "result": {}})
+        with patch.object(Path, "home", return_value=self.root), patch.object(wg, "orca_json", side_effect=fake), \
+                contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(wg.main(["wg", "agents", "--install"]), 0)
-            path = self.root / "Library/LaunchAgents/dev.work-graph.tick.agents.plist"
-            data = wg.plistlib.loads(path.read_bytes())
-            self.assertEqual((data["Label"], data["KeepAlive"], data["RunAtLoad"]), (wg.WATCH_LABEL, True, True))
-            self.assertEqual(data["ProgramArguments"][0::3], [str(python), "agents"])
-            self.assertIn("launchctl bootstrap", out.getvalue())
+            self.assertEqual(wg.doctor_watch()[0], "warn")
+            self.assertEqual(calls[-3][:3], ("plugin", "update", "local.wg-agents"))
+            plugin["source"]["contentHash"] = "h1"
+            calls.clear()
+            self.assertEqual(wg.main(["wg", "agents", "--install"]), 0)
+            self.assertFalse([c for c in calls if c[1] in ("install", "update")])
+            self.assertEqual(wg.doctor_watch()[0], "ok")
+            with patch.dict(wg.CONFIG, {"agent_replies": True}), patch.object(wg, "orca_caller", return_value=False):
+                self.assertEqual(wg.doctor_agent_replies()[0], "ok")
             self.assertEqual(wg.main(["wg", "agents", "--uninstall"]), 0)
-            self.assertFalse(path.exists())
+            self.assertEqual(calls[-1], ("plugin", "uninstall", "local.wg-agents"))
+
+    def test_doctor_warns_when_the_orca_plugin_is_missing(self):
+        _, fake = self.plugin_orca()
+        with patch.object(wg, "orca_json", side_effect=fake):
+            level, status = wg.doctor_watch()
+        self.assertEqual(level, "warn")
+        self.assertIn("wg agents --install", status)
 
     def test_the_link_contract_has_the_agents_message(self):
         self.assertIn("agents", wg.contract()["link"]["from_coordinator"])

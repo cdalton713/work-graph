@@ -89,3 +89,9 @@ html:has(.sheet[open]), body:has(.sheet[open]) { overflow: hidden; }
   .sheet[open] .sheet-layout { animation: sheet-enter 150ms ease-out; }
   @keyframes sheet-enter { from { transform: translateY(16px); opacity: 0; } }
 }
+
+/* Reply choices */
+.reply-options { display: grid; gap: 6px; margin: 8px 0; }
+.reply-options button { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; text-align: left; }
+.reply-options button > span { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.reply-options kbd { grid-area: 1 / 2; color: var(--ink-3); }

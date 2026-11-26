@@ -29,3 +29,11 @@ export function parseOptions(question: string): { question: string; options: Rep
   if (recommended.length !== 1) return fallback;
   return { question: prompt, options: [...recommended, ...options.filter((option) => !option.reason)] };
 }
+
+type OptionKey = Pick<KeyboardEvent, "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "repeat" | "isComposing">;
+
+export function optionForKey(key: OptionKey, options: readonly ReplyOption[], optionsFocused: boolean, draft = ""): ReplyOption | undefined {
+  if (!optionsFocused || draft || !key.altKey || key.ctrlKey || key.metaKey || key.shiftKey || key.repeat || key.isComposing) return;
+  const digit = /^Digit([1-4])$/.exec(key.code);
+  return digit ? options[Number(digit[1]) - 1] : undefined;
+}

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import type { ReplyOption } from "../lib/options";
+import { optionForKey, type ReplyOption } from "../lib/options";
 
 interface ReplyProps {
   label: string;
@@ -15,14 +15,14 @@ export function Reply({ label, placeholder, hint, options = [], send }: ReplyPro
   const [error, setError] = useState<string | null>(null);
   const pending = useRef(false);
 
-  async function submit(body: string) {
+  async function submit(body: string, fromDraft = false) {
     if (!body || pending.current) return;
     pending.current = true;
     setSending(true);
     setError(null);
     try {
       await send(body);
-      setDraft("");
+      if (fromDraft) setDraft("");
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -38,23 +38,22 @@ export function Reply({ label, placeholder, hint, options = [], send }: ReplyPro
   return (
     <form onSubmit={(e) => {
       e.preventDefault();
-      void submit(draft.trim());
-    }} onKeyDown={(e) => {
-      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.repeat || e.nativeEvent.isComposing) return;
-      const digit = /^Digit([1-4])$/.exec(e.code);
-      const option = digit && options[Number(digit[1]) - 1];
-      if (!option) return;
-      e.preventDefault();
-      choose(option);
+      void submit(draft.trim(), true);
     }}>
-      {options.length > 0 && <div className="reply-options" role="group" aria-label="Reply options">
+      {options.length > 0 && <div className="reply-options" role="group" aria-label="Reply options"
+        onKeyDown={(e) => {
+          const option = optionForKey(e.nativeEvent, options, e.currentTarget.contains(document.activeElement), draft);
+          if (!option) return;
+          e.preventDefault();
+          choose(option);
+        }}>
         {options.map((option, index) => (
           <button key={option.label} type="button" disabled={sending} onClick={() => choose(option)}
-            aria-keyshortcuts={`Alt+${index + 1}`}>
+            aria-keyshortcuts={draft ? undefined : `Alt+${index + 1}`}>
             <strong>{option.label}</strong>
             {option.reason && <span className="sig-fg-done">Recommended. {option.reason}</span>}
             <span>{option.effect}</span>
-            <kbd>{`Alt+${index + 1}`}</kbd>
+            {!draft && <kbd>{`⌥${index + 1}`}</kbd>}
           </button>
         ))}
       </div>}

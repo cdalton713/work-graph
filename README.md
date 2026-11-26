@@ -193,6 +193,7 @@ shows a count for one state. Select one or more states to filter the projects. T
 
 Select an inbox question to read it and reply in place. Use the arrow keys to move between focused inbox rows.
 Press `r` to open a reply, `⌘↵` to send, or `Esc` to close it.
+With an empty reply box, focus a choice and press `⌥1` through `⌥4` to send the choice in that position.
 
 The Overview inbox also shows stalls, with the time since each one started.
 

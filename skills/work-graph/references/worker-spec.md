@@ -30,11 +30,11 @@ Use this form for an Orca ask, or for a waiting comment that asks the human to c
 For a choice, put the question and any context first. Leave a blank line, then end the message with an `Options:` block. Give two to four options. Use one line per option in the form `- Label: Effect`. Add ` (Recommended: Reason)` to exactly one line. Use distinct labels without colons.
 
 ```text
-When should we start?
+When?
 
 Options:
-- Start today: Open the new workflow now. (Recommended: The checks passed.)
-- Wait: Keep the current schedule.
+- Now: Start today. (Recommended: Checks passed.)
+- Later: Keep the schedule.
 ```
 
 

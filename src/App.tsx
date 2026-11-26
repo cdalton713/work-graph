@@ -750,6 +750,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             </>}
             <dt><kbd>Esc</kbd></dt><dd>{project ? "Close the issue" : "Close the inbox reply"}</dd>
             <dt><kbd>⌘</kbd> <kbd>↵</kbd></dt><dd>Send a comment or a reply</dd>
+            <dt><kbd>⌥1</kbd>–<kbd>⌥4</kbd></dt><dd>Send a choice when its group has focus and the reply box is empty</dd>
           </dl>
           {!project && <p>Overview order is Stalled, Waits {words.onOwner}, Moving, then Idle by design.</p>}
         </div>

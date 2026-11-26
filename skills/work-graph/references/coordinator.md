@@ -53,20 +53,19 @@ An Orca message, the end of `wg next --wait`, or a message from the human wakes 
 <!-- explain: human -->
 ### Never block on a prompt
 
-A blocking prompt can stop the effort in a background or unattended session.
+A prompt can stop an unattended run.
 
-- Use a blocking prompt only at foreground startup for autonomy and review effort (autonomy.md).
-- Use `wg move <plan-dir> <key> "Needs <human>"`. Put the question and page link in the comment. Use a `decision` node for a question without a node (recovery.md "Replan"). Continue other work, then Wait. The answer arrives as `do answer` or a status change.
-- If a permission check refuses a call, put the step that needs approval in `Needs <human>` and continue other work.
-
-End waiting comments and decision questions that offer a choice with a blank line and an `Options:` block. Give two to four distinct labels and effects. Mark one recommendation and give its reason.
+- Inside the loop, never use `AskUserQuestion` or any other tool that waits for an answer. The one exception is the question for the autonomy level and the review effort at the start of a run in a foreground session (autonomy.md).
+- Ask through Linear: `wg move <plan-dir> <key> "Needs <human>"` with a comment that gives the question and the page link. A question that is not a node goes to a `decision` node (recovery.md "Replan"). Then act on the other lines and Wait. Their answer arrives as `do answer` (page) or as a status change.
+- When a permission check refuses a tool call, do not retry it and do not work around it. Write the step that needs their approval to `Needs <human>` and continue with the other lines.
+For a choice, end that comment with a blank line and an `Options:` block, also for a `decision` node. Give two to four options, one line each. Mark one recommendation with its reason.
 
 ```text
-When should we start?
+When?
 
 Options:
-- Start: Open now. (Recommended: The checks passed.)
-- Wait: Keep the schedule.
+- Now: Start today. (Recommended: Checks passed.)
+- Later: Keep the schedule.
 ```
 <!-- /explain -->
 

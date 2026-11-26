@@ -214,7 +214,7 @@ export function pruneRoom(room: LinkRoom, cutoff: number): boolean {
       if (!coordinator.socket && Date.parse(coordinator.lastSeen) < cutoff) account.coordinators.delete(session);
     }
     if (account.agents && Date.parse(account.agents.at) < cutoff) account.agents = null;
-    if (id !== undefined && !membersWithSockets.has(id) && !account.coordinators.size && !account.queue.length) {
+    if (id !== undefined && !membersWithSockets.has(id) && !account.coordinators.size && !account.queue.length && !account.agents) {
       room.accounts!.delete(id);
       continue;
     }

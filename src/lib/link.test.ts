@@ -1,3 +1,6 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { Overview } from "../components/Overview";
 import { describe, expect, it } from "vitest";
 import contract from "../../skills/work-graph/contract.json";
 import { ANSWERED_LABEL, AUTONOMY_DEFAULT, AUTONOMY_GROUP, AUTONOMY_LEVELS, autonomyOf, PAUSED_LABEL, pausedOf } from "./autonomy";
@@ -133,4 +136,21 @@ describe("the autonomy label agrees with wg (contract.json)", () => {
     expect(autonomyOf([{ name: "full", parent: null }, { name: "other", parent: { name: "autonomy" } }])).toBeNull();
     expect(autonomyOf(undefined)).toBeNull();
   });
+});
+
+it("shows the agent state and last message under its project in the overview", () => {
+  const html = renderToStaticMarkup(createElement(Overview, {
+    list: {
+      workspaces: [{ id: "work", name: "Work" }],
+      projects: [{ id: "p1", name: "Example", url: "", status: "Started", statusType: "started", workspace: "work", workspaceName: "Work" }],
+    },
+    loading: false, missing: null, now, onOpen: () => {},
+    agents: new Map([["work:p1", { at: new Date(now).toISOString(), agents: [{
+      id: "worker", role: "worker", key: "build", issue: "WG-1", agent: "codex", state: "working",
+      title: "Build", said: "The tests passed", at: new Date(now).toISOString(),
+    }] }]]),
+  }));
+  expect(html).toContain("Agents of Example in Orca");
+  expect(html).toContain("codex working");
+  expect(html).toContain("The tests passed");
 });

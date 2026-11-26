@@ -1745,6 +1745,9 @@ it.each(localRedis ? ["memory", "redis"] : ["memory"])("isolates socket rooms wi
       expect((await post("asks/q/reply", ada, { body: "Own room" })).status).toBe(200);
       expect(await (await post("commands", grace, { name: "next" })).json()).toEqual({ ok: true, queued: 1 });
 
+      const ownOverview = await connect(other, "page", ada, "");
+      await vi.waitFor(() => expect(ownOverview.of("agents").at(-1)?.payload)
+        .toMatchObject({ agents: [{ id: "ada-agent" }] }));
       const sender = await connect(http[0], "coordinator", token("ada"));
       sender.send("agents", { agents: [{ id: "short-send", said: "Latest message" }] });
       sender.ws.close();
@@ -1752,6 +1755,11 @@ it.each(localRedis ? ["memory", "redis"] : ["memory"])("isolates socket rooms wi
       await vi.waitFor(() => expect(own.of("agents").at(-1)?.payload).toMatchObject({
         at: new Date(now).toISOString(), agents: [{ id: "short-send", said: "Latest message" }],
       }));
+      await vi.waitFor(() => expect(ownOverview.of("agents").at(-1)?.payload)
+        .toEqual(own.of("agents").at(-1)?.payload));
+      const lateOverview = await connect(other, "page", ada, "");
+      await vi.waitFor(() => expect(lateOverview.of("agents").at(-1)?.payload)
+        .toEqual(own.of("agents").at(-1)?.payload));
       const late = await connect(other, "page", ada);
       await vi.waitFor(() => expect(late.of("agents").at(-1)?.payload).toEqual(own.of("agents").at(-1)?.payload));
       expect(view.of("agents")).toEqual([]);

@@ -125,12 +125,16 @@ describe("LinkHub", () => {
       await ownerHub.joinPage(ownerPage, ref);
       await memberHub.joinPage(memberPage, ref, false, ref.tenant, member);
       await memberHub.joinViewer(viewerPage, ref, () => true, false, ref.tenant, view);
+      for (const [hub, account, id] of [[memberHub, undefined, "owner"], [ownerHub, member, "member"]] as const) {
+        const short = await hub.joinCoordinator(peer(), ref, account);
+        await short.receive(msg("agents", { agents: [{ id }] }));
+        await short.closed();
+      }
       await owner.receive(hello("session"));
       await collaborator.receive(hello("session"));
       for (const [connection, id, at] of [[owner, "owner", "2026-11-20T00:00:00Z"], [collaborator, "member", "2026-11-21T00:00:00Z"]] as const) {
         await connection.receive(msg("asks", { asks: [{ id }] }));
         await connection.receive(msg("progress", { nodes: [{ key: "same", state: id, at }, { key: id, state: id, at }] }));
-        await connection.receive(msg("agents", { agents: [{ id }] }));
       }
       await vi.waitFor(() => {
         expect(last(ownerPage, "presence")).toMatchObject({ coordinators: expect.arrayContaining([
@@ -140,6 +144,8 @@ describe("LinkHub", () => {
           expect(last(page, "asks")).toMatchObject({ asks: [{ id: "owner", accountName: "Ada" }, { accountName: "Grace" }] });
           expect(last(page, "progress")).toMatchObject({ nodes: [{ key: "same", state: "member" }, { key: "owner" }, { key: "member" }] });
         }
+        expect(ownerPage.of("agents")).toHaveLength(1);
+        expect(memberPage.of("agents")).toHaveLength(1);
         expect(last(ownerPage, "agents")).toMatchObject({ agents: [{ id: "owner" }] });
         expect(last(memberPage, "agents")).toMatchObject({ agents: [{ id: "member" }] });
         expect(viewerPage.of("asks")).toEqual([]);
@@ -214,6 +220,25 @@ describe("LinkHub", () => {
       await (await hub.joinCoordinator(another, ref, member(1))).receive(hello("another"));
       expect(another.closed).toEqual([]);
       expect((await hub.presence(ref)).coordinators).toHaveLength(10);
+    } finally {
+      hub.stop();
+    }
+  });
+
+  it("replays a collaborator agent update after its short connection closes and the room is pruned", async () => {
+    const shared = memoryLinkState();
+    const time = fakeTime();
+    const hub = new LinkHub(time.now, undefined, time.timers, null, shared);
+    const ref = { ...A, tenant: "owner" };
+    const member = { account: "member", name: "Grace", workspace: "shared:collaborator" };
+    try {
+      const short = await hub.joinCoordinator(peer(), ref, member);
+      await short.receive(msg("agents", { agents: [{ id: "worker" }] }));
+      await short.closed();
+      await shared.prune(time.now().getTime() - 1000);
+      const page = peer();
+      await hub.joinPage(page, ref, false, ref.tenant, member);
+      expect(page.of("agents").at(-1)?.payload).toMatchObject({ agents: [{ id: "worker" }] });
     } finally {
       hub.stop();
     }

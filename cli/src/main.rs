@@ -9,6 +9,9 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(on_io_failure: &dyn Fn(std::io::ErrorKind)) -> ExitCode {
+    if let Some(status) = wg_preview::update::on_start() {
+        return status;
+    }
     if let Some(version) = option_env!("WG_RELEASE_VERSION") {
         let mut args = std::env::args_os().skip(1);
         match (args.next().as_deref(), args.next()) {

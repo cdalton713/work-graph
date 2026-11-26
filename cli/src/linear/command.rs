@@ -19,114 +19,57 @@ pub(super) fn key_env(workspace: &str) -> String {
     )
 }
 pub struct Installation {
-    path: PathBuf,
+    pub(crate) config: crate::state::Config,
     home: PathBuf,
-    rows: Vec<Value>,
-    raw: Value,
 }
 impl Installation {
     pub fn load() -> Result<Self, String> {
         let home = PathBuf::from(env::var_os("HOME").ok_or("missing home directory")?);
-        let path = env::var_os("WG_CONFIG")
-            .filter(|p| !p.is_empty())
-            .map(PathBuf::from)
-            .map(|p| {
-                p.strip_prefix("~/")
-                    .map(|relative| home.join(relative))
-                    .unwrap_or(p)
-            })
-            .unwrap_or_else(|| home.join(".config/work-graph/config.json"));
-        let raw: Value = match fs::read(&path) {
-            Ok(data) => serde_json::from_slice(&data).map_err(|e| e.to_string())?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => json!({}),
-            Err(e) => return Err(e.to_string()),
-        };
-        if !raw.is_object() {
-            return Err(format!(
-                "{}: the config must be a JSON object",
-                path.display()
-            ));
-        }
-        if let Some(human) = raw.get("human")
-            && !human.as_str().is_some_and(|name| {
-                name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b' ')
-            })
-        {
-            return Err(format!(
-                "{}: human must be a name of letters, digits and spaces",
-                path.display()
-            ));
-        }
-        let mut rows = match raw.get("workspaces") {
-            Some(value) => value
-                .as_array()
-                .cloned()
-                .ok_or("workspaces must be an array")?,
-            None => Vec::new(),
-        };
-        if rows.is_empty() {
-            rows.push(json!({"id":"default"}));
-        }
-        let mut ids = std::collections::HashSet::new();
-        for row in &rows {
-            if row
-                .get("team")
-                .is_some_and(|team| !team.is_null() && !team.is_string())
-            {
+        let config = crate::state::Config::discover().map_err(|e| e.to_string())?;
+        let installation = Self { config, home };
+        for row in installation.workspaces() {
+            if !row["team"].is_null() && !row["team"].is_string() {
                 return Err("workspace team must be a string or null".into());
             }
-            if let Some(aliases) = row.get("key_env")
-                && !aliases
-                    .as_array()
-                    .is_some_and(|names| names.iter().all(Value::is_string))
+            if !row["key_env"]
+                .as_array()
+                .is_some_and(|names| names.iter().all(Value::is_string))
             {
                 return Err("workspace key_env must be an array of names".into());
             }
-            let id = row["id"].as_str().unwrap_or("");
-            if id.is_empty()
-                || !id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-                || !ids.insert(id)
-            {
-                return Err(format!(
-                    "{}: each workspace needs a unique id of a-z, 0-9 and -",
-                    path.display()
-                ));
-            }
         }
-        Ok(Self {
-            path,
-            home,
-            raw,
-            rows,
-        })
+        Ok(installation)
+    }
+
+    pub fn workspaces(&self) -> &[Value] {
+        self.config.settings()["workspaces"]
+            .as_array()
+            .expect("validated workspace array")
     }
 }
 impl ConfigProvider for Installation {
     type Settings = Value;
     type Error = String;
     fn resolve(&self, id: &str) -> Result<Value, String> {
-        self.rows
-            .iter()
-            .find(|row| row["id"] == id)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "unknown workspace {id}: choose one of {}",
-                    self.rows
-                        .iter()
-                        .filter_map(|r| r["id"].as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })
+        self.config
+            .resolve(id)
+            .map(|w| w.settings)
+            .map_err(|e| e.to_string())
     }
 }
 impl CredentialProvider for Installation {
     type Error = String;
-    fn credential(&self, id: &str, _service: &str) -> Result<Option<Credential>, String> {
+    fn page_source(&self, id: &str) -> Result<crate::PageCredential, String> {
+        crate::providers::page_key(&self.home, &self.resolve(id)?)
+    }
+
+    fn credential(&self, id: &str, service: &str) -> Result<Option<Credential>, String> {
+        if service == "page" {
+            return Ok(self.page_source(id)?.into_token());
+        }
+        if service != "linear" {
+            return Err("unknown credential service".into());
+        }
         let row = self.resolve(id)?;
         let defaults = json!(["LINEAR_API_KEY"]);
         let aliases = row
@@ -278,7 +221,7 @@ pub fn run_setup(args: impl Iterator<Item = OsString>) -> ExitCode {
 fn command(args: impl Iterator<Item = OsString>) -> Result<(), String> {
     let config = Installation::load()?;
     let mut options = Options {
-        workspace: config.rows[0]["id"].as_str().unwrap().into(),
+        workspace: config.workspaces()[0]["id"].as_str().unwrap().into(),
         ..Default::default()
     };
     let mut privacy_flag = None;
@@ -357,17 +300,22 @@ fn command(args: impl Iterator<Item = OsString>) -> Result<(), String> {
     super::setup::install(
         &mut client,
         &options,
-        config.raw["human"].as_str().unwrap_or("Human"),
+        config.config.settings()["human"]
+            .as_str()
+            .unwrap_or("Human"),
         scoped,
     )?;
     let entry = json!({"id":options.workspace,"team":options.team,"team_labels":scoped});
-    if !config.rows.iter().any(|r| {
+    if !config.workspaces().iter().any(|r| {
         r["id"] == options.workspace
             && r["team"] == options.team
             && (r["team_labels"] == scoped
                 || r["team_labels"].as_f64() == Some(u8::from(scoped) as f64))
     }) {
-        println!("Set this entry in workspaces in {}:", config.path.display());
+        println!(
+            "Set this entry in workspaces in {}:",
+            config.config.path.display()
+        );
         println!("{}", serde_json::to_string_pretty(&entry).unwrap());
     }
     println!("Next commands\n  wg preflight <plan-dir>\n  wg doctor");

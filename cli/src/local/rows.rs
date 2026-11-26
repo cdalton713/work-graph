@@ -376,12 +376,6 @@ pub(super) fn run(
         return show(p, &row, args);
     }
     let lock = lock.ok_or_else(|| invalid("unknown run mode"))?;
-    if km
-        .get("collab")
-        .is_some_and(|c| c.is_object() && c != &json!({}))
-    {
-        return Err(failed("shared plan writes require the page provider"));
-    }
     let journal_command = if mode == "rebuild" && args == ["--apply"] {
         "run rebuild --apply".into()
     } else {
@@ -408,9 +402,6 @@ pub(super) fn run(
             node(p, k)?;
         }
         let mapped = !effort && km["nodes"].get(k).is_some();
-        if mapped && cards.is_none() {
-            return Err(failed("mapped run writes require the Linear card provider"));
-        }
         let level = text(&row["effort"], "review_seen").to_owned();
         match mode {
             "reset" if fields.is_empty() => {
@@ -439,13 +430,23 @@ pub(super) fn run(
         }
         km["run"] = row;
         if mapped {
-            lock.save_keymap(&km).map_err(ioerr)?;
+            crate::page::save_run_keymap(dir, lock, p, &mut km).map_err(failed)?;
             if let Err(e) = journal::record(dir, &journal_command, &before, &km["run"]) {
                 eprintln!("warn: journal not written ({e})")
             }
             let r = km["run"]["nodes"][k].clone();
-            match card::refresh(node(p, k)?, &mut km["nodes"][k], &r, cards.unwrap()) {
-                Ok(()) => lock.save_keymap(&km).map_err(ioerr)?,
+            let mut production =
+                crate::providers::LinearCards::new(text(&p["effort"], "workspace"), cfg);
+            match card::refresh(
+                node(p, k)?,
+                &mut km["nodes"][k],
+                &r,
+                match cards {
+                    Some(w) => w,
+                    None => &mut production,
+                },
+            ) {
+                Ok(()) => crate::page::save_run_keymap(dir, lock, p, &mut km).map_err(failed)?,
                 Err(e) => {
                     eprintln!("node card not updated ({e}); the next 'wg load --apply' updates it")
                 }
@@ -454,7 +455,7 @@ pub(super) fn run(
             return Ok(0);
         }
     }
-    lock.save_keymap(&km).map_err(ioerr)?;
+    crate::page::save_run_keymap(dir, lock, p, &mut km).map_err(failed)?;
     if let Err(e) = journal::record(dir, &journal_command, &before, &km["run"]) {
         eprintln!("warn: journal not written ({e})")
     }

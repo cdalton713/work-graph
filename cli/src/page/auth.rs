@@ -1,5 +1,5 @@
 use super::*;
-use crate::Credential;
+use crate::{Credential, PageCredential};
 use std::{
     fs,
     io::{self, BufRead, Write},
@@ -7,74 +7,6 @@ use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::Path,
 };
-
-pub(super) struct Installation {
-    home: PathBuf,
-    config: Value,
-}
-
-impl Installation {
-    pub fn load() -> Result<Self> {
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is missing")?)
-            .join(".config/work-graph");
-        let path = std::env::var_os("WG_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("config.json"));
-        let config = match fs::read(path) {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|_| "invalid installation configuration")?
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => serde_json::json!({}),
-            Err(_) => return Err("cannot read installation configuration".into()),
-        };
-        Ok(Self { home, config })
-    }
-}
-
-impl ConfigProvider for Installation {
-    type Settings = Settings;
-    type Error = String;
-    fn resolve(&self, workspace: &str) -> Result<Settings> {
-        let default_page = self.config["page_url"].as_str();
-        let mut workspaces = Vec::new();
-        if let Some(rows) = self.config["workspaces"].as_array() {
-            for row in rows {
-                let id = row["id"].as_str().ok_or("invalid configured workspace")?;
-                workspaces.push((
-                    id.to_owned(),
-                    row["name"].as_str().unwrap_or(id).to_owned(),
-                    row["page_url"].as_str().or(default_page).map(str::to_owned),
-                ));
-            }
-        } else {
-            workspaces.push((
-                "default".into(),
-                "Linear".into(),
-                default_page.map(str::to_owned),
-            ));
-        }
-        let selected = if workspace.is_empty() {
-            workspaces.first()
-        } else {
-            workspaces.iter().find(|w| w.0 == workspace)
-        }
-        .ok_or("unknown workspace")?;
-        Ok(Settings {
-            page: selected.2.clone(),
-            human: self.config["human"].as_str().unwrap_or("Human").to_owned(),
-            token_directory: self.home.join("pages"),
-            workspaces,
-        })
-    }
-}
-
-// Production collaboration commands need the integrated state and credential providers.
-impl CredentialProvider for Installation {
-    type Error = String;
-    fn credential(&self, _: &str, _: &str) -> Result<Option<Credential>> {
-        Err("the credential provider is unavailable".into())
-    }
-}
 
 pub(super) fn validated_url(raw: &str, settings: &Settings) -> Result<Url> {
     let error = "use a page URL with HTTPS, or configured HTTP on loopback or a tailnet";
@@ -151,6 +83,37 @@ fn header(raw: &str) -> Result<(String, HeaderValue)> {
     Ok((token.into(), Credential::new(value).into_header()))
 }
 
+pub(crate) fn page_source(raw: &str) -> Result<PageCredential> {
+    if raw.bytes().all(|b| b == b' ') {
+        Ok(PageCredential::Disabled)
+    } else {
+        header(raw).map(|(_, value)| PageCredential::Token(Credential::new(value)))
+    }
+}
+
+pub(crate) fn read_page_source(path: &Path) -> Result<PageCredential> {
+    use std::io::Read;
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(PageCredential::Missing),
+        Err(_) => return Err("cannot read page token".into()),
+    };
+    if file
+        .metadata()
+        .map_err(|_| "cannot inspect token")?
+        .permissions()
+        .mode()
+        & 0o7777
+        != 0o600
+    {
+        return Err(format!("{} must have mode 600", path.display()));
+    }
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)
+        .map_err(|_| "cannot read page token")?;
+    page_source(raw.strip_suffix('\n').unwrap_or(&raw))
+}
+
 /// Resolve the credential for an HTTP or coordinator connection to the specified page.
 pub fn page_credential<K: CredentialProvider<Error = String>>(
     settings: &Settings,
@@ -160,66 +123,33 @@ pub fn page_credential<K: CredentialProvider<Error = String>>(
     provider: &K,
 ) -> Result<Option<Credential>> {
     validated_url(raw.trim_end_matches('/'), settings)?;
-    let mut token = None;
-    let configured = settings
-        .page
-        .as_deref()
-        .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'));
-    let saved = || -> Result<Option<HeaderValue>> {
-        let path = token_path(settings, raw)?;
-        match fs::File::open(&path) {
-            Ok(mut file) => {
-                use std::io::Read;
-                if file
-                    .metadata()
-                    .map_err(|_| "cannot inspect token")?
-                    .permissions()
-                    .mode()
-                    & 0o7777
-                    != 0o600
-                {
-                    return Err(format!("{} must have mode 600", path.display()));
-                }
-                let mut raw = String::new();
-                file.read_to_string(&mut raw)
-                    .map_err(|_| "cannot read token")?;
-                let line = raw.strip_suffix('\n').unwrap_or(&raw);
-                if line.bytes().all(|b| b == b' ') {
-                    return Ok(None);
-                }
-                Ok(Some(header(line)?.1))
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err("cannot read page token".into()),
+    let saved = || Ok(read_page_source(&token_path(settings, raw)?)?.into_token());
+    if shared {
+        if let Some(token) = saved()? {
+            return Ok(Some(token));
         }
-    };
-    if shared || !configured {
-        token = saved()?;
-    }
-    if shared && token.is_none() {
         for (workspace, _, url) in &settings.workspaces {
             if url
                 .as_deref()
                 .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'))
+                && let Some(token) = provider.page_source(workspace)?.into_token()
             {
-                token = provider
-                    .credential(workspace, "page")?
-                    .map(Credential::into_header);
-                if token.is_some() {
-                    break;
-                }
+                return Ok(Some(token));
             }
         }
+        return Ok(None);
     }
-    if !shared && configured && token.is_none() {
-        token = provider
-            .credential(scope, "page")?
-            .map(Credential::into_header);
+    if settings
+        .page
+        .as_deref()
+        .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'))
+    {
+        match provider.page_source(scope)? {
+            PageCredential::Missing => (),
+            source => return Ok(source.into_token()),
+        }
     }
-    if !shared && configured && token.is_none() {
-        token = saved()?;
-    }
-    Ok(token.map(Credential::new))
+    saved()
 }
 
 fn save(path: &Path, token: &str) -> Result<()> {

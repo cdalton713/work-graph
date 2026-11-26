@@ -203,7 +203,7 @@ impl Fixture {
             &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             self,
             self,
-            Some(self),
+            self,
         )
         .and_then(|out| {
             if out.status == 0 {
@@ -583,7 +583,7 @@ fn coordinator_replays_state_after_planned_close_and_bounds_idle_wait() {
 }
 
 #[test]
-fn preview_refuses_missing_providers_and_invite_links_before_writes() {
+fn preview_refuses_unshared_pull_and_invite_links_before_writes() {
     let dir = tempfile::tempdir().unwrap();
     for args in [
         &["pull", "."][..],
@@ -602,7 +602,7 @@ fn preview_refuses_missing_providers_and_invite_links_before_writes() {
         assert!(message.contains(if args[0] == "join" {
             "browser"
         } else {
-            "providers"
+            "not shared"
         }));
     }
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -835,7 +835,7 @@ fn join_reports_selection_access_and_post_join_status() {
         (200, published(1)),
     ]);
     let fixture = Fixture::new(&server);
-    let run = || page::run(&["join".into()], &fixture, &fixture, Some(&fixture)).unwrap();
+    let run = || page::run(&["join".into()], &fixture, &fixture, &fixture).unwrap();
     let selection = run();
     assert_eq!(selection.status, 2);
     assert_eq!(

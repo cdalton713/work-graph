@@ -27,7 +27,7 @@ export function Asks({ asks, projectId, workspace, now }: AsksProps) {
             <div className="ask-body"><Rich text={question} /></div>
             <Reply options={options} label="Reply to the worker" placeholder="Your reply."
               draftKey={[workspace ?? site.defaultWorkspace, projectId, "worker", ask.id]}
-              hint="It is also a comment on this issue." send={async (body) => {
+              hint="Also saved as an issue comment." send={async (body) => {
                 await api.reply(projectId, ask.id, body, workspace);
                 setSent((s) => new Set(s).add(ask.id));
               }} />

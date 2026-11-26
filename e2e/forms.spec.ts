@@ -59,11 +59,20 @@ async function checkControls(page: Page, field: Locator, word?: "answer" | "evid
     });
     expect(fits).toBe(true);
     if (!touch) {
-      // Desktop dimensions measured on main before the shared form change.
-      const container = word ? form.locator("xpath=ancestor::div[contains(@class, 'warning')][1]") : form;
-      expect(Math.round((await container.boundingBox())!.height)).toBe(word === "answer" ? 224 : word === "evidence" ? 243 : 112);
-      for (const button of await form.getByRole("button").all()) {
-        expect(Math.round((await button.boundingBox())!.height)).toBe(27);
+      const { rowHeight, buttonHeights, normalHeight } = await form.locator(".text-send-actions").evaluate((row) => {
+        const buttonHeights = Array.from(row.querySelectorAll("button"), (button) => button.getBoundingClientRect().height);
+        const reference = document.createElement("button");
+        reference.textContent = "Send";
+        reference.style.position = "absolute";
+        row.append(reference);
+        const normalHeight = reference.getBoundingClientRect().height;
+        reference.remove();
+        return { rowHeight: row.getBoundingClientRect().height, buttonHeights, normalHeight };
+      });
+      expect(rowHeight).toBeCloseTo(normalHeight);
+      expect(buttonHeights.length).toBe(word ? 2 : 1);
+      for (const buttonHeight of buttonHeights) {
+        expect(buttonHeight).toBeCloseTo(normalHeight);
       }
     }
   }

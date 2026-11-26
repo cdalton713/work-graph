@@ -229,10 +229,9 @@ def scenario(root, preflight):
             assert "FAIL tools:" in output
         else:
             assert output.index("ok plan: valid") < output.index("phase 1:", output.index("ok trunk:")), output
-        # Subsequent pull and card tests start with the original joined bytes.
-        for name, value in joined_files.items():
-            (work / name).write_bytes(value)
+        assert not [q for q in requests if q.lstrip().startswith("mutation")], requests
         files = snapshot()
+        assert files == joined_files, "join changed the saved files after preflight"
         oracle = root / "oracle"
         oracle.mkdir()
         subprocess.run(["git", "clone", "-q", str(repo), str(oracle)], env=env, check=True)

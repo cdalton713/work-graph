@@ -30,7 +30,7 @@ fn label<'a>(labels: &'a [Value], group: &str, default: &'a str) -> &'a str {
         .map(|s| s.strip_prefix("review:").unwrap_or(s))
         .unwrap_or(default)
 }
-fn levels(e: &mut Effort, a: &mut Actions, labels: &[Value]) -> Result<()> {
+fn levels(e: &mut Effort, a: &mut Actions, labels: &[Value], record: bool) -> Result<()> {
     let human = text(&e.install.config.settings()["human"]);
     let mut lines = vec![];
     let mut fields = vec![];
@@ -92,7 +92,7 @@ fn levels(e: &mut Effort, a: &mut Actions, labels: &[Value]) -> Result<()> {
         fields.push(("resumed", Value::Null));
         a.lines.insert(0,("do".into(),format!("resumed @effort -: {human} resumed this effort on the page; acknowledge it and continue the loop")));
     }
-    if !fields.is_empty() {
+    if record && !fields.is_empty() {
         save_fields(e.dir, &fields)?;
         e.km = crate::state::load_keymap(e.dir)?;
     }
@@ -202,7 +202,14 @@ fn answers(e: &Effort) -> Result<Vec<(String, String)>> {
     }
     Ok(lines)
 }
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Invocation {
+    Next,
+    Watch,
+    Join,
+}
 struct Run<'a> {
+    invocation: Invocation,
     output: &'a mut dyn std::io::Write,
     install: &'a Installation,
     args: &'a arguments::Next,
@@ -374,7 +381,7 @@ impl Run<'_> {
         }
         extra.append(&mut a.lines);
         a.lines = extra;
-        levels(&mut e, &mut a, &labels)?;
+        levels(&mut e, &mut a, &labels, self.invocation != Invocation::Join)?;
         let actionable = a.lines.iter().any(|(l, _)| l == "do");
         let complete = a.head == COMPLETE;
         if let Some(link) = &mut self.link {
@@ -389,7 +396,9 @@ impl Run<'_> {
         {
             eprintln!("warn publish: {err}")
         }
-        if let Err(err) = notices::notify(&e, &a.lines, &asks) {
+        if self.invocation != Invocation::Join
+            && let Err(err) = notices::notify(&e, &a.lines, &asks)
+        {
             eprintln!("warn notify: {err}")
         }
         self.actions = Some(a);
@@ -487,19 +496,27 @@ impl Coordinator for Run<'_> {
     }
 }
 pub(super) fn next_command(args: &arguments::Next, watch: bool) -> Result<u8> {
-    next_with_output(args, watch, &mut std::io::stdout())
+    next_with_output(
+        args,
+        if watch {
+            Invocation::Watch
+        } else {
+            Invocation::Next
+        },
+        &mut std::io::stdout(),
+    )
 }
 
 pub(super) fn next_with_output(
     args: &arguments::Next,
-    watch: bool,
+    invocation: Invocation,
     output: &mut dyn std::io::Write,
 ) -> Result<u8> {
     let interval = Duration::try_from_secs_f64(args.interval)
         .map_err(|_| "--interval must be a positive number of seconds")?;
     let install = Installation::load()?;
     let e = Effort::read(&install, &args.dir)?;
-    if watch {
+    if invocation == Invocation::Watch {
         eprintln!(
             "wg watch is now wg next: load the work-graph skill again and read coordinator.md \"Loop\""
         );
@@ -522,6 +539,7 @@ pub(super) fn next_with_output(
         .transpose()?
         .unwrap_or_default();
     let mut run = Run {
+        invocation,
         plan: e.plan.clone(),
         collaborative: false,
         output,

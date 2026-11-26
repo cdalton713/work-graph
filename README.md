@@ -541,6 +541,8 @@ Set `WG_SENTRY_DSN` to enable server error reports. Set `WG_SENTRY_BROWSER_DSN` 
 
 Set `WG_SENTRY_TEST_EVENT=1` to send one info event, `work-graph sentry test`, when a server with error reporting enabled starts. Server reports omit request data, exception messages, and source text.
 
+When browser reporting is enabled, the page also sends this test event once per page load if `WG_SENTRY_TEST_EVENT=1`. Browser error reports include error types and stack locations. They omit request data, breadcrumbs, and exception text.
+
 ### First start and data key changes
 
 The container applies database migrations at start. On a function host, the first request waits for them.

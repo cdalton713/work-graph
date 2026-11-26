@@ -197,6 +197,9 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
         <span className="chip">{node.kind}</span>
         {node.claim && <span className="chip chip-claim"><Lamp signal="running" pulse />{node.claim}</span>}
         <span className="station-fill" />
+        {phone && onShowInGraph && (
+          <button type="button" className="show-in-graph" onClick={onShowInGraph} aria-label="Show in graph">⌖</button>
+        )}
         <button type="button" className="ghost" onClick={onClose} aria-label="Close panel">✕</button>
       </header>
 

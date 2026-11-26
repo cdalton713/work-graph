@@ -11,17 +11,22 @@ pub struct Config {
     values: Value,
 }
 
-fn expand(path: &Path) -> PathBuf {
-    if let Ok(rest) = path.strip_prefix("~")
-        && let Some(home) = env::home_dir()
-    {
-        return if rest.as_os_str().is_empty() {
-            home
-        } else {
-            home.join(rest)
-        };
+fn expand(path: &Path) -> io::Result<PathBuf> {
+    use std::path::Component;
+    let mut parts = path.components().filter(|p| *p != Component::CurDir);
+    let first = parts.next();
+    let mut normalized = match first {
+        Some(Component::Normal(part)) if part == "~" => env::home_dir(),
+        Some(Component::Normal(part)) if part.to_str().is_some_and(|s| s.starts_with('~')) => {
+            let user = &part.to_str().unwrap()[1..];
+            nix::unistd::User::from_name(user)?.map(|u| u.dir)
+        }
+        Some(part) => Some(PathBuf::from(part.as_os_str())),
+        None => Some(PathBuf::from(".")),
     }
-    path.to_owned()
+    .ok_or_else(|| invalid("Could not determine home directory."))?;
+    normalized.extend(parts);
+    Ok(normalized)
 }
 
 fn overlay(base: &mut Value, values: &Value) -> io::Result<()> {
@@ -36,64 +41,105 @@ fn overlay(base: &mut Value, values: &Value) -> io::Result<()> {
     Ok(())
 }
 
-fn agent_settings(lower: &Value, higher: &Value) -> io::Result<Value> {
-    let mut result = if lower.get("agent").is_some()
-        && higher.get("agent").is_some()
-        && lower["agent"] != higher["agent"]
-    {
-        json!({})
-    } else {
-        lower.clone()
-    };
-    if let Some(fields) = higher.as_object() {
-        for (field, value) in fields {
-            let s = value.as_str().unwrap_or_default();
-            match field.as_str() {
-                "agent" if !matches!(s, "codex" | "claude") => {
-                    return Err(invalid("agent: must be claude or codex"));
-                }
-                "model" | "effort"
-                    if s.is_empty()
-                        || s.starts_with('-')
-                        || s.chars().any(|c| c.is_control() || c.is_whitespace()) =>
-                {
-                    return Err(invalid(format!(
-                        "{field}: must be nonempty text with no leading dash, spaces, or control characters"
-                    )));
-                }
-                "agent" | "model" | "effort" => (),
-                _ => return Err(invalid(format!("{field}: unknown field"))),
-            }
-        }
-        overlay(&mut result, higher)?;
-    } else {
-        return Err(invalid("must be an object"));
-    }
-    if result.get("effort").is_some() && result.get("model").is_none() {
-        return Err(invalid("effort: needs a model"));
-    }
-    Ok(result)
+const VALUE_ERROR: &str =
+    "must be nonempty text with no leading dash, spaces, or control characters";
+
+fn safe_value(value: &Value) -> bool {
+    use unicode_general_category::{GeneralCategory::*, get_general_category};
+    value.as_str().is_some_and(|s| {
+        !s.is_empty()
+            && !s.starts_with('-')
+            && s.chars().all(|c| {
+                !matches!(
+                    get_general_category(c),
+                    Control
+                        | Format
+                        | PrivateUse
+                        | Surrogate
+                        | Unassigned
+                        | SpaceSeparator
+                        | LineSeparator
+                        | ParagraphSeparator
+                )
+            })
+    })
 }
 
-fn agents(base: &Value, overrides: Option<&Value>) -> io::Result<Value> {
-    let mut result = base.clone();
-    if let Some(settings) = overrides {
-        for (role, fields) in settings
-            .as_object()
-            .ok_or_else(|| invalid("agents: must be an object"))?
-        {
-            let lower = base
-                .get(role)
-                .ok_or_else(|| invalid(format!("agents.{role}: unknown role")))?;
-            result[role] = agent_settings(lower, fields).map_err(|e| {
-                invalid(format!(
-                    "agents.{role}{}{e}",
-                    if fields.is_object() { "." } else { ": " }
-                ))
-            })?;
+fn validate_agents(settings: &Value) -> io::Result<()> {
+    let mut errors = Vec::new();
+    for (role, values) in settings
+        .as_object()
+        .ok_or_else(|| invalid("agents: must be an object"))?
+    {
+        let path = format!("agents.{role}");
+        if !matches!(role.as_str(), "worker" | "coordinator") {
+            errors.push(format!("{path}: unknown role"));
+            continue;
+        }
+        let Some(fields) = values.as_object() else {
+            errors.push(format!("{path}: must be an object"));
+            continue;
+        };
+        for (field, value) in fields {
+            let message = match field.as_str() {
+                "agent" if !matches!(value.as_str(), Some("codex" | "claude")) => {
+                    "must be claude or codex"
+                }
+                "model" | "effort" if !safe_value(value) => VALUE_ERROR,
+                "agent" | "model" | "effort" => continue,
+                _ => "unknown field",
+            };
+            errors.push(format!("{path}.{field}: {message}"));
+        }
+        if has_value(&values["effort"]) && !has_value(&values["model"]) {
+            errors.push(format!("{path}.effort: needs a model"));
         }
     }
-    Ok(result)
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid(errors.join("; ")))
+    }
+}
+
+fn has_value(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
+}
+
+fn resolved_agents(config: &Value, plan: &Value) -> io::Result<Value> {
+    let mut roles = json!({"coordinator":{},"worker":{"agent":"codex"}});
+    for role in ["coordinator", "worker"] {
+        let result = &mut roles[role];
+        if let Some(settings) = config.get(role) {
+            overlay(result, settings)?;
+        }
+        if let Some(settings) = plan.get(role) {
+            if has_value(&result["agent"])
+                && settings
+                    .get("agent")
+                    .is_some_and(|agent| *agent != result["agent"])
+            {
+                *result = json!({});
+            }
+            overlay(result, settings)?;
+        }
+        for field in ["model", "effort"] {
+            if result.get(field).is_some_and(|v| !safe_value(v)) {
+                return Err(invalid(format!("agents.{role}.{field}: {VALUE_ERROR}")));
+            }
+        }
+        if has_value(&result["effort"]) && !has_value(&result["model"]) {
+            return Err(invalid(format!("agents.{role}.effort: needs a model")));
+        }
+    }
+    Ok(roles)
 }
 
 fn id_ok(s: &str) -> bool {
@@ -213,7 +259,7 @@ impl Config {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("~/.config/work-graph/config.json"));
-        Self::read(expand(&path))
+        Self::read(expand(&path)?)
     }
 
     pub fn read(path: PathBuf) -> io::Result<Self> {
@@ -228,11 +274,9 @@ impl Config {
         if !data.is_object() {
             return Err(problem("the config must be a JSON object"));
         }
-        agents(
-            &json!({"coordinator":{},"worker":{"agent":"codex"}}),
-            data.get("agents"),
-        )
-        .map_err(|e| problem(&e.to_string()))?;
+        if let Some(settings) = data.get("agents") {
+            validate_agents(settings).map_err(|e| problem(&e.to_string()))?;
+        }
         if data.get("agent_replies").is_some_and(|v| !v.is_boolean()) {
             return Err(problem("agent_replies must be true or false"));
         }
@@ -345,7 +389,7 @@ impl Config {
             self.values["rules"]
                 .as_str()
                 .ok_or_else(|| invalid("rules must be a path"))?,
-        ));
+        ))?;
         let human = self.values["human"].as_str().unwrap();
         let slug = human
             .split_ascii_whitespace()
@@ -356,12 +400,8 @@ impl Config {
             .map(|d| self.load_plan(d))
             .transpose()?
             .unwrap_or(Value::Null);
-        let defaults = agents(
-            &json!({"coordinator":{},"worker":{"agent":"codex"}}),
-            self.values.get("agents"),
-        )?;
         Ok(
-            json!({"path":self.path,"exists":self.path.exists(),"rules":rules,"rules_exist":rules.exists(),"wait_status":format!("Needs {human}"),"wait_label":format!("needs-{slug}"),"config":self.values,"agents":agents(&defaults,plan["effort"].get("agents"))?}),
+            json!({"path":self.path,"exists":self.path.exists(),"rules":rules,"rules_exist":rules.exists(),"wait_status":format!("Needs {human}"),"wait_label":format!("needs-{slug}"),"config":self.values,"agents":resolved_agents(&self.values["agents"], &plan["effort"]["agents"])?}),
         )
     }
 }

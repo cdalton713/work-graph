@@ -1,42 +1,140 @@
 use std::{fs, process::Command};
 use tempfile::tempdir;
 
+const REFERENCE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skills/work-graph/scripts/wg.py"
+);
+
 #[test]
 fn config_matches_python_with_isolated_files() {
-    let dir = tempdir().unwrap();
-    let root = dir.path();
-    let plan = root.join("plan.json");
-    fs::write(
-        &plan,
-        r#"{"effort":{"agents":{"worker":{"agent":"claude"}}}}"#,
-    )
-    .unwrap();
-    let config = root.join("settings.json");
-    fs::write(&config, r#"{"human":"Example User","rules":"~/rules","workspaces":[{"team":"EX"}],"agents":{"worker":{"agent":"codex","model":"example"}},"legacy":"café 😀"}"#).unwrap();
-    for with_plan in [false, true] {
-        let mut python = Command::new("python3");
-        python.args([
-            "-I",
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../skills/work-graph/scripts/wg.py"
-            ),
-        ]);
-        let mut rust = Command::new(env!("CARGO_BIN_EXE_wg-preview"));
-        let outputs = [&mut python, &mut rust].map(|cmd| {
-            cmd.env("HOME", root)
-                .env("WG_CONFIG", &config)
-                .arg("config");
-            if with_plan {
-                cmd.arg(root);
-            }
-            cmd.output().unwrap()
-        });
-        for output in &outputs {
-            assert!(output.status.success(), "{:?}", output.stderr);
+    const DEFAULT: &str = r#"{"human":"Example User","rules":"~/./rules//file","agents":{"worker":{"model":"base"}},"legacy":"café 😀","workspaces":[{"id":"first","team":"EX"},{"id":"second","teams":["B","C"]}]}"#;
+    for (config, effort, argument, code) in [
+        (None, None, None, 0),
+        (Some(DEFAULT), None, Some(""), 0),
+        (Some(DEFAULT), Some(r#"{}"#), Some("."), 0),
+        (
+            Some(DEFAULT),
+            Some(r#"{"workspace":"second","team":"B"}"#),
+            Some("."),
+            0,
+        ),
+        (
+            Some(DEFAULT),
+            Some(r#"{"agents":{"reviewer":{"agent":"other"}}}"#),
+            Some("."),
+            0,
+        ),
+        (
+            Some(DEFAULT),
+            Some(r#"{"agents":{"worker":{"foo":"old","effort":"low"}}}"#),
+            Some("."),
+            0,
+        ),
+        (
+            Some(DEFAULT),
+            Some(r#"{"agents":{"worker":{"agent":"gemini","extra":"field"}}}"#),
+            Some("."),
+            0,
+        ),
+        (
+            Some(DEFAULT),
+            Some(r#"{"agents":{"worker":{"agent":"other","effort":"high"}}}"#),
+            Some("."),
+            2,
+        ),
+        (
+            Some(DEFAULT),
+            Some(r#"{"agents":{"worker":{"model":"a\u200bb"}}}"#),
+            Some("."),
+            2,
+        ),
+        (
+            Some(DEFAULT),
+            Some(r#"{"workspace":"missing"}"#),
+            Some("."),
+            2,
+        ),
+        (Some(DEFAULT), Some(r#"{"team":"C"}"#), Some("."), 2),
+        (
+            Some(DEFAULT),
+            Some(r#"{"workspace":"second","team":"EX"}"#),
+            Some("."),
+            2,
+        ),
+        (Some(DEFAULT), None, Some("."), 2),
+        (
+            Some(r#"{"agents":{"worker":{"model":"","effort":"","foo":"no"},"reviewer":{}}}"#),
+            None,
+            None,
+            1,
+        ),
+        (
+            Some(r#"{"agents":{"worker":{"agent":"other"}}}"#),
+            None,
+            None,
+            1,
+        ),
+        (
+            Some(r#"{"workspaces":[{"id":"one"},{"id":"one"}]}"#),
+            None,
+            None,
+            1,
+        ),
+        (Some(r#"{"context_limit":42}"#), None, None, 1),
+        (
+            Some(r#"{"notify":[{"type":"webhook","url":"bad"}]}"#),
+            None,
+            None,
+            1,
+        ),
+        (Some(DEFAULT), None, Some("--help"), 0),
+    ] {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        if let Some(contents) = config {
+            fs::write(root.join("c.json"), contents).unwrap();
         }
-        assert_eq!(outputs[0].stdout, outputs[1].stdout);
-        assert_eq!(outputs[0].stderr, outputs[1].stderr);
+        if let Some(effort) = effort {
+            fs::write(root.join("plan.json"), format!(r#"{{"effort":{effort}}}"#)).unwrap();
+        }
+        let mut python = Command::new("python3");
+        python.args(["-I", REFERENCE]);
+        let mut rust = Command::new(env!("CARGO_BIN_EXE_wg-preview"));
+        let [py, rs] = [&mut python, &mut rust].map(|cmd| {
+            cmd.current_dir(root)
+                .env("HOME", root)
+                .env_remove("WG_CONFIG")
+                .env("PYTHON_COLORS", "0")
+                .arg("config");
+            if config.is_some() {
+                cmd.env("WG_CONFIG", "./c.json");
+            }
+            cmd.args(argument).output().unwrap()
+        });
+        let case = format!("{config:?} {effort:?} {argument:?}");
+        assert_eq!(
+            py.status.code(),
+            Some(code),
+            "{case}: {}",
+            String::from_utf8_lossy(&py.stderr)
+        );
+        assert_eq!(
+            rs.status.code(),
+            Some(code),
+            "{case}: {}",
+            String::from_utf8_lossy(&rs.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(py.stdout).unwrap(),
+            String::from_utf8(rs.stdout).unwrap(),
+            "{case}"
+        );
+        assert_eq!(
+            String::from_utf8(py.stderr).unwrap(),
+            String::from_utf8(rs.stderr).unwrap(),
+            "{case}"
+        );
     }
 }
 
@@ -157,4 +255,61 @@ os.execv(sys.argv[1], [sys.argv[1], '--exact', 'save_in_limited_process'])
     let lock = PlanLock::acquire(dir.path(), Some(std::time::Duration::ZERO)).unwrap();
     lock.save_keymap(&serde_json::json!({"legacy":2})).unwrap();
     assert_eq!(load_keymap(dir.path()).unwrap()["legacy"], 2);
+}
+
+#[test]
+fn resolves_workspace_pages_and_local_shared_plan() {
+    use wg_preview::{ConfigProvider, state::Config};
+    if let Some(dir) = std::env::var_os("WG_TEST_SHARED_DIR") {
+        let config = Config::discover().unwrap();
+        let dir = std::path::Path::new(&dir);
+        let expected: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("expected")).unwrap()).unwrap();
+        assert_eq!(config.load_plan(dir).unwrap(), expected["plan"]);
+        assert_eq!(config.resolve("other").unwrap().page_url, expected["page"]);
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".config/work-graph")).unwrap();
+    fs::write(root.join(".config/work-graph/config.json"),r#"{"page_url":"https://global.invalid","workspaces":[{"team":"EX"},{"id":"other","team":"B","page_url":"https://workspace.invalid/"}]}"#).unwrap();
+    fs::write(
+        root.join("plan.json"),
+        r#"{"effort":{"name":"Example","workspace":"old","team":"old"},"legacy":"keep"}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("keymap.json"),
+        r#"{"collab":{"settings":{"workspace":"other","extra":1}}}"#,
+    )
+    .unwrap();
+    for page in [None, Some("https://override.invalid///")] {
+        let mut python = Command::new("python3");
+        python.args(["-I","-c","import json, runpy, sys; wg=runpy.run_path(sys.argv[1]); print(json.dumps(dict(plan=wg['load_plan']('.'),page=wg['page_base']('other'))))",REFERENCE]);
+        let mut rust = Command::new(std::env::current_exe().unwrap());
+        rust.args(["--exact", "resolves_workspace_pages_and_local_shared_plan"])
+            .env("WG_TEST_SHARED_DIR", root);
+        for cmd in [&mut python, &mut rust] {
+            cmd.current_dir(root)
+                .env("HOME", root)
+                .env_remove("WG_CONFIG")
+                .env_remove("WG_UI_URL");
+            if let Some(url) = page {
+                cmd.env("WG_UI_URL", url);
+            }
+        }
+        let result = python.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        fs::write(root.join("expected"), result.stdout).unwrap();
+        let result = rust.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+    }
 }

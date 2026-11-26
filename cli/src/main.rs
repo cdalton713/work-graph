@@ -30,7 +30,20 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match config.report(dir.as_deref().map(std::path::Path::new)) {
+            if dir
+                .as_deref()
+                .is_some_and(|arg| arg == "--help" || arg == "-h")
+            {
+                println!(
+                    "usage: wg.py config [-h] [dir]\n\npositional arguments:\n  dir\n\noptions:\n  -h, --help  show this help message and exit"
+                );
+                return ExitCode::SUCCESS;
+            }
+            match config.report(
+                dir.as_deref()
+                    .filter(|p| !p.is_empty())
+                    .map(std::path::Path::new),
+            ) {
                 Ok(report) => print_config(&report),
                 Err(e) => {
                     eprintln!("{e}");

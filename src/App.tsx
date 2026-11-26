@@ -1,3 +1,5 @@
+import { Notices, useNoticeStartup } from "./components/Notices";
+import { updateBadge } from "./lib/push";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { pageEvent } from "./lib/telemetry";
 import { accountApi, api, setOpenProject } from "./api";
@@ -75,6 +77,7 @@ export function projectFromQuery(directory: ProjectList | null, query: URLSearch
 }
 
 export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}) {
+  useNoticeStartup();
   const installed = isStandalone();
   const compactBar = useCompactBar();
   const [query, navigate] = useQuery();
@@ -124,7 +127,7 @@ export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}
         <button onClick={() => route("settings")}>Settings</button>}
       {installed && <button className="installed-refresh" type="button" aria-label="Refresh account"
         disabled={busy} onClick={() => void run(async () => { await refresh(); })}>Refresh</button>}
-      {compactBar ? <BarMenu title="Account controls">{() => signOut}</BarMenu> : signOut}
+      {compactBar ? <BarMenu title="Account controls">{() => <>{site.push && <Notices />}{signOut}</>}</BarMenu> : signOut}
     </header>
     {installed && account && <AccountError error={error} />}
     {!account ? <main className="account-page"><div className="account-content">
@@ -146,6 +149,7 @@ function includePending<T extends ProjectList>(list: T | null, pending: Director
 export function App({ createProjects, openSettings, overviewWorkspace = site.defaultWorkspace, service = false, connections }: {
   createProjects?: boolean; openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
 } = {}) {
+  useNoticeStartup();
   const installed = isStandalone();
   const stage = useRef<HTMLElement>(null);
   const [query, setQuery] = useQuery();
@@ -385,6 +389,8 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   };
   // A worker's question is a move of the human's: it counts in "Your move", the picker, and the badge.
   const yours = useMemo(() => new Map((overview?.summaries ?? []).map((s) => [summaryKey(s), movesWithAgents(movesWithAsks(s.you, link.asksBy.get(summaryKey(s))), link.agentsBy.get(summaryKey(s)), now).length])), [overview, link.asksBy, link.agentsBy, now]);
+  const badgeCount = overview ? [...yours.values()].reduce((sum, count) => sum + count, 0) : null;
+  useEffect(() => { if (site.push && badgeCount !== null && !site.readOnly) updateBadge(badgeCount); }, [badgeCount]);
   const [sharedPresence, setSharedPresence] = useState<{ key: string; data: Awaited<ReturnType<typeof api.sharedPresence>> } | null>(null);
   useEffect(() => {
     if (sharedRole !== "collaborator" || link.connected || !linkRef || !openKey) return;
@@ -845,6 +851,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         )}
         {compactBar ? (
           <BarMenu key={openKey} title={project ? "Project controls" : "More controls"}>{(dismiss) => <>
+            {site.push && <Notices account={!service} />}
             {setupButton(dismiss)}
             {viewer && <p>{viewerHelp}</p>}
             {projectLink && <div className="bar-menu-row"><span>Project link</span><CopyButton text={projectLink} label="Copy the project link" secret /></div>}
@@ -881,6 +888,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         ) : <>
           {serverVersion && <Hint className="bar-version mono" text={`The build of the server: ${status!.version}`}>{serverVersion}</Hint>}
           {keysControl}
+          {site.push && !service && <BarMenu title="Notice settings">{() => <Notices account />}</BarMenu>}
           {settings}
           {signOut}
           {closeControl}

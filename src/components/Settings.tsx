@@ -1,3 +1,4 @@
+import { Notices } from "./Notices";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Intro } from "./Intro";
 import { InstalledSignInHelp } from "./SignIn";
@@ -327,6 +328,7 @@ export function Settings({ account, refresh, openGuide }: { account: Account; re
   return <main className="account-page">
     <div className="account-content">
       <h1>Settings</h1>
+      <Notices account />
       <section className="account-card">
         <h2>Name</h2>
         <NameForm human={account.human} refresh={refresh} />

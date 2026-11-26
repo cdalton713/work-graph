@@ -6,6 +6,9 @@
   "functions": {
     "api/index.ts": { "includeFiles": "{skills/work-graph/contract.json,dist/index.html,server/manifest.template.json}", "maxDuration": 300 }
   },
+  "headers": [
+    { "source": "/sw.js", "headers": [{ "key": "Cache-Control", "value": "no-store" }] }
+  ],
   "rewrites": [
     { "source": "/manifest.json", "destination": "/api" },
     { "source": "/api/(.*)", "destination": "/api" },

@@ -1,3 +1,4 @@
+import type { NoticeSettings } from "./lib/types";
 import type { ProjectClaims } from "./lib/claims";
 import type { Ask, Presence } from "./lib/link";
 import type { AutonomyLevel } from "./lib/autonomy";
@@ -187,4 +188,17 @@ export const api = {
   update: (issueId: string, patch: IssuePatch, workspace?: string) => call<Issue>(`issues/${issueId}`, { method: "PATCH", body: JSON.stringify(patch) }, workspace, patch.stateId === undefined ? undefined : "status_written"),
   comments: (issueId: string, workspace?: string, projectId?: string) => call<Comment[]>(`issues/${issueId}/comments`, undefined, workspace, undefined, projectId),
   comment: (issueId: string, body: string, workspace?: string, projectId?: string) => call<Comment>(`issues/${issueId}/comments`, { method: "POST", body: JSON.stringify({ body }) }, workspace, "comment_written", projectId),
+};
+
+export const pushApi = {
+  key: () => call<{ publicKey: string }>("push/key"),
+  devices: () => call<{ devices: { id: string }[] }>("push/devices"),
+  save: (sub: PushSubscriptionJSON) => call("push/devices", {
+    method: "POST", body: JSON.stringify({ ...sub, label: "This device" }),
+  }),
+  remove: (id: string) => call("push/devices/" + id, { method: "DELETE" }),
+  test: (id: string) => call("push/devices/" + id + "/test", { method: "POST" }),
+  settings: () => call<NoticeSettings>("push/settings"),
+  setSettings: (settings: NoticeSettings) =>
+    call<NoticeSettings>("push/settings", { method: "PUT", body: JSON.stringify(settings) }),
 };

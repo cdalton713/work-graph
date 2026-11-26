@@ -69,11 +69,21 @@ def fixture_service():
     with TemporaryDirectory() as temp:
         cert = Path(temp) / "cert.pem"
         key = Path(temp) / "key.pem"
+        config = Path(temp) / "openssl.cnf"
+        config.write_text("""[req]
+distinguished_name = dn
+x509_extensions = fixture
+prompt = no
+[dn]
+CN = parity fixture
+[fixture]
+subjectAltName = DNS:api.linear.app,DNS:page.invalid
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,digitalSignature,keyCertSign
+extendedKeyUsage = serverAuth
+""")
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                        "-days", "1", "-subj", "/CN=parity fixture",
-                        "-addext", "subjectAltName=DNS:api.linear.app,DNS:page.invalid",
-                        "-addext", "basicConstraints=critical,CA:TRUE",
-                        "-addext", "keyUsage=critical,digitalSignature,keyCertSign",
+                        "-days", "1", "-config", str(config),
                         "-keyout", str(key), "-out", str(cert)], check=True, capture_output=True)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)

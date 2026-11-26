@@ -13,3 +13,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 unicode-general-category = "1"
 nix = { version = "0.31", features = ["user"] }
 serde = "1"
+graphql-parser = "0.4"
+fastrand = "2"
+httpdate = "1"
+curl = "0.4"

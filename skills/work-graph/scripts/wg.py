@@ -75,6 +75,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -508,7 +509,8 @@ def plan_lock(plan_dir, wait=None):
         os.close(fd)
 
 
-def save_json(path, value, mode=None):
+@contextlib.contextmanager
+def atomic_text_file(path, mode=None):
     if mode is None:
         try:
             mode = stat.S_IMODE(path.stat().st_mode)
@@ -517,13 +519,18 @@ def save_json(path, value, mode=None):
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as f:
         tmp = Path(f.name)
         try:
-            json.dump(value, f, indent=2)
-            f.write("\n")
+            yield f
             f.close()
             tmp.chmod(mode)
             tmp.replace(path)
         finally:
             tmp.unlink(missing_ok=True)
+
+
+def save_json(path, value, mode=None):
+    with atomic_text_file(path, mode) as file:
+        json.dump(value, file, indent=2)
+        file.write("\n")
 
 
 # ---------------------------------------------------------------- journal
@@ -5092,13 +5099,21 @@ def collab_page(collab, workspace):
     if not collab.get("workspace"):
         raise ReadError("the collaboration record needs a workspace")
     page = login_page_url(collab["page"], workspace)
-    token = collaboration_page_token(page, workspace)
+    token = collaboration_page_token(page, workspace, shared=collab["workspace"].startswith("shared:"))
     if not token:
         raise PlanPageUnavailable("no page token; run wg login for the page")
     return page, {"Authorization": f"Bearer {token}", "x-workspace": collab["workspace"]}
 
 
-def collaboration_page_token(page, workspace):
+def collaboration_page_token(page, workspace, *, shared=False):
+    if shared:
+        if token := read_link_token_file(page_token_path(page)):
+            return token
+        for candidate in WORKSPACES:
+            if (workspace_page(candidate) or PAGE_URL or "").rstrip("/") == page:
+                if token := link_token_for(page, candidate):
+                    return token
+        return ""
     configured = (workspace_page(workspace) or PAGE_URL or "").rstrip("/")
     return (link_token_for(page, workspace) if page == configured
             else read_link_token_file(page_token_path(page)))
@@ -5312,7 +5327,8 @@ def validate_shared_plan(plan, name):
     if plan["effort"].get("name") != name:
         raise ReadError("the shared plan has the wrong project name")
     component = r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}"
-    if not re.fullmatch(component, str(plan["effort"].get("slug", ""))):
+    slug = plan["effort"].get("slug")
+    if not isinstance(slug, str) or not re.fullmatch(component, slug):
         raise ReadError("unsafe effort.slug")
     for phase in plan["phases"]:
         if not re.fullmatch(component, str(phase["key"])) or not valid_shared_branch(phase["target"]):
@@ -5603,18 +5619,29 @@ def join_worktree(repo, plan, page, project):
     return path
 
 
+def join_display_name(name):
+    return "".join(char for char in name
+                   if unicodedata.category(char) not in {"Cc", "Cf", "Cs", "Zl", "Zp"}).strip()[:120]
+
+
+def is_join_link(argument):
+    value = argument.partition("=")[2] if argument.startswith("--") and "=" in argument else argument
+    try:
+        path = urllib.parse.urlsplit(value).path
+    except ValueError:
+        path = re.split(r"[?#]", value, maxsplit=1)[0]
+    return "/join/" in urllib.parse.unquote(path).casefold()
+
+
 def join_project(ns):
-    if ns.page_url and re.search(r"/join(?:/|[?#]|$)", ns.page_url):
-        raise ReadError("Open the collab link in a browser. Give wg join the page URL.")
     if ns.page_url is None and not (workspace_page(DEFAULT_WORKSPACE_ID) or CONFIG.get("page_url")):
         raise ReadError("Give wg join the page URL. Open the collab link in a browser first.")
     page = login_page_url(ns.page_url, DEFAULT_WORKSPACE_ID)
-    token_workspace = next((key for key in WORKSPACES if workspace_page(key)
-                            and workspace_page(key).rstrip("/") == page), DEFAULT_WORKSPACE_ID)
-    token = collaboration_page_token(page, token_workspace)
+    token = collaboration_page_token(page, DEFAULT_WORKSPACE_ID, shared=True)
     if not token:
+        origin = urllib.parse.urlsplit(page)._replace(path="").geturl()
         raise ReadError("Open the collab link in a browser, sign in, and press Join. "
-                        f"Make a coordinator token in Settings and run wg login {shlex.quote(page)}.")
+                        f"Make a coordinator token in Settings and run wg login {shlex.quote(origin)}.")
     status = token_page_request(page, "/api/status", token)
     workspaces = status.get("workspaces") if isinstance(status, dict) else None
     if not isinstance(workspaces, list) or any(
@@ -5624,44 +5651,49 @@ def join_project(ns):
     if any(not isinstance(entry.get(field), str) or not entry[field]
            for entry in members for field in ("name", "owner", "role", "projectId")):
         raise ReadError("The page returned invalid shared project fields.")
+    if any(not re.fullmatch(r"shared:[A-Za-z0-9-]+", entry["id"]) for entry in members):
+        raise ReadError("The page returned an invalid shared membership id.")
     if not members:
         raise ReadError("Open the collab link in a browser and press Join first.")
-    projects = [entry for entry in members if ns.project is None or entry["name"].casefold() == ns.project.casefold()]
+    projects = [entry for entry in members if ns.project is None or entry["id"] == ns.project]
+    if not projects:
+        projects = [entry for entry in members if entry["name"].casefold() == ns.project.casefold()]
     if not projects:
         raise ReadError("No shared project with that name. Run wg join without --project to see your projects.")
     if len(projects) > 1:
-        print("Shared projects. Select one by name with --project:")
+        print("Shared projects. Select one with --project:")
         for entry in projects:
-            print(f"  {json.dumps(entry['name'])} by {json.dumps(entry['owner'])} ({entry['role']})")
-        raise ReadError("Select one shared project.")
+            name, owner, role = (join_display_name(entry[field]) for field in ("name", "owner", "role"))
+            print(f"  {entry['id']}  {name} by {owner} ({role})")
+        raise ReadError("Select one shared project by its id.")
     member = projects[0]
     if member["role"] != "collaborator":
         raise ReadError("A read-only member cannot run wg on this project.")
-    check_collaboration_human(status.get("human"))
+    page_name = status.get("human")
+    if page_name != HUMAN:
+        check_collaboration_human(join_display_name(page_name) if isinstance(page_name, str) else None)
+        raise ReadError("The page returned an invalid account name.")
     project, name = member["projectId"], member["name"]
     collab = {"page": page, "workspace": member["id"], "project": project}
-    data = remote_plan(collab, token_workspace)
+    data = remote_plan(collab, DEFAULT_WORKSPACE_ID)
     wire = data["plan"]
-    try:
-        validate_shared_plan(wire, name)
-    except (KeyError, AttributeError, TypeError):
-        raise ReadError("The page returned invalid plan fields.") from None
-    workspace, has_key = join_workspace(wire["effort"], project, page)
+    workspace, has_key = join_workspace(wire["effort"] | {"name": name}, project, page)
     if workspace is None:
         if has_key:
             query = urllib.parse.urlencode({"workspace": member["id"], "project": project})
             print(f"Open {page}/?{query} and use Request access if your key cannot read the team.")
         raise ReadError("Set up your own Linear key with access to the team and project, then run wg join again.")
     # The owner's local automation, paths, and test commands need local setup.
-    effort = shared_effort(wire["effort"]) | {"slug": wire["effort"]["slug"],
+    effort = shared_effort(wire["effort"]) | {"slug": wire["effort"].get("slug"),
                                              "team": wire["effort"]["team"], "workspace": workspace}
     plan = wire | {"effort": effort}
     km = {"nodes": {}, "milestones": {}}
     try:
+        validate_shared_plan(plan, name)
         validate_shared_mapping(km, data["keymap"], workspace, project, plan, {})
     except (KeyError, AttributeError, TypeError):
-        raise ReadError("The page returned invalid keymap fields.") from None
-    if not (path := join_worktree(ns.repo, plan, page, name)):
+        raise ReadError("The page returned invalid plan or keymap fields.") from None
+    if not (path := join_worktree(ns.repo, plan, page, member["id"])):
         return 2
     with plan_lock(path):
         if git_output("status", "--porcelain", "--untracked-files=normal", cwd=path):
@@ -5672,9 +5704,9 @@ def join_project(ns):
         after = replace_shared_keymap(km, data["keymap"])
         after["collab"] = new_collab_record(page, member["id"], project, plan) | {
             "version": data["version"], "remote_settings": collab_settings(wire["effort"])}
-        stage_plan_pair(path, after, plan, None)
-        owner = " ".join(member["owner"].split())
-        (path / "PLAN.md").write_text(f"# {name} by {owner}\n", encoding="utf-8")
+        with atomic_text_file(path / "PLAN.md") as file:
+            file.write(f"# {join_display_name(name)} by {join_display_name(member['owner'])}\n")
+            stage_plan_pair(path, after, plan, None)
     print(f"Joined {path}")
     print("The owner keeps merge points, ship points, and deploys.")
     scope = LINEAR_WORKSPACE.set(workspace)
@@ -5689,12 +5721,15 @@ def leave_project(plan_dir):
         km = load_keymap(plan_dir)
         if not (collab := km.get("collab", {})).get("workspace", "").startswith("shared:"):
             raise ReadError("This worktree has no collaborator record.")
-        plan = load_plan(plan_dir, strict=True)
-        current = project_claims(plan, km)
-        releases = [release_page_claim(collab, plan_workspace(plan), claim["node"])
-                    for claim in current["claims"] if claim["mine"]]
-        if not all(releases):
-            raise ReadError("Some claims could not be released. Run wg leave again.")
+        workspace = DEFAULT_WORKSPACE_ID
+        try:
+            current = claim_request(collab, workspace, "GET")
+            claims = [claim["node"] for claim in current["claims"] if claim["mine"]]
+        except (ReadError, OSError, ValueError, KeyError, TypeError) as error:
+            print(f"warn: could not list claims: {error}", file=sys.stderr)
+        else:
+            for key in claims:
+                release_page_claim(collab, workspace, key)
         del km["collab"]
         save_keymap(plan_dir, km, sync=False)
     print("Removed the local collaboration record. End your membership on the page.")
@@ -5893,7 +5928,7 @@ def link_socket(url, *, workspace, deadline=None, **options):
     if scope.startswith("shared:"):
         origin = target._replace(scheme="https" if target.scheme == "wss" else "http",
                                  path="", query="", fragment="").geturl()
-        token = collaboration_page_token(login_page_url(origin, workspace), workspace)
+        token = collaboration_page_token(login_page_url(origin, workspace), workspace, shared=True)
     else:
         token = link_token_for(url, workspace)
     if token:
@@ -10257,6 +10292,8 @@ def main(argv):
 
 def main_command(argv):
     args = argv[1:]
+    if args and args[0] in {"join", "leave"} and any(is_join_link(arg) for arg in args[1:]):
+        die("Open the collab link in a browser. Give wg join the page URL.")
     given = []  # the old call form names the test command after "--"; it must be the effort's command
     if args and args[0] == "evidence" and "--" in args:
         split = args.index("--")

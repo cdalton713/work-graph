@@ -8309,9 +8309,14 @@ class CollaborativePlanTests(DirTests):
         return self.call(wg.main, ["wg", "join", self.url, *args], code=code)
 
     def test_join_refuses_browser_link_without_showing_token(self):
-        _, err = self.call(wg.main, ["wg", "join", self.url + "/join/example-secret"], code=2)
-        self.assertIn("browser", err)
-        self.assertNotIn("example-secret", err)
+        for path in ("/join/example-secret", "/prefix/JoIn/example-secret?x=1#top"):
+            link = self.url + path
+            for args in (["join", link], ["join", self.url, link], ["leave", link],
+                         ["join", self.url, "--project=" + link]):
+                with self.subTest(args=args):
+                    out, err = self.call(wg.main, ["wg", *args], code=2)
+                    self.assertEqual(out, "")
+                    self.assertEqual(err, "Open the collab link in a browser. Give wg join the page URL.\n")
         self.assertEqual(self.requests, [])
 
     def test_join_needs_own_token_and_a_shared_project(self):
@@ -8321,6 +8326,11 @@ class CollaborativePlanTests(DirTests):
         self.assertIn("Settings", err)
         self.assertIn(f"wg login {self.url}", err)
         self.assertEqual(self.requests, [])
+        with patch.object(wg, "collaboration_page_token", return_value=""):
+            _, err = self.call(wg.main, ["wg", "join", "https://example.com/path/private-part"], code=2)
+        self.assertIn("wg login https://example.com", err)
+        self.assertNotIn("private-part", err)
+        self.page_status["workspaces"] = [{"id": "local", "name": "Example"}]
         _, err = self.join_cli()
         self.assertIn("collab link", err)
 
@@ -8336,6 +8346,20 @@ class CollaborativePlanTests(DirTests):
         _, err = self.join_cli("--project", "Other")
         self.assertIn("read-only", err)
         self.assertTrue(all(path == "/api/status" for _, path, _, _ in self.requests))
+
+    def test_join_selects_one_of_two_projects_with_the_same_name_by_id(self):
+        self.join_fixture()
+        self.page_status["workspaces"].insert(0, {
+            "id": "shared:other", "projectId": "other", "name": "example",
+            "owner": "Grace", "role": "collaborator"})
+        out, err = self.join_cli("--project", "Example")
+        self.assertIn("shared:other", out)
+        self.assertIn("shared:member", out)
+        self.assertIn("id", err)
+        with self.join_checkout():
+            self.join_cli("--project", "shared:member", code=0)
+        self.assertEqual(wg.load_keymap(self.d / "core")["collab"]["workspace"], "shared:member")
+        self.assertIn("/api/projects/project/plan", [path for _, path, _, _ in self.requests])
 
     def test_join_linear_guidance(self):
         self.join_fixture()
@@ -8387,7 +8411,146 @@ class CollaborativePlanTests(DirTests):
 
     def join_linear(self):
         return {"teams": {"nodes": [{"id": "team"}]},
-                "project": {"id": "project", "name": "Example", "teams": {"nodes": [{"id": "team"}]}}}
+                "project": {"id": "project", "name": self.p["effort"]["name"],
+                            "teams": {"nodes": [{"id": "team"}]}}}
+
+    @contextlib.contextmanager
+    def join_checkout(self, *, git_dir=None, checked_out=None):
+        core = self.d / "core"
+        core.mkdir(exist_ok=True)
+        branch = wg.BRANCH_PREFIX + "example-core"
+        tree = {"id": "repo::core", "path": str(core), "branch": branch}
+
+        def git(*args, cwd=None):
+            if args == ("rev-parse", "--git-common-dir"):
+                return str(git_dir if git_dir and cwd == core else self.d / ".git")
+            return {("rev-parse", "--show-toplevel"): str(self.d),
+                    ("worktree", "list", "--porcelain", "-z"): "",
+                    ("branch", "--show-current"): checked_out or branch,
+                    ("status", "--porcelain", "--untracked-files=normal"): ""}[args]
+
+        with patch.object(wg, "key_source", return_value=("own-key", None)), \
+             patch.object(wg, "gql", return_value=self.join_linear()), \
+             patch.object(wg, "git_output", side_effect=git), \
+             patch.object(wg, "orca_caller", return_value=True), \
+             patch.object(wg, "created_tree", return_value=tree), \
+             patch.object(wg, "preflight", return_value=0), \
+             patch.object(wg, "next_command", return_value=0):
+            yield core
+
+    def test_join_uses_local_settings_when_owner_requires_a_model(self):
+        self.join_fixture()
+        self.p["effort"].update(agents={"worker": {"effort": "high"}}, test=["owner-command"],
+                                rules="/owner/rules.md", lint=["owner-lint"])
+        with self.join_checkout() as core:
+            self.join_cli(code=0)
+        self.assertEqual(wg.load_plan(core)["effort"],
+                         {field: self.p["effort"][field] for field in ("name", "slug", "team", "workspace")})
+
+    def test_join_sanitizes_names_in_output_and_plan_heading(self):
+        self.join_fixture()
+        name = "Ex\x1b[31mample\nNext"
+        self.p["effort"]["name"] = name
+        self.page_status["workspaces"][0].update(name=name, owner="Ada\u200b\nSmith")
+        with self.join_checkout() as core:
+            with patch.object(wg, "orca_caller", return_value=False):
+                out, _ = self.join_cli()
+            self.assertIn("--project shared:member", out)
+            self.assertNotIn("\x1b", out)
+            self.assertNotIn("Next", out)
+            with patch.object(Path, "write_text", side_effect=AssertionError("direct write")):
+                self.join_cli(code=0)
+        self.assertEqual((core / "PLAN.md").read_text().splitlines(), ["# Ex[31mampleNext by AdaSmith"])
+
+    def test_join_rejects_unsafe_plan_fields_before_opening_checkout(self):
+        self.join_fixture()
+        for item, key, value in ((self.p["effort"], "slug", "../x"), (self.p["effort"], "slug", None),
+                                 (self.p["phases"][0], "key", "a/b"),
+                                 (self.p["phases"][0], "target", "--upload-pack=x"),
+                                 (self.p["nodes"][0], "key", "a/b"),
+                                 (self.p["nodes"][0], "lane", "$(x)")):
+            with self.subTest(field=key, value=value), patch.dict(item, {key: value}), \
+                 patch.object(wg, "key_source", return_value=("own-key", None)), \
+                 patch.object(wg, "gql", return_value=self.join_linear()), patch.object(wg, "git_output") as git:
+                _, err = self.join_cli()
+                self.assertIn("unsafe", err)
+                git.assert_not_called()
+
+    def test_join_rejects_unverified_issue_mapping(self):
+        self.join_fixture()
+        self.data["keymap"]["nodes"] = {"a": {"id": "foreign", "identifier": "WG-1"}}
+        with self.join_checkout() as core, patch.object(wg, "fetch_nodes", return_value={
+                "foreign": {"identifier": "WG-1", "project": {"id": "elsewhere"}}}):
+            _, err = self.join_cli()
+        self.assertIn("outside the project", err)
+        self.assertEqual(list(core.iterdir()), [])
+
+    def test_join_preserves_existing_plan_files(self):
+        self.join_fixture()
+        with self.join_checkout() as core:
+            for name in ("plan.json", "keymap.json", "PLAN.md"):
+                with self.subTest(name=name):
+                    path = core / name
+                    path.write_text("local")
+                    _, err = self.join_cli()
+                    self.assertIn("already has plan files", err)
+                    self.assertEqual(path.read_text(), "local")
+                    path.unlink()
+                    path.symlink_to(core / "missing")
+                    _, err = self.join_cli()
+                    self.assertIn("already has plan files", err)
+                    self.assertTrue(path.is_symlink())
+                    path.unlink()
+
+    def test_join_refuses_orca_checkout_of_wrong_repository_or_branch(self):
+        self.join_fixture()
+        for options, message in (({"git_dir": self.d / "elsewhere"}, "is not a checkout"),
+                                 ({"checked_out": "wrong"}, "is on wrong")):
+            with self.subTest(options=options), self.join_checkout(**options) as core:
+                _, err = self.join_cli()
+                self.assertIn(message, err)
+                self.assertEqual(list(core.iterdir()), [])
+
+    def test_join_uses_same_page_token_when_linear_workspace_differs(self):
+        from types import ModuleType
+
+        self.join_fixture()
+        self.p["effort"].update(workspace="home", team=wg.WORKSPACES["home"]["team"])
+        page_file = self.d / "page-token"
+        page_file.write_text("page-file-token\n")
+        page_file.chmod(0o600)
+        client = ModuleType("websockets.sync.client")
+        client.connect = Mock(return_value=contextlib.nullcontext())
+        with patch.object(wg, "page_token_path", return_value=page_file), \
+             patch.dict(wg.WORKSPACES["home"], {"page_url": "https://other.example.com"}), \
+             patch.dict(os.environ, {wg.link_token_env("work"): "page-env-token",
+                                     wg.link_token_env("home"): "other-token"}), \
+             patch.dict(sys.modules, {"websockets.sync.client": client}), self.join_checkout() as core:
+            self.join_cli(code=0)
+            self.assertEqual(wg.load_plan(core)["effort"]["workspace"], "home")
+            self.call(wg.main, ["wg", "pull", str(core)])
+            url, _, _, _ = wg.link_target(core, wg.load_plan(core))
+            with wg.link_socket(url, workspace="home"):
+                pass
+            self.assertEqual(client.connect.call_args.kwargs["additional_headers"],
+                             {"Authorization": "Bearer page-file-token"})
+            page_file.unlink()
+            self.call(wg.main, ["wg", "pull", str(core)])
+            self.call(wg.main, ["wg", "leave", str(core)])
+        sent = [headers["Authorization"] for _, _, headers, _ in self.requests]
+        self.assertEqual(sent, ["Bearer page-file-token"] * 3 + ["Bearer page-env-token"] * 2)
+
+    def test_leave_removes_record_when_claims_cannot_be_listed(self):
+        for problem in (403, 503, "missing token"):
+            with self.subTest(problem=problem):
+                self.enable_claims("shared:member")
+                self.refused = problem if isinstance(problem, int) else None
+                tokens = {wg.link_token_env("work"): ""} if problem == "missing token" else {}
+                with patch.dict(os.environ, tokens):
+                    _, err = self.call(wg.main, ["wg", "leave", str(self.d)])
+                self.assertEqual(len(err.splitlines()), 1)
+                self.assertIn("warn", err)
+                self.assertNotIn("collab", wg.load_keymap(self.d))
 
     def test_join_worktree_and_leave(self):
         self.join_fixture()
@@ -8427,12 +8590,9 @@ class CollaborativePlanTests(DirTests):
 
         self.claims["claims"] = [{"node": "a", "mine": True}, {"node": "mp", "mine": False}]
         self.claim_responses["DELETE"] = (503, {"error": "unavailable"})
-        _, err = self.call(wg.main, ["wg", "leave", str(core)], code=2)
-        self.assertIn("Some claims could not be released", err)
-        self.assertIn("collab", wg.load_keymap(core))
-        self.requests.clear()
-        self.claim_responses.clear()
-        out, _ = self.call(wg.main, ["wg", "leave", str(core)])
+        out, err = self.call(wg.main, ["wg", "leave", str(core)])
+        self.assertEqual(len(err.splitlines()), 1)
+        self.assertIn("warn a: could not release claim", err)
         self.assertIn("membership", out)
         self.assertNotIn("collab", wg.load_keymap(core))
         self.assertEqual([path for method, path, _, _ in self.requests if method == "DELETE"],

@@ -36,7 +36,8 @@ The run rows, card hashes, and status document hash and time stay local.
    invitation link in the browser.
 3. Set the local config's `human` to your display name on the page. Run
    `wg join <page-url>` in your checkout. Use `--repo <path>` to select a
-   checkout and `--project <name>` to select one of several shared projects.
+   checkout and `--project <name-or-id>` to select one of several shared projects.
+   Use the printed `shared:<id>` when two projects have the same name.
    A viewer needs a collaborator invitation to run `wg join`.
 4. If `wg join` asks for a Linear key, follow the printed config and key
    instructions. Use your own key. If the key cannot read the team, use
@@ -49,8 +50,9 @@ The run rows, card hashes, and status document hash and time stay local.
    and other machine settings for your own checkout.
 
 The owner handles merge points, ship points, and deploys. To stop local
-collaboration, run `wg leave <plan-dir>`. It releases your claims and removes
-the local collaboration record. To end your membership, use the page.
+collaboration, run `wg leave <plan-dir>`. It removes the local collaboration
+record and warns if it cannot release a claim. Those claims end when their
+leases expire. To end your membership, use the page.
 
 ## Read and edit
 

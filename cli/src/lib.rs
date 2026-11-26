@@ -80,3 +80,5 @@ pub mod release;
 pub mod usage;
 
 pub mod providers;
+
+pub mod workflow;

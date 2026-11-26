@@ -1053,3 +1053,16 @@ pub(crate) fn save_run_keymap(
     }
     Ok(())
 }
+
+pub(crate) fn project_claims(
+    installation: &crate::linear::Installation,
+    scope: &str,
+    collab: &Value,
+) -> Result<Value> {
+    let settings = crate::providers::PageSettings(installation).resolve(scope)?;
+    let page = connect(&settings, installation, collab, scope)?;
+    let answer = json_response(project_request(&page, collab, Method::GET, &["claims"])?)?;
+    array(&answer, "claims")?;
+    field(&answer, "role")?;
+    Ok(answer)
+}

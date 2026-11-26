@@ -8,10 +8,14 @@ import { createApp } from "./app.ts";
 import { readVapid } from "./push.ts";
 import { filePushStore } from "./pushstore.ts";
 
+const transport = vi.hoisted(() => vi.fn().mockResolvedValue({}));
+vi.mock("web-push", () => ({ sendNotification: transport }));
+
 const key = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ format: "jwk" });
 const env = {
   WG_VAPID_PUBLIC_KEY: Buffer.concat([Buffer.from([4]), Buffer.from(key.x!, "base64url"), Buffer.from(key.y!, "base64url")]).toString("base64url"),
   WG_VAPID_PRIVATE_KEY: key.d!,
+  WG_VAPID_SUBJECT: "mailto:push@example.com",
 };
 const host = "page.example.com";
 const auth = { clientId: "client", clientSecret: "secret", secret: "a-session-secret-of-32-characters", owners: ["ada@example.com"], domains: ["example.com"] };
@@ -21,8 +25,8 @@ test("checks key file permissions before reading a pair", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wg-key-"));
   try {
     const file = join(dir, "keys");
-    await writeFile(file, JSON.stringify({ publicKey: env.WG_VAPID_PUBLIC_KEY, privateKey: env.WG_VAPID_PRIVATE_KEY }), { mode: 0o600 });
-    expect(readVapid({ WG_VAPID_FILE: file })?.publicKey).toBe(env.WG_VAPID_PUBLIC_KEY);
+    await writeFile(file, JSON.stringify({ publicKey: env.WG_VAPID_PUBLIC_KEY, privateKey: env.WG_VAPID_PRIVATE_KEY, subject: "https://example.com/contact" }), { mode: 0o600 });
+    expect(readVapid({ WG_VAPID_FILE: file })).toMatchObject({ publicKey: env.WG_VAPID_PUBLIC_KEY, subject: "https://example.com/contact" });
     await chmod(file, 0o644);
     expect(() => readVapid({ WG_VAPID_FILE: file })).toThrow();
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -63,6 +67,9 @@ test("push routes check setup, session, role, origin, and device ownership", asy
         expect((await request("devices", "POST", owner, device)).status).toBe(200);
         const { devices } = await (await request("devices", "GET", owner)).json();
         expect(devices).toEqual([{ label: "Phone", id: expect.any(String), time: expect.any(Number) }]);
+        expect((await request("devices/" + devices[0].id + "/test", "POST", owner)).status).toBe(202);
+        await Promise.all(deliveries);
+        expect(transport.mock.lastCall?.[2].vapidDetails.subject).toBe(env.WG_VAPID_SUBJECT);
         await request("settings", "PUT", owner, { enabled: false, kinds: [] });
         expect((await request("devices/" + devices[0].id + "/test", "POST", viewer)).status).toBe(403);
         expect((await request("devices/" + devices[0].id + "/test", "POST", owner)).status).toBe(202);
@@ -146,6 +153,9 @@ test("the notice route binds the token to its project, limits requests and retur
 
 test.each([
   [{ WG_VAPID_PUBLIC_KEY: "bad-public", WG_VAPID_PRIVATE_KEY: "bad-private" }, "WG_VAPID_PUBLIC_KEY and WG_VAPID_PRIVATE_KEY"],
+  [{ ...env, WG_VAPID_SUBJECT: undefined }, "WG_VAPID_SUBJECT"],
+  [{ ...env, WG_VAPID_SUBJECT: "http://example.com" }, "WG_VAPID_SUBJECT"],
+  [{ ...env, WG_VAPID_SUBJECT: "mailto:missing-address" }, "WG_VAPID_SUBJECT"],
   [{ WG_VAPID_FILE: "/unreadable/key-file" }, "WG_VAPID_FILE"],
 ])("bad VAPID settings leave the page available and push disabled", async (settings, label) => {
   const warning = vi.spyOn(console, "warn").mockImplementation(() => {});

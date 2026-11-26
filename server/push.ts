@@ -11,7 +11,19 @@ function encoded(value: unknown, size: number): value is string {
   return bytes.length === size && bytes.toString("base64url") === value;
 }
 
-export function readVapid(env: NodeJS.ProcessEnv): { publicKey: string; privateKey: string } | null {
+class InvalidSubject extends Error {}
+
+function contactSubject(subject: unknown): string {
+  if (typeof subject === "string" && !/\s/.test(subject)) {
+    if (/^mailto:[^@/?#]+@[^@/?#]+$/i.test(subject)) return subject;
+    const url = URL.parse(subject);
+    if (/^https:\/\//i.test(subject) && url?.protocol === "https:" && !url.username && !url.password) return subject;
+  }
+  throw new InvalidSubject();
+}
+
+export function readVapid(env: NodeJS.ProcessEnv) {
+  let subject = env.WG_VAPID_SUBJECT;
   let publicKey = env.WG_VAPID_PUBLIC_KEY;
   let privateKey = env.WG_VAPID_PRIVATE_KEY;
   if (!publicKey && !privateKey && env.WG_VAPID_FILE) {
@@ -19,7 +31,9 @@ export function readVapid(env: NodeJS.ProcessEnv): { publicKey: string; privateK
     try {
       const stat = fstatSync(fd);
       if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.size > 4096) throw new Error();
-      ({ publicKey, privateKey } = JSON.parse(readFileSync(fd, "utf8")));
+      const file = JSON.parse(readFileSync(fd, "utf8"));
+      ({ publicKey, privateKey } = file);
+      subject ??= file.subject;
     } catch { throw new Error("WG_VAPID_FILE must be a mode-600 file with a VAPID key pair"); }
     finally { closeSync(fd); }
   } else if (!publicKey && !privateKey) return null;
@@ -29,16 +43,16 @@ export function readVapid(env: NodeJS.ProcessEnv): { publicKey: string; privateK
     const pair = createECDH("prime256v1");
     pair.setPrivateKey(Buffer.from(privateKey, "base64url"));
     if (pair.getPublicKey().toString("base64url") !== publicKey) throw new Error();
-    return { publicKey, privateKey };
   } catch { throw new Error("Invalid VAPID key pair"); }
+  return { publicKey, privateKey, subject: contactSubject(subject) };
 }
 
 export function configuredVapid(env: NodeJS.ProcessEnv) {
   try {
     return readVapid(env);
-  } catch {
+  } catch (error) {
     const setting = !env.WG_VAPID_PUBLIC_KEY && !env.WG_VAPID_PRIVATE_KEY && env.WG_VAPID_FILE
-      ? "WG_VAPID_FILE" : "WG_VAPID_PUBLIC_KEY and WG_VAPID_PRIVATE_KEY";
+      ? "WG_VAPID_FILE" : error instanceof InvalidSubject ? "WG_VAPID_SUBJECT" : "WG_VAPID_PUBLIC_KEY and WG_VAPID_PRIVATE_KEY";
     console.warn("Push is off. Check " + setting + ".");
     return null;
   }

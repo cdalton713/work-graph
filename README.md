@@ -73,7 +73,9 @@ page directory. The server keeps device subscriptions and account notice setting
 directory or VAPID keys, push is off.
 
 Use one P-256 VAPID key pair for the installation. Set `WG_VAPID_PUBLIC_KEY` and `WG_VAPID_PRIVATE_KEY`
-to the base64url keys, or set `WG_VAPID_FILE` to a private JSON file. To create that file on the server,
+to the base64url keys. Set `WG_VAPID_SUBJECT` to a contact email with the `mailto:` prefix or an HTTPS contact URL.
+Push stays off if the subject is missing or invalid. To keep the keys and subject in one mode-600 JSON file,
+set `WG_VAPID_FILE` to its path. Replace the example contact address below with your own. To create the file,
 run this command in a private directory. It creates a new file with mode 600 and prints no keys.
 
 ```sh
@@ -83,7 +85,7 @@ import { writeFileSync } from "node:fs";
 const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
 const { x, y, d } = privateKey.export({ format: "jwk" });
 const publicKey = Buffer.concat([Buffer.from([4]), Buffer.from(x, "base64url"), Buffer.from(y, "base64url")]);
-writeFileSync("vapid.json", JSON.stringify({ publicKey: publicKey.toString("base64url"), privateKey: d }),
+writeFileSync("vapid.json", JSON.stringify({ publicKey: publicKey.toString("base64url"), privateKey: d, subject: "mailto:push@example.com" }),
   { flag: "wx", mode: 0o600 });
 JS
 ```

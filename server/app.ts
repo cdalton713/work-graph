@@ -687,8 +687,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   };
   const pushLimit = attemptLimit({ redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX, now: clock }, "push-notices:", 60_000, 30);
   function schedulePush(c: Context, storage: PushStore, account: string, notice: Parameters<typeof sendNotice>[3]) {
-    const subject = "https://" + c.req.header("host");
-    const job = sendNotice(storage, account, { ...vapid!, subject }, notice).then(failures => {
+    const job = sendNotice(storage, account, vapid!, notice).then(failures => {
       if (failures) console.warn("Push delivery failed attempts:", failures);
     }).catch(() => console.warn("Push delivery could not finish"));
     waitUntil?.(job);

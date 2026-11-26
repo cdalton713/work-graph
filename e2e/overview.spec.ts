@@ -78,6 +78,8 @@ test("phone overview shows the scoped project before secondary filters", async (
   await expect(filters).toHaveAttribute("aria-expanded", "false");
   await expect(workspace).toBeHidden();
   await expect(title).toBeInViewport({ ratio: 1 });
+  expect(await page.locator(".stage").evaluate((el) => [el.scrollLeft, el.scrollTop])).toEqual([0, 0]);
+  expect(await page.evaluate(() => [window.scrollX, window.scrollY])).toEqual([0, 0]);
   await expect(page.getByRole("region", { name: "Example initiative" }).getByText("Not running", { exact: true })).toHaveCount(2);
   const filterBounds = await bounds(filters);
   expect(filterBounds.height).toBeGreaterThanOrEqual(44);
@@ -120,6 +122,38 @@ test("phone overview shows the scoped project before secondary filters", async (
   await expect(page).not.toHaveURL(/[?&](initiative|state)=/);
   await page.reload();
   await expect(page.getByRole("button", { name: "Clear filters", exact: true })).toBeHidden();
+});
+
+test("phone filters show stale workspace and initiative selections while expanded", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("phone"), "Requires the phone layout");
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("wg-overview")) {
+      localStorage.setItem("wg-overview", JSON.stringify({ workspace: "archived-workspace" }));
+    }
+  });
+  await page.route("**/api/overview*", async (route) => {
+    const response = await route.fetch();
+    const data: OverviewData = await response.json();
+    for (const project of data.projects) project.initiative = null;
+    await route.fulfill({ response, json: data });
+  });
+  await page.goto("/?initiative=Archived");
+  const filters = page.getByRole("button", { name: "Filters", exact: true });
+  const scope = page.getByText("archived-workspace · Archived", { exact: true });
+  await expect(scope).toBeVisible();
+  await filters.click();
+  await expect(filters).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTitle("Show one initiative")).toHaveCount(0);
+  await expect(page.getByRole("group", { name: "Workspace", exact: true })).toHaveCount(0);
+  await expect(scope).toBeVisible();
+
+  await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+  await expect(filters).toBeFocused();
+  await expect(scope).toBeHidden();
+  await expect(page).not.toHaveURL(/[?&]initiative=/);
+  await expect(page.locator(".ov-title").getByText("Example project", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.locator(".ov-title").getByText("Example project", { exact: true })).toBeVisible();
 });
 
 test("overview controls fit the screen and show their details", async ({ page }, testInfo) => {
@@ -236,6 +270,44 @@ test("a picker sheet keeps arrow keys out of the overview", async ({ page }, tes
   await page.getByRole("dialog").getByRole("button", { name: "Close" }).tap();
   await page.keyboard.press("ArrowDown");
   await expect(active.locator(".ov-title")).not.toHaveText(initial!);
+});
+
+test("a diagonal touch drag scrolls the installed overview inbox categories", async ({ page, context }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("phone-320"), "Requires the smallest touch viewport");
+  await page.addInitScript(() => Object.defineProperty(navigator, "standalone", { value: true }));
+  await screens.overview(page);
+  const categories = page.getByRole("group", { name: "Inbox category" });
+  const questions = categories.getByRole("button", { name: "Questions 0" });
+  const { x, y, width, height } = await bounds(questions);
+  const client = await context.newCDPSession(page);
+  let navigations = 0;
+  page.on("domcontentloaded", () => { navigations++; });
+  expect(await page.locator(".stage").evaluate((el) => el.scrollTop)).toBe(0);
+  await categories.evaluate((el) => {
+    document.addEventListener("touchmove", (event) => {
+      if (event.defaultPrevented && event.target instanceof Node && el.contains(event.target)) {
+        el.setAttribute("data-drag-intercepted", "");
+      }
+    }, { passive: true });
+  });
+  const drag = async (fromX: number) => {
+    const point = { x: Math.round(fromX), y: Math.round(y + height / 2) };
+    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    for (const [dx, dy] of [[12, 2], [30, 4], [65, 6], [110, 8], [145, 10]]) {
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchMove", touchPoints: [{ x: point.x - dx, y: point.y + dy }],
+      });
+    }
+    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  };
+  await drag(x + width - 8);
+  await expect.poll(() => categories.evaluate((el) => el.scrollLeft)).toBeGreaterThan(40);
+  const rail = await bounds(categories);
+  await drag(rail.x + rail.width - 12);
+  await expect(categories.getByRole("button", { name: /Other actions/ })).toBeInViewport({ ratio: 1 });
+  await expect(categories).not.toHaveAttribute("data-drag-intercepted");
+  expect(navigations).toBe(0);
+  expect(await page.locator(".stage").evaluate((el) => el.scrollTop)).toBe(0);
 });
 
 test("a pull from the top refreshes the installed overview", async ({ page, context }, testInfo) => {

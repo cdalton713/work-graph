@@ -290,7 +290,10 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
     const blocksPull = (target: EventTarget | null) => {
       if (!(target instanceof Element) || target.closest("input, textarea, [contenteditable]")) return true;
       for (let node: Element | null = target; node && node !== stage; node = node.parentElement) {
-        if (node.scrollTop > 0 && /^(auto|scroll|overlay)$/.test(getComputedStyle(node).overflowY)) return true;
+        const { overflowX, overflowY } = getComputedStyle(node);
+        const scrollable = /^(auto|scroll|overlay)$/;
+        if (node.scrollTop > 0 && scrollable.test(overflowY)) return true;
+        if (node.scrollWidth > node.clientWidth && scrollable.test(overflowX)) return true;
       }
       return false;
     };
@@ -630,7 +633,7 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
           Filters <span className="caret" aria-hidden="true">{filtersOpen ? "▴" : "▾"}</span>
         </button>}
         {narrow && hasFilters && <div className="ov-filter-scope">
-          {!filtersOpen && <span>{filterScope || scope}</span>}
+          <span>{filterScope || scope}</span>
           <button type="button" className="ghost" onClick={clearFilters}>Clear filters</button>
         </div>}
         <div className="ov-filter-options" id="overview-filter-options" hidden={narrow && !filtersOpen}>

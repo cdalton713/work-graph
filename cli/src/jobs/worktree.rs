@@ -217,6 +217,27 @@ pub(super) fn check(ctx: &Context, path: &Path, n: &Names) -> Result<(), String>
 pub(super) fn tracked(path: &Path, n: &Names) -> bool {
     !n.track || metadata(path, &n.branch)["parentBranchName"] == n.parent
 }
+pub(super) fn fetch_shared_parent(dir: &Path, branch: &str) -> Result<(), String> {
+    let reference = format!("refs/heads/{branch}");
+    git(dir, &["check-ref-format", &reference])?;
+    if git(dir, &["show-ref", "--verify", "--quiet", &reference]).is_ok() {
+        return Ok(());
+    }
+    let remote = format!("refs/remotes/origin/{branch}");
+    git(
+        dir,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "origin",
+            &format!("{reference}:{remote}"),
+        ],
+    )?;
+    git(dir, &["branch", "--track", "--", branch, &remote])?;
+    Ok(())
+}
+
 pub(super) fn prepare(ctx: &Context, k: &str, n: &Names) -> Result<(), String> {
     let found = request(&["worktree", "list", "--limit", "10000"])?;
     if found["truncated"] == true {

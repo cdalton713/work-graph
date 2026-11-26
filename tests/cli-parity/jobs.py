@@ -11,7 +11,7 @@ from unittest.mock import patch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from services import Handler, fixture_service
-from suite import run_case
+from suite import help_flags, run_case
 
 
 def write(path, data):
@@ -101,19 +101,30 @@ print(json.dumps(r))
     errors = []
     actions = []
     label_ops = []
+    project_updates = []
+    released = []
     reject_receipt = True
     reject_review_move = True
     def post(h):
         nonlocal reject_receipt, reject_review_move
         data = json.loads(h.rfile.read(int(h.headers["Content-Length"])))
         if h.path.endswith("/claims/a"):
-            assert h.headers["Authorization"]=="Bearer token" and data["takeover"]
+            assert h.headers["Authorization"]=="Bearer token" and (data.get("takeover") or data["job"]=="dispatch")
             action=actions.pop(0)
+            if action=="unavailable":return h.send_error(503)
             if action=="refused":return h.send_error(409)
             if action=="uncertain":return h.reply({})
             return h.reply({"action":action})
         q=data["query"];v=data["variables"]
         if "issues(first:25" in q:r={"issues":page([issue])}
+        elif "projectStatuses{" in q:
+            status={"id":"planned","type":"planned","createdAt":"group-b"}
+            target={"id":"started-b","name":"In Progress","type":"started","createdAt":"group-b"}
+            r={"project":{"status":target if project_updates else status},
+               "projectStatuses":page([dict(target,id="started-a",createdAt="group-a"),target])}
+        elif "projectUpdate(" in q:
+            project_updates.append(v["s"])
+            r={"projectUpdate":{"success":True}}
         elif "issueLabels(" in q:r={"issueLabels":page([{"id":"new","name":"agent:codex","team":None}])}
         elif "team(id:" in q:r={"team":{"states":states}}
         elif "teams(filter:" in q:r={"teams":page([{"id":"team","states":states}])}
@@ -151,7 +162,12 @@ print(json.dumps(r))
         elif h.path.endswith("/claims"):
             h.reply({"role":"collaborator","claims":[{"mine":True,"node":"a","job":"review"}]})
         else:h.send_error(404)
-    with patch.object(Handler,"do_POST",post),patch.object(Handler,"do_GET",get),fixture_service() as (settings,_):
+    def delete(h):
+        assert h.path.endswith("/claims/a") and h.headers["Authorization"]=="Bearer token"
+        released.append(h.path)
+        h.send_response(204)
+        h.end_headers()
+    with patch.object(Handler,"do_DELETE",delete,create=True),patch.object(Handler,"do_POST",post),patch.object(Handler,"do_GET",get),fixture_service() as (settings,_):
         env=dict(settings,HOME=str(root),PATH=str(tools)+":"+os.defpath,WG_CONFIG=str(cfg),
                  WG_DEFAULT_LINK_TOKEN="token",WG_LINK="off",ORCA_AGENT_SESSION_ID="fixture",
                  ORCA_CLI_COMMAND=str(tools/"orca"),FIXTURE=str(root))
@@ -176,6 +192,7 @@ print(json.dumps(r))
         assert row()["step"]=="receipt" and row()["dispatch"]=="dispatch-id"
         run("dispatch","a","--run")
         starts=[a for a in calls() if a[:2]==["orchestration","worker-start"]]
+        assert project_updates==["started-b"]
         assert len(starts)==2 and "--retry-request" in starts[1]
         assert "Research the test case." in (core/"specs/a.md").read_text()
         assert len([c for c in comments if c.startswith("Claimed:")])==1
@@ -250,6 +267,44 @@ print(json.dumps(r))
             run("started","a","dispatch="+mode)
             run("done","a","--dispatch",mode,"--failed","guard tested")
             if mode=="tracked":git("rm","--cached","-q",".codex/config.toml")
+        # Resume a collaborative job whose lower branch exists only on origin.
+        lower="shared/parent"
+        git("init","--bare","-q",str(root/"remote"))
+        git("remote","add","origin",str(root/"remote"))
+        git("push","-q","origin","main:refs/heads/"+lower)
+        git("update-ref","-d","refs/remotes/origin/"+lower)
+        km=read(core/"keymap.json")
+        plan["nodes"].append(dict(plan["nodes"][0],key="below"))
+        plan["edges"].append({"from":"a","to":"below"})
+        write(core/"plan.json",plan)
+        km["collab"]={"project":"p","page":"https://page.invalid","workspace":"shared:test","name":"Example",
+                      "version":1,"settings":{"workspace":"default","team":"EX","slug":"wf"},
+                      "plan_sha":hashlib.sha256((core/"plan.json").read_bytes()).hexdigest()}
+        km["nodes"]["below"]={"id":"issue-b","identifier":"EX-2","branch":lower,"pr":"2"}
+        km["run"]["nodes"]["a"]={"agent":"codex","branch":"topic","parent":lower,"lower":lower,
+                                 "state":"creating","job":"dispatch","step":"parent"}
+        write(core/"keymap.json",km)
+        issue.update(state={"type":"started","name":"In Progress"},labels=page([{"id":"new","name":"agent:codex"}]))
+        metadata=subprocess.check_output(["git","hash-object","-w","--stdin"],cwd=work,
+                                         input=json.dumps({"parentBranchName":lower}).encode()).decode().strip()
+        git("update-ref","refs/branch-metadata/topic",metadata)
+        inventory=read(trees)
+        inventory.extend([dict(inventory[0],id="lane",branch="wg/wf-local",parentWorktreeId="core",path=str(unrelated)),
+                          dict(inventory[0],id="child",branch="topic",parentWorktreeId="lane",path=str(work))])
+        write(trees,inventory)
+        actions.extend(["unavailable","refused","claimed","claimed"])
+        run("dispatch","a","--run",code=2)
+        assert len(released)==1
+        run("dispatch","a","--run",code=2)
+        assert len(released)==1
+        run("dispatch","a","--run",code=1)
+        assert git("rev-parse",lower)==base
+        assert git("rev-parse",lower+"@{upstream}") == base
+        assert len(released)==2 and row()["retry_request"]=="request-id"
+        run("dispatch","a","--run")
+        assert len(released)==2 and row()["state"]=="running"
+        starts=[a for a in calls() if a[:2]==["orchestration","worker-start"]]
+        assert len(starts)==4 and "--retry-request" in starts[-1]
         assert not errors,errors
 
 
@@ -257,7 +312,10 @@ candidate=str(Path(sys.argv[1]).resolve())
 cases=read(HERE/"expected.json")
 verbs={"dispatch","claim","started","done","base","cleanup","evidence","verify"}
 for case,expected in cases.items():
-    if case.split()[0] in verbs and "--help" not in case:
+    if case.split()[0] in verbs and "--help" in case:
+        result=run_case([candidate],case.split(),False)
+        assert result["exit"]==0 and help_flags(result["stdout"])==expected,(case,result,expected)
+    elif case.split()[0] in verbs:
         actual=run_case([candidate],case.split(),False)
         assert actual==expected,(case,actual,expected)
 with tempfile.TemporaryDirectory() as temp:

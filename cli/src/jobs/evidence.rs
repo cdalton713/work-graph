@@ -47,10 +47,9 @@ pub(super) fn run(
         return Err(format!("invalid evidence key {key}"));
     }
     let full = key.strip_prefix("@full-").is_some_and(|k| {
-        plan["phases"].as_array().is_some_and(|ps| {
-            ps.iter()
-                .any(|p| p["key"] == k || p["key"].to_string() == k)
-        })
+        plan["phases"]
+            .as_array()
+            .is_some_and(|ps| ps.iter().any(|p| super::phase_matches(&p["key"], k)))
     });
     if !full && !list(&plan["nodes"])?.iter().any(|n| n["key"] == key) {
         return Err(format!("unknown key {key}"));
@@ -134,8 +133,7 @@ pub(super) fn run(
     let exit = if command.is_empty() {
         emit(&format!(
             "no test task is affected by {}..{}\n",
-            &base
-                .as_deref()
+            base.as_deref()
                 .unwrap_or("")
                 .chars()
                 .take(10)

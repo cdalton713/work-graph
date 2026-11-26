@@ -11,7 +11,7 @@ pub(super) fn run(
     let mut seen = BTreeSet::new();
     let mut failed = false;
     for p in list(&plan["phases"])? {
-        if phase.is_some_and(|s| p["key"] != s && p["key"].to_string() != s) {
+        if phase.is_some_and(|s| !super::phase_matches(&p["key"], s)) {
             continue;
         }
         let target = p["target"].as_str().ok_or("missing phase target")?;

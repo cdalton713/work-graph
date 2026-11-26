@@ -130,7 +130,7 @@ impl Page {
     }
 }
 
-enum PageError {
+pub(crate) enum PageError {
     Unavailable(String),
     Failed(String),
 }

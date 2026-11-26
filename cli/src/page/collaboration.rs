@@ -1250,7 +1250,7 @@ pub(crate) fn acquire_claim(
     key: &str,
     job: &str,
     takeover: bool,
-) -> Result<String> {
+) -> PageResult<String> {
     let settings = crate::providers::PageSettings(installation).resolve(scope)?;
     let page = connect(&settings, installation, collab, scope)?;
     let mut body = json!({"job":job});
@@ -1260,7 +1260,10 @@ pub(crate) fn acquire_claim(
     let req = project_request(&page, collab, Method::POST, &["claims", key])?
         .header("Content-Type", "application/json")
         .body(body.to_string());
-    let answer = json_response(req)?;
+    let (status, bytes) = response(req)?;
+    check(status)?;
+    let answer: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "the page returned invalid JSON")?;
     match field(&answer, "action")? {
         action @ ("claimed" | "renewed" | "taken_over") => Ok(action.to_owned()),
         _ => Err("invalid claim response".into()),

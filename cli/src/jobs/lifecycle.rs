@@ -131,6 +131,31 @@ impl Context<'_> {
         }
         Ok(())
     }
+    pub fn start_project(&self, km: &Value) -> Result<(), String> {
+        let id = field(&km["project"], "id")?;
+        let data=self.request("query($id:String!){project(id:$id){status{id type createdAt}} projectStatuses{nodes{id name type createdAt}}}",json!({"id":id}))?;
+        let current = &data["project"]["status"];
+        if !matches!(field(current, "type")?, "backlog" | "planned") {
+            return Ok(());
+        }
+        let statuses = list(&data["projectStatuses"]["nodes"])?;
+        let mut started = statuses
+            .iter()
+            .filter(|s| s["type"] == "started" && s["name"] == "In Progress");
+        let target = started
+            .clone()
+            .find(|s| s["createdAt"] == current["createdAt"])
+            .or_else(|| started.next())
+            .ok_or("no In Progress project status")?;
+        let updated = self.request(
+            "mutation($id:String!,$s:String!){projectUpdate(id:$id,input:{statusId:$s}){success}}",
+            json!({"id":id,"s":field(target,"id")?}),
+        )?;
+        if updated["projectUpdate"]["success"] == true {
+            println!("project status: In Progress");
+        }
+        Ok(())
+    }
     pub fn transition(&self, cmd: &str, k: &str, to: &str) -> Result<(), String> {
         move_node(
             Workflow {

@@ -254,6 +254,33 @@ fn launch(
         }
     }
 }
+fn with_dispatch_lease(
+    ctx: &Context,
+    km: &Value,
+    key: &str,
+    acquire: bool,
+    dispatch: impl FnOnce() -> Result<u8, String>,
+) -> Result<u8, String> {
+    if !acquire || !km["collab"].is_object() {
+        return dispatch();
+    }
+    let scope = ctx.scope()?;
+    let collab = &km["collab"];
+    let result =
+        match crate::page::acquire_claim(ctx.install, scope, collab, key, "dispatch", false) {
+            Ok(_) => dispatch(),
+            Err(crate::page::PageError::Unavailable(error)) => Err(error),
+            Err(crate::page::PageError::Failed(error)) => return Err(error),
+        };
+    if !matches!(result, Ok(0)) {
+        match crate::page::update_claim(ctx.install, scope, collab, key, None) {
+            Ok(()) => eprintln!("released {key}: dispatch did not complete"),
+            Err(error) => eprintln!("warn {key}: could not release claim: {error}"),
+        }
+    }
+    result
+}
+
 pub(super) fn dispatch(
     ctx: &Context,
     k: &str,
@@ -288,11 +315,13 @@ pub(super) fn dispatch(
         print_started(k, &receipt(ctx, k, "dispatch")?, "dispatch");
         return Ok(0);
     }
-    if mine && (run || row["step"] == "start") {
-        if let Err(e) = pending(k, row, "start") {
-            eprintln!("{e}");
-            return Ok(1);
-        }
+    if mine
+        && !run
+        && row["step"] == "start"
+        && let Err(e) = pending(k, row, "start")
+    {
+        eprintln!("{e}");
+        return Ok(1);
     }
     if !run && row["retry_request"].is_string() {
         return Err(format!(
@@ -354,141 +383,152 @@ pub(super) fn dispatch(
             }
         }
     }
-    if km["collab"].is_object() {
-        if path.is_some() {
-            ctx.lease(&km, k)?;
-        } else {
-            crate::page::acquire_claim(
-                ctx.install,
-                ctx.scope()?,
-                &km["collab"],
-                k,
-                "dispatch",
-                false,
-            )?;
+    if path.is_some() {
+        ctx.lease(&km, k)?;
+    }
+    with_dispatch_lease(ctx, &km, k, path.is_none(), || {
+        if mine
+            && run
+            && let Err(e) = pending(k, row, "start")
+        {
+            eprintln!("{e}");
+            return Ok(1);
         }
-    }
-    if !mine {
-        let settings = agent.settings(ctx, &Value::Null)?;
-        ctx.change(k, "dispatch", |r| {
-            let fields = json!({"state":"creating","job":"dispatch","step":"claim",
-                                "branch":n.branch,"parent":n.parent,"lower":n.lower});
-            let map = r.as_object_mut().ok_or("invalid run row")?;
-            map.extend(fields.as_object().unwrap().clone());
-            map.extend(settings.as_object().unwrap().clone());
-            Ok(())
-        })?;
-    }
-    let row = ctx.km()?["run"]["nodes"][k].clone();
-    if path.is_some() && matches!(row["step"].as_str(), Some("claim" | "status")) {
-        return Err("the claim is not complete; run dispatch again".into());
-    }
-    let label = format!("agent:{}", field(&row, "agent")?);
-    let labels = held(issue)?;
-    if !labels.iter().any(|l| l["name"] == label) {
-        claim_label(ctx, issue, field(&row, "agent")?)?;
-    }
-    if snap.statuses.get(k).map(String::as_str) != Some("In Progress") {
-        ctx.transition("dispatch", k, "In Progress")?;
-    }
-    ctx.refresh_card(k);
-    if !run && path.is_none() {
-        ctx.change(k, "dispatch", |r| {
-            r.as_object_mut().unwrap().remove("step");
-            Ok(())
-        })?;
-        let parent = quote(&n.parent);
-        let branch = quote(&n.branch);
-        let lower = quote(&n.lower);
-        let stack = quote(&n.stack);
-        let plan_dir = quote(&ctx.dir.to_string_lossy());
-        println!(
-            "branch {branch} on {lower}{}",
-            if n.track {
-                format!(", stax parent {parent}")
-            } else {
-                ", not tracked by stax".into()
-            }
-        );
-        println!("Run these in order. Each <...> is an id or a path from Orca's output:");
-        println!("  orca worktree list --json    # find the coordinator at {plan_dir}");
-        if node["kind"] != "spike" {
-            let stack_branch = quote(&format!(
-                "{}{}",
-                field(ctx.install.config.settings(), "branch_prefix")?,
-                n.stack
-            ));
-            let base = if n.lower.starts_with("origin/") {
-                lower.clone()
-            } else {
-                quote(&format!("origin/{}", n.target))
-            };
-            println!(
-                "  orca worktree create --name {stack} --branch {stack_branch} --parent-worktree id:<core-id> --base-branch {base} --setup skip --json    # only when {stack} is missing"
-            );
-        }
-        println!(
-            "  orca worktree create --name {} --branch {branch} --base-branch {lower} --parent-worktree id:<parent-id> --setup run --json",
-            quote(&n.child)
-        );
-        println!(
-            "  orca worktree set --worktree id:<child-id> --display-name {} --json",
-            quote(&n.display)
-        );
-        if n.track {
-            println!("  (cd \"<child-path>\" && st branch track --parent {parent})");
-        }
-        println!(
-            "  wg dispatch {plan_dir} {} --worktree \"<child-path>\"",
-            quote(k)
-        );
-        return Ok(0);
-    }
-    let retry = row["retry_request"].is_string();
-    if !retry {
-        if let Some(path) = path {
-            worktree::check(ctx, path, &n)?;
-            if !worktree::tracked(path, &n) {
-                return Err("incorrect stax parent".into());
-            }
-            let path = path.canonicalize().map_err(|e| e.to_string())?;
+        if !mine {
+            let settings = agent.settings(ctx, &Value::Null)?;
             ctx.change(k, "dispatch", |r| {
-                r["path"] = json!(path);
+                let fields = json!({"state":"creating","job":"dispatch","step":"claim",
+                                "branch":n.branch,"parent":n.parent,"lower":n.lower});
+                let map = r.as_object_mut().ok_or("invalid run row")?;
+                map.extend(fields.as_object().unwrap().clone());
+                map.extend(settings.as_object().unwrap().clone());
                 Ok(())
             })?;
-        } else {
-            worktree::prepare(ctx, k, &n)?;
         }
-        ctx.change(k, "dispatch", |r| {
-            r["state"] = "starting".into();
-            r["step"] = "spec".into();
-            Ok(())
-        })?;
-    }
-    let row = ctx.km()?["run"]["nodes"][k].clone();
-    if !retry {
-        apply_worker_settings(ctx, &row);
-    }
-    let spec = spec(ctx, k, entry, issue, &row, None, !retry)?;
-    let title = format!("{}: {}", field(entry, "identifier")?, field(node, "title")?);
-    if !run {
-        println!(
-            "spec {}\n  orca orchestration worker-start --spec-file '{}' --worktree id:<child-id> --agent {} --json\n  wg started {} {k} dispatch=<dispatch_id> task=<task_id> worktree=<worktree id> run_id=<run_id>",
-            spec.display(),
-            spec.display(),
-            field(&row, "agent")?,
-            ctx.dir.display()
-        );
-        return Ok(0);
-    }
-    launch(
-        ctx,
-        k,
-        "dispatch",
-        "start",
-        &row,
-        start_args(&row, &spec, &title)?,
-    )
+        let row = ctx.km()?["run"]["nodes"][k].clone();
+        if path.is_some() && matches!(row["step"].as_str(), Some("claim" | "status")) {
+            return Err("the claim is not complete; run dispatch again".into());
+        }
+        let label = format!("agent:{}", field(&row, "agent")?);
+        let labels = held(issue)?;
+        if !labels.iter().any(|l| l["name"] == label) {
+            claim_label(ctx, issue, field(&row, "agent")?)?;
+        }
+        if snap.statuses.get(k).map(String::as_str) != Some("In Progress") {
+            ctx.transition("dispatch", k, "In Progress")?;
+        }
+        if (!mine || matches!(row["step"].as_str(), Some("claim" | "status")))
+            && let Err(error) = ctx.start_project(&km)
+        {
+            eprintln!("project status not updated ({error})");
+        }
+        ctx.refresh_card(k);
+        if !run && path.is_none() {
+            ctx.change(k, "dispatch", |r| {
+                r.as_object_mut().unwrap().remove("step");
+                Ok(())
+            })?;
+            let parent = quote(&n.parent);
+            let branch = quote(&n.branch);
+            let lower = quote(&n.lower);
+            let stack = quote(&n.stack);
+            let plan_dir = quote(&ctx.dir.to_string_lossy());
+            println!(
+                "branch {branch} on {lower}{}",
+                if n.track {
+                    format!(", stax parent {parent}")
+                } else {
+                    ", not tracked by stax".into()
+                }
+            );
+            println!("Run these in order. Each <...> is an id or a path from Orca's output:");
+            println!("  orca worktree list --json    # find the coordinator at {plan_dir}");
+            if node["kind"] != "spike" {
+                let stack_branch = quote(&format!(
+                    "{}{}",
+                    field(ctx.install.config.settings(), "branch_prefix")?,
+                    n.stack
+                ));
+                let base = if n.lower.starts_with("origin/") {
+                    lower.clone()
+                } else {
+                    quote(&format!("origin/{}", n.target))
+                };
+                println!(
+                    "  orca worktree create --name {stack} --branch {stack_branch} --parent-worktree id:<core-id> --base-branch {base} --setup skip --json    # only when {stack} is missing"
+                );
+            }
+            println!(
+                "  orca worktree create --name {} --branch {branch} --base-branch {lower} --parent-worktree id:<parent-id> --setup run --json",
+                quote(&n.child)
+            );
+            println!(
+                "  orca worktree set --worktree id:<child-id> --display-name {} --json",
+                quote(&n.display)
+            );
+            if n.track {
+                println!("  (cd \"<child-path>\" && st branch track --parent {parent})");
+            }
+            println!(
+                "  wg dispatch {plan_dir} {} --worktree \"<child-path>\"",
+                quote(k)
+            );
+            return Ok(0);
+        }
+        let retry = row["retry_request"].is_string();
+        if !retry {
+            if let Some(path) = path {
+                worktree::check(ctx, path, &n)?;
+                if !worktree::tracked(path, &n) {
+                    return Err("incorrect stax parent".into());
+                }
+                let path = path.canonicalize().map_err(|e| e.to_string())?;
+                ctx.change(k, "dispatch", |r| {
+                    r["path"] = json!(path);
+                    Ok(())
+                })?;
+            } else {
+                if km["collab"].is_object()
+                    && let Some(below) = worktree::below(ctx.plan, node)
+                    && let Some(b) = below["key"].as_str()
+                    && km["nodes"][b]["branch"] == n.lower
+                    && !km["run"]["nodes"][b]["branch"].is_string()
+                {
+                    worktree::fetch_shared_parent(ctx.dir, &n.lower)?;
+                }
+                worktree::prepare(ctx, k, &n)?;
+            }
+            ctx.change(k, "dispatch", |r| {
+                r["state"] = "starting".into();
+                r["step"] = "spec".into();
+                Ok(())
+            })?;
+        }
+        let row = ctx.km()?["run"]["nodes"][k].clone();
+        if !retry {
+            apply_worker_settings(ctx, &row);
+        }
+        let spec = spec(ctx, k, entry, issue, &row, None, !retry)?;
+        let title = format!("{}: {}", field(entry, "identifier")?, field(node, "title")?);
+        if !run {
+            println!(
+                "spec {}\n  orca orchestration worker-start --spec-file '{}' --worktree id:<child-id> --agent {} --json\n  wg started {} {k} dispatch=<dispatch_id> task=<task_id> worktree=<worktree id> run_id=<run_id>",
+                spec.display(),
+                spec.display(),
+                field(&row, "agent")?,
+                ctx.dir.display()
+            );
+            return Ok(0);
+        }
+        launch(
+            ctx,
+            k,
+            "dispatch",
+            "start",
+            &row,
+            start_args(&row, &spec, &title)?,
+        )
+    })
 }
 
 fn quote(s: &str) -> String {

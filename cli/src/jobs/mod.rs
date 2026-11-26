@@ -200,3 +200,7 @@ fn list(v: &Value) -> Result<&Vec<Value>, String> {
     v.as_array().ok_or_else(|| "expected an array".to_string())
 }
 mod worktree;
+
+fn phase_matches(key: &Value, text: &str) -> bool {
+    key.as_str() == Some(text) || key.as_number().is_some_and(|n| n.to_string() == text)
+}

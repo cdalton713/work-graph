@@ -1,9 +1,16 @@
 // The Node SDK loads only when the server entry point has a DSN.
+import { posix } from "node:path";
 import type { ErrorEvent } from "@sentry/node";
 
 const testMessage = "work-graph sentry test";
 const errorTypes = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError",
   "LinkRoomFull", "NeedsLinearAccess", "LinearSignInRequired", "RedisUnavailable", "RedisCommandFailed", "LinearError"]);
+
+function frameName(filename?: string): string {
+  if (!filename || /[?#]/.test(filename)) return "<source>";
+  const path = posix.normalize(filename.replaceAll("\\", "/"));
+  return /(?:^|\/)(?:server|api)\/(?:[^/]+\/)*([^/]+\.(?:ts|js))$/.exec(path)?.[1] ?? "<source>";
+}
 
 // Keep only diagnostic fields. Messages, source lines and request context can all contain plan text.
 export function scrubEvent(event: ErrorEvent): ErrorEvent {
@@ -11,7 +18,7 @@ export function scrubEvent(event: ErrorEvent): ErrorEvent {
     type: type && errorTypes.has(type) ? type : "Error",
     value: "Server error",
     stacktrace: { frames: stacktrace?.frames?.map(({ filename, lineno, colno }) => ({
-      filename: filename?.match(/\/server\/((?:app|linear|link|main|vercel|tenants|auth|plans|sentry)\.ts)$/)?.[1] ?? "<source>",
+      filename: frameName(filename),
       lineno, colno,
     })) },
   }));
@@ -30,11 +37,19 @@ export async function startSentry(env: NodeJS.ProcessEnv) {
   sdk.init({
     dsn: env.WG_SENTRY_DSN, environment: env.WG_SENTRY_ENVIRONMENT || "production",
     release: env.WG_VERSION || "dev", sendDefaultPii: false, beforeSend: scrubEvent,
-    defaultIntegrations: false, skipOpenTelemetrySetup: true, spotlight: false,
+    defaultIntegrations: false, skipOpenTelemetrySetup: true, registerEsmLoaderHooks: false, spotlight: false,
     sendClientReports: false,
   });
   sentry = sdk;
-  process.on("unhandledRejection", (reason) => { sdk.captureException(reason); });
+  process.on("unhandledRejection", async (reason) => {
+    try {
+      sdk.captureException(reason);
+      await sdk.flush(2000);
+    } finally {
+      console.error(reason);
+      process.exit(1);
+    }
+  });
   if (env.WG_SENTRY_TEST_EVENT === "1") {
     sdk.captureMessage(testMessage, "info");
     await sdk.flush(2000);

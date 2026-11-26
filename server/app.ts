@@ -1,11 +1,11 @@
 // The Hono app of the work-graph UI: static files from dist/ and a small JSON API over Linear.
-import { sentry } from "./sentry.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import type { Server } from "node:http";
+import { sentry } from "./sentry.ts";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { Hono, type Context } from "hono";
 import { matchedRoutes } from "hono/route";
@@ -233,11 +233,12 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const started = clock();
   const contract = contractHash(contractFile);
   const app = new Hono();
-  if (sentry && flushSentry) app.use(async (_c, next) => {
+  const sdk = sentry;
+  if (sdk && flushSentry) app.use(async (_c, next) => {
     try {
       await next();
     } finally {
-      await sentry?.flush(2000);
+      await sdk.flush(2000);
     }
   });
   app.use("/join/*", async (c, next) => {
@@ -1507,11 +1508,11 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   });
 
   app.onError((error, c) => {
-    sentry?.captureException(error);
     if (error instanceof LinkRoomFull) return c.json({ error: error.message }, 409);
     if (error instanceof NeedsLinearAccess) return c.json({ error: error.message, code: "needs_linear_access" }, 403);
     if (error instanceof LinearSignInRequired) return c.json({ error: error.message, login: LOGIN_PATH }, 401);
     const status = ((error instanceof RedisUnavailable || error instanceof RedisCommandFailed) ? 503 : error instanceof LinearError ? error.status : 500) as ContentfulStatusCode;
+    if (status >= 500) sentry?.captureException(error);
     // An API request writes its one log line in the request log above. Another route writes the error here.
     if (status === 500 && !c.req.path.startsWith("/api/") && !c.req.path.startsWith("/join/")) console.error(error);
     if (error instanceof RedisUnavailable || error instanceof RedisCommandFailed) c.header("Retry-After", "1");

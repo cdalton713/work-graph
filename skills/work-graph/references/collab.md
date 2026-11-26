@@ -54,3 +54,26 @@ load and keeps its prior synced version. Run `wg pull <plan-dir>`. It
 saves your attempted plan in a conflict file and pulls the new version.
 Compare the plans, apply the edits you want to keep, and run
 `wg load <plan-dir> --apply` again.
+
+## Claims
+
+Before a worker job starts, `wg dispatch` or `wg claim` claims the node on
+the page. Each request uses the workspace in the local `collab` record.
+The Linear `agent:*` label shows the current worker job. The page claim
+stays with the runner between jobs. `wg next` and `wg tick` renew it.
+`wg move` releases it at Merged, Done, or Canceled. `wg cleanup` releases
+the caller's claims.
+
+- `wait collaborator <person> <key>: job=<job>` means another person holds
+  the node. Leave it out of the wave and give it no review or merge job.
+- `note stale <key>: <person>, lease ended <age> ago` means the lease ended.
+  Ask the human before taking the node. After approval, run
+  `wg claim <plan-dir> <key> <job> --takeover`.
+- `wait owner <key>` means the owner handles the merge point, ship point,
+  or ops node.
+- `do reconcile <key>: …` means a renewal failed because the claim or node
+  changed. Check who holds it and the latest plan before starting work.
+
+If the claims page does not answer, start no new job. Running jobs continue.
+For a node that stacks on someone else's work, use the parent branch from
+the shared keymap. Fetch and track that branch locally if it is missing.

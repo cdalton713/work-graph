@@ -2980,8 +2980,16 @@ def snapshot(plan_dir, plan, km=None):
     return km, live, nodes, st, deps, run_rows(km)["nodes"]
 
 
-def open_blockers(k, nodes, deps, st, rows):
-    return [d for d in deps[k] if not satisfied(nodes[k], nodes[d], st.get(d, "?"), rows.get(d))]
+def open_blockers(k, nodes, deps, st, rows, shared=None):
+    def evidence(key):
+        row = rows.get(key, {})
+        entry = (shared or {}).get(key, {})
+        if not row.get("pr") and entry.get("branch") and entry.get("pr"):
+            # In Review is the shared record of code done. The other coordinator's head stays local.
+            return {"code_done_head": True}
+        return row
+
+    return [d for d in deps[k] if not satisfied(nodes[k], nodes[d], st.get(d, "?"), evidence(d))]
 
 
 def milestone_blockers(key, nodes, deps, st, rows):
@@ -3279,6 +3287,11 @@ def move(plan_dir, plan, key, status_name, note=None, force=None, keep_worktree=
             kind="status")
     before = next((status for status, name in ENG_LABELS.items() if name in markers), old)
     print(f"{ident}: {before} -> {' + '.join(filter(None, [want, marker])) or status_name}")
+    if status_name in SETTLED and (collab := km.get("collab")) is not None:
+        try:
+            release_page_claim(collab, plan_workspace(plan), key)
+        except PlanPageUnavailable as error:
+            print(f"warn {key}: {error}; wg next will retry the release", file=sys.stderr)
     if status_name == WAIT_STATUS:
         print(f"page {page_link(plan, ident)}")  # the link to give the human with the question
     if note and note.strip():
@@ -4272,15 +4285,23 @@ def agent_merge_repo(plan_dir):
     return bool(name) and any(m.lower() in (name.lower(), name.split("/")[0].lower()) for m in allowed)
 
 
+CLAIMS_UNAVAILABLE = "claims unavailable"
+
+
 def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
     """One status line; then what the coordinator does now (do), waits for (wait), and must know (note).
 
-    It reads Linear, GitHub, and the run rows, and writes nothing, so a new session can start from it.
+    It reads Linear, GitHub, and the run rows. For a shared effort it also maintains the page claims.
     """
     km, live, nodes, st, deps, rows = inputs if inputs is not None else snapshot(plan_dir, plan)
+    try:
+        gates = collaboration_lines(plan, km, st)
+    except (ClaimRefused, PlanPageUnavailable) as error:
+        return CLAIMS_UNAVAILABLE, [("wait", f"claims page: {error}")]
+    shared = km["nodes"] if km.get("collab") is not None else None
     effort = run_rows(km)["effort"]
     level = review_level(km)
-    wave = [k for k in effort.get("wave", "").split(",") if k]
+    wave = [k for k in effort.get("wave", "").split(",") if k and k not in gates]
     agent_merges = []  # read at the first PR that can merge
 
     def coordinator_merges():
@@ -4308,7 +4329,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
     infos = {}
     try:
         # One request reads every PR of the run rows. A PR that it does not return is read alone below.
-        batch = pr_batch([row.get("pr") for row in rows.values() if isinstance(row, dict)], cwd=plan_dir)
+        batch = pr_batch([row.get("pr") for k, row in rows.items() if k not in gates and isinstance(row, dict)], cwd=plan_dir)
     except (ReadError, OSError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
         warn(f"the request for all PRs failed, so each PR is read alone: {e}")
         batch = {}
@@ -4444,7 +4465,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
             add("do", "reconcile", k, f"ENG status {s} has no twin")
         elif not number:
             waiting = s in ("Todo", "Ready")
-            if waiting and open_blockers(k, nodes, deps, st, rows):
+            if waiting and open_blockers(k, nodes, deps, st, rows, shared):
                 pass
             elif n.get("role") == "integration":
                 add("do", "integration", k)  # the coordinator's own work: no worker, no dispatch
@@ -4489,6 +4510,10 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
 
     for k in order:
         n, s, row = nodes[k], st.get(k), rows.get(k, {})
+        if k in gates:
+            if s not in SETTLED or gates[k][0] == "do":
+                lines.append(gates[k])
+            continue
         if k not in km["nodes"]:
             lines.append(("do", f"load {k} -: not in keymap.json"))
             continue
@@ -4575,7 +4600,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None):
         return COMPLETE, lines
     mine = [t for t in tasks if str(nodes[t]["phase"]) == str(current["key"])]
     counts = (sum(1 for t in mine if st.get(t) in SETTLED or rows.get(t, {}).get("code_done_head")),
-              sum(1 for t in mine if reviewed(t)), sum(1 for t in mine if st.get(t) in MERGED))
+              sum(1 for t in mine if t not in gates and reviewed(t)), sum(1 for t in mine if st.get(t) in MERGED))
     head = "phase {}: {} task{}, {} code done, {} reviewed, {} merged".format(
         current["key"], len(mine), "" if len(mine) == 1 else "s", *counts)
     return head + (f"; wave {','.join(wave)}" if wave else ""), lines
@@ -4855,7 +4880,98 @@ def plan_writer(data):
     return " ".join("".join(char for char in name if char.isprintable() or char.isspace()).split())
 
 
-def plan_request(collab, workspace, method, body=None, *, history=False):
+class ClaimRefused(ReadError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+def claim_request(collab, workspace, method, key=None, body=None):
+    try:
+        page, headers = collab_page(collab, workspace)
+    except PlanPageUnavailable as error:
+        raise PlanPageUnavailable(f"the claims page is unavailable: {error}") from None
+    project = urllib.parse.quote(collab["project"], safe="")
+    path = f"/api/projects/{project}/claims"
+    if key is not None:
+        path += "/" + urllib.parse.quote(key, safe="")
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(page + path, method=method, headers=headers,
+                                     data=json.dumps(body).encode() if body is not None else None)
+    try:
+        with urllib.request.build_opener(NoPlanRedirect).open(request, timeout=10) as response:
+            return None if response.status == 204 else json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            if error.code >= 500 or error.code == 429:
+                raise PlanPageUnavailable(f"the claims page answered HTTP {error.code}") from None
+            try:
+                result = json.load(error)
+            except ValueError:
+                result = {}
+            detail = result.get("error") or f"the claims page answered HTTP {error.code}"
+            if (held := result.get("claim")) and error.code == 409:
+                detail += f": {held['holder']}, job={held['job']}, lease ends {held['leaseUntil']}"
+            raise ClaimRefused(error.code, detail) from None
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        raise PlanPageUnavailable(f"the claims page did not give a valid answer ({type(error).__name__})") from None
+
+
+def start_page_claim(plan_dir, plan, key, job, *, takeover=False):
+    collab = load_keymap(plan_dir).get("collab")
+    if collab is None:
+        if takeover:
+            raise ReadError("--takeover needs a collaborative effort")
+        return False
+    body = {"job": job}
+    if takeover:
+        body["takeover"] = True
+    result = claim_request(collab, plan_workspace(plan), "POST", key, body)
+    return result.get("action") == "taken_over"
+
+
+def release_page_claim(collab, workspace, key):
+    try:
+        claim_request(collab, workspace, "DELETE", key)
+    except ClaimRefused as error:
+        if error.status not in (404, 409):
+            raise
+
+
+def collaboration_lines(plan, km, statuses):
+    """Return gates by node. Read the project claims once, and renew or release only our claims."""
+    collab = km.get("collab")
+    if collab is None:
+        return {}
+    workspace = plan_workspace(plan)
+    current = claim_request(collab, workspace, "GET")
+    gates = {}
+    if current["role"] != "owner":
+        gates.update({n["key"]: ("wait", f"owner {n['key']}") for n in plan["nodes"]
+                      if n["kind"] in ("merge-point", "ship-point", "ops")})
+    for held in current["claims"]:
+        key = held["node"]
+        if held["mine"]:
+            if statuses.get(key) in SETTLED:
+                release_page_claim(collab, workspace, key)
+                continue
+            try:
+                claim_request(collab, workspace, "PUT", key, {"job": held["job"]})
+            except ClaimRefused as error:
+                if error.status not in (409, 404):
+                    raise
+                gates[key] = ("do", f"reconcile {key}: {error}")
+        elif held["stale"]:
+            end = datetime.fromisoformat(held["leaseUntil"])
+            age = max(0, int((utc_now() - end).total_seconds()))
+            gates[key] = ("note", f"stale {key}: {held['holder']}, lease ended {age}s ago")
+        else:
+            gates[key] = ("wait", f"collaborator {held['holder']} {key}: job={held['job']}")
+    return gates
+
+
+def collab_page(collab, workspace):
     if not collab.get("workspace"):
         raise ReadError("the collaboration record needs a workspace")
     page = login_page_url(collab["page"], workspace)
@@ -4864,11 +4980,15 @@ def plan_request(collab, workspace, method, body=None, *, history=False):
              else read_link_token_file(page_token_path(page)))
     if not token:
         raise PlanPageUnavailable("no page token; run wg login for the page")
+    return page, {"Authorization": f"Bearer {token}", "x-workspace": collab["workspace"]}
+
+
+def plan_request(collab, workspace, method, body=None, *, history=False):
+    page, headers = collab_page(collab, workspace)
     project = urllib.parse.quote(collab["project"], safe="")
     url = f"{page}/api/projects/{project}/plan"
     if history:
         url += "/versions"
-    headers = {"Authorization": f"Bearer {token}", "x-workspace": collab["workspace"]}
     version = collab.get("version")
     if method == "PUT":
         headers["Content-Type"] = "application/json"
@@ -5201,7 +5321,7 @@ def stage_plan_pair(plan_dir, km, plan, prior):
     finish_plan_pair(plan_dir, km)
 
 
-def pull_plan(plan_dir, *, force=False, explicit=False, applying=False, strict=False, accept_settings=False):
+def pull_plan(plan_dir, *, force=False, explicit=False, applying=False, strict=False, accept_settings=False, quiet=False):
     with plan_lock(plan_dir):
         km = load_keymap(plan_dir)
         if not (collab := km.get("collab")):
@@ -5224,7 +5344,8 @@ def pull_plan(plan_dir, *, force=False, explicit=False, applying=False, strict=F
         except PlanPageUnavailable as error:
             if explicit or applying:
                 raise
-            warn_plan(f"{error}; using the local copy")
+            if not quiet:
+                warn_plan(f"{error}; using the local copy")
             return
         if data is None:
             if not applying:
@@ -5294,9 +5415,9 @@ def pull_plan(plan_dir, *, force=False, explicit=False, applying=False, strict=F
             publish_pending_keymap(plan_dir, after)
 
 
-def read_current_plan(plan_dir, *, strict=False, applying=False):
+def read_current_plan(plan_dir, *, strict=False, applying=False, quiet=False):
     if load_keymap(plan_dir).get("collab"):
-        pull_plan(plan_dir, strict=strict, applying=applying)
+        pull_plan(plan_dir, strict=strict, applying=applying, **({"quiet": True} if quiet else {}))
     return load_plan(plan_dir, strict=strict)
 
 
@@ -5917,7 +6038,7 @@ def terminal_lines(plan_dir, lines, everything=False, keys=()):
         verb, (key, _) = line_verb(text), line_key(text, keys)
         if level == "do" and verb in DO_COMMANDS and key and key != "@effort":
             out.append(f"do {text} -> wg " + DO_COMMANDS[verb].format(dir=here, key=shlex.quote(key)))
-        elif everything or level == "do" or (level == "note" and verb in NOTES_SHOWN):
+        elif everything or level == "do" or verb in {"collaborator", "owner", "stale"} or (level == "note" and verb in NOTES_SHOWN):
             out.append(f"{level} {text}")
         elif level == "wait":
             if verb not in waits:
@@ -5950,6 +6071,10 @@ def terminal_lines(plan_dir, lines, everything=False, keys=()):
 # `wg explain <verb>` prints the parts of the skill text that say what to do for a verb of `wg next`.
 # The reference files mark each part: `<!-- explain: verb,verb -->` … `<!-- /explain -->`.
 EXPLAIN = {
+    "claims": "the claims page is unavailable; wait before starting a job",
+    "collaborator": "another coordinator holds the node",
+    "owner": "the project owner handles this node",
+    "stale": "the claim lease ended; ask before taking over",
     "load": "a node of plan.json is not in keymap.json: load the graph",
     "wave": "each node of the last wave is code done: pick the next wave",
     "dispatch": "start the first worker job of a ready node",
@@ -6055,6 +6180,16 @@ def next_command(plan_dir, plan, wait, interval, copy=False, everything=False):
                 # Before next_lines: a new review effort applies to the lines of this same wg next.
                 reviews = review_effort_lines(plan_dir, plan)
                 head, lines = next_lines(plan_dir, plan, tolerant=wait)
+                if head == CLAIMS_UNAVAILABLE:
+                    print(f"wait {lines[0][1]}", flush=True)
+                    return 0
+                held_keys = {text.rsplit(": job=", 1)[0].rsplit(" ", 1)[-1] for level, text in lines
+                             if level == "wait" and text.startswith("collaborator ")}
+                held_keys.update(text.split()[1].rstrip(":") for _, text in lines
+                                 if text.startswith(("stale ", "owner "))
+                                 or (text.startswith("reconcile ") and text.split()[1].endswith(":")))
+                extra = [line for line in extra if not (line[1].startswith("dispatch ")
+                         and line_key(line[1], held_keys)[0])]
                 lines = paused_lines(plan_dir, plan, extra + lines) + page_contract_note(plan_dir, plan) + health_lines(plan_dir)
                 if head != COMPLETE:
                     lines = autonomy_lines(plan_dir, plan) + reviews + lines
@@ -6868,6 +7003,8 @@ def tick_refresh(plan_dir, plan, km, record, notify=False):
         if key not in statuses:
             raise ReadError(f"{key}: ship point is missing from the keymap or Linear")
     complete = all(statuses[key] in {"Done", "Canceled"} for key in ships)
+    if complete and km.get("collab") is not None:
+        collaboration_lines(plan, km, statuses)
     if complete and record.get("complete"):
         return "complete", None
     triage = {}
@@ -6875,6 +7012,8 @@ def tick_refresh(plan_dir, plan, km, record, notify=False):
         head, lines, members = COMPLETE, [], {}
     else:
         head, lines = next_lines(plan_dir, plan, inputs=inputs, triage=triage)
+        if head == CLAIMS_UNAVAILABLE:
+            raise ReadError(lines[0][1])
         members = tick_members(inputs, lines, triage)
     skipped = publish(plan_dir, plan, head, lines, expected=km)
     if skipped:
@@ -8069,13 +8208,18 @@ def cleanup_worktrees(plan_dir, plan, keys=None, settled=None, dry_run=False):
 
 
 def cleanup_command(plan_dir, plan, dry_run):
+    if not dry_run and (collab := load_keymap(plan_dir).get("collab")) is not None:
+        workspace = plan_workspace(plan)
+        for held in claim_request(collab, workspace, "GET")["claims"]:
+            if held["mine"]:
+                release_page_claim(collab, workspace, held["node"])
     kept = cleanup_worktrees(plan_dir, plan, dry_run=dry_run)
     if kept:
         print(f"{kept} worktree(s) stay: see the warnings")
     return int(bool(kept))
 
 
-def branch_plan(plan, key, nodes, deps, st, rows, recorded=None):
+def branch_plan(plan, key, nodes, deps, st, rows, recorded=None, shared=None):
     """The names of a new node's worktree and branch, and the branch that it starts from (ordering.md).
 
     `recorded` is the run row of a claim that exists: its branch, parent, and lower stay as they are.
@@ -8106,7 +8250,11 @@ def branch_plan(plan, key, nodes, deps, st, rows, recorded=None):
     elif st.get(below) == "Canceled":
         die(f"{key}: {below} below it in the lane is Canceled (recovery.md Replan, Drop)", 1)
     else:
-        lower = parent = rows.get(below, {}).get("branch") or die(f"{key}: {below} below it has no branch in its run row", 1)
+        parent = (shared or {}).get(below, {}).get("branch") or rows.get(below, {}).get("branch")
+        if not parent:
+            die(f"{key}: {below} below it has no branch in its run row"
+                + (" or the shared keymap" if shared is not None else ""), 1)
+        lower = parent
     return names | {"branch": f"{BRANCH_PREFIX}{names['child']}", "lower": lower, "parent": parent, "stax": True}
 
 
@@ -8125,7 +8273,7 @@ def first_claim(plan_dir, plan, key, settings, snap, names, quiet=False, warning
         problems.append(f"{key}: the run row has state={row.get('state', '-')} branch={row.get('branch', '-')}")
     if st.get(key) not in ("Todo", "Ready"):
         problems.append(f"{key}: the status is {st.get(key)}, not Todo or Ready")
-    blockers = open_blockers(key, nodes, deps, st, rows)
+    blockers = open_blockers(key, nodes, deps, st, rows, km["nodes"] if km.get("collab") is not None else None)
     if blockers:
         problems.append(f"{key}: open blockers: {', '.join(blockers)}")
     if key not in run_rows(km)["effort"].get("wave", "").split(","):
@@ -8213,13 +8361,15 @@ def dispatch_target(plan_dir, plan, key):
 @journaled("dispatch")
 def dispatch(plan_dir, plan, key, agent, worktree, model=None, effort=None):
     """Start a node's first worker. First call: the claim and the Orca commands. With --worktree: the checks and the spec."""
+    start_page_claim(plan_dir, plan, key, "dispatch")
     snap, node, entry, issue = dispatch_target(plan_dir, plan, key)
     km, live, nodes, st, deps, rows = snap
     ident, row = entry["identifier"], rows[key]
     mine = row.get("job") == "dispatch" and row.get("state") in ("creating", "starting")
     here = shlex.quote(str(Path(plan_dir).resolve()))
     # A retry prints the names of the claim, also when the node below merged or was canceled in between.
-    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None)
+    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None,
+                        shared=km["nodes"] if km.get("collab") is not None else None)
     if mine:
         pending_start(key, row, here)
     if worktree:
@@ -8546,13 +8696,15 @@ def dispatch_run(plan_dir, plan, key, agent, model, effort=None):
 
 
 def first_job(plan_dir, plan, key, agent, model, effort, warnings):
+    start_page_claim(plan_dir, plan, key, "dispatch")
     snap, node, entry, issue = dispatch_target(plan_dir, plan, key)
     km, live, nodes, st, deps, rows = snap
     row = rows[key]
     here = shlex.quote(str(Path(plan_dir).resolve()))
     receipt_due = row.get("state") == "running" and row.get("step") == "receipt"
     mine = row.get("job") == "dispatch" and (row.get("state") in ("creating", "starting") or receipt_due)
-    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None)
+    names = branch_plan(plan, key, nodes, deps, st, rows, recorded=row if mine else None,
+                        shared=km["nodes"] if km.get("collab") is not None else None)
     continues = f"wg dispatch {here} {key} --run continues there"
     claim_pending = mine and row.get("step") in ("claim", "status")
     if mine and receipt_due:
@@ -8593,6 +8745,10 @@ def first_job(plan_dir, plan, key, agent, model, effort, warnings):
     row = update_row(plan_dir, key, step=step)
     try:
         if RUN_STEPS.index(step) <= RUN_STEPS.index("child") or not (row.get("worktree") and row.get("path")):
+            below = lane_below(key, nodes, deps)
+            shared_branch = km["nodes"].get(below, {}).get("branch") if km.get("collab") is not None else None
+            if shared_branch == names["lower"] and not rows.get(below, {}).get("branch"):
+                fetch_shared_parent(plan_dir, shared_branch)
             row = first_worktree(plan_dir, plan, key, names, row)
         path = Path(row["path"])
         if not row.get("retry_request"):  # a lost start reply: the worktree steps are done
@@ -8639,6 +8795,16 @@ def first_job(plan_dir, plan, key, agent, model, effort, warnings):
         return 1
     print(f"started {key} dispatch={row['dispatch']} worktree={row['path']}")
     return 0
+
+
+def fetch_shared_parent(plan_dir, branch):
+    ref = f"refs/heads/{branch}"
+    git_output("check-ref-format", ref, cwd=plan_dir)
+    if not command("git", "show-ref", "--verify", "--quiet", ref, cwd=plan_dir).returncode:
+        return
+    remote = f"refs/remotes/origin/{branch}"
+    git_output("fetch", "--no-tags", "--no-recurse-submodules", "origin", f"{ref}:{remote}", cwd=plan_dir)
+    git_output("branch", "--track", "--", branch, remote, cwd=plan_dir)
 
 
 def first_worktree(plan_dir, plan, key, names, row):
@@ -8942,7 +9108,7 @@ def restack_line(plan_dir, plan, node, row, nodes, deps, st):
 
 
 @journaled("claim")
-def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=None, effort=None):
+def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=None, effort=None, *, takeover=False):
     """Start a follow-up job on a node: the checks, the claim, the job header.
 
     The job `dispatch` continues a node that has a branch and no PR: an adopted node, or a first job that failed.
@@ -8958,6 +9124,7 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=Non
             die(f"--work-file: {e}")
         if not work:
             die(f"--work-file {work_file} is empty")
+    taken_over = start_page_claim(plan_dir, plan, key, job, takeover=takeover)
     km, live, nodes, st, deps, rows = snapshot(plan_dir, plan)
     node = nodes.get(key) or die(f"unknown key {key}")
     entry = km["nodes"].get(key) or die(f"{key}: not loaded")
@@ -9007,6 +9174,9 @@ def claim(plan_dir, plan, key, job, agent, send=False, work_file=None, model=Non
         # `wg done` sets the parent when the PR's base is the target.
         row["lower"] = f"origin/{bottom_base(node, phase_of(plan, node)['target'])}"
     if not resume:
+        if taken_over and (old_claim := claim_labels(issue)):
+            issue_update(entry["id"], {"removedLabelIds": [label["id"] for label in old_claim]})
+            issue = fetch_nodes({"nodes": {key: entry}})[entry["id"]]
         held = claim_labels(issue)
         if send and held:  # the same refusal as take_claim, before the run row changes
             die(f"{ident}: {held[0]['name']} holds the claim; find its job with wg run show", 1)
@@ -9357,6 +9527,7 @@ def cli_parser():
     c.add_argument("job", choices=JOBS)
     add_agent_flags(c)
     c.add_argument("--send", action="store_true", help="send the job in Orca and record the receipt (an Orca terminal only)")
+    c.add_argument("--takeover", action="store_true", help="take a claim whose lease ended")
     c.add_argument("--work-file", help="a file with the work of this job; its text goes at the end of the job spec")
     s = add(sub, "started")
     s.add_argument("key")
@@ -9483,7 +9654,8 @@ def run_command(ns, d, plan, given):
     if ns.cmd == "claim":
         if ns.send and not ns.work_file:
             die("wg claim --send needs --work-file <file> with the work of the job")
-        return claim(d, plan, ns.key, ns.job, ns.agent, ns.send, ns.work_file, ns.model, ns.effort)
+        options = {"takeover": True} if ns.takeover else {}
+        return claim(d, plan, ns.key, ns.job, ns.agent, ns.send, ns.work_file, ns.model, ns.effort, **options)
     if ns.cmd == "started":
         return started(d, plan, ns.key, ns.fields)
     if ns.cmd == "done":
@@ -9578,8 +9750,9 @@ def main_command(argv):
             return ui(ns.port, ns.project, ns.no_open, ns.no_tailnet, ns.workspace)
         writes = ns.cmd in KEYMAP_WRITERS or (ns.cmd == "run" and ns.mode in ("set", "reset", "rebuild"))
         with plan_lock(ns.dir) if writes else contextlib.nullcontext():
+            options = {"quiet": True} if ns.cmd in ("next", "watch") else {}
             plan = (load_plan(ns.dir) if ns.cmd == "check"
-                    else read_current_plan(ns.dir, applying=ns.cmd == "load" and ns.apply))
+                    else read_current_plan(ns.dir, applying=ns.cmd == "load" and ns.apply, **options))
             return run_plan_command(ns, plan, given)
     except (ReadError, OSError, ValueError, subprocess.SubprocessError) as e:
         die(str(e))

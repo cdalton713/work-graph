@@ -24,11 +24,11 @@ The coordinator is this session. It reads `wg next`, runs the Orca commands that
 | `ask <ops or decision>`, `ops <key>`, `verifying`, `ship` | review-and-merge.md "Ship point" |
 | `triage <identifier>` (level `full`) | "Discovered work" |
 | `closed <key>` | recovery.md "Failure", row "PR closed without a merge" |
-| `reconcile <key>` | recovery.md "Resume" |
+| `reconcile <key>` | recovery.md "Resume". For a claim renewal, see collab.md "Claims". |
 | `answer`, `dispatch`, `relay` from the page | page.md "Lines from the page" |
 
 <!-- explain: below,blockers,soak,worker,reviewer,coordinator,human,review -->
-A `wait` line needs no action from you. `human`: The human must act, and your status line says what. At level `full`, a `wait human` line for a review hold after 2 rounds, a `decision`, or triage is yours: autonomy.md. `worker` and `reviewer`: Orca wakes you. `review`: the thorough review runs. `coordinator`: an `ops` node with `"by": "coordinator"` that you started and still run (for example a check that needs a market session first); finish it, then `wg move … Done --note`. `below`, `blockers`, `soak`: the node waits for other nodes or for time. On the terminal, the `wait` lines with the same verb are one line (`wait worker: a (dispatch), b (review)`), and the `note` lines other than `autonomy`, `triage`, and `page` are counted in one line; `wg next <plan-dir> --all` prints each line in full. The page and the status document always get each full line. A `note triage` line: "Discovered work". The last line, `note page <url>`, is the link of the effort in the page (SKILL.md "See the graph"): put it in each message that asks the human for something. `wg move … "Needs <human>"` prints `page <url>`, the link of that one issue.
+A `wait` line needs no action. `human` means the human must act. At level `full`, handle review holds, decisions, and triage as described in autonomy.md. `worker` and `reviewer` mean Orca will wake you. `review` means a thorough review runs. If a coordinator ops node is still running, wait for its result, then use `wg move … Done --note`. `below`, `blockers`, and `soak` wait for a node or for time. Use `wg next <plan-dir> --all` to show each wait and note. The page and the status document get each line in full. Include the URL from `note page` when you ask the human for something.
 
 ## Wait
 
@@ -38,6 +38,15 @@ A `wait` line needs no action from you. `human`: The human must act, and your st
 4. Exception to step 3. If a Stop hook or a goal keeps the session open and every open line is a `wait` line, keep one `wg next <plan-dir> --wait` in the background while you wait, and no heartbeat of your own. Say once what you wait for. Do not start work in the human's place.
 
 An Orca message, the end of `wg next --wait`, or a message from the human wakes the coordinator. Run `orca orchestration check` only for an Orca message.
+<!-- /explain -->
+
+<!-- explain: claims,collaborator,owner,stale -->
+| Other line | Action |
+|---|---|
+| `wait collaborator <person> <key>` | Leave the node to the holder. |
+| `wait owner <key>` | Leave the node to the project owner. |
+| `note stale <key>` | Ask the human before takeover. See collab.md "Claims". |
+| `wait claims page` | Start no new job. Running jobs continue. |
 <!-- /explain -->
 
 <!-- explain: human -->

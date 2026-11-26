@@ -32,7 +32,7 @@ export function claimRoutes(access?: (c: Context) => Promise<Access | Response>,
     const target = await access(c);
     if (target instanceof Response) return target;
     const result = await target.claims(target.scope, { kind: "list" });
-    return "claims" in result ? c.json({ claims: result.claims }) : missing(c);
+    return "claims" in result ? c.json({ claims: result.claims, role: result.role }) : missing(c);
   });
 
   async function write(c: Context, kind: "post" | "put" | "release") {
@@ -41,22 +41,25 @@ export function claimRoutes(access?: (c: Context) => Promise<Access | Response>,
     const key = c.req.param("node");
     if (!key || !nodeKey.test(key)) return c.json({ error: "Invalid node key" }, 400);
     if (kind === "release") {
-      const { status } = await target.claims(target.scope, { kind, node: key });
+      const result = await target.claims(target.scope, { kind, node: key, force: c.req.query("force") === "1" });
+      const { status } = result;
       if (status === 204) {
         await target.notice([key]);
         return c.body(null, 204);
       }
+      if (status === 409) return c.json({ error: "Node already claimed", claim: result.claim }, 409);
       return status === 403 ? c.json({ error: "Only the holder or project owner can release this claim" }, 403) : missing(c);
     }
-    const input: { job?: unknown; lease_s?: unknown } | null = kind === "put" && !c.req.raw.body
+    const input: { job?: unknown; lease_s?: unknown; takeover?: unknown } | null = kind === "put" && !c.req.raw.body
       ? {} : await c.req.json().catch(() => null);
     const lease = input?.lease_s === undefined ? 600 : input.lease_s;
     if (!input || typeof input !== "object" || Array.isArray(input) || (kind === "post" && !jobNames.has(input.job))
+      || (input.takeover !== undefined && typeof input.takeover !== "boolean")
       || typeof lease !== "number" || !Number.isInteger(lease) || lease < 30 || lease > 3600) {
       return c.json({ error: "Invalid job or lease" }, 400);
     }
     const result = await target.claims(target.scope, kind === "post"
-      ? { kind, node: key, job: input.job as ClaimJob, lease }
+      ? { kind, node: key, job: input.job as ClaimJob, lease, takeover: input.takeover === true }
       : { kind, node: key, lease });
     if (result.status === 200 && result.claim) {
       if (result.action !== "renewed") telemetry?.emit("node_claimed",

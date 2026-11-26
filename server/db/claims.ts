@@ -24,8 +24,8 @@ const onProject = "c.tenant_id = $1 AND c.connection_id = $2 AND c.project_id = 
 const columns = `c.node_key AS node, c.job, u.name AS holder, c.claimed_at AS "claimedAt",
   c.renewed_at AS "renewedAt", c.lease_until AS "leaseUntil", c.lease_until <= now() AS stale`;
 
-type Operation = { kind: "list" } | { kind: "release"; node: string }
-  | { kind: "post"; node: string; job: ClaimJob; lease: number }
+type Operation = { kind: "list" } | { kind: "release"; node: string; force: boolean }
+  | { kind: "post"; node: string; job: ClaimJob; lease: number; takeover: boolean }
   | { kind: "put"; node: string; lease: number };
 
 // Member changes take the same lock. All project plan and claim writes see the
@@ -52,15 +52,15 @@ export function createClaims(sql: Sql) {
     if (!actor?.role) return { status: 404 } as const;
     const { id, role } = actor;
     if (operation.kind === "list") {
-      const claims = await query<Claim>(`SELECT ${columns}
-        FROM node_claims c JOIN users u ON u.id = c.holder_user_id WHERE ${onProject} ORDER BY c.node_key`, project);
-      return { status: 200, claims } as const;
+      const claims = await query<Claim & { mine: boolean }>(`SELECT ${columns}, c.holder_user_id = $4 AS mine
+        FROM node_claims c JOIN users u ON u.id = c.holder_user_id WHERE ${onProject} ORDER BY c.node_key`, [...project, id]);
+      return { status: 200, role, claims } as const;
     }
     if (role === "viewer") return { status: 403 } as const;
     const node = [...project, operation.node];
     if (operation.kind === "release") {
       const removed = await query(`DELETE FROM node_claims c WHERE ${onProject} AND c.node_key = $4
-        AND (c.holder_user_id = $5 OR $6 = 'owner') RETURNING 1`, [...node, id, role]);
+        AND (c.holder_user_id = $5 OR $6::boolean) RETURNING 1`, [...node, id, role === "owner" && operation.force]);
       if (removed.length) return { status: 204 } as const;
     } else {
       const [stored] = await query<{ nodes: { key: string; kind: string }[] }>(`
@@ -87,7 +87,7 @@ export function createClaims(sql: Sql) {
             job = EXCLUDED.job,
             claimed_at = CASE WHEN c.holder_user_id = EXCLUDED.holder_user_id THEN c.claimed_at ELSE now() END,
             renewed_at = now(), lease_until = EXCLUDED.lease_until
-          WHERE c.holder_user_id = EXCLUDED.holder_user_id OR ($7 IS NOT NULL AND c.lease_until <= now())
+          WHERE c.holder_user_id = EXCLUDED.holder_user_id OR ($8::boolean AND c.lease_until <= now())
           RETURNING c.*
         )
         SELECT ${columns}, CASE
@@ -96,7 +96,7 @@ export function createClaims(sql: Sql) {
           ELSE 'taken_over' END AS action,
           EXISTS (SELECT 1 FROM prior WHERE prior.job <> c.job) AS "jobChanged"
         FROM written c JOIN users u ON u.id = c.holder_user_id`,
-      [...node, id, operation.lease, operation.kind === "post" ? operation.job : null]);
+      [...node, id, operation.lease, operation.kind === "post" ? operation.job : null, operation.kind === "post" && operation.takeover]);
       if (written.length) {
         const [{ action, jobChanged, ...claim }] = written;
         return { status: 200, claim, action, jobChanged, role } as const;
@@ -104,12 +104,11 @@ export function createClaims(sql: Sql) {
     }
     const [current] = await query<Claim & { mine: boolean }>(`SELECT ${columns}, c.holder_user_id = $5 AS mine
       FROM node_claims c JOIN users u ON u.id = c.holder_user_id WHERE ${onProject} AND c.node_key = $4`, [...node, id]);
-    if (operation.kind === "release") return { status: current ? 403 : 404 } as const;
-    if (current && !current.mine && (operation.kind === "put" || !current.stale)) {
+    if (current && !current.mine) {
       const { mine: _, ...claim } = current;
       return { status: 409, claim, role } as const;
     }
-    if (operation.kind === "put" && !current) return { status: 404 } as const;
+    if (operation.kind !== "post" && !current) return { status: 404 } as const;
     return { status: 409 } as const;
   });
 }

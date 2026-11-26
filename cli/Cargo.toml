@@ -6,3 +6,7 @@ publish = false
 
 [dependencies]
 http = "1"
+
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3"
+chrono = { version = "0.4", default-features = false, features = ["std"] }

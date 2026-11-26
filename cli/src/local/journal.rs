@@ -279,6 +279,25 @@ pub(crate) fn record_status(
     )
 }
 
+pub(crate) fn record_claim(
+    dir: &Path,
+    cmd: &str,
+    key: &str,
+    old: Option<&str>,
+    new: Option<&str>,
+) -> io::Result<()> {
+    let _lock = PlanLock::acquire(dir, Some(std::time::Duration::from_secs(5)))?;
+    let km = crate::state::load_keymap(dir)?;
+    let t = now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    append(
+        dir,
+        cmd,
+        &km["run"],
+        &t,
+        json!({"time":t,"command":cmd,"kind":"claim","key":key,"changes":{"claim":[old,new]}}),
+    )
+}
+
 fn append(dir: &Path, cmd: &str, after: &Value, t: &str, entry: Value) -> io::Result<()> {
     let mut line = sorted_line(entry);
     let path = dir.join("journal.jsonl");

@@ -121,6 +121,11 @@ impl Context<'_> {
         field(&r["commentCreate"]["comment"], "id")?;
         Ok(())
     }
+    pub fn claim_event(&self, cmd: &str, k: &str, old: Option<&str>, new: Option<&str>) {
+        if let Err(e) = crate::local::record_claim(self.dir, cmd, k, old, new) {
+            eprintln!("warn: journal not written ({e})");
+        }
+    }
     pub fn labels(&self, id: &str, input: Value) -> Result<(), String> {
         let r = self.request(
             "mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}",
@@ -356,6 +361,7 @@ pub(super) fn done(
             id,
             json!({"removedLabelIds":labels.iter().map(|l|&l["id"]).collect::<Vec<_>>()}),
         )?;
+        ctx.claim_event("done", k, Some(field(labels[0], "name")?), None);
         println!("released {}", field(labels[0], "name")?);
     }
     ctx.change(k, "done", |r| {

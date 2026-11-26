@@ -109,9 +109,11 @@ pub(super) fn names(
             Some("Canceled") => return Err(format!("{key}: {k} below it in the lane is Canceled")),
             Some("Merged" | "Done") => (),
             _ => {
-                parent = km["run"]["nodes"][k]["branch"]
-                    .as_str()
-                    .or(km["nodes"][k]["branch"].as_str())
+                parent = km["collab"]
+                    .as_object()
+                    .and_then(|_| km["nodes"][k]["branch"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .or(km["run"]["nodes"][k]["branch"].as_str())
                     .ok_or_else(|| format!("{key}: {k} below it has no branch"))?
                     .into();
                 lower = parent.clone();

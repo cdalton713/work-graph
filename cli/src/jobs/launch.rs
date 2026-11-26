@@ -158,8 +158,10 @@ fn apply_worker_settings(ctx: &Context, row: &Value) {
 fn start_args(row: &Value, spec: &Path, title: &str) -> Result<Vec<String>, String> {
     let location = if let Some(id) = row["worktree"].as_str() {
         format!("id:{id}")
+    } else if let Some(path) = row["path"].as_str() {
+        format!("path:{path}")
     } else {
-        format!("path:{}", field(row, "path")?)
+        "id:<child-id>".into()
     };
     let mut args = [
         "orchestration",
@@ -184,6 +186,36 @@ fn start_args(row: &Value, spec: &Path, title: &str) -> Result<Vec<String>, Stri
     }
     Ok(args)
 }
+fn print_worker_commands(ctx: &Context, k: &str, spec: &Path, args: &[String], fresh: bool) {
+    let command = args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
+    println!(
+        "spec {}\n  orca {command} --json",
+        quote(&spec.to_string_lossy())
+    );
+    let extra = if fresh {
+        " worktree=<worktree-id> run_id=<run_id>"
+    } else {
+        ""
+    };
+    println!(
+        "  wg started {} {} dispatch=<dispatch_id> task=<task_id>{extra}",
+        quote(&ctx.dir.to_string_lossy()),
+        quote(k)
+    );
+}
+
+fn refused_start(ctx: &Context, k: &str, cmd: &str, step: &str) -> Result<(), String> {
+    ctx.change(k, cmd, |r| {
+        if step == "start" {
+            r["step"] = "spec".into();
+        } else {
+            r.as_object_mut().unwrap().remove("step");
+        }
+        r.as_object_mut().unwrap().remove("retry_request");
+        Ok(())
+    })
+}
+
 fn launch(
     ctx: &Context,
     k: &str,
@@ -202,10 +234,16 @@ fn launch(
     if let Some(id) = replay {
         args.extend(["--retry-request".into(), id.into()]);
     }
-    let result = worktree::orca()
-        .args(args)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let result = match worktree::orca().args(args).output() {
+        Ok(result) => result,
+        Err(e) => {
+            if replay.is_none() {
+                refused_start(ctx, k, cmd, step)?;
+            }
+            println!("FAIL {step}: orca did not run: {e}");
+            return Ok(1);
+        }
+    };
     let answer: Value = serde_json::from_slice(&result.stdout).unwrap_or(Value::Null);
     if !result.status.success() || answer["ok"] == false || !answer["result"].is_object() {
         let err = &answer["error"];
@@ -214,11 +252,12 @@ fn launch(
                 r["retry_request"] = id.into();
                 Ok(())
             })?;
-        } else if replay.is_none() && answer["ok"] == false && err["code"].is_string() {
-            ctx.change(k, cmd, |r| {
-                r["step"] = "spec".into();
-                Ok(())
-            })?;
+        } else if !result.status.success()
+            && replay.is_none()
+            && answer["ok"] == false
+            && err["code"].as_str().is_some_and(|c| !c.is_empty())
+        {
+            refused_start(ctx, k, cmd, step)?;
         }
         println!(
             "FAIL {step}: {}",
@@ -412,7 +451,9 @@ pub(super) fn dispatch(
         let label = format!("agent:{}", field(&row, "agent")?);
         let labels = held(issue)?;
         if !labels.iter().any(|l| l["name"] == label) {
-            claim_label(ctx, issue, field(&row, "agent")?)?;
+            let agent = field(&row, "agent")?;
+            claim_label(ctx, issue, agent)?;
+            ctx.claim_event("dispatch", k, None, Some(&format!("agent:{agent}")));
         }
         if snap.statuses.get(k).map(String::as_str) != Some("In Progress") {
             ctx.transition("dispatch", k, "In Progress")?;
@@ -510,24 +551,12 @@ pub(super) fn dispatch(
         }
         let spec = spec(ctx, k, entry, issue, &row, None, !retry)?;
         let title = format!("{}: {}", field(entry, "identifier")?, field(node, "title")?);
+        let args = start_args(&row, &spec, &title)?;
         if !run {
-            println!(
-                "spec {}\n  orca orchestration worker-start --spec-file '{}' --worktree id:<child-id> --agent {} --json\n  wg started {} {k} dispatch=<dispatch_id> task=<task_id> worktree=<worktree id> run_id=<run_id>",
-                spec.display(),
-                spec.display(),
-                field(&row, "agent")?,
-                ctx.dir.display()
-            );
+            print_worker_commands(ctx, k, &spec, &args, true);
             return Ok(0);
         }
-        launch(
-            ctx,
-            k,
-            "dispatch",
-            "start",
-            &row,
-            start_args(&row, &spec, &title)?,
-        )
+        launch(ctx, k, "dispatch", "start", &row, args)
     })
 }
 
@@ -714,6 +743,26 @@ fn old_parent_tip(
     })
 }
 
+// A newly acquired lease belongs to this attempt until it issues a worker command.
+// A renewal may belong to a worker which is already running.
+struct ClaimReservation<'a> {
+    ctx: &'a Context<'a>,
+    collab: &'a Value,
+    key: &'a str,
+    release: bool,
+}
+impl Drop for ClaimReservation<'_> {
+    fn drop(&mut self) {
+        if self.release
+            && let Err(error) = self.ctx.scope().and_then(|scope| {
+                crate::page::update_claim(self.ctx.install, scope, self.collab, self.key, None)
+            })
+        {
+            eprintln!("warn {}: could not release claim: {error}", self.key);
+        }
+    }
+}
+
 pub(super) fn claim(
     ctx: &Context,
     k: &str,
@@ -750,6 +799,12 @@ pub(super) fn claim(
     } else {
         String::new()
     };
+    let mut reservation = ClaimReservation {
+        ctx,
+        collab: &km["collab"],
+        key: k,
+        release: matches!(action.as_str(), "claimed" | "taken_over"),
+    };
     let snap = crate::workflow::snapshot(ctx.install, ctx.plan, &km)?;
     let node = ctx.node(k)?;
     if node["kind"] != "task" {
@@ -766,10 +821,14 @@ pub(super) fn claim(
             .iter()
             .all(|f| row[*f] == settings[*f]);
     if same && row["state"] == "running" && row["step"] == "receipt" {
+        reservation.release = false;
         print_started(k, &receipt(ctx, k, "claim")?, job);
         return Ok(0);
     }
     let resume = same && row["state"] == "starting";
+    if resume && row["step"] == "send" {
+        reservation.release = false;
+    }
     if resume && let Err(e) = pending(k, row, "send") {
         eprintln!("{e}");
         return Ok(1);
@@ -896,6 +955,7 @@ pub(super) fn claim(
                 id,
                 json!({"removedLabelIds":labels.iter().map(|l|&l["id"]).collect::<Vec<_>>()}),
             )?;
+            ctx.claim_event("claim", k, Some(field(labels[0], "name")?), None);
             issue = crate::workflow::snapshot(ctx.install, ctx.plan, &km)?
                 .live
                 .remove(id)
@@ -906,6 +966,10 @@ pub(super) fn claim(
     if !resume && !labels.is_empty() {
         eprintln!("{} holds the claim", field(labels[0], "name")?);
         return Ok(1);
+    }
+    if !send && !resume {
+        claim_label(ctx, &issue, worker)?;
+        ctx.claim_event("claim", k, None, Some(&format!("agent:{worker}")));
     }
     if !resume {
         ctx.change(k, "claim", |r| {
@@ -939,11 +1003,13 @@ pub(super) fn claim(
             Ok(())
         })?;
     }
-    if !labels
-        .iter()
-        .any(|l| l["name"] == format!("agent:{worker}"))
+    if send
+        && !labels
+            .iter()
+            .any(|l| l["name"] == format!("agent:{worker}"))
     {
         claim_label(ctx, &issue, worker)?;
+        ctx.claim_event("claim", k, None, Some(&format!("agent:{worker}")));
     }
     let row = ctx.km()?["run"]["nodes"][k].clone();
     let spec = spec(
@@ -987,13 +1053,17 @@ pub(super) fn claim(
     }
     ctx.refresh_card(k);
     if !send {
-        println!(
-            "spec {}\n  orca {} --json\n  wg started {} {k} dispatch=<dispatch_id> task=<task_id>",
-            spec.display(),
-            args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" "),
-            ctx.dir.display()
-        );
+        print_worker_commands(ctx, k, &spec, &args, fresh);
+        reservation.release = false;
         return Ok(0);
     }
-    launch(ctx, k, "claim", "send", &row, args)
+    let newly_acquired = reservation.release;
+    reservation.release = false;
+    let result = launch(ctx, k, "claim", "send", &row, args);
+    // Keep the claim for a confirmed worker, a pending receipt, or an uncertain send.
+    // A confirmed refusal clears the send step and can release this attempt's lease.
+    if newly_acquired && matches!(result, Ok(1)) && ctx.km()?["run"]["nodes"][k]["step"].is_null() {
+        reservation.release = true;
+    }
+    result
 }

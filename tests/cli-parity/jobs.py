@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -27,7 +28,7 @@ def page(nodes):
 
 
 def scenario(binary, root):
-    core = root / "core"
+    core = root / "owner's plan"
     work = root / "work"
     tools = root / "tools"
     for directory in (core, work, tools):
@@ -64,6 +65,12 @@ elif args[:2]==['worktree','rm']:
     id=args[3].removeprefix('id:')
     trees.write_text(json.dumps([t for t in json.loads(trees.read_text()) if t['id']!=id]))
     r={}
+elif args[:2] in (['orchestration','send'],['orchestration','worker-start']) and (root/'orca-reply').exists():
+    mode=(root/'orca-reply').read_text()
+    if mode in ('refused','uncertain'):
+        print(json.dumps({'ok':False,'error':{'code':'fixture','message':mode}}))
+        sys.exit(int(mode=='refused'))
+    r={'dispatchId':'confirmed','taskId':'new-task','runId':'new-run'}
 elif args[:2]==['orchestration','worker-start']:
     if '--retry-request' not in args:
         print(json.dumps({'ok':False,'error':{'data':{'recovery':{'orchestrationRequestId':'request-id'}}}}))
@@ -85,7 +92,7 @@ print(json.dumps(r))
 """)
     plan = read(HERE / "fixture/plan.json")
     plan["effort"].update(slug="wf",test=["sh","-c","echo fixture"])
-    plan["nodes"][0]["kind"] = "spike"
+    plan["nodes"][0].update(kind="spike",title="Owner's first job")
     write(core/"plan.json", plan)
     km = read(HERE / "fixture/keymap.json")
     km["run"] = {"effort":{"wave":"a"},"nodes":{}}
@@ -104,6 +111,7 @@ print(json.dumps(r))
     label_ops = []
     project_updates = []
     released = []
+    cleanup_claims = []
     reject_receipt = True
     reject_review_move = True
     def post(h):
@@ -161,10 +169,12 @@ print(json.dumps(r))
         if h.path.endswith("/plan"):
             h.send_response(304);h.end_headers()
         elif h.path.endswith("/claims"):
-            h.reply({"role":"collaborator","claims":[{"mine":True,"node":"a","job":"review"}]})
+            h.reply({"role":"collaborator","claims":cleanup_claims or [{"mine":True,"node":"a","job":"review"}]})
         else:h.send_error(404)
     def delete(h):
-        assert h.path.endswith("/claims/a") and h.headers["Authorization"]=="Bearer token"
+        assert h.headers["Authorization"]=="Bearer token"
+        if h.path.endswith("/claims/refused"):
+            return h.send_error(409)
         released.append(h.path)
         h.send_response(204)
         h.end_headers()
@@ -185,6 +195,13 @@ print(json.dumps(r))
         excluded=work/git("rev-parse","--git-path","info/exclude")
         with excluded.open("a") as f:f.write("\n/.codex/config.toml\n")
         settings_file.write_text('model = "existing"\n')
+        run("dispatch","a","--model","fixture-model","--effort","high")
+        printed=run("dispatch","a","--worktree",str(work)).stdout.splitlines()
+        argv=shlex.split(next(line for line in printed if line.startswith("  orca ")))
+        assert argv[argv.index("--task-title")+1]=="EX-1: Owner's first job"
+        assert argv[argv.index("--spec-file")+1]==str((core/"specs/a.md").resolve())
+        assert argv[argv.index("--model")+1]=="fixture-model" and argv[argv.index("--effort")+1]=="high"
+        assert argv[argv.index("--environment")+1]=="local"
         run("dispatch","a","--run",code=1)
         assert 'model = "existing"' in settings_file.read_text()
         assert 'worker = true' in settings_file.read_text()
@@ -259,9 +276,15 @@ print(json.dumps(r))
                       "version":1,"settings":{"workspace":"default","team":"EX","slug":"wf"},
                       "plan_sha":hashlib.sha256((core/"plan.json").read_bytes()).hexdigest()}
         write(core/"keymap.json",km)
+        cleanup_claims.extend([{"mine":True,"node":"refused"},{"mine":True,"node":"another"}])
+        count=len(calls())
+        cleanup=run("cleanup")
+        assert "could not release claim" in cleanup.stderr and released.pop().endswith("/claims/another")
+        assert any(c[:2]==["worktree","list"] for c in calls()[count:])
+        cleanup_claims.clear()
         issue["labels"]=page([{"id":"old","name":"agent:claude"}])
         before=list(label_ops)
-        actions.extend(["refused","uncertain","renewed","taken_over"])
+        actions.extend(["refused","uncertain","renewed","claimed","taken_over"])
         for _ in range(2):
             run("claim","a","review","--takeover",code=2)
             assert label_ops==before and issue["labels"]["nodes"][0]["id"]=="old"
@@ -269,6 +292,8 @@ print(json.dumps(r))
         # alone cannot authorize deletion of a pre-existing Linear label.
         run("claim","a","review","--takeover",code=1)
         assert label_ops==before and issue["labels"]["nodes"][0]["id"]=="old"
+        run("claim","a","review","--takeover",code=1)
+        assert released.pop().endswith("/claims/a") and label_ops==before
         run("claim","a","review","--takeover")
         assert label_ops[len(before):]==[("remove",["old"]),("add",["new"])]
         km=read(core/"keymap.json");del km["collab"];write(core/"keymap.json",km)
@@ -287,6 +312,10 @@ print(json.dumps(r))
                 settings_file.unlink()
                 settings_file.symlink_to(external)
             response=run("claim","a","review","--model",mode)
+            argv=shlex.split(next(line for line in response.stdout.splitlines() if line.startswith("  orca ")))
+            assert argv[argv.index("--model")+1]==mode and argv[argv.index("--task-title")+1]=="EX-1: Owner's first job"
+            hint=next(line for line in response.stdout.splitlines() if line.startswith("  wg started "))
+            assert "worktree=" in hint and "run_id=" in hint and shlex.split(hint)[2]==str(core)
             assert mode in response.stderr and settings_file.read_text()==original
             run("started","a","dispatch="+mode)
             run("done","a","--dispatch",mode,"--failed","guard tested")
@@ -307,6 +336,19 @@ print(json.dumps(r))
         km["nodes"]["below"]={"id":"issue-b","identifier":"EX-2","branch":lower,"pr":"2"}
         km["run"]["nodes"]["a"]={"agent":"codex","branch":"topic","parent":lower,"lower":lower,
                                  "state":"creating","job":"dispatch","step":"parent"}
+        # Use the shared lower even when the local run row has an obsolete branch.
+        resume_row=km["run"]["nodes"].pop("a")
+        km["nodes"]["a"]["branch"]="wg/wf-local-01-a"
+        km["run"]["nodes"]["below"]={"branch":"stale/local","code_done_head":base}
+        below_issue["state"]={"name":"In Review","type":"started"}
+        issue.update(state={"type":"unstarted","name":"Ready"},labels=page([]))
+        write(core/"keymap.json",km)
+        actions.append("claimed")
+        run("dispatch","a")
+        assert row()["parent"]==lower and row()["lower"]==lower
+        below_issue["state"]={"name":"Done","type":"completed"}
+        del km["run"]["nodes"]["below"]
+        km["run"]["nodes"]["a"]=resume_row
         write(core/"keymap.json",km)
         issue.update(state={"type":"started","name":"In Progress"},labels=page([{"id":"new","name":"agent:codex"}]))
         metadata=subprocess.check_output(["git","hash-object","-w","--stdin"],cwd=work,
@@ -394,6 +436,11 @@ print(json.dumps(r))
         assert instruction(fork)==["git","rebase","--onto","origin/frozen",fork]
         assert git("rev-parse","frozen")==squash
         assert f"target frozen at {squash}; base: frozen;" in (core/"specs/a-restack.md").read_text()
+        claim_events=[entry for line in (core/"journal.jsonl").read_text().splitlines()
+                      if (entry:=json.loads(line))["kind"]=="claim"]
+        assert any(e["command"]=="dispatch" and e["changes"]["claim"]==[None,"agent:codex"] for e in claim_events)
+        assert any(e["command"]=="done" and e["changes"]["claim"]==["agent:codex",None] for e in claim_events)
+        assert any(e["command"]=="claim" and e["changes"]["claim"]==["agent:claude",None] for e in claim_events)
         # With a narrow fetch refspec, a local fast-forward can leave a stale remote ref.
         git("config","remote.origin.fetch","+refs/heads/main:refs/remotes/origin/main")
         git("update-ref","refs/remotes/origin/frozen",base)
@@ -401,6 +448,28 @@ print(json.dumps(r))
         write(core/"keymap.json",km)
         assert "differ after the base refresh" in run("claim","a","restack",code=2).stderr
         assert row()["lower"]==lower
+        notice=root/"work file"
+        notice.write_text("Review the changes.")
+        work_args=["--send","--work-file",str(notice),"--model","new-model"]
+        reply=root/"orca-reply"
+        env["ORCA_CLI_COMMAND"]=str(tools/"absent")
+        assert "orca did not run" in run("claim","a","review",*work_args,code=1).stdout
+        assert "step" not in row()
+        env["ORCA_CLI_COMMAND"]=str(tools/"orca")
+        reply.write_text("refused")
+        assert "refused" in run("claim","a","review",*work_args,code=1).stdout
+        assert "step" not in row()
+        reply.write_text("uncertain")
+        assert "uncertain" in run("claim","a","review",*work_args,code=1).stdout
+        assert row()["step"]=="send"
+        count=sum(c[:2]==["orchestration","worker-start"] for c in calls())
+        run("claim","a","review",*work_args,code=1)
+        assert sum(c[:2]==["orchestration","worker-start"] for c in calls())==count
+        run("started","a","dispatch=recovered")
+        run("done","a","--dispatch","recovered","--failed","recorded")
+        reply.write_text("success")
+        run("claim","a","review","--model","fresh-again","--send","--work-file",str(notice))
+        assert row()["state"]=="running" and row()["dispatch"]=="confirmed"
         git(*emitted[1:])
         assert git("log","--reverse","--format=%s","origin/main..HEAD").splitlines()==["child one","child two"]
         assert not errors,errors

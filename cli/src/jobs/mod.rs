@@ -163,13 +163,16 @@ fn execute(job: Job) -> Result<u8, String> {
                             .ok_or("missing workspace")?;
                         for claim in claims["claims"].as_array().ok_or("missing claims")? {
                             if claim["mine"] == true {
-                                crate::page::update_claim(
+                                let key = claim["node"].as_str().ok_or("missing claim key")?;
+                                if let Err(e) = crate::page::update_claim(
                                     &install,
                                     scope,
                                     &km["collab"],
-                                    claim["node"].as_str().ok_or("missing claim key")?,
+                                    key,
                                     None,
-                                )?;
+                                ) {
+                                    eprintln!("warn {key}: could not release claim: {e}");
+                                }
                             }
                         }
                     }

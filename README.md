@@ -178,6 +178,10 @@ Mail waits for a running turn to end. A delivered result means that Orca stored 
 It does not confirm that the agent read it. If delivery is unconfirmed, check Orca before you reply again. A reply to a worker is also a comment on its
 issue. A reply to the coordinator has no issue comment.
 
+The Overview shows one state and one reason for each project. It shows stalled projects first, then
+projects that wait on you, then moving projects, then projects that are idle by design. Each switch
+shows a count for one state. Select one or more states to filter the projects. The URL keeps the selection.
+
 The Overview inbox also shows stalls, with the time since each one started.
 
 - **Worker silent.** A job has a working agent that last reported 20 minutes ago or earlier.

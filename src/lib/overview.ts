@@ -1,11 +1,15 @@
 // The overview of all projects: one summary for each open project, made from its graph by the
 // same rules as the Board. The server makes the summaries, so the page does not load each graph.
-import { ownerWords } from "./words.ts";
-import { type MoveRank, type Signal, boardGroups, buildGraph, compareMoves, isClosed, moveImpact, parseStatus, projectGroups, statusTiming, yourMove } from "./graph.ts";
-import { type Agents, type Ask, agentName, agentNeeds, agentsWaiting } from "./link.ts";
+import { summaryWords } from "./words.ts";
+import { type MoveRank, type Signal, boardGroups, buildGraph, isClosed, moveImpact, parseStatus, projectGroups, statusName, statusTiming, yourMove } from "./graph.ts";
+import { type Agents, type Ask, type Presence, agentName, agentNeeds, agentsWaiting } from "./link.ts";
 import type { GraphData, Project, ProjectList, PullRequest } from "./types.ts";
 
 import { currentSite, statusOrder } from "./site.ts";
+import { PROJECT_STATES, type ProjectState, type ProjectStateName, type Stall, projectState, stalls } from "./attention.ts";
+
+export { rankMoves } from "./graph.ts";
+export { overviewMoveReason } from "./words.ts";
 
 /** The lamp of a project: its Linear status type. */
 export const PROJECT_LAMP: Record<string, Signal> = { started: "running", paused: "stop", planned: "ready", backlog: "idle", completed: "done", canceled: "off" };
@@ -28,6 +32,8 @@ export interface ProjectSummary {
   /** Not started, and no blocker holds it back. */
   ready: number;
   paused?: boolean;
+  externalBlocker?: string;
+  collaborator?: string;
   liveJobs?: { identifier: string; title: string; state: string; startedAt: string | null }[];
   nextLines?: NonNullable<ReturnType<typeof parseStatus>>["lines"];
   /** What `wg next` last said about the effort, and when. */
@@ -39,18 +45,6 @@ export interface ProjectSummary {
   error?: string;
 }
 export interface OverviewData extends ProjectList { summaries: ProjectSummary[] }
-
-const summaryWords = ownerWords({ human: "", readOnly: false });
-
-/** Adapt the generated parts of a reason from an overview response for display. */
-export function overviewMoveReason(reason: string): string {
-  if (!currentSite().readOnly) return reason;
-  const words = ownerWords();
-  if (reason === summaryWords.step.slice(0, -1)) return words.step.slice(0, -1);
-  return reason
-    .replaceAll(summaryWords.waitReason, () => words.waitReason)
-    .replaceAll(summaryWords.step, () => words.step);
-}
 
 export function summarize(data: GraphData, workspace: string, now = Date.now(), settings = currentSite()): ProjectSummary {
   const graph = buildGraph(data, { site: settings });
@@ -72,6 +66,13 @@ export function summarize(data: GraphData, workspace: string, now = Date.now(), 
     !issue.external && card?.job && card.state && ["creating", "starting", "running"].includes(card.state)
       ? [{ identifier: issue.identifier, title: issue.title, state: card.state, startedAt: card.started_at ?? null }]
       : []);
+  const projectNodes = graph.nodes.filter((node) => !node.issue.external && !isClosed(node));
+  const externalBlocker = projectNodes.flatMap(({ issue }) => issue.blockedBy)
+    .find((ref) => !ref.inProject && !["Done", "Canceled"].includes(statusName(ref.state, [], settings)))?.identifier;
+  const collaborator = effort?.lines.flatMap(({ level, text }) => {
+    const name = level === "note" ? text.match(/^human \S+: waits on (.+)/)?.[1] : undefined;
+    return name ? [name] : [];
+  })[0];
   const hasCards = graph.nodes.some((n) => n.card && !n.issue.external);
   const timing = hasCards ? statusTiming(effort, true, data.status?.updatedAt ?? null, now) : null;
   const updated = data.issues.map((i) => i.updatedAt).sort().at(-1) ?? null;
@@ -86,6 +87,8 @@ export function summarize(data: GraphData, workspace: string, now = Date.now(), 
     review: groups.get("review")?.length ?? 0,
     ready: groups.get("next")?.length ?? 0,
     paused: nextLines.some(({ level, text }) => level === "wait" && text.split(" ", 1)[0] === "paused"),
+    externalBlocker,
+    collaborator,
     liveJobs,
     nextLines,
     effort: effort ? { status: effort.status, at: effort.at ?? data.status?.updatedAt ?? null } : null,
@@ -95,35 +98,65 @@ export function summarize(data: GraphData, workspace: string, now = Date.now(), 
 }
 
 /** `initiative`: null shows every project; NO_INITIATIVE shows the projects with no initiative; a name shows that initiative. */
-export interface OverviewFilter { text: string; workspace: string | null; mine: boolean; closed: boolean; initiative?: string | null }
+export interface OverviewFilter { text: string; workspace: string | null; closed: boolean; initiative?: string | null }
 export const NO_INITIATIVE = "";
-export interface OverviewRow { project: Project & { workspace: string; workspaceName: string }; summary: ProjectSummary | null }
-
-export function rankMoves<T extends { move: MoveRank }>(items: T[]): T[] {
-  const ranked = items.some(({ move }) => move.blocks !== undefined);
-  return [...items].sort((a, b) => compareMoves(a.move, b.move, ranked));
+export interface OverviewRow {
+  project: Project & { workspace: string; workspaceName: string };
+  summary: ProjectSummary | null;
+  attention: ProjectState;
+  stalls: Stall[];
 }
+
+export function readProjectStates(query: URLSearchParams): ProjectStateName[] {
+  const selected = query.get("state")?.split(",") ?? [];
+  return PROJECT_STATES.filter((state) => selected.includes(state));
+}
+
+export function countProjectStates(rows: OverviewRow[]): Record<ProjectStateName, number> {
+  const counts = { stalled: 0, waits: 0, moving: 0, idle: 0 };
+  for (const { attention } of rows) counts[attention.state]++;
+  return counts;
+}
+
+export function filterProjectStates(rows: OverviewRow[], selected: ProjectStateName[]): OverviewRow[] {
+  return selected.length ? rows.filter(({ attention }) => selected.includes(attention.state)) : rows;
+}
+
+interface OverviewActivity {
+  now: number;
+  presence?: Map<string, Presence>;
+  agents?: Map<string, Agents>;
+}
+
+const stateOrder = (state: ProjectStateName) => PROJECT_STATES.indexOf(state);
 
 export const summaryKey = (p: { workspace?: string; id: string }) => `${p.workspace ?? currentSite().defaultWorkspace}:${p.id}`;
 
-/**
- * The rows of the overview: the projects that pass the filter. Projects that wait on the human come
- * first (more waiting issues first), then projects with work that runs, then the order of `projectGroups`.
- */
-export function overviewRows(list: OverviewData | ProjectList, filter: OverviewFilter): OverviewRow[] {
+/** The project rows by state, with the project order as the tie-breaker within each state. */
+export function overviewRows(list: OverviewData | ProjectList, filter: OverviewFilter, activity: OverviewActivity = { now: Date.now() }): OverviewRow[] {
   const summaries = new Map(("summaries" in list ? list.summaries : []).map((s) => [summaryKey(s), s]));
   const { open, closed } = projectGroups(list.projects);
   const words = filter.text.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const order = new Map([...open, ...closed].map((p, at) => [summaryKey(p), at]));
+  const shared = new Set(list.workspaces.filter(({ role }) => role).map(({ id }) => id));
   return [...open, ...(filter.closed ? closed : [])]
-    .map((p) => ({ project: p as OverviewRow["project"], summary: summaries.get(summaryKey(p)) ?? null }))
-    .filter(({ project, summary }) => (!filter.workspace || project.workspace === filter.workspace)
-      && (!filter.mine || (summary?.you.length ?? 0) > 0)
+    .map((project) => {
+      const key = summaryKey(project);
+      const summary = summaries.get(key) ?? null;
+      const { now } = activity;
+      const presence = activity.presence?.get(key);
+      const agents = activity.agents?.get(key);
+      const readOnly = currentSite().readOnly || shared.has(project.workspace);
+      const open = !project.paused && !["paused", "completed", "canceled"].includes(project.statusType);
+      const found = summary && open ? stalls(summary, presence, agents, now, readOnly) : [];
+      const attention = projectState(summary, { now, presence, agents, project, stalls: found });
+      return { project, summary, attention, stalls: found };
+    })
+    .filter(({ project }) => (!filter.workspace || project.workspace === filter.workspace)
       && (filter.initiative == null || (project.initiative ?? NO_INITIATIVE).toLowerCase() === filter.initiative.toLowerCase())
       && words.every((w) => `${project.name} ${project.workspaceName} ${project.initiative ?? ""}`.toLowerCase().includes(w)))
-    .sort((a, b) => (b.summary?.you.length ?? 0) - (a.summary?.you.length ?? 0)
-      || Number((b.summary?.running ?? 0) > 0) - Number((a.summary?.running ?? 0) > 0)
-      || order.get(summaryKey(a.project))! - order.get(summaryKey(b.project))!);
+    .sort((a, b) => stateOrder(a.attention.state) - stateOrder(b.attention.state)
+      || (b.summary?.you.length ?? 0) - (a.summary?.you.length ?? 0)
+      || Number((b.summary?.running ?? 0) > 0) - Number((a.summary?.running ?? 0) > 0));
 }
 
 /**
@@ -170,13 +203,13 @@ export function movesWithAgents(you: YourMove[], agents: Agents | undefined, now
 /** The projects of one initiative in one workspace, and the sums of their summaries. `name` null: no initiative. */
 export interface InitiativeSection {
   key: string; workspace: string; workspaceName: string; name: string | null; rows: OverviewRow[];
-  projects: number; planned: number; done: number; you: number; running: number;
+  state: ProjectStateName; projects: number; planned: number; done: number; you: number; running: number;
 }
 
 /**
  * The overview rows in one section for each initiative of each workspace. Workspaces keep the order of
- * `workspaces`. Inside a workspace, initiatives that wait on the human come first, then those with work
- * that runs, then by name; the projects with no initiative come last. Rows keep their order.
+ * `workspaces`. Inside each workspace, the section takes the highest-priority state of its rows.
+ * Sections in the same state keep their previous order. Rows keep their order.
  */
 export function initiativeSections(rows: OverviewRow[], workspaces: { id: string }[]): InitiativeSection[] {
   const sections = new Map<string, InitiativeSection>();
@@ -185,7 +218,8 @@ export function initiativeSections(rows: OverviewRow[], workspaces: { id: string
     const name = row.project.initiative ?? null;
     const key = `${workspace}:${name ?? ""}`;
     let section = sections.get(key);
-    if (!section) sections.set(key, section = { key, workspace, workspaceName, name, rows: [], projects: 0, planned: 0, done: 0, you: 0, running: 0 });
+    if (!section) sections.set(key, section = { key, workspace, workspaceName, name, rows: [], state: row.attention.state, projects: 0, planned: 0, done: 0, you: 0, running: 0 });
+    if (stateOrder(row.attention.state) < stateOrder(section.state)) section.state = row.attention.state;
     section.rows.push(row);
     section.projects++;
     section.planned += row.summary?.planned ?? 0;
@@ -195,6 +229,7 @@ export function initiativeSections(rows: OverviewRow[], workspaces: { id: string
   }
   const rank = new Map(workspaces.map((w, at) => [w.id, at]));
   return [...sections.values()].sort((a, b) => (rank.get(a.workspace) ?? 99) - (rank.get(b.workspace) ?? 99)
+    || stateOrder(a.state) - stateOrder(b.state)
     || Number(a.name === null) - Number(b.name === null)
     || b.you - a.you
     || Number(b.running > 0) - Number(a.running > 0)

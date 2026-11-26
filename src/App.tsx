@@ -15,7 +15,7 @@ import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel }
 import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
 import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./lib/health";
 import { agentsFresh, agentsWaiting, canCommandCoordinator, liveJob, presenceText } from "./lib/link";
-import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, summaryKey } from "./lib/overview";
+import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, readProjectStates, summaryKey } from "./lib/overview";
 import { ownerWords } from "./lib/words";
 import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
@@ -109,6 +109,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   openSettings?: () => void; overviewWorkspace?: string; service?: boolean; connections?: AccountConnection[];
 } = {}) {
   const [query, setQuery] = useQuery();
+  const overviewStates = useMemo(() => readProjectStates(query), [query]);
   const [directory, setDirectory] = useState<ProjectList | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -745,13 +746,14 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
             <dt><kbd>Esc</kbd></dt><dd>Close the issue</dd>
             <dt><kbd>⌘</kbd> <kbd>↵</kbd></dt><dd>Send a comment or a reply</dd>
           </dl>
+          {!project && <p>Overview order is Stalled, Waits {words.onOwner}, Moving, then Idle by design.</p>}
         </div>
       )}
 
       <main className="stage">
         {!project && directory && (
           <Overview list={overview ?? directory} loading={overviewBusy} missing={missing} now={now} onOpen={openProject} presence={link.presence} asks={link.asksBy} agents={link.agentsBy}
-            budget={budget}
+            budget={budget} states={overviewStates} onStates={(states) => setQuery({ state: states.join(",") || null }, true)}
             initiative={query.get("initiative")} onInitiative={(name) => setQuery({ initiative: name }, true)} />
         )}
         {project && !data && !error && <div className="blank">Loading {project.name}…</div>}

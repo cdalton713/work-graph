@@ -264,6 +264,11 @@ export function compareMoves(a: MoveRank, b: MoveRank, ranked = true): number {
   return priority || (a.updatedAt || "~").localeCompare(b.updatedAt || "~");
 }
 
+export function rankMoves<T extends { move: MoveRank }>(items: T[]): T[] {
+  const ranked = items.some(({ move }) => move.blocks !== undefined);
+  return [...items].sort((a, b) => compareMoves(a.move, b.move, ranked));
+}
+
 /** Reasons a move of `id` to `target` breaks the graph order. Empty when the move is in order. */
 export function moveWarnings(graph: Graph, id: string, target: State): string[] {
   const node = graph.byId.get(id);
@@ -393,7 +398,7 @@ function durationText(minutes: number): string {
 
 const PROJECT_ORDER = ["started", "paused", "planned", "backlog"];
 /** The projects to work on, those in progress first, and apart from them the completed and canceled ones. */
-export function projectGroups(projects: Project[]): { open: Project[]; closed: Project[] } {
+export function projectGroups<T extends Project>(projects: T[]): { open: T[]; closed: T[] } {
   const isClosed = (p: Project) => p.statusType === "completed" || p.statusType === "canceled";
   const rank = (p: Project) => (PROJECT_ORDER.indexOf(p.statusType) + PROJECT_ORDER.length + 1) % (PROJECT_ORDER.length + 1);
   const byName = (a: Project, b: Project) => a.name.localeCompare(b.name);

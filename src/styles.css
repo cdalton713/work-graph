@@ -327,11 +327,15 @@ a { color: inherit; }
 button.ov-section-name { cursor: pointer; }
 button.ov-section-name:hover { text-decoration: underline; }
 .ov-section-sum { font-size: 11px; font-weight: 400; color: var(--ink-3); }
-.ov-section-you { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 400; color: var(--lamp-stop); }
+.ov-section-state { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 400; }
+.ov-state-filters { display: flex; flex-wrap: wrap; gap: 6px; }
 .ov-init-on { color: var(--ink-1); font-weight: 600; }
 .ov-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--rail); border-radius: var(--r-2); background: var(--cab-1); overflow: hidden; }
 .ov-row + .ov-row { border-top: 1px solid var(--rail); }
 .ov-row { display: flex; flex-wrap: wrap; align-items: center; box-shadow: inset 2px 0 0 transparent; }
+.ov-effort { flex: 0 0 100%; min-width: 0; padding: 0 12px 6px 29px; font-size: 12px; color: var(--ink-3); }
+.ov-effort summary { width: fit-content; cursor: pointer; }
+.ov-effort p { margin: 4px 0 0; overflow-wrap: anywhere; color: var(--ink-2); }
 /* The agents of the effort in Orca (wg agents): one line each, below the project row. A click shows the full message. */
 .ov-agents { flex: 0 0 100%; min-width: 0; margin: 0; padding: 0 12px 6px 29px; list-style: none; font-size: 12px; }
 .ov-agents.is-stale .ov-agent { opacity: 0.55; }
@@ -352,16 +356,16 @@ button.copy.is-copied { color: var(--lamp-done); }
 .ov-row.is-you { box-shadow: inset 2px 0 0 var(--lamp-stop); }
 .ov-row.is-active { background: var(--cab-2); }
 .ov-row.is-closed .ov-title { color: var(--ink-3); }
-.ov-open { display: grid; grid-template-columns: minmax(0, 2fr) 72px minmax(120px, 1.1fr) minmax(0, 1.2fr) 124px; align-items: center; gap: 4px 16px;
+.ov-open { display: grid; grid-template-columns: minmax(0, 2fr) minmax(120px, 1.1fr) minmax(0, 1.2fr); align-items: center; gap: 4px 16px;
   width: 100%; border: 0; border-radius: 0; padding: 10px 14px; text-align: left; color: var(--ink-2); }
 .ov-open:hover:not(:disabled) { color: var(--ink-2); }
-.ov-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.ov-state { grid-column: 1 / -1; display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 12px; }
+.ov-state-label { flex: none; font-weight: 600; }
+.ov-reason { min-width: 0; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-error { grid-column: 1 / -1; padding-left: 17px; font-size: 12px; overflow-wrap: anywhere; }
+.ov-name { display: flex; align-items: center; gap: 9px; min-width: 0; padding-left: 17px; }
 .ov-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 500; color: var(--ink-1); }
-.ov-ws, .ov-pstatus { flex: none; font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-4); }
-.ov-pstatus { color: var(--ink-3); }
-.ov-you { font-size: 12px; white-space: nowrap; color: var(--lamp-stop); }
-.ov-you b { font-size: 14px; font-weight: 600; margin-right: 3px; }
-.ov-you.is-zero { color: var(--ink-4); }
+.ov-ws { flex: none; font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-4); }
 .ov-progress { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .ov-track { flex: 1; display: flex; gap: 2px; height: 4px; min-width: 40px; }
 .ov-track i { display: block; min-width: 3px; border-radius: 1px; }
@@ -369,26 +373,16 @@ button.copy.is-copied { color: var(--lamp-done); }
 .ov-flow { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; min-width: 0; }
 .ov-flow > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .ov-flow .lamp { width: 6px; height: 6px; }
-/* What wg next last said: a second line under the row, so that the sentence can be read. */
-.ov-effort { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; min-width: 0; padding-left: 17px; font-size: 12px; }
-.ov-effort-mark { flex: none; font: 600 9px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-4); }
-.ov-effort-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); }
-.ov-effort-status.is-stalled { color: var(--lamp-stop); }
-.ov-age { font-size: 12px; text-align: right; white-space: nowrap; color: var(--ink-4); }
-.ov-age.is-warning { color: var(--lamp-running); }
 .ov-pr { display: inline-flex; align-items: baseline; gap: 6px; font: 11px var(--mono); color: var(--ink-3); }
 .ov-pr .pr-links a { font-size: 11px; }
 .overview .empty { color: var(--ink-3); }
 /* The way back to the overview, with the count of issues that wait on the human in all projects. */
 .bar-home { display: inline-flex; align-items: center; gap: 6px; }
 .bar-home-count { padding: 0 5px; border-radius: 8px; background: var(--lamp-stop); color: var(--cab-0); font-size: 11px; font-weight: 600; line-height: 16px; }
-/* Below 1024px the columns leave too little room for the name of a project, so a row takes two lines. */
+/* Below 1024px let the project details use the full width. */
 @media (max-width: 1023px) {
-  .ov-open { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; }
-  .ov-name { grid-column: 1; }
-  .ov-you { grid-column: 2; grid-row: 1; text-align: right; }
-  .ov-progress, .ov-flow, .ov-effort { grid-column: 1 / -1; }
-  .ov-age { grid-column: 1 / -1; text-align: left; padding-left: 17px; }
+  .ov-open { grid-template-columns: minmax(0, 1fr); gap: 6px 12px; }
+  .ov-progress, .ov-flow { grid-column: 1 / -1; }
   .ov-progress, .ov-flow { padding-left: 17px; }
   .ov-progress { max-width: 320px; }
 }
@@ -487,14 +481,12 @@ button.copy.is-copied { color: var(--lamp-done); }
 .fields-wg .wide dd { white-space: pre-line; overflow: visible; }
 
 /* The coordinator of a project, from the link: listening (green), working (amber), not listening (grey). */
-.ov-coord { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; white-space: nowrap; }
 .coord-listening { color: var(--lamp-done); }
 .coord-working { color: var(--lamp-running); }
 .coord-gone { color: var(--ink-3); }
 .coord-needs { color: var(--lamp-stop); }
 .panel-agent-said { display: block; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.ov-coord::before, .effort-age[class*="coord-"]::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: currentColor; vertical-align: 1px; }
-@media (max-width: 720px) { .ov-coord { display: none; } }
+.effort-age[class*="coord-"]::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: currentColor; vertical-align: 1px; }
 
 /* A worker's question (an Orca ask), with the reply box. */
 .asks .ask { margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--lamp-stop); border-radius: var(--r-2); background: color-mix(in srgb, var(--lamp-stop) 6%, transparent); }
@@ -556,9 +548,8 @@ button.copy.is-copied { color: var(--lamp-done); }
 .bar-review { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--ink-3); }
 .bar-review b { font-weight: 600; color: var(--ink-1); }
 .bar-review.review-light b { color: var(--lamp-running); }
-.bar-autonomy.auto-full b, .ov-auto.auto-full { color: var(--lamp-running); }
-.bar-autonomy.auto-supervised b, .ov-auto.auto-supervised { color: var(--lamp-review); }
-.ov-auto { font-size: 11px; color: var(--ink-3); border: 1px solid currentColor; border-radius: 3px; padding: 0 4px; line-height: 16px; }
+.bar-autonomy.auto-full b { color: var(--lamp-running); }
+.bar-autonomy.auto-supervised b { color: var(--lamp-review); }
 .bar-view-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--lamp-running); }
 
 /* The inbox: every move that waits on the human, in all projects, the one that waits longest first. */

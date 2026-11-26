@@ -194,7 +194,7 @@ export function TeamForm({ workspace, refresh, draft, saveDraft }: {
   </form>;
 }
 
-async function copySecret(text: string, trigger: HTMLButtonElement) {
+export async function copySecret(text: string, trigger: HTMLButtonElement) {
   try {
     if (navigator.clipboard) {
       await navigator.clipboard.writeText(text);

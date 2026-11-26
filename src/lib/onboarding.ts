@@ -4,8 +4,9 @@ export const steps = [
   { id: "welcome", label: "Welcome" },
   { id: "name", label: "Your name" },
   { id: "workspaces", label: "Linear workspaces" },
-  { id: "teams", label: "Teams" },
-  { id: "setup", label: "Set up wg" },
+  { id: "teams", label: "Team" },
+  { id: "statuses", label: "Statuses and labels" },
+  { id: "setup", label: "Install wg" },
   { id: "connect", label: "Connect" },
 ] as const;
 
@@ -14,13 +15,14 @@ export type NewTeam = { key: string; name: string };
 export type NewTeams = Record<string, NewTeam>;
 type SetupAccount = Pick<Account, "human" | "pageUrl" | "connections">;
 
-export function doneSteps({ name, workspaces, teams, token, connected }: OnboardingState): Record<Step, boolean> {
-  return { welcome: name || token || connected, name, workspaces, teams, setup: token, connect: connected };
+export function doneSteps({ name, workspaces, teams, token, connected }: OnboardingState, statuses = false): Record<Step, boolean> {
+  return { welcome: name || token || connected, name, workspaces, teams, statuses, setup: token, connect: connected };
 }
 
-export function firstStep(state: OnboardingState): Step | null {
+export function firstStep(state: OnboardingState, statuses?: boolean): Step | null {
   if (state.skipped) return null;
-  const done = doneSteps(state);
+  // Account-only callers can route before the team setup check returns.
+  const done = doneSteps(state, statuses ?? true);
   return steps.find(({ id }) => !done[id])?.id ?? null;
 }
 

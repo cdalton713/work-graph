@@ -111,6 +111,28 @@ async function previewCoordinators() {
   ] } }));
 }
 
+type PreviewTeam = { key: string; name: string; id: string; visibility: string; parent?: PreviewTeam; triageEnabled: boolean };
+type PreviewLabel = { id: string; name: string; isGroup: boolean; groupType?: string; team: {id: string} | null; parent: {id: string} | null };
+const setupWorkspaces = new Map<string, {
+  teams: PreviewTeam[]; states: Map<string, { name: string; type: string }[]>;
+  issueLabels: PreviewLabel[]; projectLabels: PreviewLabel[];
+}>();
+async function newSetupUser(refused: boolean) {
+  const id = randomUUID();
+  const org = { id, name: "Setup workspace", urlKey: "setup-" + id };
+  const name = "Alex";
+  const email = id + "@example.com";
+  const key = randomUUID();
+  const accountId = await tenants.signIn({ linearUserId: id, linearOrgId: id, name, email }, {
+    workspaceId: org.urlKey, linearOrgId: id, name: org.name, team: "DEMO", teamLabels: false,
+    credential: { kind: "oauth", key, refreshToken: randomUUID(), expiresAt: new Date(Date.now() + 86_400_000) },
+  });
+  const person = { id, name, org, email, key, accountId };
+  people.push(person);
+  if (refused) refusedOrganizations.add(id);
+  return person;
+}
+const refusedOrganizations = new Set<string>();
 const teamMembers = new Set([owner.id]);
 let invitationPending = false;
 
@@ -132,6 +154,53 @@ globalThis.fetch = async (input, init) => {
   const linearViewer = { id: identity.id, name: identity.name, email: identity.email };
   const graphProject = { ...project, projectMilestones: empty, documents: empty, issues: empty, teams: { nodes: [exampleTeam] } };
 
+  let setup = setupWorkspaces.get(organization.id);
+  if (!setup) {
+    setup = { teams: teams.map(t => ({ ...t, id: t.key, visibility: "public", triageEnabled: false })),
+      states: new Map(), issueLabels: [], projectLabels: [] };
+    setupWorkspaces.set(organization.id, setup);
+  }
+  if (query.includes("query AccountTeams")) return data({ viewer: linearViewer, organization, teams: { nodes: setup.teams, pageInfo } });
+  if (query.includes("teams(filter:{key:")) return data({ teams: { nodes: setup.teams.filter(t => t.key === variables.key) } });
+  if (query.includes("organization { subscription")) return data({ organization: { subscription: { type: "business" } } });
+  if (query.includes("teamCreate(input:")) {
+    if (refusedOrganizations.has(organization.id)) return new Response(null, { status: 403 });
+    const input = variables.i;
+    const team = { id: randomUUID(), key: input.key, name: input.name, parent: setup.teams.find(t => t.id === input.parentId),
+      visibility: "public", triageEnabled: false };
+    setup.teams.push(team);
+    setup.states.set(team.id, [{ name: "Duplicate", type: "duplicate" }]);
+    return data({ teamCreate: { success: true, team } });
+  }
+  if (query.includes("issues(first:1,includeArchived:true)")) return data({ team: { issues: empty, projects: empty } });
+  if (query.includes("teamUpdate(id:")) {
+    const team = setup.teams.find(t => t.id === variables.id);
+    if (team && variables.i.private) team.visibility = "private";
+    if (team && variables.i.triageEnabled) {
+      team.triageEnabled = true;
+      setup.states.set(team.id, [...setup.states.get(team.id) ?? [], { name: "Triage", type: "triage" }]);
+    }
+    return data({ teamUpdate: { success: !!team } });
+  }
+  if (query.includes("states(first:100,after:")) return data({ team: { states: { nodes: setup.states.get(variables.id) ?? [], pageInfo } } });
+  if (query.includes("workflowStateCreate(input:")) {
+    const { teamId, name, type } = variables.i;
+    setup.states.set(teamId, [...setup.states.get(teamId) ?? [], { name, type }]);
+    return data({ workflowStateCreate: { success: true, workflowState: { id: randomUUID() } } });
+  }
+  for (const kind of ["issueLabel", "projectLabel"] as const) {
+    const rows = setup[`${kind}s`];
+    if (query.includes(`${kind}s(filter:$f`)) {
+      return data({ [kind + "s"]: { nodes: rows.filter(row => row.team?.id === variables.f.team.id?.eq), pageInfo } });
+    }
+    if (query.includes(`${kind}Create(input:`)) {
+      const input = variables.i;
+      const label = { id: randomUUID(), name: input.name, isGroup: !!input.isGroup, groupType: input.groupType,
+        team: input.teamId ? { id: input.teamId } : null, parent: input.parentId ? { id: input.parentId } : null };
+      rows.push(label);
+      return data({ [kind + "Create"]: { success: true, [kind]: label } });
+    }
+  }
   if (query.includes("ProjectAccessTeam")) return data({ organization, project: graphProject });
   if (query.includes("CheckProjectAccess")) {
     return data({ organization, teams: { nodes: visible ? [exampleTeam] : [] }, projects: { nodes: visible ? [project] : [] } });
@@ -182,7 +251,8 @@ const server = serve({ port, hostname: "127.0.0.1", async fetch(request) {
   }
   if (url.pathname === "/auth/login") {
     const identity = url.searchParams.get("as");
-    const person = people.find(({ id }) => id === identity) ?? owner;
+    const setupLogin = url.searchParams.get("setup-user");
+    const person = setupLogin ? await newSetupUser(setupLogin === "refused") : people.find(({ id }) => id === identity) ?? owner;
     if (identity) await accounts.setOnboarding(person.accountId, undefined, true);
     await previewCoordinators();
     const value = pack({ accountId: person.accountId, email: person.email, id: randomUUID(), exp: Math.floor(Date.now() / 1000) + SESSION_S });

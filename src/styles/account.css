@@ -90,3 +90,17 @@
   .starter-form :is(button, input, select, a), .ov-head > button { min-height: 44px; }
   .starter-form a { display: inline-flex; align-items: center; }
 }
+
+.setup-recommendation { padding: 12px; border: 1px solid var(--rail-2); background: var(--cab-2); border-radius: var(--r-2); }
+.account-guide .setup-flow { gap: 0; }
+.setup-flow li { position: relative; display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: baseline; gap: 8px; padding: 6px 0; }
+.setup-flow li::before { content: ""; position: absolute; left: 4px; top: 20px; bottom: -8px; border-left: 1px solid var(--rail-2); }
+.setup-flow li:last-child::before { display: none; }
+.setup-flow .setup-wait { padding-left: 24px; }
+.setup-wait::after { content: ""; position: absolute; left: 4px; top: 15px; width: 20px; border-top: 1px solid var(--rail-2); }
+.setup-flow p, .setup-labels small { color: var(--ink-3); }
+.setup-mark { font-family: var(--mono); }
+.setup-mark.exists { color: var(--lamp-done); }
+.setup-mark.warn { color: var(--lamp-running); }
+.setup-labels { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 6px 12px; }
+.setup-labels li { display: flex; gap: 8px; }

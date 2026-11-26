@@ -341,7 +341,13 @@ export function Overview({ list: given, loading, missing, now, onOpen, presence,
     if (expanded) inboxRoot.current?.querySelector<HTMLTextAreaElement>(".inbox-row:not([hidden]) .inbox-detail:not([hidden]) textarea")?.focus();
   }, [expanded]);
   useEffect(() => setActive(0), [filter, initiatives, states]);
-  useEffect(() => { root.current?.querySelector(".ov-row.is-active")?.scrollIntoView({ block: "nearest" }); }, [active]);
+  // On a phone, keep the inbox in view until the active project changes.
+  const lastScrolledRow = useRef(narrow ? active : null);
+  useEffect(() => {
+    if (lastScrolledRow.current === active) return;
+    lastScrolledRow.current = active;
+    root.current?.querySelector(".ov-row.is-active")?.scrollIntoView({ block: "nearest" });
+  }, [active]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

@@ -575,6 +575,7 @@ button.copy.is-copied { color: var(--lamp-done); }
 .inbox-text { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .inbox-why { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-1); font-weight: 500; }
 .inbox-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: 12px; }
+.inbox-effect { display: block; color: var(--ink-3); font-size: 12px; }
 .inbox-project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--ink-3); }
 .inbox-age { font-size: 11px; text-align: right; color: var(--ink-4); }
 .inbox-prs { flex: none; width: 150px; display: inline-flex; flex-direction: column; gap: 2px; }

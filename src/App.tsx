@@ -14,7 +14,7 @@ import { REVIEWED, boardOrder, buildGraph, parseStatus, projectGroups, reduceEdg
 import { AUTONOMY_DEFAULT, AUTONOMY_HINTS, AUTONOMY_LEVELS, type AutonomyLevel } from "./lib/autonomy";
 import { REVIEW_DEFAULT, REVIEW_HINTS, REVIEW_LEVELS, type ReviewEffort } from "./lib/review";
 import { type HeldGraph, budgetWarnings, mergeDirectory, pollGraph, staleBanner, versionText } from "./lib/health";
-import { agentsFresh, canCommandCoordinator, liveJob, presenceText } from "./lib/link";
+import { agentsFresh, agentsWaiting, canCommandCoordinator, liveJob, presenceText } from "./lib/link";
 import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, summaryKey } from "./lib/overview";
 import { ownerWords } from "./lib/words";
 import { configureSite, site, statusOrder } from "./lib/site";
@@ -306,6 +306,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
   const asked = useMemo(() => new Set(asks.flatMap((a) => (a.issue && (!a.accountName || a.accountName === site.human) ? [a.issue] : []))), [asks]);
   const presence = projectPresence ?? (linkRef ? link.presence.get(summaryKey(linkRef)) : undefined);
   const agents = linkRef ? link.agentsBy.get(summaryKey(linkRef)) : undefined;
+  const atPrompt = useMemo(() => new Set(agentsWaiting(agents, now).flatMap((a) => a.issue ? [a.issue] : [])), [agents, now]);
   const viewer = site.readOnly || sharedRole === "viewer";
   const collaborator = sharedRole === "collaborator";
   const coordinator = useMemo(() => (linkRef ? presenceText(presence, now, agents, viewer) : null), [presence, linkRef, now, agents, viewer]);
@@ -501,7 +502,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
 
   // The keys of a project page. `j` and `k` step through the issues in board order (Your move first).
   const [keys, setKeys] = useState(false);
-  const order = useMemo(() => (full ? boardOrder(full, asked).filter(includeClaim) : []), [full, asked, includeClaim]);
+  const order = useMemo(() => (full ? boardOrder(full, asked, atPrompt).filter(includeClaim) : []), [full, asked, atPrompt, includeClaim]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLElement && e.target.closest("input, textarea, select, [contenteditable]");
@@ -751,7 +752,7 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, s
         )}
         {project && !data && !error && <div className="blank">Loading {project.name}…</div>}
         {board && full && full.nodes.length > 0 && <Board graph={full} marks={marks} filter={claimFilter} now={now} selectedId={selected?.id ?? null} onPick={pick} onHover={setHoverId} onReview={canReview && !viewer ? onReview : undefined}
-          asked={asked}
+          asked={asked} atPrompt={atPrompt}
           live={new Map(link.progress.flatMap((p) => { const job = liveJob(p); return job && p.issue ? [[p.issue, job] as [string, string]] : []; }))} />}
         {graph && data && !graph.nodes.length && <div className="blank">{claimFilter !== "all" ? "No issues match this runner filter." : openOnly ? "No open issues. Turn off “Open issues only” under View to see all." : "This project has no issues."}</div>}
         {graph && placed && graph.nodes.length > 0 && (

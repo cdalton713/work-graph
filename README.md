@@ -149,6 +149,10 @@ stopped at a prompt: it counts as a move of the human's, and it sends one notice
 when it waits for two reads in sequence. The message text goes to the page server, so do not use `wg agents` with
 a page that other people can read.
 
+The Overview inbox puts moves with a waiting agent first, then moves that hold back the most open issues.
+When these are equal, the oldest move comes first. Each move shows if an agent waits, how many open issues
+it holds back, and how many can start when it closes. The Board uses the same order for these moves.
+
 `wg agents --once` does one read and prints the rows. `wg agents --install` writes a launchd agent that keeps
 `wg agents` running; run the printed `launchctl bootstrap` command to load it. Logs: `~/Library/Logs/wg-agents/`.
 When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the agent.

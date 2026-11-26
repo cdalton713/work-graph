@@ -3,7 +3,7 @@ import type { ReviewEffort } from "./lib/review";
 import { pageEvent, type PageEvent } from "./lib/telemetry";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
-import type { Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectList, ProjectShareLinks, ServerStatus } from "./lib/types";
+import type { Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShareLinks, ServerStatus } from "./lib/types";
 
 /** The open project. A write names it (`x-project`), so the server can tell its coordinator at once. */
 let openProject: string | null = null;
@@ -37,11 +37,13 @@ function accountWrite<T>(path: string, method: string, data?: object) {
   return call<T>(`account${path}`, { method, body: data && JSON.stringify(data) });
 }
 
-export async function joinProject(token: string): Promise<ProjectJoin | null> {
+export function joinProject(token: string): Promise<ProjectJoinPreview | null>;
+export function joinProject(token: string, confirm: true): Promise<ProjectJoin | null>;
+export async function joinProject(token: string, confirm?: true): Promise<ProjectJoin | null> {
   const response = await fetch("/api/join", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ token, confirm }),
   });
   const body = await response.json().catch(() => ({}));
   if (response.status === 401 && body.login) return null;

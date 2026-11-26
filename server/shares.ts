@@ -124,8 +124,13 @@ export function shareRoutes({ access, project, limit, pageUrl, telemetry }: Opti
       c.header("Retry-After", String(Math.ceil(retry / 1000)));
       return c.json({ error: "Too many join attempts" }, 429);
     }
-    const input = await c.req.json<{ token?: unknown }>().catch(() => null);
+    const input = await c.req.json<{ token?: unknown; confirm?: unknown }>().catch(() => null);
     if (typeof input?.token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(input.token)) throw invalidLink();
+    if (input.confirm !== true) {
+      const preview = await account.accounts.shares.preview(input.token);
+      if (!preview) throw invalidLink();
+      return c.json(preview);
+    }
     const result = await account.accounts.shares.join(account.tenant.id, input.token);
     if (!result) throw invalidLink();
     if (result === "full") return c.json({ error: "This project has reached its member limit" }, 409);

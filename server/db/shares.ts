@@ -11,6 +11,7 @@ type ProjectScope = [tenant: string, connection: string, project: string];
 const scope = "tenant_id = $1 AND connection_id = $2 AND project_id = $3";
 const live = "revoked_at IS NULL";
 type Share = { id: string; tenant: string; connection: string; project: string; name: string; kind: ShareKind };
+const roleFor = (kind: ShareKind): MemberRole => kind === "view" ? "viewer" : "collaborator";
 type Member = { id: string; name: string; email: string; role: MemberRole; joinedAt: Date };
 
 export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>) {
@@ -47,12 +48,11 @@ export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>
     },
 
     async make(project: ProjectScope, name: string, rotate?: ShareKind) {
-      const [tenant, connection, id] = project;
+      const [tenant, connection] = project;
       const result = await sql.transaction(async ({ query }) => {
         const owner = await lock(query, tenant);
         if (!owner || !(await query("SELECT 1 FROM linear_connections WHERE tenant_id = $1 AND id = $2 AND kind = 'oauth'",
           [tenant, connection])).length) return null;
-        if ((await query("SELECT 1 FROM project_members WHERE user_id = $1 AND project_id = $2 LIMIT 1", [owner, id])).length) return null;
         const links = await liveLinks(query, project);
         const created: Partial<Record<ShareKind, string>> = {};
         const revoked = rotate ? await revoke(query, project, rotate) : false;
@@ -88,6 +88,13 @@ export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>
       return changed;
     },
 
+    async preview(token: string) {
+      const [row] = await sql.query<{ project: string; owner: string; kind: ShareKind }>(`
+        SELECT s.project_name AS project, t.human AS owner, s.kind FROM shares s
+        JOIN tenants t ON t.id = s.tenant_id WHERE s.token_hash = $1 AND s.revoked_at IS NULL`, [tokenHash(token)]);
+      return row ? { project: row.project, owner: row.owner, role: roleFor(row.kind) } : null;
+    },
+
     async join(account: string, token: string) {
       const hash = tokenHash(token);
       const result = await sql.transaction(async ({ query }) => {
@@ -100,7 +107,7 @@ export function createShares(sql: Sql, notify: (tenant: string) => Promise<void>
           WHERE t.id = $1 FOR KEY SHARE OF u`, [account]);
         if (!member) return null;
         const project = share.name;
-        const role: MemberRole = share.kind === "view" ? "viewer" : "collaborator";
+        const role = roleFor(share.kind);
         if (member.id === owner) return { share, project, role, changed: false } as const;
         const params: ProjectScope = [share.tenant, share.connection, share.project];
         const [prior] = await query<{ role: MemberRole }>(`SELECT role FROM project_members

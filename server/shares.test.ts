@@ -55,8 +55,14 @@ databaseSuites((open) => {
       const owner = await account("Ada");
       const member = await account("Sam");
       const other = await account("Pat");
+      const memberRoute = "/api/projects/project/members/" + randomUUID();
       const minted = await tenants.accounts.createToken(owner.accountId, "Coordinator");
-      for (const [path, method] of [[share, "GET"], [share, "POST"], [share + "/view/rotate", "POST"], [share + "/view", "DELETE"]]) {
+      const ownerWrites = [[share, "POST"], [share + "/view/rotate", "POST"], [share + "/view", "DELETE"],
+        [memberRoute, "PATCH"], [memberRoute, "DELETE"]];
+      for (const [path, method] of ownerWrites) {
+        expect((await owner.request(path, method, { role: "viewer" }, { origin: "https://other.example.com" })).status).toBe(403);
+      }
+      for (const [path, method] of [[share, "GET"], ...ownerWrites]) {
         const response = await app.request(path, { method, headers: {
           host, origin, "content-type": "application/json", authorization: "Bearer " + minted.token,
         } });
@@ -93,15 +99,31 @@ databaseSuites((open) => {
       expect((await other.request(share + "/view/rotate", "POST")).status).toBe(404);
       expect((await other.request(share + "/collab", "DELETE")).status).toBe(404);
       expect((await owner.request("/api/projects/missing/share", "POST")).status).toBe(404);
-      const join = (value: string) => member.request("/api/join", "POST", { token: value });
+      const joinAs = (person: typeof member, token: string, confirm?: boolean, headers?: Record<string, string>) =>
+        person.request("/api/join", "POST", { token, confirm }, headers);
+      const join = (value: string) => joinAs(member, value, true);
+      for (const confirm of [undefined, true]) {
+        expect((await joinAs(member, view, confirm, { origin: "https://other.example.com" })).status).toBe(403);
+      }
+      expect(await (await joinAs(member, view)).json()).toEqual({ project: "Example", owner: "Ada", role: "viewer" });
+      expect((await (await owner.request(share)).json()).members).toEqual([]);
       expect(await (await join(view)).json()).toMatchObject({ project: "Example", role: "viewer" });
       expect((await member.request(share)).status).toBe(404);
-      expect((await member.request(share, "POST")).status).toBe(404);
       expect((await member.request(share + "/view/rotate", "POST")).status).toBe(404);
       expect((await member.request(share + "/collab", "DELETE")).status).toBe(404);
+      const memberShare = await member.request(share, "POST");
+      expect(memberShare.status).toBe(200);
+      const memberLink = token((await memberShare.json()).view.url);
+      expect((await joinAs(other, memberLink, true)).status).toBe(200);
+      expect((await (await member.request(share)).json()).members).toHaveLength(1);
+      const connection = (await tenants.accounts.readTenant(member.accountId))!.connections[0];
+      await tenants.accounts.removeConnection(member.accountId, connection.id);
+      expect((await joinAs(other, memberLink)).status).toBe(404);
+      expect(await db.query("SELECT id FROM shares WHERE connection_id = $1", [connection.id])).toEqual([]);
+      expect(await db.query("SELECT user_id FROM project_members WHERE connection_id = $1", [connection.id])).toEqual([]);
       expect(await (await join(collab)).json()).toMatchObject({ role: "collaborator" });
       expect(await (await join(view)).json()).toMatchObject({ role: "collaborator" });
-      expect((await owner.request("/api/join", "POST", { token: view })).ok).toBe(true);
+      expect((await joinAs(owner, view, true)).ok).toBe(true);
       const rotated = await owner.request(share + "/view/rotate", "POST");
       expect(rotated.ok).toBe(true);
       const fresh = token((await rotated.json()).url);
@@ -133,7 +155,7 @@ databaseSuites((open) => {
       expect((await owner.request(memberPath, "PATCH", { role: "viewer" })).status).toBe(204);
       expect((await (await owner.request(share)).json()).members[0].role).toBe("viewer");
       expect((await owner.request(memberPath, "DELETE")).status).toBe(204);
-      for (let i = 0; i < 3; i++) expect((await join(fresh)).ok).toBe(true);
+      for (let i = 0; i < 2; i++) expect((await join(fresh)).ok).toBe(true);
       expect((await join(fresh)).status).toBe(429);
       const changes: string[] = [];
       const stop = tenants.onChange((tenant) => changes.push(tenant));
@@ -147,7 +169,7 @@ databaseSuites((open) => {
         SELECT s.tenant_id, s.connection_id, s.project_id, u.id, 'viewer', s.id FROM shares s
         CROSS JOIN users u WHERE s.token_hash = $1 AND u.id = ANY($2::uuid[])`,
       [createHash("sha256").update(fresh).digest("hex"), fill.map(({ id }) => id)]);
-      expect((await other.request("/api/join", "POST", { token: fresh })).status).toBe(409);
+      expect((await joinAs(other, fresh, true)).status).toBe(409);
       expect((await (await owner.request(share)).json()).members).toHaveLength(50);
       await tenants.accounts.deleteAccount(owner.accountId);
       expect(await db.query("SELECT id FROM shares")).toEqual([]);
@@ -159,12 +181,4 @@ databaseSuites((open) => {
       await rm(dist, { recursive: true });
     }
   });
-});
-
-it("keeps service-only routes disabled in config mode", async () => {
-  const app = createApp(rules, options);
-  try {
-    expect((await app.request(share, { headers: { host } })).status).toBe(404);
-    expect((await app.request("/api/join", { method: "POST", headers: { host, origin, "content-type": "application/json" } })).status).toBe(404);
-  } finally { app.link.stop(); }
 });

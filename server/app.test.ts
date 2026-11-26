@@ -2549,6 +2549,14 @@ describe("share a project with the viewer", () => {
     expect([on.status, await on.json()]).toEqual([200, { ok: true, shared: true }]);
     expect(marks.created).toEqual([{ name: "shared", teamId: "team", description: "work-graph: the read-only viewer shows this project." }]);
     expect(await list()).toMatchObject({ workspaces: [{ id: "work", name: "Work", shareUrl: "https://view.example.com" }], projects: [{ id: "p1", shared: true }] });
+    for (const [method, path] of [
+      ["GET", "/api/projects/p1/share"], ["POST", "/api/projects/p1/share/view/rotate"],
+      ["DELETE", "/api/projects/p1/share/view"], ["PATCH", "/api/projects/p1/members/member"],
+      ["DELETE", "/api/projects/p1/members/member"], ["POST", "/api/join"],
+    ]) {
+      const response = await page.request(path, { method, headers: write });
+      expect([response.status, await response.json()]).toEqual([404, { error: "Share route not found" }]);
+    }
     expect((await share({ shared: false })).status).toBe(200);
     expect(marks.shared).toBe(false);
     expect((await list()).projects[0].shared).toBe(false);

@@ -17,8 +17,9 @@ import type { SiteConfig } from "./lib/types";
 const root = createRoot(document.getElementById("root")!);
 const joinPath = location.pathname.startsWith("/join/") ? location.pathname : null;
 if (joinPath) {
+  const returnedFromSignIn = new URLSearchParams(location.search).get("signed-in") === "1";
   history.replaceState(null, "", "/?join");
-  root.render(<StrictMode><Join path={joinPath} /></StrictMode>);
+  root.render(<StrictMode><Join path={joinPath} returnedFromSignIn={returnedFromSignIn} /></StrictMode>);
 } else {
   fetch("/api/config")
     .then((response) => (response.ok ? response.json() : {}))

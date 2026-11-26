@@ -208,9 +208,26 @@ pub(super) enum Invocation {
     Watch,
     Join,
 }
+pub(super) enum NextOutput<'a> {
+    Terminal,
+    Collected(&'a mut Vec<u8>),
+}
+
+impl NextOutput<'_> {
+    fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+        match self {
+            Self::Terminal => {
+                print!("{args}");
+                Ok(())
+            }
+            Self::Collected(bytes) => std::io::Write::write_fmt(bytes, args),
+        }
+    }
+}
+
 struct Run<'a> {
     invocation: Invocation,
-    output: &'a mut dyn std::io::Write,
+    output: NextOutput<'a>,
     install: &'a Installation,
     args: &'a arguments::Next,
     plan: Value,
@@ -503,14 +520,14 @@ pub(super) fn next_command(args: &arguments::Next, watch: bool) -> Result<u8> {
         } else {
             Invocation::Next
         },
-        &mut std::io::stdout(),
+        NextOutput::Terminal,
     )
 }
 
 pub(super) fn next_with_output(
     args: &arguments::Next,
     invocation: Invocation,
-    output: &mut dyn std::io::Write,
+    output: NextOutput<'_>,
 ) -> Result<u8> {
     let interval = Duration::try_from_secs_f64(args.interval)
         .map_err(|_| "--interval must be a positive number of seconds")?;

@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -194,6 +195,12 @@ def scenario(root):
         result = run("next", plan, "--no-publish")
         assert "phase 1: 1 task" in result and "do reconcile a EX-1: In Progress with no run row" in result, result
         assert not cards and not documents
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        with os.fdopen(write_fd, "wb") as closed_pipe:
+            broken = subprocess.run([BIN, "next", plan, "--no-publish"], cwd=root, env=env,
+                                    stdout=closed_pipe, stderr=subprocess.PIPE, timeout=30)
+        assert broken.returncode == 101 and b"Broken pipe" in broken.stderr, broken
         assert run("watch", plan, "--wait", "--interval", ".1", "--no-publish") == result
         assert run("wake", plan).startswith("start: reconcile a EX-1")
         run("next", plan)

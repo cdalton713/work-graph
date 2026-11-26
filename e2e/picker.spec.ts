@@ -12,7 +12,7 @@ async function box(locator: Locator) {
 async function openSheet(page: Page, trigger: Locator, multi = false) {
   await expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
   await trigger.tap();
-  const dialog = page.getByRole("dialog");
+  const dialog = page.getByRole("dialog").filter({ has: page.getByRole("textbox", { name: "Filter" }) });
   const bounds = await box(dialog);
   const viewport = page.viewportSize()!;
   expect(bounds.x).toBeGreaterThanOrEqual(0);
@@ -69,7 +69,9 @@ test("bar pickers open as sheets and apply choices", async ({ page }, testInfo) 
   );
   await screens.project(page);
   const bar = page.locator(".bar");
-  const view = bar.getByRole("button", { name: /^View/ });
+  await bar.getByRole("button", { name: "More", exact: true }).tap();
+  const menu = page.getByRole("dialog", { name: "Project controls" });
+  const view = menu.getByRole("button", { name: /^View/ });
   let dialog = await openSheet(page, view, true);
   const openOnly = dialog.getByRole("option", { name: /Open issues only/ });
   const selected = await openOnly.getAttribute("aria-selected");
@@ -80,7 +82,7 @@ test("bar pickers open as sheets and apply choices", async ({ page }, testInfo) 
   await expect(view).toBeFocused();
 
   for (const [name, choice] of [["Autonomy", "supervised"], ["Review", "light"]]) {
-    const trigger = bar.getByRole("button", { name: new RegExp(`^${name} `) });
+    const trigger = menu.getByRole("button", { name: new RegExp(`^${name} `) });
     dialog = await openSheet(page, trigger);
     const option = dialog.getByRole("option").filter({ hasText: choice });
     await expect(option.locator(".picker-hint")).toHaveCSS("white-space", "normal");
@@ -89,6 +91,7 @@ test("bar pickers open as sheets and apply choices", async ({ page }, testInfo) 
     await expect(trigger).toContainText(choice);
   }
 
+  await menu.getByRole("button", { name: "Close", exact: true }).tap();
   const project = bar.getByRole("button", { name: /Example project/ });
   dialog = await openSheet(page, project);
   await dialog.getByRole("option").filter({ hasText: "Planned project" }).tap();

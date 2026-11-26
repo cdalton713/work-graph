@@ -66,7 +66,7 @@ enum Verb {
 
 pub fn command() -> ExitCode {
     match execute(Args::parse().verb) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(message) => {
             eprintln!("{message}");
             ExitCode::from(
@@ -83,7 +83,7 @@ pub fn command() -> ExitCode {
     }
 }
 
-fn execute(verb: Verb) -> Result<(), String> {
+fn execute(verb: Verb) -> Result<u8, String> {
     let installation = Installation::load()?;
     let dir = match &verb {
         Verb::Autonomy { dir, .. }
@@ -141,7 +141,7 @@ fn execute(verb: Verb) -> Result<(), String> {
             apply,
             prune,
             adopt,
-        } => super::load::load(dir, &installation, &plan, apply, prune, adopt),
+        } => return super::load::load(dir, &installation, &plan, apply, prune, adopt),
         Verb::Ready { ref dir, apply } => {
             let _lock = if apply {
                 Some(crate::state::PlanLock::acquire(dir, None).map_err(|e| e.to_string())?)
@@ -172,7 +172,8 @@ fn execute(verb: Verb) -> Result<(), String> {
             };
             print_status(&plan, &km, &snap, phase.as_deref())
         }
-    }
+    }?;
+    Ok(0)
 }
 
 pub(super) fn archive(linear: &mut Linear, apply: bool, explicit: bool) -> Result<(), String> {
@@ -183,35 +184,35 @@ pub(super) fn archive(linear: &mut Linear, apply: bool, explicit: bool) -> Resul
         }
         return Ok(());
     }
-    let result = (|| {
+    let mut labels = Vec::new();
+    let mut refused = false;
+    let result: Result<(), String> = (|| {
         let issues = linear.pages("query($after:String){issues(first:100,after:$after,filter:{state:{type:{in:[\"completed\",\"canceled\"]}}}){nodes{id identifier} pageInfo{hasNextPage endCursor}}}",json!({}),"/issues")?;
-        let mut labels = Vec::new();
         for issue in issues {
             let id = issue["id"].as_str().ok_or("missing issue id")?;
-            labels.push(
-                issue["identifier"]
-                    .as_str()
-                    .ok_or("missing issue identifier")?
-                    .to_owned(),
-            );
+            let label = issue["identifier"]
+                .as_str()
+                .ok_or("missing issue identifier")?;
             if apply {
                 let r = linear.request(
                     "mutation($id:String!){issueArchive(id:$id){success}}",
                     json!({"id":id}),
                 )?;
                 if r["issueArchive"]["success"] != true {
-                    return Err("Linear refused to archive the issue".to_owned());
+                    eprintln!("warn: Linear refused to archive {label}");
+                    refused = true;
+                    continue;
                 }
             }
+            labels.push(label.to_owned());
         }
-        Ok(labels)
+        Ok(())
     })();
-    let labels = result.unwrap_or_else(|e| {
+    if let Err(e) = &result {
         eprintln!("warn: archive of settled issues failed: {e}");
-        Vec::new()
-    });
+    }
     if labels.is_empty() {
-        if explicit {
+        if explicit && !refused && result.is_ok() {
             println!("no completed or canceled issue to archive");
         }
     } else {
@@ -413,7 +414,8 @@ pub(super) fn ready(
                 json!({"id":id["id"],"s":state_id}),
             )?;
             if result["issueUpdate"]["success"] != true {
-                return Err(format!("{ident}: state update failed"));
+                eprintln!("warn: {ident}: state update failed");
+                continue;
             }
             if let Err(e) = crate::local::record_status(dir, command, &km["run"], k, status, want) {
                 eprintln!("warn: journal: {e}");

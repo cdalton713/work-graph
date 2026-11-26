@@ -181,12 +181,6 @@ fn relations(
             continue;
         }
         let (a, b) = pair;
-        println!(
-            "relation {} blocks {}: {}",
-            identifiers[a.as_str()],
-            identifiers[b.as_str()],
-            if apply { "created" } else { "missing" }
-        );
         if apply {
             let r = l.request(
                 "mutation($i:IssueRelationCreateInput!){issueRelationCreate(input:$i){success}}",
@@ -196,18 +190,18 @@ fn relations(
                 return Err("could not create relation".into());
             }
         }
+        println!(
+            "relation {} blocks {}: {}",
+            identifiers[a.as_str()],
+            identifiers[b.as_str()],
+            if apply { "created" } else { "missing" }
+        );
     }
     for (pair, id) in have {
         if wanted.contains(&pair) {
             continue;
         }
         let (a, b) = pair;
-        println!(
-            "relation {} blocks {}: not in plan.json{}",
-            identifiers[a.as_str()],
-            identifiers[b.as_str()],
-            if apply && prune { " (deleted)" } else { "" }
-        );
         if apply
             && prune
             && l.request(
@@ -218,6 +212,12 @@ fn relations(
         {
             return Err("could not delete relation".into());
         }
+        println!(
+            "relation {} blocks {}: not in plan.json{}",
+            identifiers[a.as_str()],
+            identifiers[b.as_str()],
+            if apply && prune { " (deleted)" } else { "" }
+        );
     }
     Ok(())
 }
@@ -229,7 +229,7 @@ pub(super) fn load(
     apply: bool,
     prune: bool,
     adopting: bool,
-) -> Result<(), String> {
+) -> Result<u8, String> {
     let lock = PlanLock::acquire(dir, None).map_err(|e| e.to_string())?;
     let cfg = installation
         .config
@@ -318,22 +318,19 @@ pub(super) fn load(
             return Err(format!("more than one project is named '{name}'"));
         }
         if adopting {
+            let project = project.ok_or_else(|| {
+                format!(
+                    "project '{name}' not found in team {}",
+                    display(&eff["team"])
+                )
+            })?;
+            for change in &changes {
+                println!("{change}");
+            }
             let before = km.clone();
-            adopt(
-                &mut linear,
-                plan,
-                &mut km,
-                project.ok_or_else(|| {
-                    format!(
-                        "project '{name}' not found in team {}",
-                        display(&eff["team"])
-                    )
-                })?,
-                tid,
-                &lock,
-            )?;
+            adopt(&mut linear, plan, &mut km, project, tid, &lock)?;
             super::journal(dir, "load", &before, &km);
-            return Ok(());
+            return Ok(0);
         }
         if let Some(p) = project {
             return Err(format!(
@@ -395,11 +392,9 @@ pub(super) fn load(
             km["nodes"][n["key"].as_str().unwrap_or("")].is_null() && external(n).is_none()
         })
     {
-        let known: BTreeSet<_> = km["nodes"]
-            .as_object()
-            .ok_or("invalid mappings")?
-            .values()
-            .filter_map(|v| v["id"].as_str())
+        let known: BTreeSet<_> = known_keys
+            .iter()
+            .filter_map(|k| km["nodes"][*k]["id"].as_str())
             .collect();
         let issues = project_rows(&mut linear, &pid, "issues", "id identifier title")?;
         for n in nodes {
@@ -407,10 +402,15 @@ pub(super) fn load(
             if !km["nodes"][k].is_null() || external(n).is_some() {
                 continue;
             }
-            for i in issues.iter().filter(|i| {
-                i["title"] == n["title"] && !known.contains(i["id"].as_str().unwrap_or(""))
-            }) {
-                let ident = string(i, "identifier")?;
+            let mut matches = issues
+                .iter()
+                .filter(|i| {
+                    i["title"] == n["title"] && !known.contains(i["id"].as_str().unwrap_or(""))
+                })
+                .map(|i| string(i, "identifier"))
+                .collect::<Result<Vec<_>, _>>()?;
+            matches.sort_unstable();
+            for ident in matches {
                 conflicts.insert(k);
                 changes.push(format!(
                     "conflict {k}: {ident} has this title; set \"issue\": \"{ident}\" in plan.json"
@@ -419,7 +419,7 @@ pub(super) fn load(
         }
         if apply && !conflicts.is_empty() {
             println!("{}", changes.join("\n"));
-            return Err("unmapped issue conflicts".into());
+            return Ok(2);
         }
     }
     for ph in rows(plan, "phases")? {
@@ -686,7 +686,7 @@ pub(super) fn load(
             );
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 fn project_labels(l: &mut Linear, scope: &Value) -> Result<Vec<Value>, String> {

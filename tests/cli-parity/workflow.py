@@ -37,6 +37,8 @@ def scenario(binary, work):
     comments = []
     fail_relation_once = True
     claim_reads = []
+    refused = set()
+    archive_error = None
     paths = {k: work / k for k in ("clean", "dirty", "unrelated", "custom-coordinator-path")}
     for path in paths.values():
         path.mkdir()
@@ -106,7 +108,14 @@ else:
         elif "team(id:" in q and "labels(" in q:
             data = {"team": {"labels": page(labels.values())}}
         elif "projects(first:" in q:
-            data = {"team": {"projects": page([])}}
+            project = {"id": "p", "name": "Example", "url": "https://example.invalid/p"}
+            data = {"team": {"projects": page([project] if issues else [])}}
+        elif "project(id:" in q and "issues(first:" in q:
+            data = {"project": {"issues": page(issues.values())}}
+        elif "project(id:" in q and "projectMilestones(first:" in q:
+            data = {"project": {"projectMilestones": page([{"id": "m", "name": "Build"}])}}
+        elif "issue(id:" in q and "comments(first:" in q:
+            data = {"issue": {"comments": page([])}}
         elif "projectCreate(" in q:
             data = {"projectCreate": {"project": {"id": "p", "url": "https://example.invalid/p"}}}
         elif "projectMilestoneCreate(" in q:
@@ -142,6 +151,8 @@ else:
                 return h.reply({"errors": [{"message": "fixture interrupted after relation creation"}]})
             data = {"issueRelationCreate": {"success": True}}
         elif "issueUpdate(" in q:
+            if ("update", v["id"]) in refused:
+                return h.reply({"data": {"issueUpdate": {"success": False}}})
             issue = issues[v["id"]]
             if "o" in v:
                 issue["sortOrder"] = v["o"]
@@ -156,6 +167,10 @@ else:
         elif "issues(first:100," in q:
             data = {"issues": page([i for i in issues.values() if i["state"]["name"] == "Done" and i["id"] not in archives])}
         elif "issueArchive(" in q:
+            if ("archive", v["id"]) in refused:
+                return h.reply({"data": {"issueArchive": {"success": False}}})
+            if archive_error == v["id"]:
+                return h.reply({"errors": [{"message": "fixture archive interruption"}]})
             archives.append(v["id"])
             data = {"issueArchive": {"success": True}}
         else:
@@ -178,7 +193,9 @@ else:
         assert "create project" in initial and not (work / "keymap.json").exists()
         run("load", "--apply", code=2)
         # Both adapters surface the injected GraphQL failure; their transport diagnostics differ.
-        outcomes.pop()
+        interrupted = outcomes.pop()
+        if len(binary) == 1:
+            assert ": created" not in interrupted[1]
         assert len(links) == 1
         run("load", "--apply")
         assert json.loads((work / ".claude/settings.local.json").read_text())["autoCompactWindow"] == 142000
@@ -220,21 +237,6 @@ else:
         assert {groups[uid]["name"] for uid in active_labels} == {"standard", "review:thorough"}
         run("approve", "a", "--quote", "go ahead")
         assert comments[-1].endswith('Their words: "go ahead"')
-        if len(binary) == 1:
-            # A persisted row can identify the coordinator by its custom path alone.
-            original = (work / "keymap.json").read_bytes()
-            saved_journal = (work / "journal.jsonl").read_bytes()
-            km = json.loads(original)
-            km.setdefault("run", {}).setdefault("nodes", {}).setdefault("a", {})["path"] = str(paths["custom-coordinator-path"])
-            (work / "keymap.json").write_text(json.dumps(km))
-            old_state = issues["3"]["state"]
-            run("move", "a", "Done", "--force", "fixture")
-            assert "removed worktree" not in outcomes.pop()[1]
-            assert not json.loads((work / "keymap.json").read_bytes())["run"]["nodes"]["a"].get("worktree_removed")
-            issues["3"]["state"] = old_state
-            archives.clear()
-            (work / "keymap.json").write_bytes(original)
-            (work / "journal.jsonl").write_bytes(saved_journal)
         for key in ("dirty", "clean"):
             km = json.loads((work / "keymap.json").read_bytes())
             km.setdefault("run", {}).setdefault("nodes", {}).setdefault("a", {})["worktree"] = key
@@ -244,6 +246,45 @@ else:
         assert (paths["dirty"] / "pending").read_text() == "user data"
         assert archives == ["3"]
         run("archive", "--apply")
+        km = json.loads((work / "keymap.json").read_bytes())
+        km["nodes"]["old"] = km["nodes"].pop("a")
+        (work / "keymap.json").write_text(json.dumps(km))
+        stdout = run("load", "--apply", code=2)
+        assert "orphan old -> EX-3" in stdout and "conflict a: EX-3" in stdout
+        assert not outcomes[-1][2]
+        del km["project"]
+        (work / "keymap.json").write_text(json.dumps(km))
+        stdout = run("load", "--adopt")
+        assert stdout.startswith("orphan old -> EX-3\n") and "adopted a -> EX-3" in stdout
+        if len(binary) == 1:
+            # Exercise native safeguards that deliberately exceed the Python reference.
+            original = (work / "keymap.json").read_bytes()
+            saved_journal = (work / "journal.jsonl").read_bytes()
+            km = json.loads(original)
+            km["run"]["nodes"]["a"] = {"path": str(paths["custom-coordinator-path"])}
+            (work / "keymap.json").write_text(json.dumps(km))
+            run("move", "a", "Done", "--force", "fixture")
+            assert "removed worktree" not in outcomes.pop()[1]
+            assert not json.loads((work / "keymap.json").read_bytes())["run"]["nodes"]["a"].get("worktree_removed")
+            assert sorted(r["id"] for r in json.loads(inventory.read_text())) == ["custom-coordinator-path", "dirty", "unrelated"]
+            issues["3"]["state"] = {"name": "Todo", "type": "unstarted"}
+            issues["2"]["state"]["name"] = "Ready"
+            refused.add(("update", "3"))
+            run("ready", "--apply")
+            _, _, message = outcomes.pop()
+            assert "EX-3: state update failed" in message and "moved EX-3" not in message
+            assert issues["2"]["state"]["name"] == "Todo"
+            for issue in issues.values():
+                issue["state"]["name"] = "Done"
+            archives.clear()
+            refused.add(("archive", "2"))
+            archive_error = "3"
+            run("archive", "--apply")
+            _, summary, warnings = outcomes.pop()
+            assert archives == ["1"] and summary.endswith(": EX-1\n")
+            assert "refused to archive EX-2" in warnings and "fixture archive interruption" in warnings
+            (work / "keymap.json").write_bytes(original)
+            (work / "journal.jsonl").write_bytes(saved_journal)
     def stable(value):
         if isinstance(value, dict):
             return {k: stable(v) for k, v in value.items() if k != "time"}

@@ -92,6 +92,16 @@ Each account starts with notices on for decisions and ops steps, merge requests,
 other waits. The account can turn notices off or select the kinds to receive. Removing one device
 keeps the account settings and the other devices.
 
+A coordinator sends a move with `POST /api/push/notices`. Use the coordinator bearer token.
+Send a JSON object with `workspace`, `project`, `issue` (the issue identifier), and `kind`
+(`decision`, `merge`, `question`, or `wait`). In config mode, add `recipient` with the email
+of one configured owner. You can omit it if there is one owner. In service mode, omit it.
+The token identifies the account. The server reads the project name for the notice.
+
+The signed-in page can send a test to one registered device with
+`POST /api/push/devices/:id/test`. Both routes return 202 when they accept the request.
+Each account can request 30 notices per minute. A disabled notice produces no delivery.
+
 `wg` and the page server read `~/.config/work-graph/config.json` (or the file `WG_CONFIG`; the server also takes
 the text in `WG_CONFIG_JSON`). Without a file, there is one Linear workspace with `LINEAR_API_KEY`, the human is
 "Human", there is no hosted page, and each plan needs `effort.test`. Every field is optional:

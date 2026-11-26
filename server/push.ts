@@ -42,7 +42,8 @@ function validEndpoint(value: unknown): value is string {
 }
 
 export function pushRoutes(publicKey: string | undefined, store: (() => Promise<PushStore> | PushStore) | undefined,
-  authorize: (c: Context) => Promise<string | Response>, now: () => number) {
+  authorize: (c: Context) => Promise<string | Response>, now: () => number,
+  testDevice?: (c: Context, account: string, storage: PushStore, id: string) => Promise<Response>) {
   const routes = new Hono<{ Variables: { account: string; storage: PushStore } }>();
   routes.use(async (c, next) => {
     c.header("Cache-Control", "no-store");
@@ -54,6 +55,12 @@ export function pushRoutes(publicKey: string | undefined, store: (() => Promise<
     return next();
   });
   routes.use(bodyLimit({ maxSize: 8192 }));
+  routes.post("/devices/:id/test", async c => {
+    const id = c.req.param("id");
+    if (!/^[a-f0-9]{64}$/.test(id)) return c.json({ error: "Invalid device" }, 400);
+    if (!testDevice) return c.json({ error: "Push is not set up" }, 503);
+    return testDevice(c, c.var.account, c.var.storage, id);
+  });
   routes.get("/key", c => c.json({ publicKey }));
   routes.get("/devices", async c => {
     const devices = await c.var.storage.list(c.var.account);

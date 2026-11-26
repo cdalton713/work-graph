@@ -5,7 +5,6 @@ import { createApp } from "../../server/app.ts";
 import { setTransport } from "../../server/linear.ts";
 import { createSite, statusOrder } from "../../src/lib/site.ts";
 import contract from "../../skills/work-graph/contract.json" with { type: "json" };
-import { pagePort } from "./ports.ts";
 
 const team = { id: "team", key: "WG" };
 const pageInfo = { hasNextPage: false, endCursor: null };
@@ -70,10 +69,14 @@ setTransport({
   sleep: async () => {},
 });
 
-const app = createApp({ port: pagePort, tailnet: null }, {
+const rules = { port: 0, tailnet: null };
+const app = createApp(rules, {
   team: team.key, human: "Ada", dist: fileURLToPath(new URL("../../dist/", import.meta.url)),
   watchMs: 0, telemetryEnv: {}, readOnly: false,
   workspaces: [{ id: "default", name: "Example", team: team.key, key: "fixture", teamLabels: false }],
 });
-const server = serve({ port: pagePort, hostname: "127.0.0.1", fetch: app.fetch });
+const server = serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch }, ({ port }) => {
+  rules.port = port;
+  console.log(`Page fixture at http://127.0.0.1:${port}/`);
+});
 if (server instanceof Server) app.injectWebSocket(server);

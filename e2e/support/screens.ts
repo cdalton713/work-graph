@@ -2,10 +2,12 @@ import { expect, test as playwright, type Page } from "@playwright/test";
 import { pageUrl, serviceUrl } from "./ports.ts";
 
 export const test = playwright.extend({
+  baseURL: async ({}, use) => use(pageUrl()),
   context: async ({ context }, use) => {
+    const fixtureOrigins = [pageUrl(), serviceUrl()];
     await context.route("**/*", (route) => {
       const origin = new URL(route.request().url()).origin;
-      return origin === pageUrl || origin === serviceUrl ? route.continue() : route.abort();
+      return fixtureOrigins.includes(origin) ? route.continue() : route.abort();
     });
     await use(context);
   },
@@ -36,11 +38,11 @@ export const screens = {
     await expect(board(page)).toBeVisible();
   },
   async settings(page: Page) {
-    await page.goto(`${serviceUrl}/auth/login?as=ada&next=/?page=settings`);
+    await page.goto(`${serviceUrl()}/auth/login?as=ada&next=/?page=settings`);
     await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   },
   async setup(page: Page) {
-    await page.goto(`${serviceUrl}/auth/login?as=ada&next=/?page=setup`);
+    await page.goto(`${serviceUrl()}/auth/login?as=ada&next=/?page=setup`);
     await expect(page.getByRole("heading", { name: "Setup guide", exact: true })).toBeVisible();
   },
 };

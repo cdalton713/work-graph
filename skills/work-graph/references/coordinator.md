@@ -45,6 +45,7 @@ An Orca message, the end of `wg next --wait`, or a message from the human wakes 
 |---|---|
 | `wait collaborator <person> <key>` | Leave the node to the holder. |
 | `wait owner <key>` | Leave the node to the project owner. |
+| `note human <key>: waits on <person>` | Leave the node to the named person. |
 | `note stale <key>` | Ask the human before takeover. See collab.md "Claims". |
 | `wait claims page` | Start no new job. Running jobs continue. |
 <!-- /explain -->
@@ -69,7 +70,8 @@ Run `wg next <plan-dir>`: its lines, not old messages, are the state. Run `wg ex
 
 ### One coordinator per effort
 
-Exactly one session coordinates an effort, and Orca wakes only the terminal that holds the Run.
+Use one coordinator per account per effort. Orca wakes the Run terminal.
+See [Share a plan](collab.md).
 
 - A background session has no Orca terminal: Orca cannot wake it. Run the coordinator in a terminal session, or rely on `wg autostart`, which starts a fresh coordinator in the core worktree.
 - A fork of the coordinator session (a copy that shares its history) is not the coordinator. When Orca wakes a fork, the fork does not run `orca orchestration check`, because that takes the coordinator's mail. It reads `orca orchestration inbox --terminal run:<run_id>` (read-only) and tells the coordinator with `SendMessage`.

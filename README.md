@@ -148,8 +148,8 @@ the agents in the plan directory (the coordinator) and in the worktree of each r
 agent, the page gets its state, its title, and its last message as one line of at most 500 characters. The
 Overview shows one line for each agent below its project. An agent that Orca reports as `blocked` or `waiting`
 stopped at a prompt: it counts as a move of the human's, and it sends one notice through the `notify` channels
-when it waits for two reads in sequence. The message text goes to the page server, so do not use `wg agents` with
-a page that other people can read.
+when it waits for two reads in sequence. The message text goes to the page server. On a config page, use
+`wg agents` only if everyone with access may read the agent lines.
 
 The Overview inbox puts moves with a waiting agent first, then moves that hold back the most open issues.
 When these are equal, the oldest move comes first. Each move shows if an agent waits, how many open issues
@@ -422,36 +422,8 @@ unavailable while `/healthz` returns 200.
 
 ## Run the hosted service
 
-A collaborator can ask the project owner for access to the Linear team. The owner can add an existing workspace member to the team or confirm an email invite for someone outside the workspace. An invite can add a seat to the Linear plan.
-
-The hosted service stores node claims for each project. A coordinator token can
-claim a node and renew its lease. The lease defaults to ten minutes. The project
-owner can list and release claims. Project members can list claims, and
-collaborators can claim nodes and release their own claims.
-The service tells connected pages and other coordinators when a claim changes,
-including when a renewal changes the job.
-
 The service hosts the page and its API. Accounts share a server and keep their workspaces private.
 Each user runs `wg`, Orca, `gh`, `st`, `uv`, and an agent CLI on their own machine.
-
-Choose **Share** on a project in your Linear sign-in workspace to make a read-only link and a collaboration link.
-Copy each link when it appears. The service shows the address only when it makes the link.
-The recipient signs in with Linear to join the project. Revoking a link prevents new joins.
-Existing members keep their role until the owner changes it or removes them.
-The host's access logs and the browser's history can hold a join address, so rotate a link if you sent it to the wrong place.
-
-Open a project under **Shared projects** in the project menu. Viewers and collaborators see the same graph, with issues from the shared project only. A collaborator
-can also comment, change issue status and labels, and send commands to the coordinator. To write to Linear,
-a collaborator needs their own connection to the project’s Linear organization. The owner manages project settings and members.
-
-The service stores up to 50 versions of each project plan and keymap. The owner
-uses a coordinator token to store the first version. Owners and collaborators
-can save a new version if the current version still matches. Viewers can read
-the current plan. When a plan exists, only the owner can claim a merge point,
-ship point, or ops node. Use the version number in the response body for
-`If-Match` when you save a new version. If the newest plan removed a node,
-claim renewal returns 404 and the holder must stop work on that node.
-The service tells connected pages and other coordinators when it saves a new version.
 
 ### Parts of the service
 
@@ -560,7 +532,6 @@ personal API keys separately in Linear. Project and issue records stay in Linear
 - Each account can have 10 workspace connections including the sign-in workspace, and 10 active coordinator tokens.
 - Each account can make 10 personal key checks in 10 minutes. Attaching a workspace and replacing its key use the same limit.
 - Each server process uses one Linear request limiter for all accounts, with up to six requests in flight.
-- Projects cannot be shared between service accounts.
 - The function configuration allows 300 seconds per invocation. Sockets have a default age of 270 seconds.
   Use 60 to 280 seconds for a custom age with that configuration. Allow at least 20 seconds before the function limit.
   Clients reconnect after a close. If the host pauses the instance, the server checks the Redis connection
@@ -582,6 +553,90 @@ Use the loopback address from the terminal. To attach the second workspace, use 
 To open the shared project, go to `/auth/login?as=ada` on the loopback address. Open **Example project** and select **Share**.
 To see the project as a collaborator, go to `/auth/login?as=grace` and open the shared **Example project**.
 Use `/auth/login?as=pat` for the viewer. To see a Linear access refusal, start the preview with `pnpm service:dev --refuse-access`.
+
+## Share a project
+
+On a hosted service, the **Read-only link** lets a member read the shared project. The
+**Collab link** also lets a member edit the project and run its nodes.
+The owner keeps pause and resume, autonomy, review effort, closing the effort,
+sharing, and member management. The owner handles merge points, ship points,
+ops nodes, decisions, and deploys.
+
+### Set up sharing as the owner
+
+1. Open a project in your Linear sign-in workspace and select **Share**. Select
+   **Make link** for each role you want to offer. Copy the link before you close
+   the dialog. Keep each link secret. Anyone with the link can sign in with
+   Linear and join with its role. Send it only to the intended person. The
+   host's access logs and browser history can hold the join address. If a link
+   goes to the wrong place, use **New link** to stop the old link and make a new one.
+2. For CLI collaboration, set `effort.team` in the plan. Sign in with `wg login <page-url>`,
+   set the workspace's `page_url` to the page address in the local config,
+   load the plan with `wg load <plan-dir> --apply`, then run `wg share <plan-dir>`
+   to publish the first plan version.
+3. In **Members**, set a member's role or select **Remove** to end their access.
+   **Turn off** stops new joins. Turning off or replacing a link keeps existing
+   memberships. Removing a member or changing their role to viewer releases
+   their claims.
+
+### Join as a collaborator
+
+1. Open the **Collab link** in a browser. Sign in with Linear and select
+   **Join**. Open the project under **Shared projects**.
+2. Create a coordinator token in **Settings**. Run `wg login https://wg.example.com`
+   with your page address and paste the token at the prompt. Match the local
+   `human` setting to your display name on the page.
+3. Run `wg join https://wg.example.com` from your repository checkout. Use your
+   own Linear key with access to the project's team. Give the CLI the page
+   address. It refuses the **Collab link**. Follow the printed instructions
+   if you need to add the key or create the coordinator worktree.
+4. The page uses your own Linear connection for writes. If the page asks for
+   a workspace key, attach your own in **Settings**. If you lack team access,
+   select **Request access**. The owner selects **Add access** in **Members**
+   to add an existing workspace member to the team or confirm an email
+   invitation. An invitation can add a seat to the Linear plan.
+
+See [Join as a collaborator](skills/work-graph/references/collab.md#join-as-a-collaborator)
+for worktree setup and how to leave.
+
+### Run work together
+
+A coordinator claims a node before dispatch. The lease lasts 10 minutes by
+default. `wg next` and `wg tick` renew claims for local run rows. Another
+coordinator sees `wait collaborator <person> <key>: job=<job>` and leaves
+that node to the holder. A `note stale` line means the lease expired.
+Ask your human before you take it with `wg claim <plan-dir> <key> <job> --takeover`.
+The owner can release another holder's claim on the page.
+Each person uses their own `Needs <name>` status in the project's Linear team.
+
+Use `wg pull <plan-dir>` to fetch the shared plan version. Use
+`wg load <plan-dir> --apply` to update Linear and publish your changes.
+The service stores the full plan, including the writer's test command, lint,
+rules, agents, and team settings. Every project member can read the current
+plan. Keep secrets out of `plan.json`. Each coordinator uses local settings
+until they choose `wg pull <plan-dir> --accept-settings`.
+
+If a newer version blocks the write, pull it, compare the changes, and
+apply your edits to the new version before you publish again. See
+[Resolve a version conflict](skills/work-graph/references/collab.md#resolve-a-version-conflict)
+for local edits and HTTP 412.
+
+The owner and collaborators can see shared worker questions and progress.
+Each account sees only its own agent lines. See
+[The agents on the page](#the-agents-on-the-page).
+
+### Sharing limits
+
+- A project can have 50 members in addition to the owner. Its link room can
+  hold up to eight collaborator accounts that connect a coordinator or
+  send a page command. The owner has a place in addition.
+- A project can have 200 live node claims. A lease can last 30 to 3600 seconds.
+- A plan write can contain up to 1 MiB of JSON, including the keymap. The
+  maximum nesting depth is 64. The service keeps the latest 50 versions.
+
+A config installation shares read access with the Linear project label
+`shared`. See [Give owners and viewers access on one hosted page](#give-owners-and-viewers-access-on-one-hosted-page)
+and [Host a read-only viewer](#host-a-read-only-viewer).
 
 ## Usage data
 
@@ -626,10 +681,6 @@ shared, and they can change nothing. Your own page stays where it is, and each c
   with the **Share** button on the full page, or in Linear. The button uses the workspace's `share_url`
   if set. On a full page with sign-in, it otherwise uses that page's address. A full page without sign-in
   needs `share_url` to show the button. The viewer must name the workspace with the same `id`.
-  For a collaborator invitation, open the link in a browser, sign in, and press **Join**.
-  Then run `wg login <page-url>` and `wg join <page-url>` with the page address.
-  Run `wg leave <plan-dir>` to release your claims and remove local collaboration.
-  End your membership on the page. See [Collaboration](skills/work-graph/references/collab.md).
 - **When a share ends.** The viewer decides from its newest project list from Linear. It reads the list for each
   overview poll of each open page, and again when its copy is 60 s old. So a project that loses the label leaves
   the viewer at the next list, in at most 60 s. Each server process has its own list: where a host runs more than

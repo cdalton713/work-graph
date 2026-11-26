@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.10
+# syntax=docker/dockerfile:1.10.0
 # The hosted work-graph page (README "Host the page"). Node runs the TypeScript server directly.
 FROM node:24.22.1-alpine AS build
 WORKDIR /ui

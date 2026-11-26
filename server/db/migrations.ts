@@ -73,6 +73,33 @@ const migrations = [
     `UPDATE tenants t SET first_usage_connection = true WHERE EXISTS
       (SELECT 1 FROM coordinator_tokens c WHERE c.tenant_id = t.id AND c.last_used_at IS NOT NULL)`,
   ],
+  [
+    `CREATE TABLE shares (
+      id uuid PRIMARY KEY,
+      tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      connection_id uuid NOT NULL REFERENCES linear_connections(id) ON DELETE CASCADE,
+      project_id text NOT NULL,
+      project_name text NOT NULL,
+      kind text NOT NULL CHECK (kind IN ('view', 'collab')),
+      token_hash text NOT NULL UNIQUE,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      revoked_at timestamptz
+    )`,
+    `CREATE UNIQUE INDEX shares_live ON shares (tenant_id, connection_id, project_id, kind)
+      WHERE revoked_at IS NULL`,
+    `CREATE INDEX shares_project ON shares (tenant_id, connection_id, project_id)`,
+    `CREATE TABLE project_members (
+      tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      connection_id uuid NOT NULL REFERENCES linear_connections(id) ON DELETE CASCADE,
+      project_id text NOT NULL,
+      user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role text NOT NULL CHECK (role IN ('viewer', 'collaborator')),
+      share_id uuid NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+      joined_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant_id, connection_id, project_id, user_id)
+    )`,
+    `CREATE INDEX project_members_user ON project_members (user_id, project_id)`,
+  ],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

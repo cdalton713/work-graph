@@ -13,6 +13,11 @@ import { credentialCrypto } from "./db/crypto.ts";
 import { migrate } from "./db/migrations.ts";
 import { pgliteSql } from "./testing/sql.ts";
 
+it("rewrites join pages to the function before the static fallback", () => {
+  const rewrite = vercelConfig.rewrites.find(({ source }) => new RegExp(`^${source}$`).test("/join/example"));
+  expect(rewrite).toEqual({ source: "/join/(.*)", destination: "/api" });
+});
+
 const host = "page.example.com";
 const headers = { host };
 const auth = { domains: ["example.com"], owners: ["ada@example.com"] };

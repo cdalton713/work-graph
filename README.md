@@ -389,6 +389,12 @@ unavailable while `/healthz` returns 200.
 The service hosts the page and its API. Accounts share a server and keep their workspaces private.
 Each user runs `wg`, Orca, `gh`, `st`, `uv`, and an agent CLI on their own machine.
 
+Choose **Share** on a project in your Linear sign-in workspace to make a read-only link and a collaboration link.
+Copy each link when it appears. The service shows the address only when it makes the link.
+The recipient signs in with Linear to join the project. Revoking a link prevents new joins.
+Existing members keep their role until the owner changes it or removes them.
+The host's access logs and the browser's history can hold a join address, so rotate a link if you sent it to the wrong place.
+
 ### Parts of the service
 
 - Run the container behind an HTTPS proxy that supports WebSocket upgrades. The server listens on the

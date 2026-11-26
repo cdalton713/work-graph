@@ -3,7 +3,7 @@ import type { ReviewEffort } from "./lib/review";
 import { pageEvent, type PageEvent } from "./lib/telemetry";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
-import type { Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectList, ServerStatus } from "./lib/types";
+import type { Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShareLinks, ServerStatus } from "./lib/types";
 
 /** The open project. A write names it (`x-project`), so the server can tell its coordinator at once. */
 let openProject: string | null = null;
@@ -35,6 +35,20 @@ async function call<T>(path: string, init?: RequestInit, workspace = site.defaul
 
 function accountWrite<T>(path: string, method: string, data?: object) {
   return call<T>(`account${path}`, { method, body: data && JSON.stringify(data) });
+}
+
+export function joinProject(token: string): Promise<ProjectJoinPreview | null>;
+export function joinProject(token: string, confirm: true): Promise<ProjectJoin | null>;
+export async function joinProject(token: string, confirm?: true): Promise<ProjectJoin | null> {
+  const response = await fetch("/api/join", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, confirm }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (response.status === 401 && body.login) return null;
+  if (!response.ok) throw new Error(body.error || "Could not join the project");
+  return body;
 }
 
 export const accountApi = {
@@ -75,6 +89,8 @@ export const api = {
   /** Share the project with the read-only viewer, or stop that (the project label `shared`). */
   share: (projectId: string, shared: boolean, workspace?: string) =>
     call<{ ok: boolean; shared: boolean }>(`projects/${projectId}/share`, { method: "POST", body: JSON.stringify({ shared }) }, workspace),
+  makeShareLinks: (projectId: string, workspace?: string) =>
+    call<ProjectShareLinks>(`projects/${encodeURIComponent(projectId)}/share`, { method: "POST" }, workspace),
   /** The human's reply to a worker's question; the coordinator sends it to the worker. */
   reply: (projectId: string, askId: string, body: string, workspace?: string) => call<{ ok: boolean; recorded: boolean }>(`projects/${projectId}/asks/${encodeURIComponent(askId)}/reply`, { method: "POST", body: JSON.stringify({ body }) }, workspace, "answer_written"),
   update: (issueId: string, patch: IssuePatch, workspace?: string) => call<Issue>(`issues/${issueId}`, { method: "PATCH", body: JSON.stringify(patch) }, workspace, patch.stateId === undefined ? undefined : "status_written"),

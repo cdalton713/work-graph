@@ -18,7 +18,7 @@ import { type OverviewData, PROJECT_LAMP, movesWithAgents, movesWithAsks, summar
 import { ownerWords } from "./lib/words";
 import { configureSite, site, statusOrder } from "./lib/site";
 import { type Layout, layout as runLayout } from "./lib/layout";
-import type { Account, GraphData, Issue, IssuePatch, Project, ProjectList, ServerStatus } from "./lib/types";
+import type { Account, GraphData, Issue, IssuePatch, Project, ProjectList, ProjectShareLinks, ServerStatus } from "./lib/types";
 import { useLink } from "./useLink";
 
 const POLL_MS = 15_000;
@@ -86,7 +86,7 @@ export function ServiceApp() {
     lastAccountView.current = accountView;
     if (accountView) pageEvent(accountView, signInWorkspace);
   }, [accountView, signInWorkspace]);
-  if (account && page !== "settings" && !showGuide) return <App openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
+  if (account && page !== "settings" && !showGuide) return <App service openSettings={() => route("settings")} overviewWorkspace={signInWorkspace} />;
   return <div className="app">
     <header className="bar account-bar">
       <span className="brand">work-graph</span><span className="station-fill" />
@@ -104,7 +104,9 @@ export function ServiceApp() {
   </div>;
 }
 
-export function App({ openSettings, overviewWorkspace = site.defaultWorkspace }: { openSettings?: () => void; overviewWorkspace?: string } = {}) {
+export function App({ openSettings, overviewWorkspace = site.defaultWorkspace, service = false }: {
+  openSettings?: () => void; overviewWorkspace?: string; service?: boolean;
+} = {}) {
   const [query, setQuery] = useQuery();
   const [directory, setDirectory] = useState<ProjectList | null>(null);
   const [data, setData] = useState<GraphData | null>(null);
@@ -304,6 +306,22 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace }:
   const shareLink = project && shareUrl
     ? `${shareUrl}/?${new URLSearchParams({ workspace: project.workspace ?? site.defaultWorkspace, project: project.id })}` : null;
   const [shareBusy, setShareBusy] = useState(false);
+  const [shareLinks, setShareLinks] = useState<ProjectShareLinks | null>(null);
+  const shareDialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (shareLinks && !shareDialog.current?.open) shareDialog.current?.showModal();
+  }, [shareLinks]);
+  const makeShareLinks = async () => {
+    if (!project || shareBusy) return;
+    setShareBusy(true);
+    try {
+      setShareLinks(await api.makeShareLinks(project.id, project.workspace));
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      setShareBusy(false);
+    }
+  };
   const setShared = async (shared: boolean) => {
     if (!project || shareBusy) return;
     const target = project;
@@ -527,6 +545,24 @@ export function App({ openSettings, overviewWorkspace = site.defaultWorkspace }:
           <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void setShared(true)}
             title="Show this project on the read-only viewer, for each account that may sign in there. The link to copy shows here then.">{shareBusy ? "Sharing…" : "Share"}</button>
         ))}
+        {!viewer && service && project && (
+          <button type="button" className="ghost bar-share" disabled={shareBusy} onClick={() => void makeShareLinks()}>
+            {shareBusy ? "Sharing…" : "Share"}
+          </button>
+        )}
+        <dialog ref={shareDialog} className="account-dialog" aria-label="Share links" onClose={() => setShareLinks(null)}>
+          <h2>Share links</h2>
+          {shareLinks && (["view", "collab"] as const).map((kind) => {
+            const link = shareLinks[kind];
+            const label = kind === "view" ? "Read-only link" : "Collaboration link";
+            return <div className="account-item" key={kind}>
+              <b>{label}</b>
+              {"url" in link ? <><code>{link.url}</code><CopyButton text={link.url} label={`Copy ${label.toLowerCase()}`} /></> :
+                <p>Link already exists.</p>}
+            </div>;
+          })}
+          <button type="button" onClick={() => shareDialog.current?.close()}>Close</button>
+        </dialog>
         <span className="station-fill" />
         {viewer && <span className="bar-viewer" title="This page changes nothing. The owner of the project changes it on their own page.">view only</span>}
         {full && (

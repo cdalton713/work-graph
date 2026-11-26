@@ -392,7 +392,7 @@ databaseSuites((open) => {
       expect(await (await t.request(path + "/teams", cookie)).json()).toEqual({ teams });
       const projects = async () => (await t.request("/api/projects", cookie)).json();
       expect((await projects()).projects.map(({ id }: { id: string }) => id)).toContain("personal-project");
-      expect((await t.request("/api/projects/personal-project/share", cookie, "POST", { shared: true }, { "x-workspace": "personal" })).status).toBe(403);
+      expect((await t.request("/api/projects/personal-project/share", cookie, "POST", undefined, { "x-workspace": "personal" })).status).toBe(400);
       const { connections } = await (await t.request(root, cookie)).json();
       expect(connections[0]).toMatchObject({ team: "HOME", team_labels: true, position: 0 });
       expect((await t.request(attach + "/" + connections[1].id, cookie, "DELETE")).status).toBe(403);

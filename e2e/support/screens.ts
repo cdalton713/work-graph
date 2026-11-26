@@ -34,6 +34,9 @@ export const screens = {
     await page.addInitScript(() => localStorage.setItem("wg-board", "off"));
     await page.goto(issuePath);
     await expect(page.locator(".panel").getByText("Example issue 1", { exact: true })).toBeVisible();
+    if (await page.evaluate(() => matchMedia("(pointer: fine)").matches)) {
+      await expect(page.locator(".react-flow")).toBeVisible();
+    }
   },
   async board(page: Page) {
     await screens.project(page);

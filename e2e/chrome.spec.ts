@@ -60,7 +60,8 @@ test("the status filters scroll with a fixed done count and explain each filter"
     expect(await tally.boundingBox()).toEqual(tallyBox);
     await filters.evaluate((element) => { element.scrollLeft = 0; });
   } else {
-    expect(rowBox.height).toBeCloseTo(28.39, 1);
+    // Text metrics differ slightly between the Linux and macOS font renderers.
+    expect(Math.abs(rowBox.height - 28.39)).toBeLessThanOrEqual(1.5);
     await expect(filter).toHaveAccessibleDescription("Dim all but Triage");
   }
   await filter.click();

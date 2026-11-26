@@ -295,6 +295,8 @@ local copies of `gh`, `st`, Orca, `uv`, and an agent CLI (Claude Code or Codex).
 
 The `Dockerfile` builds the page and its server. Run the container behind a proxy that serves HTTPS, and set:
 
+- `WG_PRECOMPRESSED_ASSETS=1`: the page server sends the gzip files from `pnpm build` to clients
+  that accept gzip. Leave the value unset to compress responses on request.
 - `WG_HOSTED`: the name that the page answers under (`wg.example.com`). The API refuses requests for another
   host name, and a write needs the exact HTTPS origin and a JSON body.
 - `WG_CONFIG_JSON`: the config text (at least `human` and `workspaces`).

@@ -10,6 +10,7 @@ import { Hono, type Context } from "hono";
 import { matchedRoutes } from "hono/route";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
+import { parseAccept } from "hono/utils/accept";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { type OverviewData, type ProjectSummary, summarize } from "../src/lib/overview.ts";
 import { parseCard, statusName } from "../src/lib/graph.ts";
@@ -63,6 +64,7 @@ export function contractHash(file: URL | string = new URL("../skills/work-graph/
 
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css",
+  ".woff2": "font/woff2",
   ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json", ".map": "application/json",
 };
 
@@ -434,6 +436,10 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     // Vite puts a hash of the content in each name under assets/, so such a file never changes.
     const fixed = c.req.path.startsWith("/assets/") && c.res.status === 200;
     c.header("Cache-Control", fixed ? "public, max-age=31536000, immutable" : "no-store");
+    if (c.req.path.startsWith("/fonts/") && c.res.headers.get("ETag") &&
+      (c.res.status === 304 || c.res.headers.get("Content-Type") === TYPES[".woff2"])) {
+      c.header("Cache-Control", "public, max-age=86400");
+    }
   });
   // Static files and JSON answers of any size, when the client accepts gzip. Every client that accepts Brotli
   // or deflate accepts gzip too. The 1 KiB minimum of `compress` applies only to a reply with a Content-Length,
@@ -1453,10 +1459,28 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const file = normalize(join(dist, c.req.path === "/" ? "index.html" : c.req.path));
     if (!file.startsWith(dist)) return c.text("forbidden", 403);
     const type = TYPES[extname(file)];
+    if (process.env.WG_PRECOMPRESSED_ASSETS === "1" && c.req.path.startsWith("/assets/")
+      && (type === TYPES[".js"] || type === TYPES[".css"])) {
+      const encodings = parseAccept(c.req.header("Accept-Encoding") ?? "");
+      const gzip = encodings.find(({ type }) => type.toLowerCase() === "gzip");
+      const wildcard = encodings.find(({ type }) => type === "*");
+      if ((gzip?.q ?? wildcard?.q ?? 0) > 0) {
+        const compressed = await readFile(`${file}.gz`).catch(() => null);
+        if (compressed) return c.body(compressed, 200, {
+          "Content-Type": type, "Content-Encoding": "gzip", Vary: "Accept-Encoding",
+        });
+      }
+    }
     // Unknown paths get the app, so a reloaded deep link works.
     const body = await readFile(type ? file : join(dist, "index.html")).catch(() => null);
     if (!body) return c.text("not found (run `pnpm build`)", 404);
     const contentType = type ?? TYPES[".html"];
+    if (contentType === TYPES[".woff2"] && c.req.path.startsWith("/fonts/")) {
+      const tag = `"${createHash("sha256").update(body).digest("hex")}"`;
+      const have = c.req.header("if-none-match")?.split(",").map((value) => value.trim().replace(/^W\//, ""));
+      if (have?.includes(tag) || have?.includes("*")) return c.body(null, 304, { ETag: tag });
+      return c.body(body, 200, { "Content-Type": contentType, ETag: tag });
+    }
     if (contentType !== TYPES[".html"]) return c.body(body, 200, { "Content-Type": contentType });
     // The page has `no-store`; the ETag lets a client that has it skip the body. The tag is weak, so that the
     // gzip and the plain reply have the same validator, and the 304 has the same ETag and Vary as the 200.

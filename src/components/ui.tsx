@@ -1,7 +1,6 @@
-import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { Component, lazy, Suspense, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import Markdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
+import type { Components, Options as MarkdownOptions } from "react-markdown";
 import { useCoarse, useHover, useNarrow } from "../lib/screen";
 import type { Signal } from "../lib/graph";
 import type { PullRequest } from "../lib/types";
@@ -171,6 +170,35 @@ export function Picker(props: {
   </div>;
 }
 
+export class LazyBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+export function LoadError({ message }: { message: string }) {
+  return <div role="alert">
+    {message} <button type="button" onClick={() => window.location.reload()}>Reload</button>
+  </div>;
+}
+
+const Markdown = lazy(async () => {
+  const [{ default: RenderMarkdown }, { default: gfm }] = await Promise.all([
+    import("react-markdown"),
+    import("remark-gfm"),
+  ]);
+  return {
+    default: (props: Pick<MarkdownOptions, "children" | "components">) =>
+      <RenderMarkdown {...props} remarkPlugins={[gfm]} />,
+  };
+});
+
 const markdownComponents: Components = {
   a: ({ href, children, title }) => <a href={href} title={title} target="_blank" rel="noopener noreferrer">{children}</a>,
 };
@@ -189,17 +217,22 @@ export function Rich({ text, linkHints }: { text: string; linkHints?: boolean })
   const fold = /^\+\+\+[ \t]*(.*)\n([\s\S]*?)\n\+\+\+[ \t]*$/gm;
   let at = 0;
   for (let m = fold.exec(text); m; m = fold.exec(text)) {
-    if (m.index > at) parts.push(<Markdown key={at} remarkPlugins={[remarkGfm]} components={components}>{text.slice(at, m.index)}</Markdown>);
+    if (m.index > at) parts.push(<Markdown key={at} components={components}>{text.slice(at, m.index)}</Markdown>);
     parts.push(
       <details key={`f${m.index}`} className="fold">
         <summary>{m[1] || "Details"}</summary>
-        <Markdown remarkPlugins={[remarkGfm]} components={components}>{m[2]}</Markdown>
+        <Markdown components={components}>{m[2]}</Markdown>
       </details>,
     );
     at = m.index + m[0].length;
   }
-  if (at < text.length) parts.push(<Markdown key={at} remarkPlugins={[remarkGfm]} components={components}>{text.slice(at)}</Markdown>);
-  return <div className="rich">{parts}</div>;
+  if (at < text.length) parts.push(<Markdown key={at} components={components}>{text.slice(at)}</Markdown>);
+  const plain = <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{text}</p>;
+  return <div className="rich">
+    <LazyBoundary fallback={<>{plain}<LoadError message="Could not load Markdown formatting." /></>}>
+      <Suspense fallback={plain}>{parts}</Suspense>
+    </LazyBoundary>
+  </div>;
 }
 
 /**

@@ -76,9 +76,9 @@ export const shareApi = {
     shareWrite<null>(`${projectPath(id)}/access/request`, workspace, "POST"),
 };
 
-async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace, event?: PageEvent): Promise<T> {
+async function call<T>(path: string, init?: RequestInit, workspace = site.defaultWorkspace, event?: PageEvent, project = openProject): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "x-workspace": workspace };
-  if (openProject && !(site.user && workspace.startsWith("shared:"))) headers["x-project"] = openProject;
+  if (project && !(site.user && workspace.startsWith("shared:"))) headers["x-project"] = project;
   const method = init?.method?.toUpperCase() ?? "GET";
   if (method !== "GET" && method !== "HEAD") {
     // Keep the same headers if this request is retried.
@@ -166,6 +166,6 @@ export const api = {
   /** The human's reply to a worker's question; the coordinator sends it to the worker. */
   reply: (projectId: string, askId: string, body: string, workspace?: string) => call<{ ok: boolean; recorded: boolean }>(`projects/${projectId}/asks/${encodeURIComponent(askId)}/reply`, { method: "POST", body: JSON.stringify({ body }) }, workspace, "answer_written"),
   update: (issueId: string, patch: IssuePatch, workspace?: string) => call<Issue>(`issues/${issueId}`, { method: "PATCH", body: JSON.stringify(patch) }, workspace, patch.stateId === undefined ? undefined : "status_written"),
-  comments: (issueId: string, workspace?: string) => call<Comment[]>(`issues/${issueId}/comments`, undefined, workspace),
-  comment: (issueId: string, body: string, workspace?: string) => call<Comment>(`issues/${issueId}/comments`, { method: "POST", body: JSON.stringify({ body }) }, workspace, "comment_written"),
+  comments: (issueId: string, workspace?: string, projectId?: string) => call<Comment[]>(`issues/${issueId}/comments`, undefined, workspace, undefined, projectId),
+  comment: (issueId: string, body: string, workspace?: string, projectId?: string) => call<Comment>(`issues/${issueId}/comments`, { method: "POST", body: JSON.stringify({ body }) }, workspace, "comment_written", projectId),
 };

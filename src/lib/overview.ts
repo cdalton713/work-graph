@@ -15,7 +15,11 @@ export { overviewMoveReason } from "./words.ts";
 export const PROJECT_LAMP: Record<string, Signal> = { started: "running", paused: "stop", planned: "ready", backlog: "idle", completed: "done", canceled: "off" };
 
 /** `updatedAt`: the last change of the issue, so the page can show how long the move waits. */
-export interface YourMove extends MoveRank { identifier: string; title: string; why: string; pullRequests: PullRequest[]; unblocks?: number }
+export interface YourMove extends MoveRank {
+  identifier: string; title: string; why: string; pullRequests: PullRequest[]; unblocks?: number;
+  answer?: { issueId: string; sent: boolean };
+  workerAsk?: Ask;
+}
 type MoveImpacts = Record<string, ReturnType<typeof moveImpact>>;
 
 export interface ProjectSummary {
@@ -82,7 +86,17 @@ export function summarize(data: GraphData, workspace: string, now = Date.now(), 
     done: graph.nodes.filter((n) => n.status === "Done").length,
     counts,
     moveImpacts,
-    you: humanMoves.map((n) => ({ identifier: n.issue.identifier, title: n.issue.title, why: yourMove(n.card?.next, summaryWords) ?? n.status, pullRequests: n.issue.pullRequests, updatedAt: n.issue.updatedAt, ...moveImpact(graph, n) })),
+    you: humanMoves.map((n) => {
+      const next = n.card?.next;
+      const canAnswer = !n.issue.external && n.status === settings.waitStatus
+        && !["ops", "merge-point", "ship-point"].includes(n.kind)
+        && !/^do ask-(?:merge|ready)(?::|$)/m.test(next ?? "");
+      return {
+        identifier: n.issue.identifier, title: n.issue.title, why: yourMove(next, summaryWords) ?? n.status,
+        pullRequests: n.issue.pullRequests, updatedAt: n.issue.updatedAt, ...moveImpact(graph, n),
+        ...(canAnswer && { answer: { issueId: n.id, sent: n.issue.labels.some((label) => label.name === "answered") } }),
+      };
+    }),
     running: groups.get("running")?.length ?? 0,
     review: groups.get("review")?.length ?? 0,
     ready: groups.get("next")?.length ?? 0,
@@ -175,15 +189,23 @@ function liveMoveImpact(impacts: MoveImpacts | undefined, id: string | null | un
 export function movesWithAsks(you: YourMove[], asks: Ask[] | undefined, impacts?: MoveImpacts): YourMove[] {
   asks = asks?.filter((ask) => !ask.accountName || ask.accountName === currentSite().human);
   if (!asks?.length) return you;
-  const asked = new Set(asks.map((a) => a.issue ?? "worker"));
-  const extra: YourMove[] = [];
-  for (const a of asks) {
-    const id = a.issue ?? "worker";
-    if (you.some((m) => m.identifier === id) || extra.some((m) => m.identifier === id)) continue;
-    extra.push({ identifier: id, title: a.body.split("\n")[0].trim(), why: `${askVerb(a)}:`, pullRequests: [], updatedAt: a.at, idle: true, ...liveMoveImpact(impacts, a.issue) });
+  const byIssue = new Map<string, Ask>();
+  for (const ask of asks) {
+    const id = ask.issue ?? "worker";
+    if (!byIssue.has(id)) byIssue.set(id, ask);
   }
-  const verb = (id: string) => askVerb(asks.find((a) => (a.issue ?? "worker") === id)!);
-  return [...extra, ...you.map((m) => (asked.has(m.identifier) ? { ...m, idle: true, why: `${verb(m.identifier)} · ${m.why}` } : m))];
+  const extra: YourMove[] = [];
+  for (const [id, ask] of byIssue) {
+    if (you.some((m) => m.answer && m.identifier === id)) continue;
+    extra.push({
+      identifier: id, title: ask.body.split("\n")[0].trim(), why: `${askVerb(ask)}:`,
+      pullRequests: [], updatedAt: ask.at, idle: true, workerAsk: ask, ...liveMoveImpact(impacts, ask.issue),
+    });
+  }
+  return [...extra, ...you.map((m) => {
+    const ask = m.answer && byIssue.get(m.identifier);
+    return ask ? { ...m, idle: true, why: `${askVerb(ask)} · ${m.why}`, workerAsk: ask } : m;
+  })];
 }
 
 /**

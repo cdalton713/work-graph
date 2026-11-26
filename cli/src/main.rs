@@ -6,6 +6,37 @@ fn main() -> ExitCode {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("setup")) {
         return wg_preview::linear::run_setup(std::env::args_os().skip(2));
     }
+    if matches!(
+        std::env::args_os()
+            .nth(1)
+            .as_deref()
+            .and_then(|v| v.to_str()),
+        Some("login" | "logout" | "join" | "leave" | "share" | "pull")
+    ) {
+        let Ok(args) = std::env::args_os()
+            .skip(1)
+            .map(|s| s.into_string())
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            eprintln!("invalid command argument");
+            return ExitCode::from(2);
+        };
+        return match wg_preview::page::preview(&args) {
+            Ok(out) => {
+                if !out.stdout.is_empty() {
+                    println!("{}", out.stdout);
+                }
+                if !out.stderr.is_empty() {
+                    eprintln!("{}", out.stderr);
+                }
+                ExitCode::from(out.status)
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let mut args = std::env::args_os().skip(1);
     match (args.next().as_deref(), args.next()) {
         (Some(verb), dir) if verb == "config" && args.next().is_none() => {

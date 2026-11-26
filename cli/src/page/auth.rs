@@ -1,0 +1,335 @@
+use super::*;
+use crate::Credential;
+use std::{
+    fs,
+    io::{self, BufRead, Write},
+    net::IpAddr,
+    os::unix::fs::{DirBuilderExt, PermissionsExt},
+    path::Path,
+};
+
+pub(super) struct Installation {
+    home: PathBuf,
+    config: Value,
+}
+
+impl Installation {
+    pub fn load() -> Result<Self> {
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is missing")?)
+            .join(".config/work-graph");
+        let path = std::env::var_os("WG_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("config.json"));
+        let config = match fs::read(path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|_| "invalid installation configuration")?
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(_) => return Err("cannot read installation configuration".into()),
+        };
+        Ok(Self { home, config })
+    }
+}
+
+impl ConfigProvider for Installation {
+    type Settings = Settings;
+    type Error = String;
+    fn resolve(&self, workspace: &str) -> Result<Settings> {
+        let default_page = self.config["page_url"].as_str();
+        let mut workspaces = Vec::new();
+        if let Some(rows) = self.config["workspaces"].as_array() {
+            for row in rows {
+                let id = row["id"].as_str().ok_or("invalid configured workspace")?;
+                workspaces.push((
+                    id.to_owned(),
+                    row["name"].as_str().unwrap_or(id).to_owned(),
+                    row["page_url"].as_str().or(default_page).map(str::to_owned),
+                ));
+            }
+        } else {
+            workspaces.push((
+                "default".into(),
+                "Linear".into(),
+                default_page.map(str::to_owned),
+            ));
+        }
+        let selected = if workspace.is_empty() {
+            workspaces.first()
+        } else {
+            workspaces.iter().find(|w| w.0 == workspace)
+        }
+        .ok_or("unknown workspace")?;
+        Ok(Settings {
+            page: selected.2.clone(),
+            human: self.config["human"].as_str().unwrap_or("Human").to_owned(),
+            token_directory: self.home.join("pages"),
+            workspaces,
+        })
+    }
+}
+
+// Production collaboration commands need the integrated state and credential providers.
+impl CredentialProvider for Installation {
+    type Error = String;
+    fn credential(&self, _: &str, _: &str) -> Result<Option<Credential>> {
+        Err("the credential provider is unavailable".into())
+    }
+}
+
+pub(super) fn validated_url(raw: &str, settings: &Settings) -> Result<Url> {
+    let error = "use a page URL with HTTPS, or configured HTTP on loopback or a tailnet";
+    if raw.contains(['?', '#', '\\']) || raw.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(error.into());
+    }
+    let uri: http::Uri = raw.parse().map_err(|_| error)?;
+    let authority = uri.authority().ok_or(error)?;
+    if authority.as_str().contains('@') {
+        return Err(error.into());
+    }
+    let url = Url::parse(raw).map_err(|_| error)?;
+    let host = authority
+        .host()
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase();
+    if host.len() > 253
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".:-".contains(&b))
+    {
+        return Err(error.into());
+    }
+    let private = host == "localhost"
+        || host.ends_with(".ts.net")
+        || host.parse::<IpAddr>().is_ok_and(|ip| {
+            ip.is_loopback()
+                || match ip {
+                    IpAddr::V4(ip) => u32::from(ip) >> 22 == 0x191,
+                    IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+                }
+        });
+    let configured = settings
+        .workspaces
+        .iter()
+        .filter_map(|w| w.2.as_deref())
+        .chain(settings.page.as_deref())
+        .any(|p| p.trim_end_matches('/') == raw);
+    if url.scheme() != "https" && !(url.scheme() == "http" && private && configured) {
+        return Err(
+            "use HTTPS unless the page has a configured HTTP loopback or tailnet URL".into(),
+        );
+    }
+    Ok(url)
+}
+
+fn token_path(settings: &Settings, raw: &str) -> Result<PathBuf> {
+    let uri: http::Uri = raw.parse().map_err(|_| "invalid page URL")?;
+    let authority = uri.authority().ok_or("invalid page URL")?;
+    let host = authority
+        .host()
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase();
+    let suffix = authority
+        .port_u16()
+        .map(|p| format!("_{p}"))
+        .unwrap_or_default();
+    let filename = format!("{host}{suffix}-token");
+    if filename.len() > 255 {
+        return Err("page host and port too long".into());
+    }
+    Ok(settings.token_directory.join(filename))
+}
+
+fn header(raw: &str) -> Result<(String, HeaderValue)> {
+    if !raw.bytes().all(|b| (32..=126).contains(&b)) {
+        return Err("the token must contain one line of printable ASCII".into());
+    }
+    let token = raw.trim();
+    if token.is_empty() {
+        return Err("the token is empty".into());
+    }
+    let value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| "invalid token")?;
+    Ok((token.into(), Credential::new(value).into_header()))
+}
+
+/// Resolve the credential for an HTTP or coordinator connection to the specified page.
+pub fn page_credential<K: CredentialProvider<Error = String>>(
+    settings: &Settings,
+    raw: &str,
+    scope: &str,
+    shared: bool,
+    provider: &K,
+) -> Result<Option<Credential>> {
+    validated_url(raw.trim_end_matches('/'), settings)?;
+    let mut token = None;
+    let configured = settings
+        .page
+        .as_deref()
+        .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'));
+    let saved = || -> Result<Option<HeaderValue>> {
+        let path = token_path(settings, raw)?;
+        match fs::File::open(&path) {
+            Ok(mut file) => {
+                use std::io::Read;
+                if file
+                    .metadata()
+                    .map_err(|_| "cannot inspect token")?
+                    .permissions()
+                    .mode()
+                    & 0o7777
+                    != 0o600
+                {
+                    return Err(format!("{} must have mode 600", path.display()));
+                }
+                let mut raw = String::new();
+                file.read_to_string(&mut raw)
+                    .map_err(|_| "cannot read token")?;
+                let line = raw.strip_suffix('\n').unwrap_or(&raw);
+                if line.bytes().all(|b| b == b' ') {
+                    return Ok(None);
+                }
+                Ok(Some(header(line)?.1))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err("cannot read page token".into()),
+        }
+    };
+    if shared || !configured {
+        token = saved()?;
+    }
+    if shared && token.is_none() {
+        for (workspace, _, url) in &settings.workspaces {
+            if url
+                .as_deref()
+                .is_some_and(|p| p.trim_end_matches('/') == raw.trim_end_matches('/'))
+            {
+                token = provider
+                    .credential(workspace, "page")?
+                    .map(Credential::into_header);
+                if token.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+    if !shared && configured && token.is_none() {
+        token = provider
+            .credential(scope, "page")?
+            .map(Credential::into_header);
+    }
+    if !shared && configured && token.is_none() {
+        token = saved()?;
+    }
+    Ok(token.map(Credential::new))
+}
+
+fn save(path: &Path, token: &str) -> Result<()> {
+    let dir = path.parent().ok_or("invalid token path")?;
+    fs::create_dir_all(dir.parent().ok_or("invalid token directory")?)
+        .map_err(|_| "cannot create token directory")?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(dir)
+        .map_err(|_| "cannot create token directory")?;
+    let meta = dir
+        .symlink_metadata()
+        .map_err(|_| "cannot inspect token directory")?;
+    if !meta.is_dir() || meta.permissions().mode() & 0o7777 != 0o700 {
+        return Err("the token directory must have mode 700".into());
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|_| "cannot create token file")?;
+    writeln!(tmp, "{token}").map_err(|_| "cannot write token")?;
+    tmp.persist(path).map_err(|_| "cannot save token")?;
+    Ok(())
+}
+
+pub(super) fn login(settings: &Settings, explicit: Option<&str>, stdin: bool) -> Result<String> {
+    let mut page = Page::new(settings, explicit)?;
+    let url = explicit
+        .or(settings.page.as_deref())
+        .ok_or("give the page URL")?
+        .trim_end_matches('/');
+    let path = token_path(settings, url)?;
+    let raw = if stdin {
+        let mut line = String::new();
+        io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|_| "cannot read token")?;
+        line.strip_suffix('\n').unwrap_or(&line).to_string()
+    } else {
+        rpassword::prompt_password("Page coordinator token: ")
+            .map_err(|_| "cannot read the token without echo; use --token-stdin")?
+    };
+    let (token, value) = header(&raw)?;
+    page.token = Some(value);
+    let config = token_json(&page, "/api/config")?;
+    if !config["auth"]
+        .as_bool()
+        .ok_or("the page did not report whether sign-in is enabled")?
+    {
+        let path = "/api/link?role=coordinator";
+        let with = token_response(&page, path)?.0;
+        if with != 400 {
+            check(with)?;
+        }
+        let credential = page.token.take();
+        let without = token_response(&page, path)?.0;
+        page.token = credential;
+        if with != 400 || !matches!(without, 401 | 403) {
+            return Err("the page did not confirm the token".into());
+        }
+    }
+    let status = token_json(&page, "/api/status")?;
+    save(&path, &token)?;
+    let mut lines = vec![format!("Saved the coordinator token for {url}.")];
+    for row in status["workspaces"].as_array().into_iter().flatten() {
+        let Some(id) = row["id"].as_str().filter(|s| {
+            !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        }) else {
+            continue;
+        };
+        let name: String = row["name"]
+            .as_str()
+            .unwrap_or(id)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(120)
+            .collect();
+        if settings.workspaces.iter().any(|w| {
+            w.0 == id
+                && w.2
+                    .as_deref()
+                    .is_some_and(|s| s.trim_end_matches('/') == url)
+        }) {
+            lines.push(format!("{id} ({name}): configured"));
+        } else {
+            lines.push(format!("{id} ({name}): set this entry in workspaces"));
+            lines.push(collaboration::display_json(
+                &serde_json::json!({"id":id,"name":name,"page_url":url}),
+            ));
+        }
+    }
+    Ok(lines.join("\n").replace(&token, "[redacted]"))
+}
+
+pub(super) fn logout(settings: &Settings, explicit: Option<&str>) -> Result<String> {
+    let url = explicit
+        .or(settings.page.as_deref())
+        .ok_or("give the page URL")?
+        .trim_end_matches('/');
+    validated_url(url, settings)?;
+    let message = match fs::remove_file(token_path(settings, url)?) {
+        Ok(()) => "Removed the saved token",
+        Err(e) if e.kind() == io::ErrorKind::NotFound => "There was no saved token",
+        Err(_) => return Err("cannot remove saved token".into()),
+    };
+    Ok(format!(
+        "{message} for {url}.\nUse the page settings to revoke the token on the page."
+    ))
+}

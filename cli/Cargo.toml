@@ -9,7 +9,7 @@ http = "1"
 
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 tempfile = "3"
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 unicode-general-category = "1"
 nix = { version = "0.31", features = ["user"] }
 serde = "1"
@@ -17,3 +17,13 @@ graphql-parser = "0.4"
 fastrand = "2"
 httpdate = "1"
 curl = "0.4"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
+rpassword = "7"
+sha2 = "0.10"
+tungstenite = "0.27"
+reqwest-websocket = "0.5"
+tokio = { version = "1", features = ["rt","time","net"] }
+futures-util = { version = "0.3", features = ["sink"] }
+url = "2"
+percent-encoding = "2"

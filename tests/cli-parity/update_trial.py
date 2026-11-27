@@ -21,13 +21,15 @@ SKILL, PLUGIN = "skills/work-graph/SKILL.md", "orca-plugin/orca-plugin.json"
 DISCOVERY = "/repos/fixture/release/releases/latest"
 PREFIX = f"wg-v{NEW}-{TARGET}"
 ASSETS = f"/fixture/release/releases/download/wg-v{NEW}/{PREFIX}"
+# Let the worker enforce its 60-second deadline, including checks after download.
+TRIAL_TIMEOUT = 90
 
 
 class Service(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.requests.append(self.path)
         if self.path == getattr(self.server, "stalled_path", None):
-            self.server.resume.wait(30)
+            self.server.resume.wait()
             return
         body = self.server.responses.get(self.path)
         if body is None:
@@ -35,7 +37,7 @@ class Service(http.server.BaseHTTPRequestHandler):
             return
         if self.path.endswith(".tar.gz"):
             self.server.archive_requested.set()
-            if not self.server.release_archive.wait(10):
+            if not self.server.release_archive.wait(TRIAL_TIMEOUT):
                 self.send_error(503)
                 return
         self.send_response(200)
@@ -95,7 +97,7 @@ def install_generation(release, destination):
 
 
 def wait_for(condition):
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + TRIAL_TIMEOUT
     while not condition():
         if time.monotonic() >= deadline:
             raise AssertionError("timed out waiting for update")
@@ -116,7 +118,7 @@ def trial(temp, server):
     if os.environ.get("WG_NATIVE_UPGRADE_TRIAL") == "1":
         native = runpy.run_path(str(REPO / "tests/cli-upgrade/native.py"))
         native["trial"](temp, server, REPO, TARGET, OLD, NEW, LATEST, first[1], successor[1],
-                        DISCOVERY, wait_for)
+                        DISCOVERY, wait_for, TRIAL_TIMEOUT)
         server.requests.clear()
 
     home = temp / "home"
@@ -138,7 +140,7 @@ def trial(temp, server):
         env.pop(name, None)
 
     def invoke(*args, **settings):
-        p = subprocess.run([launcher, *args], capture_output=True, env=dict(env, **settings), timeout=12)
+        p = subprocess.run([launcher, *args], capture_output=True, env=dict(env, **settings), timeout=TRIAL_TIMEOUT)
         return p.returncode, p.stdout, p.stderr
 
     def assert_version(version):
@@ -182,10 +184,11 @@ def trial(temp, server):
     (root / old / "empty-local-dir").mkdir()
     original = server.responses[ASSETS + ".tar.gz"]
     server.responses[ASSETS + ".tar.gz"] = b"damaged"
-    assert invoke("invalid-fixture-command") == baseline
-    assert server.archive_requested.wait(10)
-    concurrent_starts()
     server.release_archive.set()
+    concurrent_starts()
+    assert invoke("invalid-fixture-command") == baseline
+    assert server.archive_requested.wait(TRIAL_TIMEOUT)
+    wait_for(lambda: b"Release verification or activation failed" in invoke("update", "status")[1])
     # A direct synchronous worker after a failed attempt must also honor the stamp.
     assert invoke("--wg-background-update")[0] == 0
     concurrent_starts()
@@ -199,8 +202,7 @@ def trial(temp, server):
     server.release_archive.clear()
     os.utime(stamp, (1, 1))
     assert invoke("invalid-fixture-command") == baseline
-    assert server.archive_requested.wait(10)
-    concurrent_starts()
+    assert server.archive_requested.wait(TRIAL_TIMEOUT)
     assert current.readlink() == old
     server.release_archive.set()
     wait_for(lambda: current.readlink() == new)
@@ -232,6 +234,7 @@ def trial(temp, server):
     staged_plugin.write_bytes(b"preserved edit")
     assert invoke("--wg-background-update")[0] == 0
     assert_version(OLD)
+    assert b"Existing candidate has local changes" in invoke("update", "status")[1]
     assert staged_plugin.read_bytes() == b"preserved edit"
     staged_plugin.write_bytes(original_plugin)
     os.utime(stamp, (1, 1))

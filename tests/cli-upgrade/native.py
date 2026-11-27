@@ -9,7 +9,7 @@ import sys
 
 
 def trial(temp, server, repo, target, old, new, latest, initial_pin, recovery_pin,
-          discovery, wait_for):
+          discovery, wait_for, trial_timeout):
     home = temp / "native-home"
     home.mkdir()
     installer = temp / "installer"
@@ -39,7 +39,7 @@ def trial(temp, server, repo, target, old, new, latest, initial_pin, recovery_pi
 
     def wg(*args, code=0, updates=False):
         p = subprocess.run([launcher, *args], env=env if updates else dict(env, WG_UPDATE="off"),
-                           capture_output=True, timeout=25)
+                           capture_output=True, timeout=trial_timeout)
         assert p.returncode == code, (args, p.stdout, p.stderr)
         return p.stdout
 
@@ -78,7 +78,7 @@ def trial(temp, server, repo, target, old, new, latest, initial_pin, recovery_pi
     files = {p: p.read_bytes() for p in effort.iterdir() if p.is_file()}
     server.release_archive.clear()
     assert wg("--version", updates=True) == f"wg {old} {target}\n".encode()
-    assert server.archive_requested.wait(10)
+    assert server.archive_requested.wait(trial_timeout)
     assert permissions() == first
     server.release_archive.set()
     wait_for(lambda: current.readlink().name == f"{new}-{target}")

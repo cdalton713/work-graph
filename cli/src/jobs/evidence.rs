@@ -18,6 +18,15 @@ fn args(v: &Value) -> Result<Vec<String>, String> {
         .collect()
 }
 
+/// One project's tasks in `moon query tasks`: moon 1 gives a list of task
+/// names, moon 2 an object keyed by task name.
+fn has_test_task(tasks: &Value) -> Result<bool, String> {
+    match tasks {
+        Value::Object(map) => Ok(map.contains_key("test")),
+        _ => Ok(list(tasks)?.iter().any(|n| n == "test")),
+    }
+}
+
 pub(super) fn suite(plan: &Value, cfg: &Value) -> Result<Vec<String>, String> {
     if let Some(command) = plan["effort"].get("test") {
         return args(command);
@@ -88,7 +97,7 @@ pub(super) fn run(
                 .map_err(|e| e.to_string())?;
                 let mut targets = Vec::new();
                 for (project, names) in tasks["tasks"].as_object().ok_or("invalid task query")? {
-                    if list(names)?.iter().any(|n| n == "test") {
+                    if has_test_task(names)? {
                         targets.push(format!("{project}:test"));
                     }
                 }
@@ -208,4 +217,27 @@ pub(super) fn run(
         return Ok(3);
     }
     Ok(exit as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_test_task;
+    use serde_json::json;
+
+    #[test]
+    fn reads_moon_1_task_lists() {
+        assert!(has_test_task(&json!(["build", "test"])).unwrap());
+        assert!(!has_test_task(&json!(["build"])).unwrap());
+    }
+
+    #[test]
+    fn reads_moon_2_task_objects() {
+        assert!(has_test_task(&json!({"build": {}, "test": {"command": "vitest"}})).unwrap());
+        assert!(!has_test_task(&json!({"build": {}})).unwrap());
+    }
+
+    #[test]
+    fn rejects_other_shapes() {
+        assert!(has_test_task(&json!("test")).is_err());
+    }
 }

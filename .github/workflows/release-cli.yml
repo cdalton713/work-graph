@@ -42,6 +42,13 @@ jobs:
           cargo +1.98.1 build --locked --release --target "$TARGET" --manifest-path cli/Cargo.toml --bin wg-preview
           python3 -I packaging/releases/package.py build "$GITHUB_REF_NAME" "$TARGET" dist-release \
             --binary "cli/target/$TARGET/release/wg-preview"
+      - name: Install Go for the managed installer trial
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Exercise managed upgrades with disposable signing keys
+        run: tests/cli-upgrade/run.sh "$TARGET"
       - name: Check tagged resources and run the extracted executable
         run: |
           python3 -I packaging/releases/package.py test "$GITHUB_REF_NAME" "$TARGET" dist-release \

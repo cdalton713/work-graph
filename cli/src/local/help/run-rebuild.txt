@@ -1,4 +1,4 @@
-usage: wg.py run rebuild [-h] [--apply] dir
+usage: wg run rebuild [-h] [--apply] dir
 
 positional arguments:
   dir

@@ -125,7 +125,7 @@ fn times(p: &Value, entries: &[Value], cfg: &Value) {
 }
 fn log_usage(reason: &str) -> Error {
     let usage = include_str!("help/log.txt").lines().next().unwrap();
-    invalid(format!("{usage}\nwg.py log: error: {reason}"))
+    invalid(format!("{usage}\nwg log: error: {reason}"))
 }
 pub(super) fn log(dir: &Path, p: &Value, args: &[String], cfg: &Value) -> Result<u8> {
     let mut args = args.iter().map(String::as_str);
@@ -161,7 +161,7 @@ pub(super) fn log(dir: &Path, p: &Value, args: &[String], cfg: &Value) -> Result
                 .collect::<Vec<_>>()
                 .join(" ");
             return Err(invalid(format!(
-                "{}wg.py: error: unrecognized arguments: {extra}",
+                "{}wg: error: unrecognized arguments: {extra}",
                 include_str!("help/usage.txt")
             )));
         }

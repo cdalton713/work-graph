@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use std::{net::TcpListener, path::PathBuf, thread, time::Duration};
-use wg_preview::page::{Settings, link::Link};
+use wg::page::{Settings, link::Link};
 
 #[test]
 fn agents_connection_exchanges_a_reply_without_registering_a_coordinator() {
@@ -120,7 +120,7 @@ esac
             json!({"id":"r","status":"delivered","messageId":"mail"})
         );
     });
-    let out = Command::new(env!("CARGO_BIN_EXE_wg-preview"))
+    let out = Command::new(env!("CARGO_BIN_EXE_wg"))
         .args(["agents", "--once"])
         .env_clear()
         .env("HOME", &home)
@@ -157,7 +157,7 @@ fn public_automation_commands_use_fixture_services_and_files() {
                     .join("../tests/cli-parity")
                     .join(script),
             )
-            .arg(env!("CARGO_BIN_EXE_wg-preview"))
+            .arg(env!("CARGO_BIN_EXE_wg"))
             .status()
             .unwrap();
         assert!(result.success(), "{script} failed");
@@ -271,7 +271,7 @@ fn public_next_reconnects_replays_state_and_acknowledges_the_wakeup() {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../tests/cli-parity/automation-live.py"
             ),
-            env!("CARGO_BIN_EXE_wg-preview"),
+            env!("CARGO_BIN_EXE_wg"),
             &page,
         ])
         .output()

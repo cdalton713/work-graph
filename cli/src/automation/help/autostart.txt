@@ -1,4 +1,4 @@
-usage: wg.py autostart [-h] [--install | --uninstall] [--agent {codex,claude}] [--model MODEL] [--effort EFFORT] dir
+usage: wg autostart [-h] [--install | --uninstall] [--agent {codex,claude}] [--model MODEL] [--effort EFFORT] dir
 
 positional arguments:
   dir

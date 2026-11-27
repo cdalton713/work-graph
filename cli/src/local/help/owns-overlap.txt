@@ -1,4 +1,4 @@
-usage: wg.py owns overlap [-h] dir keys [keys ...]
+usage: wg owns overlap [-h] dir keys [keys ...]
 
 positional arguments:
   dir

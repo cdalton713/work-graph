@@ -1,4 +1,4 @@
-usage: wg.py preflight [-h] [--phase PHASE] dir
+usage: wg preflight [-h] [--phase PHASE] dir
 
 positional arguments:
   dir

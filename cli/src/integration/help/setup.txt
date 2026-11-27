@@ -1,5 +1,5 @@
-usage: wg.py setup [-h] [--workspace WORKSPACE] [--team TEAM] [--name NAME]
-                   [--parent KEY] [--private | --no-private] [--apply]
+usage: wg setup [-h] [--workspace WORKSPACE] [--team TEAM] [--name NAME]
+                [--parent KEY] [--private | --no-private] [--apply]
 
 options:
   -h, --help            show this help message and exit

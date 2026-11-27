@@ -39,9 +39,9 @@ jobs:
           export WG_RELEASE_VERSION="${GITHUB_REF_NAME#wg-v}"
           test -n "$WG_RELEASE_PUBLIC_KEY"
           rustup toolchain install 1.98.1 --profile minimal
-          cargo +1.98.1 build --locked --release --target "$TARGET" --manifest-path cli/Cargo.toml --bin wg-preview
+          cargo +1.98.1 build --locked --release --target "$TARGET" --manifest-path cli/Cargo.toml --bin wg
           python3 -I packaging/releases/package.py build "$GITHUB_REF_NAME" "$TARGET" dist-release \
-            --binary "cli/target/$TARGET/release/wg-preview"
+            --binary "cli/target/$TARGET/release/wg"
       - name: Install Go for the managed installer trial
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:

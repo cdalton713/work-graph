@@ -10,7 +10,7 @@ fn production_commands_match_reference_services() {
                     env!("CARGO_MANIFEST_DIR"),
                     "/../tests/cli-parity/providers.py"
                 ),
-                env!("CARGO_BIN_EXE_wg-preview")
+                env!("CARGO_BIN_EXE_wg")
             ])
             .status()
             .unwrap()

@@ -1,6 +1,6 @@
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::json;
-use wg_preview::release::{public_key, verify_manifest};
+use wg::release::{public_key, verify_manifest};
 
 #[test]
 fn rotation_requires_a_release_signed_by_the_current_key() {
@@ -70,7 +70,7 @@ fn publication_checks_native_results_and_signs_the_tested_bytes() {
     let root = public_key(std::str::from_utf8(&read("root.hex")).unwrap()).unwrap();
     let next = String::from_utf8(read("successor.hex")).unwrap();
     assert_ne!(public_key(&next).unwrap(), root);
-    for target in wg_preview::release::TARGETS {
+    for target in wg::release::TARGETS {
         let prefix = format!("signed/wg-v1.2.3-{target}");
         let manifest = verify_manifest(
             &root,
@@ -82,11 +82,8 @@ fn publication_checks_native_results_and_signs_the_tested_bytes() {
         .unwrap();
         assert_eq!(manifest.public_key, next);
         let binary = dir.path().join(target).join("wg");
-        wg_preview::release::verify_digest(
-            std::fs::File::open(&binary).unwrap(),
-            &manifest.files["wg"],
-        )
-        .unwrap();
+        wg::release::verify_digest(std::fs::File::open(&binary).unwrap(), &manifest.files["wg"])
+            .unwrap();
         let output = std::process::Command::new(binary)
             .arg("--release-key")
             .output()
@@ -97,7 +94,7 @@ fn publication_checks_native_results_and_signs_the_tested_bytes() {
             manifest.public_key
         );
         let archive = read(&format!("{prefix}.tar.gz"));
-        wg_preview::release::verify_digest(archive.as_slice(), &manifest.sha256).unwrap();
-        assert!(wg_preview::release::verify_digest(&b"other"[..], &manifest.sha256).is_err());
+        wg::release::verify_digest(archive.as_slice(), &manifest.sha256).unwrap();
+        assert!(wg::release::verify_digest(&b"other"[..], &manifest.sha256).is_err());
     }
 }

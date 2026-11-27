@@ -39,7 +39,7 @@ pub struct Settings {
 }
 
 #[derive(Parser)]
-#[command(name = "wg-preview", infer_long_args = true)]
+#[command(name = "wg", infer_long_args = true)]
 struct Arguments {
     #[command(subcommand)]
     command: Command,
@@ -253,7 +253,7 @@ where
         return Err("Open the collab link in a browser. Give wg join the page URL.".into());
     }
     let cmd = match Arguments::try_parse_from(
-        std::iter::once("wg-preview").chain(args.iter().map(String::as_str)),
+        std::iter::once("wg").chain(args.iter().map(String::as_str)),
     ) {
         Ok(parsed) => parsed.command,
         Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => {

@@ -7,7 +7,7 @@ fn workflow_commands_match_reference_services() {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../tests/cli-parity/workflow.py"
             ),
-            env!("CARGO_BIN_EXE_wg-preview"),
+            env!("CARGO_BIN_EXE_wg"),
         ])
         .status()
         .expect("start workflow fixture");

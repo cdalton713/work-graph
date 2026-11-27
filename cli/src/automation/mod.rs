@@ -152,7 +152,7 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
                 }
                 if let [first, second, ..] = seen.as_slice() {
                     eprintln!(
-                        "{}\nwg.py {verb}: error: argument {second}: not allowed with argument {first}",
+                        "{}\nwg {verb}: error: argument {second}: not allowed with argument {first}",
                         help.split("\n\n").next().unwrap_or(help)
                     );
                     return Some(ExitCode::from(2));

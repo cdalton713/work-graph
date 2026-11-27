@@ -100,7 +100,7 @@ fn config_matches_python_with_isolated_files() {
         }
         let mut python = Command::new("python3");
         python.args(["-I", REFERENCE]);
-        let mut rust = Command::new(env!("CARGO_BIN_EXE_wg-preview"));
+        let mut rust = Command::new(env!("CARGO_BIN_EXE_wg"));
         let [py, rs] = [&mut python, &mut rust].map(|cmd| {
             cmd.current_dir(root)
                 .env("HOME", root)
@@ -146,7 +146,7 @@ fn interrupted_python_writer_releases_lock_and_preserves_keymap() {
         process::Stdio,
         time::Duration,
     };
-    use wg_preview::state::{PlanLock, load_keymap};
+    use wg::state::{PlanLock, load_keymap};
     let root = tempdir().unwrap();
     let path = root.path().join("keymap.json");
     fs::write(&path, r#"{"legacy":"kept"}"#).unwrap();
@@ -231,7 +231,7 @@ fn reads_rotated_and_current_journal_in_order() {
         fixture.replace("idle", "ready"),
     )
     .unwrap();
-    let (entries, skipped) = wg_preview::state::journal_entries(dir.path()).unwrap();
+    let (entries, skipped) = wg::state::journal_entries(dir.path()).unwrap();
     assert_eq!(skipped, 2);
     assert_eq!(entries[0]["changes"]["state"][1], "idle");
     assert_eq!(entries[1]["changes"]["state"][1], "ready");
@@ -244,14 +244,14 @@ fn save_in_limited_process() {
     let Some(dir) = std::env::var_os("WG_TEST_SAVE_DIR") else {
         return;
     };
-    let lock = wg_preview::state::PlanLock::acquire(std::path::Path::new(&dir), None).unwrap();
+    let lock = wg::state::PlanLock::acquire(std::path::Path::new(&dir), None).unwrap();
     lock.save_keymap(&serde_json::json!({"value":"x".repeat(1<<20)}))
         .unwrap();
 }
 
 #[test]
 fn interrupted_rust_save_keeps_the_last_complete_file() {
-    use wg_preview::state::{PlanLock, load_keymap};
+    use wg::state::{PlanLock, load_keymap};
     let dir = tempdir().unwrap();
     let original = serde_json::json!({"legacy":1,"nodes":{},"milestones":{}});
     PlanLock::acquire(dir.path(), None)
@@ -288,7 +288,7 @@ os.execv(sys.argv[1], [sys.argv[1], '--exact', 'save_in_limited_process'])
 
 #[test]
 fn resolves_workspace_pages_and_local_shared_plan() {
-    use wg_preview::{ConfigProvider, state::Config};
+    use wg::{ConfigProvider, state::Config};
     if let Some(dir) = std::env::var_os("WG_TEST_SHARED_DIR") {
         let config = Config::discover().unwrap();
         let dir = std::path::Path::new(&dir);
@@ -345,7 +345,7 @@ fn resolves_workspace_pages_and_local_shared_plan() {
 
 #[test]
 fn python_and_rust_keep_the_same_state_file_hashes() {
-    use wg_preview::state::{Config, PlanLock, load_keymap};
+    use wg::state::{Config, PlanLock, load_keymap};
     let root = tempdir().unwrap();
     let dir = root.path();
     let script = r#"

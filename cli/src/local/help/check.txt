@@ -1,4 +1,4 @@
-usage: wg.py check [-h] dir
+usage: wg check [-h] dir
 
 positional arguments:
   dir

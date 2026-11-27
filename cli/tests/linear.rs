@@ -1,7 +1,7 @@
 use http::{HeaderValue, Request, Response};
 use serde_json::json;
 use std::{cell::RefCell, collections::VecDeque, time::Duration};
-use wg_preview::{
+use wg::{
     ConfigProvider, Credential, CredentialProvider, HttpTransport,
     linear::{Client, Timing},
 };
@@ -108,7 +108,7 @@ fn public_setup_matches_the_python_oracle() {
     let result = std::process::Command::new("python3")
         .arg("-I")
         .arg(script)
-        .arg(env!("CARGO_BIN_EXE_wg-preview"))
+        .arg(env!("CARGO_BIN_EXE_wg"))
         .status()
         .unwrap();
     assert!(result.success());

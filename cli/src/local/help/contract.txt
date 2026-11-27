@@ -1,4 +1,4 @@
-usage: wg.py contract [-h] [--write]
+usage: wg contract [-h] [--write]
 
 options:
   -h, --help  show this help message and exit

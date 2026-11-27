@@ -145,7 +145,7 @@ pub fn command(args: impl Iterator<Item = OsString>) -> Option<ExitCode> {
                     .map(ToString::to_string)
                     .unwrap_or_default();
                 eprintln!(
-                    "{}\nwg.py: error: unrecognized arguments: {unknown}",
+                    "{}\nwg: error: unrecognized arguments: {unknown}",
                     // Parser errors retain the frozen legacy usage line.
                     include_str!("help/root.txt")
                         .split("\n\n")
@@ -159,7 +159,7 @@ pub fn command(args: impl Iterator<Item = OsString>) -> Option<ExitCode> {
                     .map(ToString::to_string)
                     .unwrap_or_default();
                 eprintln!(
-                    "{}\nwg.py ui: error: argument --port: invalid int value: '{value}'",
+                    "{}\nwg ui: error: argument --port: invalid int value: '{value}'",
                     help.split("\n\n").next().unwrap()
                 );
             } else {

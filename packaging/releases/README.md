@@ -21,7 +21,7 @@ For each Rust target triple, the asset prefix is `<tag>-<target>`. The four targ
 | `files` | Object mapping each relative file path to its SHA-256 in lowercase hexadecimal |
 | `public_key` | 32-byte Ed25519 public key embedded in the packaged executable, in lowercase hexadecimal |
 
-The initial installer needs a public key obtained through a separately authenticated channel. For subsequent updates, use the key from the installed release. The Rust module `wg_preview::release` supplies `public_key` for the initial pin, `embedded_key` for an installed binary, and `verify_manifest` for both consumers. Pass the trusted key, original manifest bytes, raw signature, requested version and host target to the verifier. Enforce the channel and version policy before installation.
+The initial installer needs a public key obtained through a separately authenticated channel. For subsequent updates, use the key from the installed release. The Rust module `wg::release` supplies `public_key` for the initial pin, `embedded_key` for an installed binary, and `verify_manifest` for both consumers. Pass the trusted key, original manifest bytes, raw signature, requested version and host target to the verifier. Enforce the channel and version policy before installation.
 
 Call `verify_digest` on the compressed archive using the authenticated `sha256`. Extract only the regular files listed in `files`, once each, under a new private staging directory. Reject missing members, extra members, links, unsafe paths and special modes. Call `verify_digest` on each file using its authenticated digest. Install the CLI, skill, and plugin together after all checks pass.
 

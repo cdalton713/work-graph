@@ -5,9 +5,9 @@ use std::{
     process::{Command, ExitCode},
 };
 use tempfile::TempDir;
-use wg_preview::local::{CardWriter, command};
+use wg::local::{CardWriter, command};
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/cli-parity/fixture");
-const BIN: &str = env!("CARGO_BIN_EXE_wg-preview");
+const BIN: &str = env!("CARGO_BIN_EXE_wg");
 fn fixture() -> TempDir {
     let root = tempfile::tempdir().unwrap();
     for name in ["journal.jsonl", "plan.json", "keymap.json"] {

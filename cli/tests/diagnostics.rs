@@ -33,7 +33,7 @@ fn page_channels_in_status_and_config() {
         )
         .unwrap();
         for verb in ["config", "status"] {
-            let out = Command::new(env!("CARGO_BIN_EXE_wg-preview"))
+            let out = Command::new(env!("CARGO_BIN_EXE_wg"))
                 .env_clear()
                 .env("HOME", dir)
                 .env("WG_CONFIG", &config)
@@ -61,7 +61,7 @@ fn installed_resources_and_legacy_commands() {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../tests/cli-parity/diagnostics.py"
             ))
-            .arg(env!("CARGO_BIN_EXE_wg-preview"))
+            .arg(env!("CARGO_BIN_EXE_wg"))
             .status()
             .unwrap()
             .success()
@@ -73,7 +73,7 @@ fn ui_help_with_invalid_config() {
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join("config.json");
     fs::write(&config, "invalid").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_wg-preview"))
+    let out = Command::new(env!("CARGO_BIN_EXE_wg"))
         .env_clear()
         .env("HOME", home.path())
         .env("WG_CONFIG", &config)
@@ -93,7 +93,7 @@ fn compare_public_diagnostics_to_python() {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../tests/cli-parity/doctor-review.py"
             ))
-            .arg(env!("CARGO_BIN_EXE_wg-preview"))
+            .arg(env!("CARGO_BIN_EXE_wg"))
             .status()
             .unwrap()
             .success()

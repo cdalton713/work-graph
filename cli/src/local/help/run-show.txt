@@ -1,4 +1,4 @@
-usage: wg.py run show [-h] [--json] dir [key]
+usage: wg run show [-h] [--json] dir [key]
 
 positional arguments:
   dir

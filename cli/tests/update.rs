@@ -3,7 +3,7 @@ use std::{fs, process::Command};
 #[test]
 fn unmanaged_use_does_not_create_update_state() {
     let home = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_wg-preview"))
+    let output = Command::new(env!("CARGO_BIN_EXE_wg"))
         .arg("--version")
         .env("HOME", home.path())
         .output()

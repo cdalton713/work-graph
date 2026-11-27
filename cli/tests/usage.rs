@@ -6,7 +6,7 @@ fn usage_matches_reference_on_synthetic_sessions() {
         .args([
             "-I",
             concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/cli-parity/usage.py"),
-            env!("CARGO_BIN_EXE_wg-preview"),
+            env!("CARGO_BIN_EXE_wg"),
         ])
         .status()
         .expect("start usage parity check");

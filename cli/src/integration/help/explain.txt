@@ -1,4 +1,4 @@
-usage: wg.py explain [-h] [verb]
+usage: wg explain [-h] [verb]
 
 positional arguments:
   verb

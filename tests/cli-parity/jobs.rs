@@ -4,7 +4,7 @@ fn job_commands_at_recorded_boundaries() {
         .args([
             "-IB",
             concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/cli-parity/jobs.py"),
-            env!("CARGO_BIN_EXE_wg-preview"),
+            env!("CARGO_BIN_EXE_wg"),
         ])
         .status()
         .expect("start job fixtures");

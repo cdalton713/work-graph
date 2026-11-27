@@ -10449,7 +10449,7 @@ def add_agent_flags(parser):
 
 
 def cli_parser():
-    parser = argparse.ArgumentParser(description="Validate and manage a work-graph effort.")
+    parser = argparse.ArgumentParser(prog="wg", description="Validate and manage a work-graph effort.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def add(group, name):

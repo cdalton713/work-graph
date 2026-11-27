@@ -1,4 +1,4 @@
-usage: wg.py doctor [-h] [--fix] [dir]
+usage: wg doctor [-h] [--fix] [dir]
 
 positional arguments:
   dir

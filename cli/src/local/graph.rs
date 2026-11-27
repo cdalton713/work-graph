@@ -44,7 +44,7 @@ pub(super) fn owns(mode: &str, p: &Value, args: &[String]) -> Result<u8> {
         bad = u8::from(!check_ownership(n, base, Path::new("."))?);
     } else {
         return Err(invalid(
-            "usage: wg.py owns overlap <plan-dir> <key>... | owns diff <plan-dir> <key> <base>",
+            "usage: wg owns overlap <plan-dir> <key>... | owns diff <plan-dir> <key> <base>",
         ));
     }
     Ok(bad)

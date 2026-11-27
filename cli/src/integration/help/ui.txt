@@ -1,5 +1,5 @@
-usage: wg.py ui [-h] [--workspace {default}] [--port PORT] [--project PROJECT]
-                [--no-open] [--no-tailnet]
+usage: wg ui [-h] [--workspace {default}] [--port PORT] [--project PROJECT]
+             [--no-open] [--no-tailnet]
 
 options:
   -h, --help            show this help message and exit

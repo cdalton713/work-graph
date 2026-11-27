@@ -1,4 +1,4 @@
-usage: wg.py watch [-h] [--wait] [--interval INTERVAL] [--no-publish] [--all] dir
+usage: wg watch [-h] [--wait] [--interval INTERVAL] [--no-publish] [--all] dir
 
 positional arguments:
   dir

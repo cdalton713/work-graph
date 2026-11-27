@@ -1,6 +1,6 @@
-usage: wg.py [-h]
-             {check,share,pull,preflight,base,status,load,ready,next,watch,wake,health,autostart,approve,dispatch,claim,started,done,move,cleanup,archive,run,log,usage,evidence,autonomy,review-effort,verify,owns,explain,doctor,setup,config,contract,tick,agents,login,logout,join,leave,ui,update}
-             ...
+usage: wg [-h]
+          {check,share,pull,preflight,base,status,load,ready,next,watch,wake,health,autostart,approve,dispatch,claim,started,done,move,cleanup,archive,run,log,usage,evidence,autonomy,review-effort,verify,owns,explain,doctor,setup,config,contract,tick,agents,login,logout,join,leave,ui,update}
+          ...
 
 Validate and manage a work-graph effort.
 

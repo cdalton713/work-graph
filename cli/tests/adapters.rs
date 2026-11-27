@@ -1,6 +1,6 @@
 use http::{HeaderValue, Request, Response, StatusCode, Uri, header::AUTHORIZATION};
 use std::convert::Infallible;
-use wg_preview::{ConfigProvider, Credential, CredentialProvider, HttpTransport};
+use wg::{ConfigProvider, Credential, CredentialProvider, HttpTransport};
 
 struct Fixture;
 

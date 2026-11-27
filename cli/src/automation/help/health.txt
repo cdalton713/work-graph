@@ -1,4 +1,4 @@
-usage: wg.py health [-h] [--install | --uninstall | --due | --report FILE] dir
+usage: wg health [-h] [--install | --uninstall | --due | --report FILE] dir
 
 positional arguments:
   dir

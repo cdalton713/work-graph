@@ -12,7 +12,7 @@ const WORKER: &str = "You are working inside Orca, a multi-agent IDE. You are a 
 static UTILITY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(chat|session|conversation|thread|tab)(?:'s)? (name|title)\b|\bbranch name\b|\bcommit message\b|^\s*reply with ok\b").unwrap()
 });
-const HELP: &str = "usage: wg.py usage [-h] [--json] [--since SINCE] [--all] dir
+const HELP: &str = "usage: wg usage [-h] [--json] [--since SINCE] [--all] dir
 
 positional arguments:
   dir
@@ -141,7 +141,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let (mut dir, mut since, mut all, mut json) = (None, None, false, false);
     let usage_error = |reason: &str| {
         format!(
-            "{}\nwg.py usage: error: {reason}",
+            "{}\nwg usage: error: {reason}",
             HELP.lines().next().unwrap()
         )
     };
@@ -200,7 +200,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let dir = dir.ok_or_else(|| usage_error("the following arguments are required: dir"))?;
     if !extra.is_empty() {
         return Err(format!(
-            "{}wg.py: error: unrecognized arguments: {}",
+            "{}wg: error: unrecognized arguments: {}",
             include_str!("../local/help/usage.txt"),
             extra.join(" ")
         ));

@@ -3,7 +3,7 @@ use std::process::Command;
 #[test]
 fn logout_accepts_an_explicit_secure_page() {
     let home = tempfile::tempdir().unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_wg-preview"))
+    let result = Command::new(env!("CARGO_BIN_EXE_wg"))
         .env_clear()
         .env("HOME", home.path())
         .args(["logout", "https://page.invalid"])
@@ -32,7 +32,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use wg_preview::{
+use wg::{
     ConfigProvider, Credential, CredentialProvider,
     page::{self, Collaboration, LocalEffort, LockedEffort, Result, Settings},
 };
@@ -107,7 +107,7 @@ fn login_checks_token_before_replacing_private_file() {
     let config = home.path().join("config.json");
     fs::write(&config, json!({"page_url":server.url}).to_string()).unwrap();
     let invoke = |verb: &str, token: &str| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wg-preview"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wg"));
         cmd.env_clear()
             .env("HOME", home.path())
             .env("WG_CONFIG", &config)
@@ -589,7 +589,7 @@ fn preview_refuses_unshared_pull_and_invite_links_before_writes() {
         &["pull", "."][..],
         &["join", "https://page.invalid/%6aoin/fixture-secret"],
     ] {
-        let result = Command::new(env!("CARGO_BIN_EXE_wg-preview"))
+        let result = Command::new(env!("CARGO_BIN_EXE_wg"))
             .env_clear()
             .env("HOME", dir.path())
             .current_dir(dir.path())
@@ -691,7 +691,7 @@ fn compiled_login_verifies_the_private_ca_and_matches_the_service_case() {
             .args([
                 "-I",
                 "../tests/cli-parity/page_login.py",
-                env!("CARGO_BIN_EXE_wg-preview")
+                env!("CARGO_BIN_EXE_wg")
             ])
             .status()
             .unwrap()
@@ -721,7 +721,7 @@ fn node_page_commands_and_authorized_reconnect() {
     let config = owner.dir().join("config.json");
     fs::write(&config, json!({"page_url":url}).to_string()).unwrap();
     let preview = || {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wg-preview"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_wg"));
         cmd.env_clear()
             .env("HOME", owner.dir())
             .env("WG_CONFIG", &config);

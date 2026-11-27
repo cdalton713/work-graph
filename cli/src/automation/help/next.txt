@@ -1,4 +1,4 @@
-usage: wg.py next [-h] [--wait] [--interval INTERVAL] [--no-publish] [--all] dir
+usage: wg next [-h] [--wait] [--interval INTERVAL] [--no-publish] [--all] dir
 
 positional arguments:
   dir

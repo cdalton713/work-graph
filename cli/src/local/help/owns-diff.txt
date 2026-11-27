@@ -1,4 +1,4 @@
-usage: wg.py owns diff [-h] dir key base
+usage: wg owns diff [-h] dir key base
 
 positional arguments:
   dir

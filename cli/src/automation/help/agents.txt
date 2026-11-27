@@ -1,4 +1,4 @@
-usage: wg.py agents [-h] [--root ROOT] [--once | --install | --uninstall | --wait] [--approve FINGERPRINT]
+usage: wg agents [-h] [--root ROOT] [--once | --install | --uninstall | --wait] [--approve FINGERPRINT]
 
 options:
   -h, --help            show this help message and exit

@@ -1,4 +1,4 @@
-usage: wg.py wake [-h] dir
+usage: wg wake [-h] dir
 
 positional arguments:
   dir

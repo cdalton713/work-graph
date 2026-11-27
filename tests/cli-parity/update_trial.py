@@ -60,7 +60,7 @@ def make_release(directory, key, port, version, signer, signing_key):
     env = dict(os.environ, WG_RELEASE_REPOSITORY="fixture/release", WG_RELEASE_PUBLIC_KEY=key,
                WG_RELEASE_VERSION=version, WG_FIXTURE_PORT=str(port))
     lines = subprocess.check_output(
-        [CARGO, "rustc", "--locked", "--offline", "--bin", "wg-preview", "--target", TARGET,
+        [CARGO, "rustc", "--locked", "--offline", "--bin", "wg", "--target", TARGET,
          "--features", "update-fixture", "--message-format=json", "--", "-C", "strip=debuginfo"],
         cwd=REPO / "cli", env=env, text=True).splitlines()
     binary = next(Path(msg["executable"]) for msg in map(json.loads, lines) if msg.get("executable"))

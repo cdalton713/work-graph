@@ -1,4 +1,4 @@
-usage: wg.py run set [-h] dir key fields [fields ...]
+usage: wg run set [-h] dir key fields [fields ...]
 
 positional arguments:
   dir

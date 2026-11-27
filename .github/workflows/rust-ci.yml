@@ -47,9 +47,9 @@ jobs:
         run: |
           version=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[0].version')
           bin_dir="target/$CARGO_BUILD_TARGET/release"
-          test "$("$bin_dir/wg-preview" --version)" = "wg-preview $version $CARGO_BUILD_TARGET"
-          artifact="wg-preview-$version-$CARGO_BUILD_TARGET"
-          tar -czf "$artifact.tar.gz" -C "$bin_dir" wg-preview
+          test "$("$bin_dir/wg" --version)" = "wg $version $CARGO_BUILD_TARGET"
+          artifact="wg-$version-$CARGO_BUILD_TARGET"
+          tar -czf "$artifact.tar.gz" -C "$bin_dir" wg
           echo "name=$artifact" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:

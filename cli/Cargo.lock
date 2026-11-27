@@ -2003,7 +2003,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wg-preview"
+name = "wg"
 version = "0.1.0"
 dependencies = [
  "chrono",

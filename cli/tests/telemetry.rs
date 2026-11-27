@@ -11,7 +11,7 @@ fn listener() -> TcpListener {
 }
 
 fn command(socket: &TcpListener) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wg-preview"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wg"));
     let dsn = format!("http://fixture@{}/17", socket.local_addr().unwrap());
     cmd.env_clear()
         .env("WG_SENTRY_DSN", &dsn)

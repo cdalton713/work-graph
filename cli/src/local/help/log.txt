@@ -1,4 +1,4 @@
-usage: wg.py log [-h] [--since SINCE] [-n N] [--times] dir [key]
+usage: wg log [-h] [--since SINCE] [-n N] [--times] dir [key]
 
 positional arguments:
   dir

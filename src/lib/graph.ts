@@ -1,3 +1,4 @@
+import { validateAgents, type AgentSettings } from "./agents.ts";
 import { ownerWords } from "./words.ts";
 import { currentSite, waitStatuses, type Site } from "./site.ts";
 import type { Card, GraphData, Issue, Kind, Label, Project, State } from "./types";
@@ -310,6 +311,14 @@ export interface EffortStatus {
   ran: string | null;
   waitInterval: number | null;
   contract: string | null;
+  /** effort.agents of the plan. Null: the status doc has none, so the effort uses the config defaults. */
+  agents: AgentSettings | null;
+}
+
+function statusAgents(value: unknown): AgentSettings | null {
+  if (value === undefined) return null;
+  const agents = validateAgents(value);
+  return typeof agents === "string" ? null : agents;
 }
 
 export function parseStatus(content: string | null | undefined): EffortStatus | null {
@@ -325,6 +334,7 @@ export function parseStatus(content: string | null | undefined): EffortStatus | 
       ran: typeof data.ran === "string" ? data.ran : null,
       waitInterval: typeof data.wait_interval === "number" && data.wait_interval > 0 && Number.isFinite(data.wait_interval) ? data.wait_interval : null,
       contract: typeof data.contract === "string" ? data.contract : null,
+      agents: statusAgents(data.agents),
     };
   } catch {
     return null;

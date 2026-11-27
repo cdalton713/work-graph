@@ -3055,7 +3055,7 @@ def contract():
                            "paused": PAUSED_LABEL},
         "card": {"prefix": "**work-graph node card**", "footers": [CARD_FOOTER, EMPTY_CARD],
                  "fields": [*CARD_PLAN_FIELDS, *CARD_RUN_FIELDS], "samples": cards},
-        "status_doc": {"title": STATUS_DOC, "fields": ["status", "wave", "lines", "at", "ran", "wait_interval", "contract"]},
+        "status_doc": {"title": STATUS_DOC, "fields": ["status", "wave", "lines", "at", "ran", "wait_interval", "contract", "agents"]},
         "statuses": list(CONTRACT_STATUSES),
         "satisfied": edges,
         "link": {"version": LINK_VERSION, "path": "/api/link", "to_coordinator": list(LINK_TO_COORDINATOR),
@@ -4825,6 +4825,9 @@ def status_doc(plan, head, lines, wave, previous, wait_interval=None):
     data.update(at=at, ran=ran, contract=hashlib.sha256(contract_text().encode()).hexdigest()[:12])
     if wait_interval is not None:
         data["wait_interval"] = wait_interval
+    # The agents of this effort (effort.agents in plan.json), for the Agents picker of the page.
+    if agents := (plan.get("effort") or {}).get("agents"):
+        data["agents"] = agents
     text = (body + "\n\n```json\n" + json.dumps(data) + "\n```\n\n"
             "Written by `wg next` for the page (" + page_link(plan) + "). Do not edit.")
     return sha, at, text
@@ -4897,7 +4900,7 @@ LINK_OPEN_TIMEOUT = 3
 LINK_TO_COORDINATOR = ("changed", "answer", "reply", "command", "agent-reply")
 LINK_FROM_COORDINATOR = ("hello", "state", "asks", "progress", "ack", "wrote", "agents", "agent-reply-result")
 AGENT_REPLY_STATUSES = ("delivered", "refused", "unconfirmed")
-LINK_COMMANDS = ("next", "dispatch", "pause", "resume", "autonomy")
+LINK_COMMANDS = ("next", "dispatch", "pause", "resume", "autonomy", "agents")
 
 
 # What the server forgets when it restarts, and the coordinator sends again when it connects again.
@@ -6353,6 +6356,8 @@ def link_lines(messages, keys=None, plan_dir=None, current=None):
             issue = payload.get("issue") or "-"
             if name == "dispatch" and key:
                 lines.append(("do", f"dispatch {key} {issue}: {HUMAN} asked for it on the page"))
+            elif name == "agents" and plan_dir:
+                lines.append(apply_page_agents(plan_dir, payload.get("agents")))
             elif name in ("pause", "resume") and plan_dir:
                 # The page set or removed the project label `paused`; paused_lines reads it.
                 lines.append(("note", f"{'paused' if name == 'pause' else 'resumed'} @effort -: on the page"))
@@ -6444,6 +6449,44 @@ def open_asks(plan_dir):
                          "kind": m["type"],
                          "body": m.get("body") or (f"The worker stopped: {payload['stopReason']}" if payload.get("stopReason") else "")})
     return asks
+
+
+def describe_agents(agents):
+    """`coordinator claude claude-opus-5-5 high; worker default`: the settings of each role, for a line."""
+    return "; ".join(f"{role} " + (" ".join(agents[role][f] for f in AGENT_FIELDS if agents.get(role, {}).get(f))
+                                   or "default") for role in AGENT_DEFAULTS)
+
+
+def apply_page_agents(plan_dir, agents):
+    """The `agents` command of the page: write its settings as effort.agents in plan.json. Returns the line.
+    A new coordinator agent applies to the next coordinator job; an autostart automation keeps its old command
+    until `wg autostart --install`. A shared plan sends the change with `wg load --apply`."""
+    errors = agent_setting_errors(agents, "agents", {})
+    if errors:
+        return ("note", f"agents @effort -: not changed ({'; '.join(errors)})")
+    try:
+        with plan_lock(plan_dir, wait=5):
+            plan = load_plan(plan_dir, strict=True)
+            effort = plan.setdefault("effort", {})
+            old = effort.get("agents") or {}
+            if agents:
+                effort["agents"] = agents
+            else:
+                effort.pop("agents", None)
+            if old != agents:
+                save_json(Path(plan_dir) / "plan.json", plan)
+            shared = bool(load_keymap(plan_dir).get("collab"))
+    except (OSError, ValueError, TimeoutError) as error:
+        return ("note", f"agents @effort -: not changed ({error})")
+    text = f"agents @effort -: set on the page: {describe_agents(agents)}"
+    if old == agents:
+        return ("note", text + " (no change)")
+    steps = []
+    if old.get("coordinator") != agents.get("coordinator"):
+        steps.append(f"run `wg autostart {plan_dir} --install` if this effort has an autostart automation")
+    if shared:
+        steps.append(f"run `wg load {plan_dir} --apply` to share the plan")
+    return ("do", text + "; " + ", then ".join(steps)) if steps else ("note", text)
 
 
 def relay_reply(plan_dir, payload):
@@ -6577,6 +6620,7 @@ EXPLAIN = {
     "autonomy": "the autonomy level, or a change of it",
     "paused": "the human paused the effort",
     "resumed": "the human resumed the effort",
+    "agents": "the human set the agents of the effort on the page",
     "below": "wait: the node below in the lane comes first",
     "blockers": "wait: a blocker of the ship point opened again",
     "soak": "wait: the soak runs",

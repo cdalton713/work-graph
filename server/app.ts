@@ -36,6 +36,7 @@ import { type Auth, type Session, LOGIN_PATH, authRoutes, clearSessionCookie, se
 import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
+import { validateAgents } from "../src/lib/agents.ts";
 import { HOLD_EVERY_DEFAULT } from "../src/lib/hold.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
 import { boardRead, NeedsLinearAccess, sharedLinear, LinearReadLimited, LinearError, LinearKeyRequired, LinearReconnectRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, waitingIssues, loadGraph, markAnswered, readLinearTeams, setAutonomy, setHold, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
@@ -1266,6 +1267,16 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const { queued } = await notify(() => enqueueLink(ref, "command", { name: "autonomy", key: null, issue: null, level },
       undefined, noticeId(c.req.header("Idempotency-Key"), "autonomy")), { queued: 0 });
     return c.json({ ok: true, level, queued });
+  });
+  // The agents of the effort (work-graph page.md "Lines from the page"). plan.json is the record: the
+  // coordinator's `wg next` writes the settings as effort.agents and publishes them in the status document.
+  api.post("/projects/:id/agents", async (c) => {
+    const agents = validateAgents((await json(c.req.json<{ agents?: unknown }>())).agents);
+    if (typeof agents === "string") throw new LinearError(agents, 400);
+    const ref = { workspace: linearWorkspace.getStore()!.id, id: c.req.param("id") };
+    const { queued } = await notify(() => enqueueLink(ref, "command", { name: "agents", key: null, issue: null, agents },
+      undefined, noticeId(c.req.header("Idempotency-Key"), "agents")), { queued: 0 });
+    return c.json({ ok: true, agents, queued });
   });
   // The review effort of the effort (work-graph review-and-merge.md "Review effort"). The project label is the
   // record; the command `next` wakes the coordinator, whose `wg next` reads the label and prints `do review`.

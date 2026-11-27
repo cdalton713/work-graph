@@ -1,7 +1,7 @@
 //! Local effort files shared with the Python CLI.
 mod config;
 mod json;
-pub use config::{Config, Workspace};
+pub use config::{Config, Workspace, validate_agents};
 pub use json::write_pretty_json;
 
 use serde_json::{Value, json};

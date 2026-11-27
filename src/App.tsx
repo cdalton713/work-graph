@@ -13,6 +13,7 @@ import { CreateProject, StarterSetup } from "./components/CreateProject";
 import { clearStarterHandoffs, readStarter, saveStarter, starterKey } from "./lib/starterHandoff";
 import { Overview } from "./components/Overview";
 import { HoldControl } from "./components/Hold";
+import { AgentsControl } from "./components/Agents";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
 import { PullRefresh } from "./components/PullRefresh";
@@ -795,6 +796,17 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const signOutHelp = `Signed in as ${site.user}. Select to sign out.`;
   const closeHelp = "Mark every issue in this project Done and complete the project.";
   const activeProject = project && project.statusType !== "completed" && project.statusType !== "canceled";
+  // The agents of the project: effort.agents in plan.json. The page sends a change to the coordinator, whose
+  // wg next writes it and publishes it in the status document.
+  const agentsControl = (dismiss?: () => void) => !sharedRole && !viewer && activeProject && project && (
+    <AgentsControl current={effort?.agents ?? null} onDone={dismiss} onSave={async (agents) => {
+      const target = project;
+      const result = await api.agents(target.id, agents, target.workspace);
+      setCommandNote(coordinator?.state === "listening" ? "Agents: the coordinator was told."
+        : `Agents sent. The coordinator writes them at its next wg next${result.queued ? ` (queue: ${result.queued})` : ""}.`);
+      setTimeout(() => setCommandNote(null), 6000);
+    }} />
+  );
   const holdControl = (dismiss?: () => void) => !sharedRole && !viewer && activeProject && project && (
     <HoldControl held={"hold" in project} hold={project.hold} now={now} onDone={dismiss}
       onHold={async (hold) => {
@@ -902,6 +914,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         {!compactBar && <>
           {project && <CopyButton text={project.name} label="Copy the project name" />}
           {holdControl()}
+          {agentsControl()}
           {autonomyPicker}
           {reviewPicker}
           {shareControl()}
@@ -937,6 +950,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
               <p>{stopSharingHelp}</p>
             </>}
             {holdControl(dismiss)}
+            {agentsControl(dismiss)}
             {autonomyPicker && <div className="bar-menu-field">
               {autonomyPicker}
               <p>{autonomyHelp}</p>

@@ -1,3 +1,4 @@
+import type { AgentSettings } from "./agents";
 import type { SiteConfig } from "./types";
 // The protocol `wg-link/1` between the wg-ui server, each coordinator (`wg next` of the work-graph
 // skill), and each open page. Design: CD-192. Linear stays the source of truth: a message here only
@@ -26,7 +27,7 @@ export function plannedRetryAfterFailure(now: number, until: number, delay: numb
 /** The message types of each direction, and the commands. contract.json `link` must hold the same lists. */
 export const LINK_TO_COORDINATOR = ["changed", "answer", "reply", "command", "agent-reply"] as const;
 export const LINK_FROM_COORDINATOR = ["hello", "state", "asks", "progress", "ack", "wrote", "agents", "agent-reply-result"] as const;
-export const LINK_COMMANDS = ["next", "dispatch", "pause", "resume", "autonomy"] as const;
+export const LINK_COMMANDS = ["next", "dispatch", "pause", "resume", "autonomy", "agents"] as const;
 export type Role = "coordinator" | "page";
 
 export interface ProjectRef { workspace: string; id: string }
@@ -40,7 +41,7 @@ export interface Answer { issue: string; key: string | null; body: string }
 export interface Reply { ask: string; issue: string | null; key: string | null; body: string }
 export type CommandName = (typeof LINK_COMMANDS)[number];
 /** `autonomy` has `level`: the server set the project label to it before it sent the command. */
-export interface Command { name: CommandName; key: string | null; issue: string | null; level?: string }
+export interface Command { name: CommandName; key: string | null; issue: string | null; level?: string; agents?: AgentSettings }
 export interface AgentReply { id: string; agent: string; body: string }
 export const AGENT_REPLY_STATUSES = ["delivered", "refused", "unconfirmed"] as const;
 export const AGENT_REPLY_NOT_TAKEN = "No agent watcher took the reply within two minutes";

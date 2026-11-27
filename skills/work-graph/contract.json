@@ -259,7 +259,8 @@
       "at",
       "ran",
       "wait_interval",
-      "contract"
+      "contract",
+      "agents"
     ]
   },
   "statuses": [
@@ -511,7 +512,8 @@
       "dispatch",
       "pause",
       "resume",
-      "autonomy"
+      "autonomy",
+      "agents"
     ],
     "agent_reply_statuses": [
       "delivered",

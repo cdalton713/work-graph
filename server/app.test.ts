@@ -647,6 +647,25 @@ describe("review effort", () => {
   });
 });
 
+describe("agents", () => {
+  const post = (a: ReturnType<typeof app>, agents: unknown) =>
+    a.request("/api/projects/p1/agents", { method: "POST", headers: write, body: JSON.stringify({ agents }) });
+
+  it("checks the agents and queues them for the coordinator", async () => {
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    const a = app();
+    expect((await post(a, { worker: { effort: "high" } })).status).toBe(400);
+    const agents = { worker: { agent: "codex", model: "gpt-6.1-sol", effort: "high" } };
+    const response = await post(a, agents);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, agents, queued: 1 });
+    const sent: string[] = [];
+    const connection = await a.link.hub.joinCoordinator({ send: (t) => sent.push(t), close: () => {} }, { workspace: "work", id: "p1" });
+    await connection.receive(JSON.stringify({ v: 1, type: "hello", payload: { session: "s" } }));
+    expect(JSON.parse(sent[0])).toMatchObject({ type: "command", payload: { name: "agents", key: null, issue: null, agents } });
+  });
+});
+
 describe("autonomy", () => {
   /** A Linear stub for the label calls: the project has the label `labelled`, and the group exists when `group`. */
   function labelLinear({ teams = ["CD"], group = true, labelled = "standard-id" } = {}) {

@@ -204,13 +204,13 @@ pub(super) fn generate() -> String {
             "fields":fields,"samples":samples()
         },
         "status_doc":{
-            "title":"work-graph status","fields":["status","wave","lines","at","ran","wait_interval","contract"]
+            "title":"work-graph status","fields":["status","wave","lines","at","ran","wait_interval","contract","agents"]
         },
         "statuses":STATUSES,"satisfied":edges(),
         "link":{
             "version":1, "path":"/api/link","to_coordinator":["changed","answer","reply","command","agent-reply"],
             "from_coordinator":["hello","state","asks","progress","ack","wrote","agents","agent-reply-result"],
-            "commands":["next","dispatch","pause","resume","autonomy"],
+            "commands":["next","dispatch","pause","resume","autonomy","agents"],
             "agent_reply_statuses":["delivered","refused","unconfirmed"],"close_codes":{"restart":1012,"recycle":4001}
         }
     });

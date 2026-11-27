@@ -379,6 +379,10 @@ impl Run<'_> {
                         }
                     }
                 }
+                "command" if payload["name"] == "agents" => extra.push(super::page_agents::apply(
+                    &self.args.dir,
+                    &payload["agents"],
+                )),
                 "command" if matches!(payload["name"].as_str(), Some("pause" | "resume")) => extra
                     .push((
                         "note".into(),

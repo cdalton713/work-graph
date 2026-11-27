@@ -218,10 +218,16 @@ describe("what wg next published", () => {
   const ids = (g: ReturnType<typeof boardGroups>) => Object.fromEntries(g.map((x) => [x.id, x.nodes.map((n) => n.issue.identifier)]));
   it("reads the status document, and nothing from a text that is not one", () => {
     const text = 'phase 1: 2 tasks\n\n- `do` review a CD-1\n\n```json\n{"wg": 1, "status": "phase 1: 2 tasks", "wave": ["a"], "lines": [{"level": "do", "text": "review a CD-1"}, {"bad": 1}], "at": "2026-11-20T10:00:00Z"}\n```\n\nWritten by `wg next`.';
-    expect(parseStatus(text)).toEqual({ status: "phase 1: 2 tasks", wave: ["a"], lines: [{ level: "do", text: "review a CD-1" }], at: "2026-11-20T10:00:00Z", ran: null, waitInterval: null, contract: null });
+    expect(parseStatus(text)).toEqual({ status: "phase 1: 2 tasks", wave: ["a"], lines: [{ level: "do", text: "review a CD-1" }], at: "2026-11-20T10:00:00Z", ran: null, waitInterval: null, contract: null, agents: null });
     expect(parseStatus("notes of a meeting")).toBeNull();
     expect(parseStatus('```json\n{"status": "x"}\n```')).toBeNull();
     expect(parseStatus(null)).toBeNull();
+  });
+  it("reads the agents of the effort and ignores invalid ones", () => {
+    const status = (agents: unknown) => parseStatus('```json\n' + JSON.stringify({ wg: 1, status: "ready", agents }) + '\n```')!.agents;
+    expect(status({ worker: { agent: "codex", model: "gpt-6.1-sol" } })).toEqual({ worker: { agent: "codex", model: "gpt-6.1-sol" } });
+    expect(status({ worker: { effort: "high" } })).toBeNull();
+    expect(status(undefined)).toBeNull();
   });
   it("uses the last run and the wait interval to tell how fresh the result is", () => {
     const status = parseStatus('```json\n{"wg":1,"status":"ready","ran":"2026-11-20T10:00:00Z","wait_interval":600,"contract":"012345abcdef"}\n```');

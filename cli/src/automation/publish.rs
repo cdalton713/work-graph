@@ -149,6 +149,13 @@ pub(super) fn publish(
     if let Some(i) = interval {
         data["wait_interval"] = json!(i)
     }
+    // The agents of this effort (effort.agents in plan.json), for the Agents picker of the page.
+    if e.plan["effort"]["agents"]
+        .as_object()
+        .is_some_and(|a| !a.is_empty())
+    {
+        data["agents"] = e.plan["effort"]["agents"].clone();
+    }
     let data = document_json(&data)?;
     let content = format!(
         "{body}\n\n```json\n{data}\n```\n\nWritten by `wg next` for the page ({}). Do not edit.",

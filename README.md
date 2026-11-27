@@ -459,7 +459,9 @@ Orca's default agent. `wg config [<plan-dir>]` shows the resolved roles.
 
 On the hosted page, the "Install wg" step of the setup guide and Settings have an Agents form. It saves the
 choice on your account and adds it as the `agents` object of the config block to copy. The form lists known
-models and effort levels for each agent and also takes another model ID.
+models and effort levels for each agent and also takes another model ID. The project bar has an "Agents…" button for the owner. It
+sends the agents of that project to its coordinator with the link command `agents`; `wg next` writes them as
+`effort.agents` in plan.json and publishes them in the status document, which the form reads.
 
 A follow-up job uses the settings in the node's run row before the plan and
 config defaults. Command flags can override those settings. To apply changes

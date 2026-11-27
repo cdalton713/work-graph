@@ -219,3 +219,5 @@
 .bar-hold { white-space: nowrap; }
 .bar-hold.is-held { color: var(--ink-3); }
 .bar-hold.is-ended { color: var(--lamp-stop); font-weight: 600; }
+.bar-agents { white-space: nowrap; }
+.bar-agents.is-set { color: var(--ink-1); }

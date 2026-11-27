@@ -5233,7 +5233,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(contract["version"], 3)
         self.assertIn("started_at", contract["card"]["fields"])
         self.assertEqual(contract["status_doc"]["fields"],
-                         ["status", "wave", "lines", "at", "ran", "wait_interval", "contract"])
+                         ["status", "wave", "lines", "at", "ran", "wait_interval", "contract", "agents"])
         same_lane = next(edge for edge in contract["satisfied"] if edge["name"] == "a task of the same lane")
         self.assertIn("In Review", same_lane["clear"])
         self.assertEqual(same_lane["clear_without_code_done"], ["Merged", "Done", "Canceled"])
@@ -6712,6 +6712,40 @@ class CommandTests(unittest.TestCase):
 
     def test_next_gives_no_line(self):
         self.assertEqual(self.command("next"), ([], ["next"]))
+
+    def agents(self, agents):
+        return wg.link_lines([{"id": "ag", "type": "command", "payload": {"name": "agents", "key": None, "issue": None,
+                                                                         "agents": agents}}], {}, self.d)
+
+    def test_agents_from_the_page_go_in_the_plan(self):
+        wg.save_json(Path(self.d) / "plan.json", {"effort": {"name": "Example"}, "nodes": []})
+        worker = {"worker": {"agent": "codex", "model": "gpt-6.1-sol", "effort": "high"}}
+        self.assertEqual(self.agents(worker), ([("note", "agents @effort -: set on the page: coordinator default; "
+                                                         "worker codex gpt-6.1-sol high")], ["ag"]))
+        self.assertEqual(wg.load_plan(self.d)["effort"]["agents"], worker)
+        self.assertEqual(self.agents(worker)[0][0][1].endswith("(no change)"), True)
+        both = worker | {"coordinator": {"agent": "claude"}}
+        (level, text), = self.agents(both)[0]
+        self.assertEqual(level, "do")
+        self.assertIn(f"run `wg autostart {self.d} --install` if this effort has an autostart automation", text)
+        self.assertEqual(self.agents({})[0][0][0], "do")  # the coordinator went back to the default
+        self.assertNotIn("agents", wg.load_plan(self.d)["effort"])
+
+    def test_a_shared_plan_asks_for_wg_load(self):
+        wg.save_json(Path(self.d) / "plan.json", {"effort": {"name": "Example"}, "nodes": []})
+        km = wg.load_keymap(self.d)
+        km["collab"] = {"name": "Example"}
+        wg.save_keymap(self.d, km, sync=False)
+        (level, text), = self.agents({"worker": {"agent": "claude"}})[0]
+        self.assertEqual(level, "do")
+        self.assertIn(f"run `wg load {self.d} --apply` to share the plan", text)
+
+    def test_invalid_agents_change_nothing(self):
+        wg.save_json(Path(self.d) / "plan.json", {"effort": {"name": "Example"}, "nodes": []})
+        self.assertEqual(self.agents({"worker": {"effort": "high"}})[0],
+                         [("note", "agents @effort -: not changed (agents.worker.effort: needs a model)")])
+        self.assertEqual(self.agents("codex")[0], [("note", "agents @effort -: not changed (agents: must be an object)")])
+        self.assertNotIn("agents", wg.load_plan(self.d)["effort"])
 
     def test_the_pause_label_holds_the_do_lines_until_resume(self):
         lines = [("do", "dispatch a CD-1"), ("wait", "worker b CD-2")]

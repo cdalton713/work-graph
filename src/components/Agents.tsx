@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { AGENT_CHOICES, AGENT_ROLES, ROLE_LABELS, validateAgents, type AgentId, type AgentRole, type AgentSetting, type AgentSettings } from "../lib/agents";
+import { Sheet } from "./ui";
+import { AGENT_CHOICES, AGENT_ROLES, describeAgent, ROLE_LABELS, validateAgents, type AgentId, type AgentRole, type AgentSetting, type AgentSettings } from "../lib/agents";
 
 const CUSTOM = ":custom";
 
@@ -81,4 +82,37 @@ export function AgentsForm({ value, save, busy, error, submit = "Save agents", n
     {shown && <p className="account-error" role="alert">{shown}</p>}
     <div><button className="primary" disabled={busy}>{submit}</button></div>
   </form>;
+}
+
+/** The Agents control of the bar: "Agents…" opens the form for this project. `current` is effort.agents as the
+ * last `wg next` published it; null when no result says. The coordinator writes the change in plan.json. */
+export function AgentsControl({ current, onSave, onDone }: {
+  current: AgentSettings | null;
+  onSave: (agents: AgentSettings) => Promise<void>;
+  /** Close a menu that holds the button. */
+  onDone?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const close = () => { if (!busy) { setOpen(false); setError(""); onDone?.(); } };
+  const set = current && Object.keys(current).length > 0;
+  return <>
+    <button type="button" className={`ghost bar-agents${set ? " is-set" : ""}`} aria-haspopup="dialog"
+      title={set ? AGENT_ROLES.map((role) => `${ROLE_LABELS[role]}: ${describeAgent(current?.[role])}`).join("\n") : undefined}
+      onClick={() => setOpen(true)}>Agents…</button>
+    <Sheet open={open} narrow title="Agents of this project" onClose={close}>
+      <p>{current ? "The coordinator and worker jobs of this project use these settings."
+        : "wg next has not published agents for this project. It uses the defaults of the wg config."}
+      {" "}Default uses the wg config, then the agent's own default.</p>
+      {open && <AgentsForm value={current ?? {}} busy={busy} error={error} submit="Send to the coordinator"
+        note="The coordinator writes the change in plan.json at its next wg next. A worker change applies at the next dispatch, a coordinator change at the next coordinator start."
+        save={(agents) => {
+          setBusy(true);
+          setError("");
+          onSave(agents).then(() => { setBusy(false); setOpen(false); onDone?.(); },
+            (e: Error) => { setBusy(false); setError(e.message); });
+        }} />}
+    </Sheet>
+  </>;
 }

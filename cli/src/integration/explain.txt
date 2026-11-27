@@ -31,6 +31,7 @@ replied       wg next sent the human's reply to the worker
 autonomy      the autonomy level, or a change of it
 paused        the human paused the effort
 resumed       the human resumed the effort
+agents        the human set the agents of the effort on the page
 below         wait: the node below in the lane comes first
 blockers      wait: a blocker of the ship point opened again
 soak          wait: the soak runs

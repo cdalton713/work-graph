@@ -77,7 +77,7 @@ to the page. On a page with sign-in, the token permits API reads. The viewer's w
 - Linear stays the record. An answer and a reply are comments on the issue. A dispatch is a comment on the issue. An answer also gets the issue label `answered`, so `wg next` finds it after a server restart. Pause is the project label `paused`. The server's queue is in memory and only wakes `wg next` sooner.
 - Without the link (no server, no `websockets` package, or `WG_LINK=off`), `wg next` prints one `warn link:` line and polls Linear.
 
-<!-- explain: answer,relay,replied,autonomy,paused,resumed -->
+<!-- explain: answer,relay,replied,autonomy,paused,resumed,agents -->
 ### Lines from the page
 
 The link gives these lines. The server keeps each message until `wg next` prints its line, so a message that comes while you work is in your next `wg next`.
@@ -90,6 +90,8 @@ The link gives these lines. The server keeps each message until `wg next` prints
 | `note replied <key> <issue>: …` | `wg next` sent the human's reply to the worker with `orca orchestration reply`. Do nothing. |
 | `do autonomy @effort -: …` | The human changed the autonomy level on the page or in Linear. Act at the new level from now on (autonomy.md), and say the change in your status line. `note autonomy @effort -: <level>` is the level when it did not change. |
 | `wait paused @effort -: …` | The human paused the effort on the page (the project label `paused`). Start no job and move no status until the line goes; `wg next` holds each `do` line until they resume. |
+| `note agents @effort -: set on the page: …` | The human set the agents of the effort on the page. `wg next` wrote them as `effort.agents` in plan.json. The next worker job uses them. Do nothing. |
+| `do agents @effort -: set on the page: …; run …` | As above, and the line names what is left: `wg autostart <plan-dir> --install` when the coordinator agent changed and the effort has an autostart automation (`wg autostart <plan-dir>` shows it), and `wg load <plan-dir> --apply` for a shared plan. Run them, then act on the other lines. A new coordinator agent applies to the next coordinator job, not to this session. |
 | `do resumed @effort -: …` | The human resumed the effort. Say so in your next status line, then act on the other lines. `wg next` prints it once, so `wg next --wait` wakes even when every other line is a wait. |
 <!-- /explain -->
 

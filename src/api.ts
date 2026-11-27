@@ -277,6 +277,9 @@ export const api = {
   /** Set the autonomy level of the project; the coordinator gets it at once. */
   autonomy: (projectId: string, level: AutonomyLevel, workspace?: string) =>
     call<{ ok: boolean; level: AutonomyLevel; queued: number }>(`projects/${projectId}/autonomy`, { method: "POST", body: JSON.stringify({ level }) }, workspace),
+  /** Send the agents of the project to its coordinator, which writes them in plan.json. */
+  agents: (projectId: string, agents: AgentSettings, workspace?: string) =>
+    call<{ ok: boolean; agents: AgentSettings; queued: number }>(`projects/${projectId}/agents`, { method: "POST", body: JSON.stringify({ agents }) }, workspace, "command_written"),
   /** Set the review effort of the project; the coordinator gets it at once. */
   reviewEffort: (projectId: string, level: ReviewEffort, workspace?: string) =>
     call<{ ok: boolean; level: ReviewEffort; queued: number }>(`projects/${projectId}/review-effort`, { method: "POST", body: JSON.stringify({ level }) }, workspace),

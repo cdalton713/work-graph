@@ -65,7 +65,7 @@ fn safe_value(value: &Value) -> bool {
     })
 }
 
-fn validate_agents(settings: &Value) -> io::Result<()> {
+pub fn validate_agents(settings: &Value) -> io::Result<()> {
     let mut errors = Vec::new();
     for (role, values) in settings
         .as_object()

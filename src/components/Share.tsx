@@ -147,13 +147,11 @@ export function Share({ id, workspace, team, close }: { id: string; workspace: s
           const row = linkRow(data[kind], urls[kind]);
           return <div className="account-item" key={kind}>
             <div><h3>{name}</h3><p>{description}</p></div>
-            {row.state === "live" && row.url && <>
-              <div className="account-form"><label>{name}<input readOnly value={row.url} /></label></div>
-              <div className="account-actions">
-                <SecretCopyButton key={row.url} text={row.url} label={`Copy ${name.toLowerCase()}`}
-                  success="Link copied." manual="Select and copy the link from the field above." />
-              </div>
-            </>}
+            {row.state === "live" && row.url && <div className="share-link">
+              <input readOnly aria-label={name} value={row.url} onFocus={(event) => event.currentTarget.select()} />
+              <SecretCopyButton key={row.url} text={row.url} label={`Copy ${name.toLowerCase()}`}
+                success="Link copied." manual="Select and copy the link from the field." />
+            </div>}
             {row.state === "live" && row.made && <p>Made {date(row.made)}</p>}
             {row.state === "live" && !row.url && <p>This link was made before the page kept link addresses. Make a new link to see it.</p>}
             <div className="account-actions">{row.state === "missing" ?

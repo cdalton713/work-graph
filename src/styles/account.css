@@ -48,6 +48,9 @@
   overflow: auto;
   overscroll-behavior: contain;
 }
+/* Both insets are set, so without a height the dialog fills the window and its rows stretch apart.
+   With a content height, the auto margins center it, and max-height still bounds it. */
+.account-dialog[open] { height: fit-content; align-content: start; }
 .account-dialog > button { justify-self: start; }
 .account-dialog::backdrop { background: var(--rail-3); }
 
@@ -64,6 +67,13 @@
 .share-heading { justify-content: space-between; }
 .share-dialog h3 { font-size: 14px; margin: 0; }
 .share-dialog section, .share-confirm { display: grid; gap: 8px; min-width: 0; }
+.share-link { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.share-link input {
+  flex: 1 1 240px; min-width: 0; padding: 6px 8px; border: 1px solid var(--rail-2);
+  border-radius: var(--r-1); background: var(--inset); color: var(--ink-1); font: 12px var(--mono);
+}
+.share-link button.copy { font-size: inherit; border: 1px solid var(--rail-2); }
+.share-link p { flex-basis: 100%; }
 .share-confirm { padding: 12px; background: var(--inset); border: 1px solid var(--rail-2); border-radius: var(--r-1); }
 .share-join { max-width: 540px; }
 .member-access { flex-wrap: wrap; white-space: normal; }

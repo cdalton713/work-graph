@@ -37,7 +37,7 @@ import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAut
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { boardRead, NeedsLinearAccess, sharedLinear, LinearReadLimited, LinearError, LinearKeyRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, waitingIssues, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
+import { boardRead, NeedsLinearAccess, sharedLinear, LinearReadLimited, LinearError, LinearKeyRequired, LinearReconnectRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, waitingIssues, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, type LinkMember, LinkHub, LinkRoomFull, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
@@ -200,7 +200,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   const requiresLinkToken = !!tenants || !!linkToken;
   const linkEnabled = !readOnly;
   const roomRef = (ref: ProjectRef, tenant: Tenant): RoomRef => tenants ? { ...ref, tenant: tenant.id } : ref;
-  const siteOf = (tenant: Tenant) => createSite(tenant.human, tenant.workspaces[0]?.id ?? "default");
+  const siteOf = (tenant: Tenant, viewer = false) =>
+    createSite(tenant.human, (viewer ? tenant.workspaces.filter((w) => !w.attached) : tenant.workspaces)[0]?.id ?? "default");
   const installationSite = createSite(human ?? DEFAULT_HUMAN, workspaces[0]?.id ?? "default");
   const clock = now ?? Date.now;
   const telemetry = createTelemetry(telemetryEnv, tenants ? "service" : "config", waitUntil, undefined, clock);
@@ -671,7 +672,8 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const workspace = isShared ? shared?.workspace
       : account.workspaces.find((entry) => entry.id === (selected || account.workspaces[0]?.id));
     const connection = workspace?.connectionId;
-    if (!workspace || !connection || workspace.needsKey || (header("x-project") && header("x-project") !== id)) {
+    if (!workspace || !connection || workspace.needsKey || (header("x-project") && header("x-project") !== id) ||
+        (!isShared && workspace.attached && !authorization && (readOnly || membership?.role !== "owner"))) {
       return c.json({ error: "Project not found" }, 404);
     }
     const name = shared && (!plan || read) ? shared.name : await shareProject(owner, workspace, id);
@@ -845,7 +847,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (reason) return c.json({ error: reason }, 403);
     if (c.req.path === "/api/config" && (method === "GET" || method === "HEAD")) {
       const tenant = membership?.tenant ?? (!tenants ? await directory.byId(CONFIG_TENANT_ID) : null);
-      const site = tenant ? siteOf(tenant) : createSite(DEFAULT_HUMAN, "default");
+      const site = tenant ? siteOf(tenant, viewer) : createSite(DEFAULT_HUMAN, "default");
       const disconnected = !!linearAuth && !!tenant?.workspaces.find((w) => w.kind === "oauth" && !w.attached)?.needsKey;
       if (membership) {
         await dropIdle(membership.tenant.id);
@@ -914,7 +916,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       version, contract, human: tenant.human, uptime: Math.floor((clock() - started) / 1000),
       readOnly: c.var.viewer, link: linkEnabled ? "/api/link" : null,
       workspaces: [
-        ...tenant.workspaces.map(({ id, name }) => ({ id, name, workspaceId: id })),
+        ...tenant.workspaces.filter((w) => !c.var.viewer || !w.attached).map(({ id, name }) => ({ id, name, workspaceId: id })),
         ...entries.map((entry) => ({ ...sharedEntry(entry), workspaceId: entry.id })),
       ].map(({ workspaceId, ...entry }) => {
         const budget = linearBudget(workspaceId);
@@ -945,6 +947,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         const address = shareUrl ?? (auth && !readOnly ? `https://${rules.hosted!.host}` : undefined);
         const row = { id, name, ...(address ? { shareUrl: address } : {}) };
         if (omitted?.has(id)) return [{ ...row, error: `${name} is temporarily unavailable.` }];
+        if (result.status === "rejected" && result.reason instanceof LinearReconnectRequired) {
+          return [{ ...row, error: `Linear disconnected ${name}. Connect it again in Settings.` }];
+        }
         if (result.status === "rejected" && result.reason instanceof LinearReadLimited) {
           const limit = result.reason;
           return [{ ...row, error: `${name} is temporarily unavailable. Retry at ${new Date(limit.deadline).toISOString()}.`,

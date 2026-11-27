@@ -68,13 +68,14 @@ databaseSuites((open) => {
     const first = await store.attachOAuth(tenant, side);
     expect(first.created).toBe(true);
     await store.setNeedsKey(tenant, first.id);
-    expect(await store.attachOAuth(tenant, { ...side, credential: oauth(2), ownerName: "Side owner" })).toEqual({ id: first.id, created: false });
+    expect(await store.attachOAuth(tenant, { ...side, credential: oauth(2), ownerName: "Side owner" })).toEqual({ id: first.id, created: false, displaced: `${refreshToken}-1` });
     expect((await store.readTenant(tenant))!.connections.map(({ workspaceId, attached, status, kind, ownerName }) =>
       ({ workspaceId, attached, status, kind, ownerName }))).toEqual([
       { workspaceId: "first", attached: false, status: "ok", kind: "api_key", ownerName: "Ada" },
       { workspaceId: "side", attached: true, status: "ok", kind: "oauth", ownerName: "Side owner" },
     ]);
     expect(await store.readCredential(tenant, first.id)).toMatchObject({ key: "access-2" });
+    expect(await store.shares.make([tenant, first.id, "project"], "Project")).toBeNull();
     const home = (await store.readTenant(tenant))!.connections[0].id;
     await expect(store.removeConnection(tenant, home, true)).rejects.toThrow("Connection not found");
     for (let i = 2; i < MAX_CONNECTIONS; i++) await store.attachOAuth(tenant, { ...side, workspaceId: `w${i}`, linearOrgId: `o${i}` });

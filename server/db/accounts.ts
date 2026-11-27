@@ -54,6 +54,17 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
     ];
   }
 
+  /** The refresh token of a stored OAuth credential, to revoke after a write replaced or removed it. */
+  function displacedToken(row: Pick<EncryptedConnection, "tenantId" | "id" | "kind" | "credential" | "refreshToken" | "expiresAt">) {
+    if (row.kind !== "oauth" || !row.credential) return undefined;
+    try {
+      const credential = decrypt(row as EncryptedConnection);
+      return credential.kind === "oauth" ? credential.refreshToken : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   function decrypt(row: EncryptedConnection): ConnectionCredential {
     const tenant = row.tenantId;
     if (row.credential === null) throw new Error("Incomplete database credential");
@@ -268,14 +279,15 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       return row?.credential != null ? decrypt(row) : null;
     },
 
-    async resolveTenant(tenant: string, oauthKey?: (id: string, initial: OAuthCredential) => (rejected?: string) => Promise<string>): Promise<Tenant | null> {
+    async resolveTenant(tenant: string, oauthKey?: (id: string, initial: OAuthCredential, attached: boolean) => (rejected?: string) => Promise<string>): Promise<Tenant | null> {
       requireUuid(tenant);
       return sql.transaction(async ({ query }) => {
         const [account] = await query<{ id: string; human: string }>(
           "SELECT id, human FROM tenants WHERE id = $1 FOR SHARE", [tenant]);
         if (!account) return null;
         const connections = await query<EncryptedConnection>(`SELECT ${encryptedFields} FROM linear_connections
-          WHERE tenant_id = $1 AND (status = 'ok' OR ($2 AND kind = 'oauth')) ORDER BY position, id`, [tenant, !!oauthKey]);
+          WHERE tenant_id = $1 AND (status = 'ok' OR ($2 AND kind = 'oauth' AND linear_org_id = ${ownerOrg}))
+          ORDER BY position, id`, [tenant, !!oauthKey]);
         return {
           ...account,
           workspaces: connections.flatMap<Workspace>((row) => {
@@ -292,7 +304,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
             if (credential.kind === "api_key") {
               return [{ ...workspace, kind: credential.kind, key: credential.key, rejectApiKey: () => rejectApiKey(row) }];
             }
-            return [{ ...workspace, kind: credential.kind, key: credential.key, oauthKey: oauthKey?.(row.id, credential) }];
+            return [{ ...workspace, kind: credential.kind, key: credential.key, oauthKey: oauthKey?.(row.id, credential, row.attached) }];
           }),
         };
       });
@@ -303,13 +315,14 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       return change(tenant, async (query, account) => {
         const [owner] = await query<{ org: string }>("SELECT linear_org_id AS org FROM users WHERE id = $1", [account.owner]);
         if (owner?.org === input.linearOrgId) throw new Error("The sign-in workspace uses Linear sign-in");
-        const [row] = await query<{ id: string }>(`SELECT id FROM linear_connections
+        const [row] = await query<EncryptedConnection>(`SELECT ${encryptedFields} FROM linear_connections
           WHERE tenant_id = $1 AND linear_org_id = $2 FOR UPDATE`, [account.id, input.linearOrgId]);
         if (row) {
           await query(`UPDATE linear_connections SET kind = $3, credential = $4, refresh_token = $5,
             expires_at = $6, status = 'ok', owner_name = $7 WHERE tenant_id = $1 AND id = $2`,
           [account.id, row.id, ...encrypt(account.id, row.id, input.credential), input.ownerName ?? null]);
-          return { id: row.id, created: false };
+          const displaced = displacedToken(row);
+          return { id: row.id, created: false, ...(displaced && displaced !== input.credential.refreshToken ? { displaced } : {}) };
         }
         const rows = await orderedIds(query, account.id);
         if (rows.length >= MAX_CONNECTIONS) throw new Error("Connection limit reached");
@@ -329,8 +342,8 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       verified?: { ownerName: string; organization: string; teams: string[] }) {
       requireUuid(connection);
       return change(tenant, async (query, account) => {
-        const [row] = await query<Connection>(`SELECT ${connectionFields}
-          FROM linear_connections WHERE tenant_id = $1 AND id = $2`, [account.id, connection]);
+        const [row] = await query<EncryptedConnection>(`SELECT ${encryptedFields}
+          FROM linear_connections WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, [account.id, connection]);
         if (!row) throw new Error("Connection not found");
         if (verified && (!row.attached || row.linearOrgId !== verified.organization)) {
           throw new Error("The replacement key must belong to the same Linear organization");
@@ -340,6 +353,8 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
         await query(`UPDATE linear_connections SET kind = $3, credential = $4,
           refresh_token = $5, expires_at = $6, status = 'ok', owner_name = $7, team = $8
           WHERE tenant_id = $1 AND id = $2`, [account.id, row.id, ...encrypt(account.id, row.id, credential), verified?.ownerName ?? row.ownerName, team]);
+        const displaced = displacedToken(row);
+        return credential.kind === "oauth" && credential.refreshToken === displaced ? undefined : displaced;
       });
     },
 
@@ -371,9 +386,12 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
     async removeConnection(tenant: string, connection: string, attachedOnly = false) {
       requireUuid(connection);
       return change(tenant, async (query) => {
-        requireConnection(await query(`DELETE FROM linear_connections WHERE tenant_id = $1 AND id = $2
-          AND (NOT $3 OR linear_org_id <> ${ownerOrg}) RETURNING id`, [tenant, connection, attachedOnly]));
+        const removed = await query<EncryptedConnection>(`DELETE FROM linear_connections WHERE tenant_id = $1 AND id = $2
+          AND (NOT $3 OR linear_org_id <> ${ownerOrg}) RETURNING id, tenant_id AS "tenantId", kind, credential,
+          refresh_token AS "refreshToken", expires_at AS "expiresAt"`, [tenant, connection, attachedOnly]);
+        requireConnection(removed);
         await updatePositions(query, tenant, await orderedIds(query, tenant));
+        return displacedToken(removed[0]);
       });
     },
 

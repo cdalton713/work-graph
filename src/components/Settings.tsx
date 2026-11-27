@@ -122,14 +122,15 @@ export function WorkspaceKeyForm({ workspace, refresh }: { workspace?: AccountCo
   </form>;
 }
 
-/** The page address to return to after Linear, without the result of an earlier connection. */
-function returnPath() {
+/** The page address to return to after Linear, without the result of an earlier connection. `page`: the screen to reopen. */
+function returnPath(page?: string) {
   const query = new URLSearchParams(location.search);
   query.delete("connect");
+  if (page) query.set("page", page);
   return location.pathname + (query.size ? `?${query}` : "");
 }
 
-export const connectUrl = () => `/auth/connect?next=${encodeURIComponent(returnPath())}`;
+export const connectUrl = (page?: string) => `/auth/connect?next=${encodeURIComponent(returnPath(page))}`;
 
 const connectMessages: Record<string, [string, boolean]> = {
   connected: ["Linear connected the workspace.", false],
@@ -147,19 +148,20 @@ function ConnectResult() {
   useEffect(() => {
     if (result) history.replaceState(history.state, "", returnPath());
   }, [result]);
-  const message = result ? connectMessages[result] : undefined;
+  const message = result && Object.hasOwn(connectMessages, result) ? connectMessages[result] : undefined;
   if (!message) return null;
   const [text, error] = message;
   return <p className={error ? "account-error" : undefined} role={error ? "alert" : "status"}>{text}</p>;
 }
 
-/** Connects another workspace with Linear sign-in. `useKey` opens the personal API key form; without it, the form shows here. */
-export function ConnectWorkspace({ refresh, useKey }: { refresh: RefreshAccount; useKey?: () => void }) {
+/** Connects another workspace with Linear sign-in. `useKey` opens the personal API key form; without it, the form shows here.
+ * `page`: the screen that Linear returns to. */
+export function ConnectWorkspace({ refresh, useKey, page }: { refresh: RefreshAccount; useKey?: () => void; page?: string }) {
   return <div className="account-form">
     <ConnectResult />
     <p>Linear asks which workspace to connect. Projects in a connected workspace stay private to you.</p>
     <div className="account-actions">
-      <button type="button" className="primary" onClick={() => location.assign(connectUrl())}>Connect a workspace with Linear</button>
+      <button type="button" className="primary" onClick={() => location.assign(connectUrl(page))}>Connect a workspace with Linear</button>
       {useKey && <button type="button" onClick={useKey}>Use a personal API key</button>}
     </div>
     {!useKey && <details>

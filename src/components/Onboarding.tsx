@@ -26,7 +26,9 @@ function Command({ text, label }: { text: string; label: string }) {
 }
 
 export function Onboarding({ account, refresh, overview }: { account: Account; refresh: RefreshAccount; overview: () => void }) {
-  const [step, setStep] = useState<Step>(() => firstStep({ ...account.onboarding, skipped: false }, false) ?? "name");
+  // After Linear returns from a workspace connection, show its result on the workspaces step.
+  const [step, setStep] = useState<Step>(() => new URLSearchParams(location.search).has("connect") ? "workspaces"
+    : firstStep({ ...account.onboarding, skipped: false }, false) ?? "name");
   const [verified, setVerified] = useState<Record<string, boolean>>({});
   const focusCreated = useRef<string | null>(null);
   const [created, setCreated] = useState<Record<string, SetupTeam>>({});
@@ -115,7 +117,7 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
               {account.connections.map((workspace) => <article className="account-item" key={workspace.id}>
                 <h3>{workspace.name}</h3><WorkspaceStatus workspace={workspace} />
               </article>)}
-              <ConnectWorkspace refresh={refresh} />
+              <ConnectWorkspace refresh={refresh} page="setup" />
             </>}
             {step === "setup" && <>
               <section>

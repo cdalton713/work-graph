@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { afterEach, expect, it, vi } from "vitest";
 import { serializeSigned } from "hono/utils/cookie";
 import { createApp } from "./app.ts";
+import { linearAuthRoutes } from "./linearauth.ts";
 import { credentialCrypto } from "./db/crypto.ts";
 import { migrate } from "./db/migrations.ts";
 import { dbTenants } from "./db/tenants.ts";
@@ -35,6 +36,22 @@ it.each(["WG_HOSTED", "WG_DATA_KEY", "WG_SESSION_SECRET", "WG_LINEAR_CLIENT_ID",
   },
 );
 
+it("never turns a signed workspace connection into a sign-in", async () => {
+  const save = vi.fn();
+  const routes = linearAuthRoutes(auth, () => `https://${host}`, () => now, save, () => {});
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  const flow = (await serializeSigned("__Host-wg_signin", Buffer.from(JSON.stringify({
+    state: "state", verifier: "test-verifier", expiresAt: now + 60_000, next: `https://${host}/?page=settings`, attach: "account",
+  })).toString("base64url"), secret, { path: "/", secure: true })).split(";")[0];
+  const response = await routes.request(`https://${host}/callback?code=${code}&state=state`, { headers: { host, cookie: flow } });
+  expect(response.status).toBe(302);
+  expect(response.headers.get("location")).toBe(`https://${host}/?page=settings&connect=failed`);
+  expect(response.headers.getSetCookie().some((value) => value.startsWith("__Host-wg_session="))).toBe(false);
+  expect(save).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
 databaseSuites((open) => {
   it("connects another workspace with Linear OAuth to the signed-in account", async () => {
     const sql = await open();
@@ -47,20 +64,36 @@ databaseSuites((open) => {
     const work = { id: allowedOrgId, name: "Work", urlKey: "work" };
     // Not in WG_ALLOWED_ORGS: the sign-up list does not limit attached workspaces.
     const side = { id: "0c1d2b9e-6f4a-4c3e-9d8b-2a1f5e7c9b30", name: "Side", urlKey: "side" };
-    let org = work, issued = 0;
+    const third = { id: "5b7e1f3a-2c4d-4e6f-8a9b-0c1d2e3f4a5b", name: "Third", urlKey: "third" };
+    let org = work, user = "ada", issued = 0, identityDown = false, refuseRefresh = false, rejected = "";
     const revoked: string[] = [];
+    const tokens = new Map<string, typeof work>();
     vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      const form = init.body as URLSearchParams;
       if (url.endsWith("/oauth/revoke")) {
-        revoked.push((init.body as URLSearchParams).get("token")!);
+        revoked.push(form.get("token")!);
         return new Response(null, { status: 200 });
       }
-      if (url.endsWith("/oauth/token")) return Response.json({ access_token: access + ++issued, refresh_token: refresh + issued, expires_in: 86400 });
-      const { query } = JSON.parse(String(init.body));
+      if (url.endsWith("/oauth/token")) {
+        if (form.get("grant_type") === "refresh_token" && refuseRefresh) return Response.json({ error: "invalid_grant" }, { status: 400 });
+        issued++;
+        tokens.set(access + issued, org);
+        return Response.json({ access_token: access + issued, refresh_token: refresh + issued, expires_in: 86400 });
+      }
+      const header = new Headers(init.headers).get("authorization")!;
+      const { query, variables } = JSON.parse(String(init.body));
       if (query.includes("subscription")) return Response.json({ data: { organization: { subscription: { type: "free" } } } });
-      return Response.json({ data: {
-        viewer: { id: org === work ? "ada" : "ada-side", name: org === work ? "Ada" : "Ada Side", email: "ada@example.com" },
-        organization: org, teams: { nodes: [{ key: org === work ? "WG" : "SIDE" }] },
-      } });
+      if (query.includes("viewer")) {
+        if (identityDown) return new Response(null, { status: 503 });
+        return Response.json({ data: {
+          viewer: { id: org === work ? user : "ada-side", name: org === work ? "Ada" : "Ada Side", email: "ada@example.com" },
+          organization: org, teams: { nodes: org === third ? [{ key: "T1" }, { key: "T2" }] : [{ key: org === work ? "WG" : "SIDE" }] },
+        } });
+      }
+      if (header === rejected) return Response.json({ error: "expired" }, { status: 401 });
+      return Response.json({ data: { teams: { nodes: [{ projects: {
+        nodes: [{ id: `project-${variables.k}`, name: "Project" }], pageInfo: { hasNextPage: false, endCursor: null },
+      } }] } } });
     }));
     const sessionOf = (response: Response) =>
       response.headers.getSetCookie().find((value) => value.startsWith("__Host-wg_session="))?.split(";")[0];
@@ -68,6 +101,11 @@ databaseSuites((open) => {
       const response = await request(path, session);
       const location = new URL(response.headers.get("location")!);
       return { location, flow: response.headers.getSetCookie()[0]?.split(";")[0], state: location.searchParams.get("state") };
+    }
+    async function signIn() {
+      const login = await start("/auth/login");
+      expect(login.location.searchParams.get("prompt")).toBeNull();
+      return sessionOf(await request(`/auth/callback?code=${code}&state=${login.state}`, login.flow))!;
     }
     async function connect(session?: string, callbackSession = session, query = `code=${code}`) {
       const { flow, state, location } = await start("/auth/connect?next=" + encodeURIComponent("/?page=settings"), session);
@@ -79,46 +117,96 @@ databaseSuites((open) => {
       expect(back.origin + back.pathname + "?page=settings").toBe(`https://${host}/?page=settings`);
       return back.searchParams.get("connect");
     }
+    const connections = async (session: string) => (await (await request("/api/account", session)).json()).connections;
     try {
       await migrate(sql);
       const anonymous = await start("/auth/connect?next=/settings");
       expect(anonymous.location.href).toBe(`https://${host}/auth/login?next=${encodeURIComponent(`https://${host}/settings`)}`);
       expect(anonymous.flow).toBeUndefined();
-      const login = await start("/auth/login");
-      expect(login.location.searchParams.get("prompt")).toBeNull();
-      const session = sessionOf(await request(`/auth/callback?code=${code}&state=${login.state}`, login.flow))!;
+      const session = await signIn();
       expect(session).toBeTruthy();
 
       org = side;
       expect(await connect(session)).toBe("connected");
-      const account = await (await request("/api/account", session)).json();
-      expect(account.connections).toMatchObject([
+      const sideToken = refresh + issued;
+      expect(await connections(session)).toMatchObject([
         { workspace_id: "work", kind: "oauth", attached: false, team: "WG" },
         { workspace_id: "side", kind: "oauth", attached: true, team: "SIDE", owner_name: "Ada Side", status: "ok" },
       ]);
       expect(await sql.query("SELECT id FROM users")).toHaveLength(1);
       expect(await sql.query("SELECT id FROM tenants")).toHaveLength(1);
-      const tenant = (await tenants.byId((await sql.query<{ id: string }>("SELECT id FROM tenants"))[0].id))!;
+      const [{ id: tenantId }] = await sql.query<{ id: string }>("SELECT id FROM tenants");
+      const tenant = (await tenants.byId(tenantId))!;
       expect(tenant.workspaces.map(({ id, attached }) => [id, attached])).toEqual([["work", false], ["side", true]]);
 
+      // A reconnection revokes the grant that it replaces.
       expect(await connect(session)).toBe("reconnected");
+      expect(revoked).toEqual([sideToken]);
       expect(await sql.query("SELECT id FROM linear_connections")).toHaveLength(2);
-      expect(revoked).toEqual([]);
+
+      // A lost attached grant marks only that workspace; the page keeps its sign-in.
+      rejected = "Bearer " + access + issued;
+      refuseRefresh = true;
+      const listed = await request("/api/projects", session);
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toMatchObject({
+        workspaces: [{ id: "work" }, { id: "side", error: "Linear disconnected Side. Connect it again in Settings." }],
+        projects: [{ id: "project-WG", workspace: "work" }],
+      });
+      expect((await connections(session))[1]).toMatchObject({ workspace_id: "side", status: "needs_key" });
+      const after = await request("/api/projects", session);
+      expect(after.status).toBe(200);
+      expect((await after.json()).workspaces).toEqual([expect.objectContaining({ id: "work" })]);
+      refuseRefresh = false;
+      expect(await connect(session)).toBe("reconnected");
+      const sideCurrent = refresh + issued;
+      expect((await connections(session))[1]).toMatchObject({ workspace_id: "side", status: "ok" });
 
       org = work;
       expect(await connect(session)).toBe("signin-workspace");
-      expect(revoked).toEqual([refresh + issued]);
+      expect(revoked.at(-1)).toBe(refresh + issued);
       expect(await sql.query("SELECT id FROM linear_connections")).toHaveLength(2);
+
+      // A grant whose identity lookup fails is revoked.
+      org = side;
+      identityDown = true;
+      expect(await connect(session)).toBe("failed");
+      expect(revoked.at(-1)).toBe(refresh + issued);
+      identityDown = false;
+
+      // With more than one team, the owner selects the team.
+      org = third;
+      expect(await connect(session)).toBe("connected");
+      expect((await connections(session))[2]).toMatchObject({ workspace_id: "third", attached: true, team: "" });
 
       const before = issued;
       expect(await connect(session, session, "error=access_denied")).toBe("denied");
       expect(await connect(session, "")).toBe("expired");
-      expect(issued).toBe(before);
+      org = work;
+      user = "bob";
+      const other = await signIn();
+      expect(await connect(session, other)).toBe("expired");
+      expect(issued).toBe(before + 1);
 
-      const removed = await request(`/api/account/workspaces/${account.connections[1].id}`, session, "DELETE");
+      // A read-only page shows no attached workspace, also when it is first, and no plan in it.
+      const viewerApp = createApp(rules, { team: "", dist: "/unused/", watchMs: 0, readOnly: true, linearAuth: auth, now: () => now, tenants });
+      const viewer = (path: string) => viewerApp.request(`https://${host}${path}`, { headers: { host, cookie: session, "x-workspace": "third" } });
+      try {
+        const thirdRow = (await connections(session))[2];
+        await tenants.accounts!.updateConnectionSettings(tenantId, thirdRow.id, { position: 0 });
+        expect(await (await viewer("/api/config")).json()).toMatchObject({ defaultWorkspace: "work", readOnly: true });
+        const status = await (await viewer("/api/status")).json();
+        expect(status.workspaces.map(({ id }: { id: string }) => id)).toEqual(["work"]);
+        expect((await viewer("/api/projects/project-T1/plan")).status).toBe(404);
+      } finally {
+        viewerApp.link.stop();
+      }
+
+      const sideRow = (await connections(session))[2];
+      const removed = await request(`/api/account/workspaces/${sideRow.id}`, session, "DELETE");
       expect(removed.status).toBe(200);
-      expect(revoked).toEqual([refresh + before, refresh + (before - 1)]);
-      expect(await sql.query("SELECT workspace_id FROM linear_connections")).toEqual([{ workspace_id: "work" }]);
+      expect(revoked.at(-1)).toBe(sideCurrent);
+      expect((await connections(session)).map(({ workspace_id }: { workspace_id: string }) => workspace_id)).toEqual(["third", "work"]);
     } finally {
       app.link.stop();
       tenants.close();

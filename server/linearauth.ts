@@ -26,7 +26,9 @@ export type ConnectResult = "connected" | "reconnected" | "signin-workspace" | "
 export interface LinearAttach {
   /** The account of the signed-in owner of this request, or null. */
   owner: (c: Context) => Promise<string | null>;
-  save: (account: string, workspace: NewConnection & { credential: OAuthCredential }) => Promise<{ id: string; created: boolean }>;
+  /** `displaced`: the refresh token of the credential that a reconnection replaced, to revoke. */
+  save: (account: string, workspace: NewConnection & { credential: OAuthCredential }) =>
+    Promise<{ id: string; created: boolean; displaced?: string }>;
 }
 
 export class LinearSignInRequired extends Error {
@@ -119,7 +121,7 @@ async function identity(key: string): Promise<Identity | null> {
   try {
     const response = await fetch("https://api.linear.app/graphql", {
       method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ query: "query { viewer { id name email } organization { id name urlKey } teams(first: 1) { nodes { key } } }" }),
+      body: JSON.stringify({ query: "query { viewer { id name email } organization { id name urlKey } teams(first: 2) { nodes { key } } }" }),
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) return null;
@@ -177,7 +179,9 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
     if (!flow) return c.json({ error: "this sign-in did not start here, or it took too long: open the page again" }, 400);
     const valid = typeof flow.state === "string" && flow.state === c.req.query("state") && typeof flow.verifier === "string" &&
       !!flow.verifier && typeof flow.expiresAt === "number" && flow.expiresAt > now();
-    const connecting = valid && typeof flow.attach === "string" && !!attach;
+    const connecting = valid && flow.attach !== undefined;
+    // A connection never falls through to sign-in, also when this instance cannot attach workspaces.
+    if (connecting && (typeof flow.attach !== "string" || !attach)) return returnTo(c, flow.next, "failed");
     if (connecting && !code) return returnTo(c, flow.next, "denied");
     if (!valid || !code) {
       return c.json({ error: "this sign-in did not start here, or it took too long: open the page again" }, 400);
@@ -188,6 +192,7 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
       code, code_verifier: flow.verifier as string, redirect_uri: redirectUri(), grant_type: "authorization_code",
     }, now).catch(() => null);
     const data = credential && await identity(credential.key);
+    if (credential && !data) await revokeLinearToken(credential.refreshToken);
     if (connecting && (!credential || !data)) return returnTo(c, flow.next, "failed");
     if (!credential || !data) return c.json({ error: "Linear did not complete the sign-in: open the page again" }, 502);
     const { viewer, organization, teams } = data;
@@ -196,7 +201,10 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
       const result = await attach!.save(flow.attach as string, {
         workspaceId: organization.urlKey, linearOrgId: organization.id, name: organization.name, ownerName: viewer.name,
         team: teams?.nodes?.length === 1 ? teams.nodes[0].key : "", teamLabels: await defaultTeamLabels(`Bearer ${credential.key}`), credential,
-      }).then(({ created }) => created ? "connected" as const : "reconnected" as const, (error: unknown) => {
+      }).then(async ({ created, displaced }) => {
+        if (displaced) await revokeLinearToken(displaced);
+        return created ? "connected" as const : "reconnected" as const;
+      }, (error: unknown) => {
         const message = error instanceof Error ? error.message : "";
         return message === "The sign-in workspace uses Linear sign-in" ? "signin-workspace" as const
           : message === "Connection limit reached" ? "limit" as const : "failed" as const;

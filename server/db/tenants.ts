@@ -2,7 +2,8 @@ import { dbPushStore } from "./push.ts";
 import { randomUUID } from "node:crypto";
 import { LINK_PREFIX, type RedisLink } from "../redis.ts";
 import type { SharedWorkspace, Tenant, Tenants } from "../tenants.ts";
-import { refreshLinearToken, type LinearAuth, type OAuthCredential } from "../linearauth.ts";
+import { LinearSignInRequired, refreshLinearToken, type LinearAuth, type OAuthCredential } from "../linearauth.ts";
+import { LinearReconnectRequired } from "../linear.ts";
 import { createAccounts } from "./accounts.ts";
 import { credentialCrypto, type CredentialCrypto } from "./crypto.ts";
 import { migrate } from "./migrations.ts";
@@ -79,7 +80,15 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
     }
   });
 
-  function oauthKey(auth: LinearAuth, tenant: string, id: string, initial: OAuthCredential) {
+  function oauthKey(auth: LinearAuth, tenant: string, id: string, initial: OAuthCredential, attached: boolean) {
+    const key = refreshedKey(auth, tenant, id, initial);
+    // A lost attached workspace needs a new connection in Settings, not a new sign-in to the page.
+    return attached ? (rejected?: string) => key(rejected).catch((error: unknown) => {
+      throw error instanceof LinearSignInRequired ? new LinearReconnectRequired() : error;
+    }) : key;
+  }
+
+  function refreshedKey(auth: LinearAuth, tenant: string, id: string, initial: OAuthCredential) {
     let current = initial;
     return async (rejected?: string) => {
       if (current.key !== rejected && current.expiresAt.getTime() - now() >= 300_000) return current.key;
@@ -110,7 +119,7 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
       const oldest = cache.keys().next().value;
       if (oldest !== undefined) cache.delete(oldest);
     }
-    const tenant = accounts.resolveTenant(key, linearAuth ? (id, initial) => oauthKey(linearAuth, key, id, initial) : undefined).catch((error: unknown) => {
+    const tenant = accounts.resolveTenant(key, linearAuth ? (id, initial, attached) => oauthKey(linearAuth, key, id, initial, attached) : undefined).catch((error: unknown) => {
       if (cache.get(key)?.tenant === tenant) cache.delete(key);
       throw error;
     });
@@ -155,7 +164,7 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
       const resolved = await Promise.all((await cached.rows).map(async (row): Promise<SharedWorkspace | null> => {
         const owner = await byId(row.ownerId);
         const workspace = owner?.workspaces.find((entry) => entry.connectionId === row.connectionId);
-        if (!owner || !workspace || workspace.needsKey) return null;
+        if (!owner || !workspace || workspace.needsKey || workspace.attached) return null;
         return { id: "shared:" + row.id, name: row.name, projectId: row.projectId, role: row.role, owner, workspace };
       }));
       return resolved.filter((entry): entry is SharedWorkspace => entry !== null);

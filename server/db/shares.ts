@@ -134,8 +134,10 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
       const [tenant, connection] = project;
       const result = await sql.transaction(async ({ query }) => {
         const owner = await lock(query, tenant);
-        if (!owner || !(await query("SELECT 1 FROM linear_connections WHERE tenant_id = $1 AND id = $2 AND kind = 'oauth'",
-          [tenant, connection])).length) return null;
+        // Only the sign-in workspace can be shared: an attached workspace stays private to its owner.
+        if (!owner || !(await query(`SELECT 1 FROM linear_connections c JOIN tenants t ON t.id = c.tenant_id
+          JOIN users u ON u.id = t.owner_user_id WHERE c.tenant_id = $1 AND c.id = $2 AND c.kind = 'oauth'
+          AND c.linear_org_id = u.linear_org_id`, [tenant, connection])).length) return null;
         const links = await liveLinks(query, project);
         const created: Partial<Record<ShareKind, string>> = {};
         const revoked = selection?.rotate ? await revoke(query, project, selection.kind) : false;

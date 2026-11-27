@@ -293,11 +293,10 @@ export function accountRoutes(options: Options) {
     const row = findConnection(account.connections, c.req.param("id"));
     if (!row.attached) throw new LinearError("The sign-in workspace uses Linear sign-in", 403);
     const { credential, identity, teams } = await verify(c, account.id);
-    const previous = row.kind === "oauth" ? await accounts.readCredential(account.id, row.id).catch(() => null) : null;
-    await accounts.replaceCredential(account.id, row.id, credential, {
+    const displaced = await accounts.replaceCredential(account.id, row.id, credential, {
       ownerName: identity.ownerName, organization: identity.organization, teams: teams.map(({ key }) => key),
     });
-    if (previous?.kind === "oauth") await revokeLinearToken(previous.refreshToken);
+    if (displaced) await revokeLinearToken(displaced);
     const saved = await accounts.readTenant(account.id);
     return c.json({ connection: publicConnection(findConnection(saved?.connections ?? [], row.id)), teams });
   });
@@ -391,9 +390,8 @@ export function accountRoutes(options: Options) {
     const { accounts, account } = c.var;
     const row = findConnection(account.connections, c.req.param("id"));
     if (!row.attached) throw new LinearError("The sign-in workspace cannot be removed", 403);
-    const previous = row.kind === "oauth" ? await accounts.readCredential(account.id, row.id).catch(() => null) : null;
-    await accounts.removeConnection(account.id, row.id, true);
-    if (previous?.kind === "oauth") await revokeLinearToken(previous.refreshToken);
+    const displaced = await accounts.removeConnection(account.id, row.id, true);
+    if (displaced) await revokeLinearToken(displaced);
     telemetry?.emit("workspace_removed", { kind: row.kind }, () => accountUsage(account, row), account.id);
     return c.json({ ok: true });
   });

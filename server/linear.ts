@@ -260,6 +260,11 @@ interface GraphQLError {
 
 interface GqlOptions { manageAccess?: true; teamSetup?: true }
 
+/** An attached workspace lost its Linear OAuth grant. The owner connects it again in Settings. */
+export class LinearReconnectRequired extends LinearError {
+  constructor() { super("Linear disconnected this workspace. Connect it again in Settings.", 409); }
+}
+
 export class LinearKeyRequired extends LinearError {
   constructor() { super("Linear refused the workspace key. Replace it in your account.", 401); }
 }

@@ -115,4 +115,42 @@
 .setup-labels { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 6px 12px; }
 .setup-labels li { display: flex; gap: 8px; }
 
-.hold-form p { margin: 0 0 8px; }
+.hold-form { max-width: 560px; }
+.hold-form p { margin: 0; }
+.hold-form .hold-intro { color: var(--ink-2); }
+.hold-form label, .hold-field { display: grid; gap: 6px; width: 100%; }
+.hold-form .account-muted { color: var(--ink-3); }
+.hold-label { color: var(--ink-1); }
+.hold-form textarea {
+  width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--rail-2); resize: vertical;
+  border-radius: var(--r-1); background: var(--inset); color: var(--ink-1); font: inherit;
+}
+.hold-form textarea::placeholder, .hold-form input::placeholder { color: var(--ink-4); }
+.hold-form > button.primary { justify-self: start; padding-inline: 20px; }
+
+/* The hold calendar: quick picks, one month, and the chosen date. */
+.cal { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px; border: 1px solid var(--rail-2); border-radius: var(--r-2); background: var(--cab-2); }
+.cal-quick { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (min-width: 560px) {
+  .cal { grid-template-columns: 150px minmax(0, 260px); align-items: start; column-gap: 16px; }
+  .cal-quick { flex-direction: column; }
+  .cal-quick button { text-align: left; }
+  .cal-summary { grid-column: 1 / -1; }
+}
+.cal-month { display: grid; gap: 4px; max-width: 280px; }
+.cal-head { display: flex; align-items: center; justify-content: space-between; }
+.cal-title { font-weight: 600; }
+.cal-nav { min-width: 32px; font-size: 16px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.cal-weekday { padding: 2px 0; text-align: center; font: 11px var(--mono); color: var(--ink-3); }
+.cal-day {
+  height: 30px; min-width: 0; padding: 0; border: 1px solid transparent; border-radius: var(--r-1);
+  background: none; color: var(--ink-1); font: 13px var(--mono); font-variant-numeric: tabular-nums;
+}
+.cal-day:hover:not(:disabled) { background: var(--cab-4); }
+.cal-day.is-outside { color: var(--ink-3); }
+.cal-day:disabled { color: var(--ink-4); opacity: 0.5; cursor: default; }
+.cal-day.is-today { border-color: var(--rail-3); }
+.cal-day.is-on { border-color: var(--lamp-done); background: color-mix(in srgb, var(--lamp-done) 22%, transparent); color: var(--ink-1); font-weight: 600; }
+@media (pointer: coarse) { .cal-day { height: 40px; } .cal-quick button, .cal-nav { min-height: 40px; } }
+.cal-summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }

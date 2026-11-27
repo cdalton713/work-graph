@@ -1,6 +1,7 @@
 // The hold control of the bar: "Hold…" opens a form; a held project shows "On hold" and its details.
 import { type FormEvent, useState } from "react";
 import { HOLD_EVERY_DEFAULT, type Hold as HoldRecord, type HoldInput, holdEnded, holdText } from "../lib/hold";
+import { Calendar } from "./Calendar";
 import { Sheet } from "./ui";
 
 const EVERY = [
@@ -37,7 +38,7 @@ function HoldSheet({ held, hold, now, onHold, onResume, onClose }: {
   onHold: (hold: HoldInput) => Promise<void>; onResume: () => Promise<void>; onClose: () => void;
 }) {
   const [waitingFor, setWaitingFor] = useState("");
-  const [until, setUntil] = useState("");
+  const [until, setUntil] = useState<string | null>(null);
   const [check, setCheck] = useState("");
   const [everyHours, setEveryHours] = useState(HOLD_EVERY_DEFAULT);
   const [busy, setBusy] = useState(false);
@@ -56,7 +57,7 @@ function HoldSheet({ held, hold, now, onHold, onResume, onClose }: {
   };
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    void run(() => onHold({ waitingFor: waitingFor.trim(), until: until || null, check: check.trim() || null, everyHours }));
+    void run(() => onHold({ waitingFor: waitingFor.trim(), until, check: check.trim() || null, everyHours }));
   };
 
   if (held) {
@@ -76,13 +77,16 @@ function HoldSheet({ held, hold, now, onHold, onResume, onClose }: {
 
   return <Sheet open title="Put on hold" onClose={() => { if (!busy) onClose(); }}>
     <form className="account-form hold-form" onSubmit={submit}>
-      <p>The project leaves the Overview list and the inbox, and the coordinator pauses. The project comes back as your move on the date, or when the agent check says the wait is over.</p>
-      <label>Waiting for<input required maxLength={200} disabled={busy} value={waitingFor} placeholder="Shopify app review"
+      <p className="hold-intro">The project leaves the Overview list and the inbox, and the coordinator pauses. It comes back as your move on the date, or when the agent check says the wait is over.</p>
+      <label><span className="hold-label">Waiting for</span><input required maxLength={200} disabled={busy} value={waitingFor} placeholder="Shopify app review"
         onChange={(e) => setWaitingFor(e.target.value)} /></label>
-      <label>Until (optional)<input type="date" disabled={busy} value={until} onChange={(e) => setUntil(e.target.value)} /></label>
-      <label>Agent check (optional)<textarea rows={3} maxLength={2000} disabled={busy} value={check} aria-describedby="hold-check-help"
+      <div className="hold-field">
+        <span className="hold-label">Until <span className="account-muted">(optional)</span></span>
+        <Calendar label="Until" value={until} onChange={setUntil} disabled={busy} />
+      </div>
+      <label><span className="hold-label">Agent check <span className="account-muted">(optional)</span></span><textarea rows={3} maxLength={2000} disabled={busy} value={check} aria-describedby="hold-check-help"
         placeholder="Has Shopify replied to the app review in #shopify-partners or by email?" onChange={(e) => setCheck(e.target.value)} /></label>
-      <small id="hold-check-help">wg tick on your machine asks your agent this question, with your connectors. A yes ends the hold.</small>
+      <small id="hold-check-help" className="account-muted">wg tick on your machine asks your agent this question with read-only tools. A yes ends the hold.</small>
       {check.trim() && <label>Check<select disabled={busy} value={everyHours} onChange={(e) => setEveryHours(Number(e.target.value))}>
         {EVERY.map((e) => <option key={e.hours} value={e.hours}>{e.label}</option>)}
       </select></label>}

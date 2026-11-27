@@ -12,6 +12,7 @@ Each bold term of the skill has the one meaning below.
 | **lane** | A chain of `task` nodes in one phase (`"lane": "<name>"`): one stax stack. Each node stacks on the node before it as soon as that node is code done. Two nodes can stack on one node (a fork). |
 | **pre-merge task** | A `task` that the merge point depends on. |
 | **post-merge task** | A SYNC or integration `task` (`"role": "sync"` or `"integration"`). It depends on the merge point, runs as its own wave, and the ship point depends on it. |
+| **merge-point branch** | The phase target `mp/<slug>-p<P>`: the phase's pre-merge PRs merge into it, QA runs on it, and one integration PR merges it into the phase's **base** (`main` or `<release>`, the phase field `base`). ordering.md "Merge-point branch". |
 | **code done** | `wg done <plan-dir> <key>` passed on the PR's current head: the PR is open on the right base, the worktree is clean at that head, its **evidence** passed on that head (or its failure is accepted for that head with `tests_accepted`), the diff stays in owns and shares, and no check failed. The issue moves to `In Review`. `gh pr checks` is not test evidence. |
 | **evidence** | The proof that a commit passed its tests. With `effort.test`, `wg evidence <plan-dir> <key>` runs that command. With the config `test_runner`, it runs the moon test tasks that the node's diff from its diff base affects, with each project that depends on a changed project; a diff that changes a root file or `.moon/` gets the repo-wide suite. `wg evidence <plan-dir> @full-<phase>` runs the repo-wide suite: one time for each phase, on the merged target. |
 | **patch** | The branch's own diff from its lane base; `wg` stores a hash of it without line numbers. A review covers a patch, not a head. A restack with no conflict keeps the review, unless the base changed a line within 3 lines of a hunk. Each other change of the diff clears it. |
@@ -19,7 +20,7 @@ Each bold term of the skill has the one meaning below.
 | **merge review** | The gate at the merge point: `merge_review=clean` or `accepted` for the current patch. A PR gets one thorough review; a fix push gets a fix check, and a second thorough review only when the fix is new work (review-and-merge.md "Merge point" step 2). |
 | **approval** | The human's own words about a node, recorded with `wg approve` when you want them on the issue. No step waits for one. |
 | **run row** | The node's or the effort's checkpoint fields in `keymap.json` (recovery.md "Run state"). `wg` writes most of them. |
-| **merge point** | A `merge-point` node. Done when every pre-merge task of the phase is `Merged`. |
+| **merge point** | A `merge-point` node. Done when every pre-merge task of the phase is `Merged` (to the target: `main`, `<release>`, or the merge-point branch). |
 | **ship point** | A `ship-point` node. Done when every `ops` node, post-merge task, and soak of the phase is done. The next phase depends on it. |
 | **soak** | A deadline on the ship point: the run row field `soak_until`. It is not a node. |
 | **claim** | An `agent:*` label, on an issue only while a worker job on that issue runs. Only `wg` sets or removes it, except a stale claim that a crash left (recovery.md "A claim label with no running job"). |

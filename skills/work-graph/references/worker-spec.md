@@ -46,7 +46,7 @@ First PR: `st branch submit --draft --no-restack --no-native-stack --no-prompt -
 
 ## submit hotfix
 
-First PR: follow the repository's hotfix rules for the PR body, if it has them (the local rules file names them); never ask for approval. `git push -u origin {branch}`, then `gh pr create --draft --base <release> --title "HOTFIX: <summary>" --body-file <body>`. Check that the PR head equals the SHA that `wg evidence` tested. Each later update: `git push --force-with-lease origin {branch}`.
+First PR: follow the repository's hotfix rules for the PR body, if it has them (the local rules file names them); never ask for approval. `git push -u origin {branch}`, then `gh pr create --draft --base {parent} --title "HOTFIX: <summary>" --body-file <body>`. Check that the PR head equals the SHA that `wg evidence` tested. Each later update: `git push --force-with-lease origin {branch}`.
 
 ## submit sync
 

@@ -296,7 +296,10 @@ pub(crate) fn preflight(
         finding(&mut lines, "FAIL", "linear", e)
     }
     let release = &cfg["config"]["release_branch"];
-    let trunk = if phases.iter().any(|p| &p["target"] != release) {
+    let trunk = if phases
+        .iter()
+        .any(|p| &p["target"] != release && release != crate::local::final_base(p))
+    {
         exec(dir, "git", &["cat-file", "-p", "refs/stax/trunk"]).unwrap_or_default()
     } else {
         String::new()
@@ -319,7 +322,9 @@ pub(crate) fn preflight(
                 .map(str::to_owned)
                 .unwrap_or_else(|| p["key"].to_string())
         );
-        let (level, detail) = if release == target {
+        let (level, detail) = if release == target
+            || (crate::local::integration_target(target) && release == crate::local::final_base(p))
+        {
             ("ok", "no stax".into())
         } else if trunk.is_empty() {
             finding(
@@ -332,7 +337,7 @@ pub(crate) fn preflight(
         } else if trunk == target {
             ("ok", "stax trunk".into())
         } else {
-            let integration = target.starts_with("effort/");
+            let integration = crate::local::integration_target(target);
             let branch = if integration { "main" } else { target };
             let meta = metadata(branch).unwrap_or_default();
             if branch != trunk

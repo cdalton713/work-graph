@@ -8,6 +8,7 @@
 | B starts after A, other lane | One of the three rewrites in "Lanes". |
 | B and C run at the same time | No edge; different lanes; disjoint `owns`. |
 | A phase must finish before the next | Merge point → `ops` chain → ship point. Each first node of the next phase depends on the ship point. |
+| Test the phase as one unit before it reaches its base | A merge-point branch ("Merge-point branch"): merge point → QA `ops` node → integration task → deploy `ops` chain → ship point. |
 | Wait for a PR merge | Nothing extra: the merge point depends on each pre-merge task and is satisfied when the task is `Merged`. A post-merge task blocks the ship point the same way. |
 | A human step (deploy, backfill run, flag flip, prod check) | An `ops` node. The next node depends on it. |
 | Soak time after a deploy or flag flip | A deadline on the ship point: the run row field `soak_until`, written when the human confirms the start (review-and-merge.md "Ship point"). Never at plan time. |
@@ -20,6 +21,7 @@ Edges among tasks, milestones, and `ops` nodes follow this list only (A → B: A
 - merge point → every pre-merge task; first `ops` node → merge point; next `ops` or `decision` node → the one before it
 - post-merge task → merge point
 - ship point → last `ops` node (or the merge point when the phase has no `ops` node) and → every post-merge task
+- merge-point branch phase: QA `ops` node → merge point; integration task → QA `ops` node; first deploy `ops` node → integration task; SYNC task (release base) → integration task
 
 ## Lanes
 
@@ -44,7 +46,8 @@ One Orca child worktree per branch, SYNC and integration branches included. One 
 | Child workspace name | `<stack>-NN-<key>` | `xy-write-01-dualwrite` |
 | Branch | `<prefix><stack>-NN-<key>` | `wg/xy-write-01-dualwrite` |
 | Base (`--base-branch`) | `origin/<target>` for `00` or when the node below merged, else the branch below | `wg/xy-write-00-schema` |
-| HOTFIX branch | `hotfix/<slug>-<key>` from `origin/<release>`; not tracked by stax | `hotfix/z-fix` |
+| HOTFIX branch | `hotfix/<slug>-<key>` from `origin/<release>` (in a merge-point phase: from `origin/mp/<slug>-p<P>`); not tracked by stax | `hotfix/z-fix` |
+| Merge-point branch | `mp/<slug>-p<P>` from `origin/<base>`, stack `<slug>-p<P>-mp`, child `00 merge point`; owned by the coordinator | `mp/xy-p1` |
 | SYNC branch | `sync/<slug>-p<P>` from `origin/main`, stack `<slug>-p<P>-sync`, child `00 sync`; not tracked by stax | `sync/z-p1` |
 | Spike branch | `<prefix><slug>-spike-<key>` from `origin/<target>`, under the `<slug>-core` coordinator; no PR | `wg/xy-spike-load` |
 
@@ -72,42 +75,62 @@ wg owns overlap <plan-dir> <every task key of the wave>     # plan time: exit 0
 
 ## Target branch per phase
 
-`PLAN.md` and `plan.json` give each phase one target branch and one ship environment. All lanes of the phase start from the target.
+`PLAN.md` and `plan.json` give each phase one target branch and one ship environment. All lanes of the phase start from the target. The **base** is the branch the phase's work finally reaches: the target itself, or for a merge-point branch the phase field `base`.
 
 | Target | Use for | Merge point is Done when | Ship environment |
 |---|---|---|---|
-| `main` | Default. Additive, backward-compatible work. | Every pre-merge PR is merged to `main` | The environment that `main` deploys to |
-| `<release>` | Work that must reach prod from the release branch while `main` cannot ship there | Every HOTFIX PR is merged to `<release>` | Prod |
-| `effort/<slug>` | A phase that is only safe as one unit (a cut-over across many files) | Every pre-merge PR is merged to `effort/<slug>` | As `main`, after the integration PR merges |
+| `mp/<slug>-p<P>`, `"base": "main"` | Default for a phase with 2 or more pre-merge PRs | Every pre-merge PR is merged to `mp/<slug>-p<P>` | The environment that `main` deploys to, after the integration PR merges |
+| `mp/<slug>-p<P>`, `"base": "<release>"` | Default for a release phase with 2 or more HOTFIX PRs | Every HOTFIX PR is merged to `mp/<slug>-p<P>` | Prod, after the integration PR merges to `<release>` |
+| `main` | A phase with 1 pre-merge PR. Additive, backward-compatible work. | The PR is merged to `main` | The environment that `main` deploys to |
+| `<release>` | A release phase with 1 HOTFIX PR | The HOTFIX PR is merged to `<release>` | Prod |
+| `effort/<slug>` | Older form of a merge-point branch: one long-lived branch for the whole effort, base `main` | Every pre-merge PR is merged to `effort/<slug>` | As `main`, after the integration PR merges |
+
+`wg check` prints `warn phase <P>: <n> pre-merge tasks merge straight to <target>` for a `main` or `<release>` phase with 2 or more pre-merge tasks. Use a merge-point branch unless the human says otherwise.
 
 ### `<release>`: HOTFIX and SYNC
 
-`<release>` is the config `release_branch` (default `release`): a branch that prod deploys from while `main` moves ahead, for example during a code freeze.
+`<release>` is the config `release_branch` (default `release`): a branch that prod deploys from while `main` moves ahead, for example during a code freeze. A **release phase** has target `<release>`, or a merge-point branch with `"base": "<release>"`. The rules below apply to both.
 
 Every pre-merge task is a HOTFIX. Lanes have length 1: no stacks. graph.md has the plan.json example.
 
 Exception, only on the human's word: `"stacked_hotfix": true` in `effort` lets one lane of HOTFIX tasks stack. Then `wg check` accepts a HOTFIX that depends on the HOTFIX below it, and `wg dispatch` names and stacks those branches like any lane (`<prefix><stack>-NN-<key>`, stax parent = the branch below, bottom parent `<release>`). Each PR still has the `HOTFIX:` title and body, and the phase still has one SYNC task.
 
-- **HOTFIX** (pre-merge `task`, `"role": "hotfix"`): branch `hotfix/<slug>-<node>` from `origin/<release>`, draft PR to `<release>`, title `HOTFIX: <summary>` (worker-spec.md "submit hotfix").
-- **SYNC** (post-merge `task`, `"role": "sync"`): one per phase, on `sync/<slug>-p<P>` from `origin/main`. The worker merges `origin/<release>` into it and opens a draft PR to `main`. The human merges it with a merge commit.
+- **HOTFIX** (pre-merge `task`, `"role": "hotfix"`): branch `hotfix/<slug>-<node>` from `origin/<target>`, draft PR to the target (`<release>`, or the merge-point branch), title `HOTFIX: <summary>` (worker-spec.md "submit hotfix").
+- **SYNC** (post-merge `task`, `"role": "sync"`): one per phase, on `sync/<slug>-p<P>` from `origin/main`. The worker merges `origin/<release>` into it and opens a draft PR to `main`. The human merges it with a merge commit. In a merge-point phase, the SYNC task depends on the integration task: `<release>` has the phase's work only after that PR merges.
 - If two hotfixes depend on each other, put them in two phases.
 
 <!-- explain: integration -->
-### `effort/<slug>`: integration branch
+### Merge-point branch
 
-The coordinator creates its worktree once, as the child `00 integration` of the parent `<slug>-integration`, which nests under `<slug>-core`, and owns it:
+A phase with 2 or more pre-merge PRs collects them on a merge-point branch `mp/<slug>-p<P>`, not on its base. The human merges each approved PR into it. Then the phase is tested as one unit on that branch, and one integration PR merges it into the base. Phase fields: `"target": "mp/<slug>-p<P>"` and `"base": "main"` or `"<release>"` (default `main`).
+
+The phase's graph, in order (graph.md "Merge-point branch plan.json"):
+
+1. Pre-merge tasks: PRs to `mp/<slug>-p<P>`, squash-merged by the human (review-and-merge.md "Merge point").
+2. Merge point: every pre-merge PR is merged to `mp/<slug>-p<P>`.
+3. The repo-wide test run (`full-suite`, review-and-merge.md "Ship point" step 1) on `origin/mp/<slug>-p<P>`, by the coordinator, and a **QA `ops` node** ("QA on `mp/<slug>-p<P>`"), by the human, at the same time. The integration task depends on the QA node.
+4. Integration task (post-merge `task`, `"role": "integration"`, no lane): one PR from `mp/<slug>-p<P>` to the base, merged by the human with a **merge commit**. In a release phase its title starts with `HOTFIX:`.
+5. Deploy `ops` nodes depend on the integration task. A release phase's SYNC task depends on it too.
+
+`wg check` rejects an integration phase with no `ops` node between the merge point and the integration task, an `ops` node that is neither before nor after the integration task, and a SYNC task that does not come after it. `wg move <key> "Ready to Merge"` for the integration task, and its `ask-merge` line, wait until the repo-wide test run of the phase passed on a commit that holds each merge commit of the phase (`wait coordinator … merges after the repo-wide test run passes`).
+
+The coordinator creates the branch and its worktree once, at phase start, as the child `00 merge point` of the parent `<slug>-p<P>-mp`, which nests under `<slug>-core`, and owns it:
 
 ```bash
-orca worktree create --name <slug>-integration --parent-worktree id:<core-id> --base-branch origin/main --setup skip --json
-orca worktree create --name <slug>-integration-00-integration --branch effort/<slug> \
-  --base-branch origin/main --parent-worktree id:<parent-id> --setup skip --json
-orca worktree set --worktree id:<child-id> --display-name "00 integration" --json
-cd <child-path> && git push -u origin effort/<slug> && st branch track --parent main && st freeze
+orca worktree create --name <slug>-p<P>-mp --parent-worktree id:<core-id> --base-branch origin/<base> --setup skip --json
+orca worktree create --name <slug>-p<P>-mp-00-merge-point --branch mp/<slug>-p<P> \
+  --base-branch origin/<base> --parent-worktree id:<parent-id> --setup skip --json
+orca worktree set --worktree id:<child-id> --display-name "00 merge point" --json
+cd <child-path> && git push -u origin mp/<slug>-p<P>
 ```
 
-- Lanes use `--base-branch effort/<slug>` and `st branch track --parent effort/<slug>`. Child PRs target it. Refresh it once per wave (table below).
-- The **integration** node (post-merge `task`, `"role": "integration"`) is coordinator-owned; no worker runs it, and `wg next` prints `integration <key>` when the merge point is `Done`. Then: `wg move <plan-dir> <key> "In Progress"`; refresh `effort/<slug>`; `wg run set <plan-dir> <key> lower=origin/main`; run the push checks in its worktree (`wg evidence <plan-dir> <key>`); `gh pr create --draft --base main --head effort/<slug> --title "<effort>: phase <P>" --body-file <body>`; `wg run set <plan-dir> <key> branch=effort/<slug> parent=main lower=origin/main path=<child-path> pr=<n>`; then `wg done <plan-dir> <key>` (it attaches the PR and skips the owns check for role `integration`), and review-and-merge.md "Merge point" steps 1–5.
-- Never run `st trunk`: it checks out the trunk. Never use this target for `<release>` work, or for a phase longer than about one week.
+Then track it in stax without a checkout: `st get mp/<slug>-p<P> --parent <base> --no-checkout --no-restack --downstack`, and `st freeze mp/<slug>-p<P>`. For base `<release>`, which stax does not track, skip `st freeze` when `st get` refuses the parent, and say so in a `PLAN.md` note.
+
+- Lanes use `--base-branch origin/mp/<slug>-p<P>` and `st branch track --parent mp/<slug>-p<P>`. Child PRs target it. Base `main`: refresh it once per wave (table below). Base `<release>`: refresh it only when a hotfix lands on `<release>` outside the effort.
+- The **integration** node is coordinator-owned; no worker runs it. `wg next` prints `integration <key>` when the QA node is `Done`. Then: `wg move <plan-dir> <key> "In Progress"`; refresh the branch; `wg run set <plan-dir> <key> lower=origin/<base>`; run the push checks in its worktree (`wg evidence <plan-dir> <key>`); `gh pr create --draft --base <base> --head mp/<slug>-p<P> --title "<effort>: phase <P>" --body-file <body>` (release: `--title "HOTFIX: <effort>: phase <P>"`); `wg run set <plan-dir> <key> branch=mp/<slug>-p<P> parent=<base> lower=origin/<base> path=<child-path> pr=<n>`; then `wg done <plan-dir> <key>` (it attaches the PR and skips the owns check for role `integration`), and review-and-merge.md "Merge point" steps 1–5.
+- After the integration PR merges, delete `mp/<slug>-p<P>` on GitHub if GitHub did not, and remove its worktree. The next phase cuts a new branch from the updated base.
+- Never run `st trunk`: it checks out the trunk.
+- The older `effort/<slug>` target follows the same rules with base `main`: one branch for the whole effort, refreshed from `main` between phases.
 <!-- /explain -->
 
 ### Move a lane to another base
@@ -130,10 +153,10 @@ How each branch kind is refreshed onto a moved base (review-and-merge.md "Restac
 |---|---|---|---|
 | Lane on the stax trunk | If the parent merged: the refresh of the restack line, `git rebase --onto origin/<target> <old parent tip>`, then `st branch reparent --parent <target>`. If the parent is `<target>`: `git rebase origin/<target>`. Else `st restack --stop-here --yes`. Never `st sync`: it moves the local trunk branch, which another worktree can have checked out. | `st branch submit --no-restack --no-native-stack --no-prompt --yes` | yes |
 | Lane on a frozen base | `wg claim … restack` refreshes the base first. If the parent merged: the refresh of the restack line, `git rebase --onto origin/<target> <old parent tip>`, then `st branch reparent --parent <target>`. Else `st restack --stop-here --yes`. Never `st sync`. | `wg base <plan-dir>`, then `st branch submit --no-restack --no-native-stack --no-prompt --yes` | yes |
-| Lane on `effort/<slug>` | `main` must pass `wg preflight` (trunk or frozen base). The coordinator refreshes `effort/<slug>` first. If the parent merged: the refresh of the restack line, `git rebase --onto origin/effort/<slug> <old parent tip>`, then `st branch reparent --parent effort/<slug>`. Else `st restack --stop-here --yes`. | `st branch submit --no-restack --no-native-stack --no-prompt --yes` | yes |
-| HOTFIX | `git rebase origin/<release>` (stacked hotfix: the lane rows above) | `git push --force-with-lease origin <branch>` | no (stacked hotfix: yes) |
+| Lane on `mp/<slug>-p<P>` or `effort/<slug>` | Base `main` must pass `wg preflight` (trunk or frozen base). The coordinator refreshes the merge-point branch first. If the parent merged: the refresh of the restack line, `git rebase --onto origin/<target> <old parent tip>`, then `st branch reparent --parent <target>`. Else `st restack --stop-here --yes`. | `st branch submit --no-restack --no-native-stack --no-prompt --yes` | yes |
+| HOTFIX | `git rebase origin/<target>` (`<release>`, or the merge-point branch; stacked hotfix: the lane rows above) | `git push --force-with-lease origin <branch>` | no (stacked hotfix: yes) |
 | SYNC | `git merge origin/<release>` | `git push origin <branch>` | no |
-| `effort/<slug>` (coordinator) | `git merge --ff-only origin/effort/<slug> && git merge --no-ff origin/main -m "Merge main into effort/<slug>"` | `git push origin effort/<slug>`; never force | frozen: never restacked |
+| `mp/<slug>-p<P>` or `effort/<slug>` (coordinator) | `git merge --ff-only origin/<target> && git merge --no-ff origin/<base> -m "Merge <base> into <target>"` | `git push origin <target>`; never force | frozen: never restacked |
 
 ## Repository rules
 

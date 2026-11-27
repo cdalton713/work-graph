@@ -6,7 +6,7 @@ load          a node of plan.json is not in keymap.json: load the graph
 wave          each node of the last wave is code done: pick the next wave
 dispatch      start the first worker job of a ready node
 adopt         a node whose branch or PR exists: adopt it, no dispatch
-integration   the coordinator's own integration branch
+integration   the merge-point branch PR into the base
 verify        check code done: wg done
 review        the wave review of a draft PR at the review effort, or a change of the review effort
 ask-ready     ask the human to mark PRs ready (merge_prep=human)

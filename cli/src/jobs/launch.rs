@@ -891,13 +891,14 @@ pub(super) fn claim(
         let kind = match node["role"].as_str() {
             Some("sync") => "sync",
             Some("hotfix") => "hotfix",
-            _ if target.starts_with("effort/") => "integration",
+            _ if crate::local::integration_target(target) => "integration",
             _ if git(ctx.dir, &["cat-file", "-p", "refs/stax/trunk"]).as_deref() == Ok(target) => {
                 "trunk"
             }
             _ => "frozen",
         };
-        let pin = if matches!(kind, "sync" | "hotfix") {
+        let pin = if kind == "sync" || kind == "hotfix" && !crate::local::integration_target(target)
+        {
             field(ctx.install.config.settings(), "release_branch")?
         } else {
             target

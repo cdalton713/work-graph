@@ -22,7 +22,7 @@ pub(super) fn run(
             Ok("no stax".into())
         } else if git(dir, &["cat-file", "-p", "refs/stax/trunk"]).as_deref() == Ok(target) {
             Ok("stax trunk (st sync refreshes it)".into())
-        } else if target.starts_with("effort/") {
+        } else if crate::local::integration_target(target) {
             Ok("coordinator-owned".into())
         } else {
             refresh(dir, target)

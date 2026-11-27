@@ -65,6 +65,7 @@ Set `effort.initiative` (graph.md "Initiatives"). Write `<plan-dir>/PLAN.md`: on
 
 - Draw an edge only for a real order constraint. Each extra edge removes parallelism.
 - End each phase on a **shippable** state: after its ship point, prod works and the effort can stop. For live data, APIs, or schemas, shape phases as **expand → migrate → contract**.
+- 2+ PRs in a phase: a merge-point branch (ordering.md).
 - Put each deploy, backfill run, flag flip, and prod check in the graph as an `ops` node, and each soak length in the phase table. Give an `ops` node `"by": "coordinator"` when the repository's own rules make that step the agent's (for example, the agent checks its own deploy); otherwise it is the human's (`do ask`).
 
 Show the human the flowchart and the phase table, and go on to step 2 (at level `supervised`, wait for their approval first). Change the graph when they comment.
@@ -122,7 +123,7 @@ Done when: every pre-merge task is `Merged`, and `wg move <plan-dir> <merge poin
 
 Start both parts when the merge point is `Done`; the ship point waits for both.
 
-1. Post-merge tasks: a SYNC task runs steps 3–4 as one wave; the integration node is coordinator-owned (ordering.md "`effort/<slug>`: integration branch"). Then step 5 for their PRs (SYNC: merge commit).
+1. Post-merge tasks: a SYNC task runs steps 3–4 as one wave; the integration node is coordinator-owned (ordering.md "Merge-point branch"). Then step 5 for their PRs (merge commit).
 2. Follow review-and-merge.md "Ship point". You run the phase's repo-wide test run (`full-suite`). The human does each `ops` node, and you do each one with `"by": "coordinator"`; you resolve each ready `decision` with them.
 
 Done when: the repo-wide test run of the phase passed, every `ops` node of the phase is `Done` with evidence, the soak deadline has passed (when the phase has a soak), and the ship point is `Done`.

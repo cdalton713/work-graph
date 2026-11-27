@@ -88,7 +88,7 @@ pub(super) fn names(
     };
     let parent = if sync {
         "main"
-    } else if hotfix {
+    } else if hotfix && !crate::local::integration_target(&target) {
         field(ctx.install.config.settings(), "release_branch")?
     } else {
         &target

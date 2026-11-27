@@ -245,3 +245,130 @@ fn reviewed_command_parity() {
             .success()
     );
 }
+
+/// `wg check` on merge-point branch phases (ordering.md "Merge-point branch") prints the same errors and
+/// warnings as the reference.
+#[test]
+fn merge_point_branch_check_matches_reference() {
+    let task = |k: &str, extra: Value| {
+        let mut n = json!({"key": k, "kind": "task", "phase": "1", "title": k, "lane": "one"});
+        n.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        n
+    };
+    let other = |k: &str, kind: &str| json!({"key": k, "kind": kind, "phase": "1", "title": k});
+    let edges = |pairs: &[(&str, &str)]| {
+        Value::Array(
+            pairs
+                .iter()
+                .map(|(a, b)| json!({"from": a, "to": b}))
+                .collect(),
+        )
+    };
+    let integration = json!({"role": "integration", "lane": null});
+    let shaped = |phase: Value, nodes: Vec<Value>, pairs: &[(&str, &str)]| json!({"effort": {"name": "Example", "workspace": "default", "team": "EX"}, "phases": [phase], "nodes": nodes, "edges": edges(pairs)});
+    let core = |first: Value| {
+        vec![
+            first,
+            other("mp", "merge-point"),
+            other("sp", "ship-point"),
+            other("qa", "ops"),
+            task("merge", integration.clone()),
+            other("deploy", "ops"),
+        ]
+    };
+    let good = [
+        ("mp", "a"),
+        ("qa", "mp"),
+        ("merge", "qa"),
+        ("deploy", "merge"),
+        ("sp", "deploy"),
+    ];
+    let mp_phase = json!({"key": "1", "target": "mp/topic-p1"});
+    let mut release_nodes = core(task("a", json!({"role": "hotfix"})));
+    release_nodes.push(task("sync", json!({"role": "sync"})));
+    let plans = [
+        shaped(mp_phase.clone(), core(task("a", json!({}))), &good),
+        shaped(
+            mp_phase.clone(),
+            core(task("a", json!({}))),
+            &[
+                ("mp", "a"),
+                ("qa", "mp"),
+                ("merge", "mp"),
+                ("deploy", "merge"),
+                ("sp", "deploy"),
+                ("sp", "qa"),
+            ],
+        ),
+        shaped(
+            json!({"key": "1", "target": "mp/topic-p1", "base": "release"}),
+            release_nodes.clone(),
+            &[good.as_slice(), &[("sync", "merge"), ("sp", "sync")]].concat(),
+        ),
+        shaped(
+            json!({"key": "1", "target": "mp/topic-p1", "base": "release"}),
+            release_nodes,
+            &[good.as_slice(), &[("sync", "mp"), ("sp", "sync")]].concat(),
+        ),
+        shaped(
+            json!({"key": "1", "target": "mp/topic-p1", "base": "feature"}),
+            core(task("a", json!({}))),
+            &good,
+        ),
+        shaped(
+            json!({"key": "1", "target": "main"}),
+            vec![
+                task("a", json!({})),
+                task("b", json!({})),
+                other("mp", "merge-point"),
+                other("sp", "ship-point"),
+            ],
+            &[("mp", "a"), ("mp", "b"), ("sp", "mp")],
+        ),
+        shaped(
+            json!({"key": "1", "target": "main", "base": "main"}),
+            vec![
+                task("a", json!({})),
+                other("mp", "merge-point"),
+                other("sp", "ship-point"),
+            ],
+            &[("mp", "a"), ("sp", "mp")],
+        ),
+    ];
+    let reference = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/cli-parity/reference/wg.py"
+    );
+    for p in plans {
+        let mut outputs = vec![];
+        for native in [false, true] {
+            let root = fixture();
+            let dir = root.path();
+            fs::write(dir.join("plan.json"), p.to_string()).unwrap();
+            let mut cmd = if native {
+                Command::new(BIN)
+            } else {
+                let mut c = Command::new("python3");
+                c.args(["-I", reference]);
+                c
+            };
+            let o = cmd
+                .current_dir(dir)
+                .env("WG_CONFIG", dir.join("config"))
+                .args(["check", "."])
+                .output()
+                .unwrap();
+            outputs.push((
+                o.status.code(),
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+            ));
+        }
+        assert_eq!(outputs[0], outputs[1], "plan {p}");
+        assert!(
+            !outputs[0].1.is_empty() || outputs[0].0 == Some(0),
+            "plan {p}"
+        );
+    }
+}

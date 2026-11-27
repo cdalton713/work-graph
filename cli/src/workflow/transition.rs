@@ -202,7 +202,11 @@ fn guard(
             {
                 failures.push(if level=="thorough"{format!("{key}: no merge review of this patch: review-and-merge.md \"Merge point\" step 2, then wg run set … merge_review=clean")}else{format!("{key}: no review of this patch at review effort {level}: review-and-merge.md \"Review effort\", then wg run set … review=clean")});
             }
-            let base = if n["role"] == "sync" { "main" } else { target };
+            let base = match n["role"].as_str() {
+                Some("sync") => "main",
+                Some("integration") => crate::local::final_base(phase),
+                _ => target,
+            };
             if info["baseRefName"] != base {
                 failures.push(format!(
                     "{key}: the base of PR #{pr} is {}, not {base}",
@@ -272,6 +276,45 @@ fn guard(
                     )),
                 }
                 break;
+            }
+            if n["role"] == "integration" && failures.is_empty() {
+                let nodes = p["nodes"].as_array().ok_or("missing nodes")?;
+                let ship = nodes
+                    .iter()
+                    .find(|s| s["kind"] == "ship-point" && s["phase"] == n["phase"])
+                    .and_then(|s| s["key"].as_str())
+                    .ok_or("missing ship point")?;
+                let mut merges = vec![];
+                for b in nodes.iter().filter(|b| {
+                    b["kind"] == "task"
+                        && b["phase"] == n["phase"]
+                        && !matches!(b["role"].as_str(), Some("sync" | "integration"))
+                }) {
+                    let bk = b["key"].as_str().ok_or("missing key")?;
+                    let num = display(&km["run"]["nodes"][bk]["pr"]);
+                    if num == "-"
+                        || !matches!(
+                            snap.statuses.get(bk).map(String::as_str),
+                            Some("Merged" | "Done")
+                        )
+                    {
+                        continue;
+                    }
+                    if let Some(oid) = gh(dir, &num, "mergeCommit")?["mergeCommit"]["oid"].as_str()
+                    {
+                        merges.push(oid.to_owned());
+                    }
+                }
+                if !merges.is_empty() {
+                    suite(
+                        ctx,
+                        phase,
+                        ship,
+                        &km["run"]["nodes"][ship],
+                        merges,
+                        &mut failures,
+                    )?;
+                }
             }
         } else if state != "MERGED" {
             failures.push(format!("{key}: PR #{pr} is {state}, not MERGED"));
@@ -443,63 +486,92 @@ fn milestone(
         }
     }
     if failures.is_empty() && ship && !merges.is_empty() {
-        if phase.contains('/') {
-            return Err("invalid phase key".into());
-        }
-        let record = std::fs::read(dir.join("evidence").join(format!("@full-{phase}.json")))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-        let plan_dir = dir.canonicalize().map_err(|e| e.to_string())?;
-        let hint = format!(
-            "in a clean worktree at origin/{target}: wg evidence {} @full-{phase}",
-            crate::page::shell_quote(&plan_dir)
-        );
-        let Some(r) = record else {
-            failures.push(format!(
-                "{k}: no repo-wide test run of phase {phase}; {hint}"
-            ));
-            return Ok(());
-        };
-        let runner = &i.config.settings()["test_runner"];
-        let default = Value::Array(
-            ["run", "suite", "options"]
-                .into_iter()
-                .filter_map(|f| runner[f].as_array())
-                .flatten()
-                .cloned()
-                .collect(),
-        );
-        let cmd = p["effort"].get("test").unwrap_or(&default);
-        let sha = r["sha"].as_str().unwrap_or("");
-        if r["valid"] != true || &r["command"] != cmd || sha.is_empty() {
-            failures.push(format!(
-                "{k}: the repo-wide test run of phase {phase} is invalid; {hint}"
-            ));
-        } else {
-            for oid in merges {
-                if !git(&["merge-base", "--is-ancestor", &oid, sha])?
-                    .status
-                    .success()
-                {
-                    failures.push(format!(
-                        "{k}: the repo-wide test run on {} does not hold merge commit {}; {hint}",
-                        sha.chars().take(10).collect::<String>(),
-                        oid.chars().take(10).collect::<String>()
-                    ));
-                    return Ok(());
-                }
-            }
-            if r["exit"] != 0
-                && !row["tests_accepted"]
-                    .as_str()
-                    .and_then(|s| s.strip_prefix(&format!("{sha}:")))
-                    .is_some_and(|s| !s.trim().is_empty())
-            {
-                failures.push(format!("{k}: the repo-wide test run on {} failed (exit {}): read {}; then a fix, or wg run set … {k} \"tests_accepted={sha}:<reason>\"",sha.chars().take(10).collect::<String>(),display(&r["exit"]),display(&r["log"])));
-            }
-        }
+        suite(ctx, ph, k, row, merges, failures)?;
     } else if !ship && failures.is_empty() {
         notes.push(format!("All pre-merge PRs are merged to `{target}`."));
+    }
+    Ok(())
+}
+
+/// The repo-wide test run of a phase (`@full-<P>`) must hold each merge commit of its pre-merge PRs
+/// and pass, or be accepted on the ship point's row (`tests_accepted`).
+fn suite(
+    ctx: Workflow<'_>,
+    ph: &Value,
+    k: &str,
+    row: &Value,
+    merges: Vec<String>,
+    failures: &mut Vec<String>,
+) -> Result<(), String> {
+    let Workflow {
+        dir,
+        installation: i,
+        plan: p,
+        ..
+    } = ctx;
+    let phase = display(&ph["key"]);
+    let target = ph["target"].as_str().unwrap_or("main");
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .map_err(|e| e.to_string())
+    };
+    if phase.contains('/') {
+        return Err("invalid phase key".into());
+    }
+    let record = std::fs::read(dir.join("evidence").join(format!("@full-{phase}.json")))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let plan_dir = dir.canonicalize().map_err(|e| e.to_string())?;
+    let hint = format!(
+        "in a clean worktree at origin/{target}: wg evidence {} @full-{phase}",
+        crate::page::shell_quote(&plan_dir)
+    );
+    let Some(r) = record else {
+        failures.push(format!(
+            "{k}: no repo-wide test run of phase {phase}; {hint}"
+        ));
+        return Ok(());
+    };
+    let runner = &i.config.settings()["test_runner"];
+    let default = Value::Array(
+        ["run", "suite", "options"]
+            .into_iter()
+            .filter_map(|f| runner[f].as_array())
+            .flatten()
+            .cloned()
+            .collect(),
+    );
+    let cmd = p["effort"].get("test").unwrap_or(&default);
+    let sha = r["sha"].as_str().unwrap_or("");
+    if r["valid"] != true || &r["command"] != cmd || sha.is_empty() {
+        failures.push(format!(
+            "{k}: the repo-wide test run of phase {phase} is invalid; {hint}"
+        ));
+    } else {
+        for oid in merges {
+            if !git(&["merge-base", "--is-ancestor", &oid, sha])?
+                .status
+                .success()
+            {
+                failures.push(format!(
+                    "{k}: the repo-wide test run on {} does not hold merge commit {}; {hint}",
+                    sha.chars().take(10).collect::<String>(),
+                    oid.chars().take(10).collect::<String>()
+                ));
+                return Ok(());
+            }
+        }
+        if r["exit"] != 0
+            && !row["tests_accepted"]
+                .as_str()
+                .and_then(|s| s.strip_prefix(&format!("{sha}:")))
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            failures.push(format!("{k}: the repo-wide test run on {} failed (exit {}): read {}; then a fix, or wg run set … {k} \"tests_accepted={sha}:<reason>\"",sha.chars().take(10).collect::<String>(),display(&r["exit"]),display(&r["log"])));
+        }
     }
     Ok(())
 }

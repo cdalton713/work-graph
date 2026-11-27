@@ -169,7 +169,37 @@ pub(super) fn check(p: &Value, cfg: &Value) -> u8 {
     for e in &errors {
         println!("{e}")
     }
+    for w in warnings(p, cfg) {
+        println!("warn {w}")
+    }
     u8::from(!errors.is_empty())
+}
+
+/// Advice that does not fail `wg check`: a trunk phase with 2 or more pre-merge PRs should collect
+/// them on a merge-point branch (ordering.md "Merge-point branch").
+pub(crate) fn warnings(p: &Value, _cfg: &Value) -> Vec<String> {
+    let mut out = vec![];
+    for phase in list(&p["phases"]) {
+        let target = text(phase, "target");
+        if target.is_empty() || super::integration_target(target) {
+            continue;
+        }
+        let ph = val(&phase["key"]);
+        let pre = list(&p["nodes"])
+            .iter()
+            .filter(|n| {
+                val(&n["phase"]) == ph
+                    && text(n, "kind") == "task"
+                    && !matches!(text(n, "role"), "sync" | "integration")
+            })
+            .count();
+        if pre >= 2 {
+            out.push(format!(
+                "phase {ph}: {pre} pre-merge tasks merge straight to {target}; use a merge-point branch mp/<slug>-p{ph} with base {target} (ordering.md 'Merge-point branch')"
+            ))
+        }
+    }
+    out
 }
 
 pub(crate) fn findings(p: &Value, cfg: &Value) -> Vec<String> {
@@ -400,7 +430,10 @@ pub(crate) fn findings(p: &Value, cfg: &Value) -> Vec<String> {
                 ))
             }
             for d in t {
-                if node(p, k).unwrap()["lane"] != node(p, d).unwrap()["lane"] {
+                // The integration task has no lane: the SYNC task after it is not a cross-lane edge.
+                if role(d) != "integration"
+                    && node(p, k).unwrap()["lane"] != node(p, d).unwrap()["lane"]
+                {
                     errors.push(format!(
                         "{k} -> {d}: cross-lane edge inside phase {ph} (ordering.md 'Lanes')"
                     ))
@@ -414,9 +447,22 @@ pub(crate) fn findings(p: &Value, cfg: &Value) -> Vec<String> {
             }
         }
         let target = text(phase, "target");
+        let base = super::final_base(phase);
+        if phase.get("base").is_some() {
+            if !super::integration_target(target) {
+                errors.push(format!(
+                    "phase {ph}: base is only for an mp/ or effort/ target"
+                ))
+            } else if base != "main" && base != release {
+                errors.push(format!("phase {ph}: base must be main or {release}"))
+            }
+        }
+        // A release phase: HOTFIX work that reaches prod from the release branch, merged straight
+        // to it or collected first on a merge-point branch cut from it.
+        let rel = base == release;
         for (needed, active) in [
-            ("sync", target == release),
-            ("integration", target.starts_with("effort/")),
+            ("sync", rel),
+            ("integration", super::integration_target(target)),
         ] {
             if active && tasks.iter().filter(|k| role(k) == needed).count() != 1 {
                 errors.push(format!(
@@ -426,7 +472,7 @@ pub(crate) fn findings(p: &Value, cfg: &Value) -> Vec<String> {
         }
         tasks.sort();
         for &k in &tasks {
-            if target == release && !post(k) {
+            if rel && !post(k) {
                 if role(k) != "hotfix" {
                     errors.push(format!("{k}: {release} pre-merge task needs role hotfix"))
                 }
@@ -438,11 +484,37 @@ pub(crate) fn findings(p: &Value, cfg: &Value) -> Vec<String> {
                     ))
                 }
             }
-            if target != release && matches!(role(k), "hotfix" | "sync") {
+            if !rel && matches!(role(k), "hotfix" | "sync") {
                 errors.push(format!("{k}: role {} requires target {release}", role(k)))
             }
-            if role(k) == "integration" && !target.starts_with("effort/") {
-                errors.push(format!("{k}: role integration requires an effort/ target"))
+            if role(k) == "integration" && !super::integration_target(target) {
+                errors.push(format!(
+                    "{k}: role integration requires an mp/ or effort/ target"
+                ))
+            }
+        }
+        if super::integration_target(target)
+            && let Some(int) = tasks.iter().copied().find(|&k| role(k) == "integration")
+        {
+            let ops: Vec<_> = mine.iter().copied().filter(|&k| kind(k) == "ops").collect();
+            if !ops.iter().any(|&o| reach(int, o, &deps)) {
+                errors.push(format!(
+                    "{int}: needs a QA ops node after merge point {mp} and before the integration PR (ordering.md 'Merge-point branch')"
+                ))
+            }
+            for s in tasks.iter().copied().filter(|&k| role(k) == "sync") {
+                if !reach(s, int, &deps) {
+                    errors.push(format!(
+                        "{s}: the SYNC task must come after the integration task {int}"
+                    ))
+                }
+            }
+            for o in ops {
+                if !reach(int, o, &deps) && !reach(o, int, &deps) {
+                    errors.push(format!(
+                        "{o}: an ops node of phase {ph} must come before or after the integration task {int}"
+                    ))
+                }
             }
         }
     }

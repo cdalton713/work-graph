@@ -423,16 +423,72 @@ class CheckTests(unittest.TestCase):
     def test_role_and_merge_rules_outside_release(self):
         p = plan("effort/topic")
         self.rejects(p, "needs exactly one integration")
-        p["nodes"].append(node("merge", role="integration", lane=None))
-        p["edges"] += [edge("sp", "merge"), edge("merge", "mp")]
+        p["nodes"] += [node("merge", role="integration", lane=None), node("qa", "ops")]
+        p["edges"] += [edge("sp", "merge"), edge("merge", "qa"), edge("qa", "mp")]
         self.assertEqual(wg.check(p), [])
-        p["edges"].remove(edge("merge", "mp"))
+        p["edges"].remove(edge("qa", "mp"))
         self.rejects(p, "merge: not after merge point mp")
         p["phases"][0]["target"] = "main"
-        self.rejects(p, "integration requires an effort/")
+        self.rejects(p, "integration requires an mp/ or effort/")
         for role in ("hotfix", "sync"):
             p["nodes"][0]["role"] = role
             self.rejects(p, f"role {role} requires target release")
+
+    def merge_branch_plan(self, base=None):
+        """A merge-point branch phase: a -> mp -> qa (ops) -> merge (integration) -> deploy (ops) -> sp."""
+        p = plan("mp/topic-p1")
+        if base:
+            p["phases"][0]["base"] = base
+        p["nodes"] += [node("qa", "ops"), node("merge", role="integration", lane=None), node("deploy", "ops")]
+        p["edges"] = [edge("mp", "a"), edge("qa", "mp"), edge("merge", "qa"), edge("deploy", "merge"),
+                      edge("sp", "deploy")]
+        return p
+
+    def test_merge_point_branch_needs_qa_before_and_deploy_after_the_integration_task(self):
+        p = self.merge_branch_plan()
+        self.assertEqual(wg.check(p), [])
+        p["edges"].remove(edge("merge", "qa"))
+        p["edges"] += [edge("merge", "mp"), edge("sp", "qa")]
+        self.assertEqual(wg.check(p), [
+            "merge: needs a QA ops node after merge point mp and before the integration PR "
+            "(ordering.md 'Merge-point branch')",
+            "qa: an ops node of phase 1 must come before or after the integration task merge"])
+        p = self.merge_branch_plan()
+        p["nodes"].append(node("side", "ops"))
+        p["edges"] += [edge("side", "mp"), edge("sp", "side")]
+        self.assertEqual(wg.check(p), ["side: an ops node of phase 1 must come before or after the integration task merge"])
+
+    def test_release_merge_point_branch_keeps_hotfix_rules_and_syncs_after_the_integration(self):
+        p = self.merge_branch_plan("release")
+        p["nodes"][0]["role"] = "hotfix"
+        p["nodes"].append(node("sync", role="sync"))
+        p["edges"] += [edge("sync", "merge"), edge("sp", "sync")]
+        self.assertEqual(wg.check(p), [])
+        self.assertEqual(wg.bottom_base(p["nodes"][4], "mp/topic-p1", wg.final_base(p["phases"][0])), "release")
+        p["edges"].remove(edge("sync", "merge"))
+        p["edges"].append(edge("sync", "mp"))
+        self.assertEqual(wg.check(p), ["sync: the SYNC task must come after the integration task merge"])
+        p["nodes"][0].pop("role")
+        self.rejects(p, "a: release pre-merge task needs role hotfix")
+
+    def test_phase_base_rules(self):
+        p = self.merge_branch_plan("feature")
+        self.assertEqual(wg.check(p), ["phase 1: base must be main or release"])
+        p = plan()
+        p["phases"][0]["base"] = "main"
+        self.assertEqual(wg.check(p), ["phase 1: base is only for an mp/ or effort/ target"])
+
+    def test_warns_when_two_pre_merge_tasks_merge_straight_to_the_target(self):
+        p = plan()
+        self.assertEqual(wg.plan_warnings(p), [])
+        p["nodes"].append(node("b"))
+        p["edges"].append(edge("mp", "b"))
+        self.assertEqual(wg.plan_warnings(p), [
+            "phase 1: 2 pre-merge tasks merge straight to main; use a merge-point branch mp/<slug>-p1 "
+            "with base main (ordering.md 'Merge-point branch')"])
+        self.assertEqual(wg.check(p), [])
+        p["phases"][0]["target"] = "mp/topic-p1"
+        self.assertEqual(wg.plan_warnings(p), [])
 
 
 class DirTests(unittest.TestCase):
@@ -1422,6 +1478,9 @@ class BaseTests(DirTests):
             self.p["edges"] += [edge("sp", "post"), edge("post", "mp")]
             if role == "sync":
                 self.p["nodes"][0]["role"] = "hotfix"
+            else:  # the integration PR waits for the QA node on the merge-point branch
+                self.p["nodes"] += [node("qa", "ops")]
+                self.p["edges"] += [edge("post", "qa"), edge("qa", "mp")]
         command = wg.command
 
         def local_command(*args, cwd=None):
@@ -2225,12 +2284,12 @@ class NextTests(LaneTests):
     def test_integration_node_is_the_coordinators_own_work(self):
         self.p["phases"][0]["target"] = "effort/ex"
         self.p["nodes"].append(node("int", role="integration", lane=None))
-        self.p["edges"] += [edge("int", "mp"), edge("sp", "int")]
+        self.p["edges"] += [edge("int", "ops"), edge("sp", "int")]  # ops is the QA node before the integration PR
         self.assertEqual(wg.check(self.p), [])
         merged = {"a": "Merged", "b": "Merged", "c": "Merged", "s": "Done", "mp": "Done", "ops": "Done", "dec": "Done"}
         for status in ("Todo", "In Progress"):
             self.assertEqual(self.lines(live=merged | {"int": status})[1], ["do integration int CD-9"])
-        self.assertEqual(self.lines(live=merged | {"mp": "Todo"})[1], ["do close mp CD-2"])
+        self.assertEqual(self.lines(live=merged | {"mp": "Todo", "ops": "Todo"})[1], ["do close mp CD-2"])
 
     def test_job_states_and_claims(self):
         cases = [

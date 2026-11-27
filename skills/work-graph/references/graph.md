@@ -85,11 +85,13 @@ Fields:
 - `issue` (`^[A-Z]+-[0-9]+$`), to map an existing issue of the plan's team: the node is an issue that exists already, for example an adopted `Triage` issue. `wg load` maps it and creates no issue; with `--apply` it moves the issue into the effort's project (`update <key>: project`). In every other way it is a plan-team node. Its description is never rewritten. A node has `eng` or `issue`, never both.
 - Edges follow ordering.md "Constraint → encoding". `wg check` rejects:
   - a cycle, a duplicate edge, a node the ship point does not reach, a cross-lane edge inside a phase, and a task that is not before its anchor (the merge point for a pre-merge task, the ship point for a post-merge task);
-  - a phase with no `target`;
+  - a phase with no `target`; a `base` on a phase whose target is not `mp/` or `effort/`, or a `base` other than `main` or `<release>`;
   - in each phase after the first, a `task`, `ops`, merge point, or ship point that does not reach the previous phase's ship point (`decision` and `spike` are exempt);
   - an `ops` node, a post-merge task, or a ship point that does not reach its phase's merge point;
-  - in a `<release>` phase: a pre-merge task without role `hotfix`, a pre-merge task that depends on another task, or not exactly one `sync` task;
-  - in other phases: role `hotfix` or `sync`, and role `integration` unless the target starts with `effort/` (then exactly one `integration` task).
+  - in a release phase (target `<release>`, or base `<release>`): a pre-merge task without role `hotfix`, a pre-merge task that depends on another task (unless `stacked_hotfix`), or not exactly one `sync` task;
+  - in other phases: role `hotfix` or `sync`;
+  - role `integration` unless the target starts with `mp/` or `effort/` (then exactly one `integration` task), and in that phase: no `ops` node between the merge point and the integration task, an `ops` node neither before nor after the integration task, or a SYNC task that is not after it (ordering.md "Merge-point branch").
+- `wg check` also prints `warn …` lines that do not fail it: a `main` or `<release>` phase with 2 or more pre-merge tasks and no merge-point branch.
 
 ## Release phase plan.json
 
@@ -114,6 +116,34 @@ A `<release>` phase: the HOTFIX is the only pre-merge task. Deploy and SYNC both
     {"from": "sync1", "to": "mp1"},
     {"from": "ship1", "to": "verify1"},
     {"from": "ship1", "to": "sync1"}
+  ]
+}
+```
+
+## Merge-point branch plan.json
+
+A phase with 2 PRs on a merge-point branch with base `main` (ordering.md "Merge-point branch"). For a release phase, set `"base": "<release>"`, give each pre-merge task `"role": "hotfix"`, and add the SYNC task with edges `sync1 → int1` and `ship1 → sync1`.
+
+```json
+{
+  "effort": {"name": "Rework Y", "slug": "y", "team": "APP"},
+  "phases": [{"key": "1", "name": "Phase 1: Y", "target": "mp/y-p1", "base": "main", "ship_env": "staging"}],
+  "nodes": [
+    {"key": "api", "kind": "task", "phase": "1", "lane": "api", "title": "Add the Y API"},
+    {"key": "ui", "kind": "task", "phase": "1", "lane": "ui", "title": "Show Y in the UI"},
+    {"key": "mp1", "kind": "merge-point", "phase": "1", "title": "MERGE POINT 1: phase 1 merged to mp/y-p1"},
+    {"key": "qa1", "kind": "ops", "phase": "1", "title": "QA on mp/y-p1"},
+    {"key": "int1", "kind": "task", "phase": "1", "role": "integration", "title": "Merge mp/y-p1 into main"},
+    {"key": "deploy1", "kind": "ops", "phase": "1", "title": "Deploy main to staging"},
+    {"key": "ship1", "kind": "ship-point", "phase": "1", "title": "SHIP POINT 1: Y live on staging"}
+  ],
+  "edges": [
+    {"from": "mp1", "to": "api"},
+    {"from": "mp1", "to": "ui"},
+    {"from": "qa1", "to": "mp1"},
+    {"from": "int1", "to": "qa1"},
+    {"from": "deploy1", "to": "int1"},
+    {"from": "ship1", "to": "deploy1"}
   ]
 }
 ```

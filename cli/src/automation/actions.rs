@@ -594,14 +594,14 @@ impl Actions {
                 if s == "Merged" && pr["state"] == "MERGED" {
                     continue;
                 }
-                pr_action(
+                let action = pr_action(
                     e,
                     &mut prs,
                     &pr,
-                    if node["role"] == "sync" {
-                        "main"
-                    } else {
-                        text(&phase["target"])
+                    match node["role"].as_str() {
+                        Some("sync") => "main",
+                        Some("integration") => crate::local::final_base(phase),
+                        _ => text(&phase["target"]),
                     },
                     TaskPr {
                         key,
@@ -610,7 +610,35 @@ impl Actions {
                         reviewed: marked,
                         below: below.map(|k| (k, status(k))),
                     },
-                )?
+                )?;
+                match action {
+                    ("do", "ask-merge" | "merge", tag) if node["role"] == "integration" => {
+                        let ship = nodes
+                            .iter()
+                            .find(|n| n["kind"] == "ship-point" && n["phase"] == node["phase"]);
+                        match ship
+                            .map(|ship| suite_problem(e, snap, ship, phase, &mut prs))
+                            .transpose()?
+                            .flatten()
+                        {
+                            Some(problem) => (
+                                "wait",
+                                "coordinator",
+                                format!(
+                                    "{tag}: merges after the repo-wide test run passes ({problem})"
+                                ),
+                            ),
+                            None if action.1 == "ask-merge" => {
+                                ("do", "ask-merge", format!("{tag} with a merge commit"))
+                            }
+                            None => ("do", "merge", format!("{tag} with a merge commit")),
+                        }
+                    }
+                    ("do", "ask-merge" | "merge", tag) if node["role"] == "sync" => {
+                        (action.0, action.1, format!("{tag} with a merge commit"))
+                    }
+                    other => other,
+                }
             } else if kind == "task" && s == "Merged" {
                 continue;
             } else if kind == "task" && !(waiting && blocked) {

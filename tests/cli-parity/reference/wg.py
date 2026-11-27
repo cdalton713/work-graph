@@ -1237,6 +1237,37 @@ def run_rebuild(plan_dir, plan, apply):
     return 0
 
 
+def integration_target(target):
+    """A phase target that collects the phase's PRs before one integration PR merges it on: a merge-point
+    branch `mp/<slug>-p<P>`, or the older long-lived `effort/<slug>`."""
+    return isinstance(target, str) and (target.startswith("mp/") or target.startswith("effort/"))
+
+
+def final_base(phase):
+    """The branch a phase's work finally merges into: the field `base` of an integration target, else the target."""
+    target = phase.get("target") or "main"
+    if integration_target(target):
+        base = phase.get("base")
+        return base if isinstance(base, str) and base else "main"
+    return target
+
+
+def plan_warnings(plan):
+    """Advice that does not fail wg check (ordering.md "Merge-point branch")."""
+    out = []
+    for phase in plan.get("phases", []):
+        target = phase.get("target")
+        if not isinstance(target, str) or not target or integration_target(target):
+            continue
+        ph = str(phase["key"])
+        pre = sum(1 for n in plan.get("nodes", []) if str(n.get("phase")) == ph and n.get("kind") == "task"
+                  and n.get("role") not in ("sync", "integration"))
+        if pre >= 2:
+            out.append(f"phase {ph}: {pre} pre-merge tasks merge straight to {target}; use a merge-point branch "
+                       f"mp/<slug>-p{ph} with base {target} (ordering.md 'Merge-point branch')")
+    return out
+
+
 def post_merge(n):
     return n.get("kind") == "task" and n.get("role") in ("sync", "integration")
 
@@ -1355,31 +1386,50 @@ def check(plan):
             if len(tdeps) > 1:
                 errs.append(f"{k}: more than one task dependency in phase {ph}: {tdeps}")
             for d in tdeps:
-                if nodes[d].get("lane") != nodes[k].get("lane"):
+                # The integration task has no lane: the SYNC task after it is not a cross-lane edge.
+                if nodes[d].get("role") != "integration" and nodes[d].get("lane") != nodes[k].get("lane"):
                     errs.append(f"{k} -> {d}: cross-lane edge inside phase {ph} (ordering.md 'Lanes')")
         for k in tasks:
             anchor = sp if post_merge(nodes[k]) else mp
             if not _reaches(anchor, k, deps):
                 errs.append(f"{k}: not before its anchor {anchor}")
         target = phase.get("target")
+        base = final_base(phase)
+        if "base" in phase:
+            if not integration_target(target):
+                errs.append(f"phase {ph}: base is only for an mp/ or effort/ target")
+            elif base not in ("main", RELEASE_BRANCH):
+                errs.append(f"phase {ph}: base must be main or {RELEASE_BRANCH}")
+        rel = base == RELEASE_BRANCH  # a release phase, straight to the release branch or through an mp/ branch
         roles = [nodes[k].get("role") for k in tasks]
-        if target == RELEASE_BRANCH:
-            if roles.count("sync") != 1:
-                errs.append(f"phase {ph}: {RELEASE_BRANCH} needs exactly one sync task")
-        elif isinstance(target, str) and target.startswith("effort/") and roles.count("integration") != 1:
+        if rel and roles.count("sync") != 1:
+            errs.append(f"phase {ph}: {target} needs exactly one sync task")
+        if integration_target(target) and roles.count("integration") != 1:
             errs.append(f"phase {ph}: {target} needs exactly one integration task")
         for k in sorted(tasks):
             role = nodes[k].get("role")
-            if target == RELEASE_BRANCH and not post_merge(nodes[k]):
+            if rel and not post_merge(nodes[k]):
                 if role != "hotfix":
                     errs.append(f"{k}: {RELEASE_BRANCH} pre-merge task needs role hotfix")
                 # effort.stacked_hotfix: the human allowed one lane of stacked HOTFIX PRs for this effort.
                 if not plan["effort"].get("stacked_hotfix") and any(d != k and _reaches(k, d, deps) for d in tasks):
                     errs.append(f"{k}: {RELEASE_BRANCH} pre-merge task depends on another task")
-            if target != RELEASE_BRANCH and role in {"hotfix", "sync"}:
+            if not rel and role in {"hotfix", "sync"}:
                 errs.append(f"{k}: role {role} requires target {RELEASE_BRANCH}")
-            if role == "integration" and not (isinstance(target, str) and target.startswith("effort/")):
-                errs.append(f"{k}: role integration requires an effort/ target")
+            if role == "integration" and not integration_target(target):
+                errs.append(f"{k}: role integration requires an mp/ or effort/ target")
+        integ = next((k for k in sorted(tasks) if nodes[k].get("role") == "integration"), None)
+        if integration_target(target) and integ:
+            ops = [k for k in mine if nodes[k].get("kind") == "ops"]
+            if not any(_reaches(integ, o, deps) for o in ops):
+                errs.append(f"{integ}: needs a QA ops node after merge point {mp} and before the integration PR "
+                            "(ordering.md 'Merge-point branch')")
+            for s_ in sorted(k for k in tasks if nodes[k].get("role") == "sync"):
+                if not _reaches(s_, integ, deps):
+                    errs.append(f"{s_}: the SYNC task must come after the integration task {integ}")
+            for o in ops:
+                if not _reaches(integ, o, deps) and not _reaches(o, integ, deps):
+                    errs.append(f"{o}: an ops node of phase {ph} must come before or after the integration task {integ}")
     return errs
 
 
@@ -3248,7 +3298,7 @@ def move_guard(plan_dir, plan, km, node, status_name, note, issue=None):
                                     "then wg run set … merge_review=clean" if level == "thorough" else
                                     f"{key}: no review of this patch at review effort {level}: review-and-merge.md "
                                     "\"Review effort\", then wg run set … review=clean")
-                base = bottom_base(node, phase_of(plan, node)["target"])
+                base = bottom_base(node, phase_of(plan, node)["target"], final_base(phase_of(plan, node)))
                 if info.get("baseRefName") != base:
                     problems.append(f"{key}: the base of PR #{pr} is {info.get('baseRefName')}, not {base}")
                 if info.get("mergeable") == "CONFLICTING":
@@ -3263,6 +3313,16 @@ def move_guard(plan_dir, plan, km, node, status_name, note, issue=None):
                     problems.append(f"{key}: {below} is below it in the lane and is not merged")
                 elif lower_pr and st.get(below) in MERGED and pr_view(lower_pr, "state", cwd=plan_dir)["state"] != "MERGED":
                     problems.append(f"{key}: {below} is below it and its PR #{lower_pr} is not merged")
+                if node.get("role") == "integration" and not problems:
+                    # The merged merge-point branch passes its repo-wide test run before it merges on.
+                    ship = next(k for k, n in nodes.items()
+                                if n["kind"] == "ship-point" and str(n["phase"]) == str(node["phase"]))
+                    merges = [(pr_view(number, "mergeCommit", cwd=plan_dir).get("mergeCommit") or {}).get("oid")
+                              for _, number in phase_tasks(nodes, st, rows, nodes[ship])]
+                    problem = (full_suite_problem(plan_dir, plan, nodes[ship], rows.get(ship, {}),
+                                                  [m for m in merges if m]) if any(merges) else None)
+                    if problem:
+                        problems.append(f"{ship}: {problem}")
     if kind in ("merge-point", "ship-point") and status_name in ("Verifying", "Done"):
         _, _, nodes, st, deps, rows = snapshot(plan_dir, plan)
         problems += [f"{key}: blocker {d} is {st.get(d, 'not loaded')}"
@@ -3627,7 +3687,7 @@ def preflight(plan_dir, plan, phase):
             line(level, "linear", message)
     except ReadError as e:
         line("FAIL", "linear", str(e).replace("\n", " "))
-    stax_phases = [p for p in phases if p.get("target") != RELEASE_BRANCH]
+    stax_phases = [p for p in phases if p.get("target") != RELEASE_BRANCH and final_base(p) != RELEASE_BRANCH]
     trunk = None
     if stax_phases:
         try:
@@ -3637,14 +3697,14 @@ def preflight(plan_dir, plan, phase):
     for p in phases:
         k, target = p["key"], p.get("target")
         phase_target = f"phase {k} targets {target}"
-        if target == RELEASE_BRANCH:
+        if target == RELEASE_BRANCH or (integration_target(target) and final_base(p) == RELEASE_BRANCH):
             line("ok", "trunk", f"{phase_target}: no stax")
         elif not trunk:
             line("FAIL", "trunk", f"{phase_target}, but the stax trunk is not set")
         elif target == trunk:
             line("ok", "trunk", f"{phase_target}: stax trunk")
         else:
-            integration = isinstance(target, str) and target.startswith("effort/")
+            integration = integration_target(target)
             branch = "main" if integration else target
             metadata = branch_metadata(plan_dir, branch) if branch and branch != trunk else None
             safe = branch == trunk or imported_frozen(metadata)
@@ -3743,7 +3803,7 @@ def base(plan_dir, plan, phase):
                 detail = "no stax"
             elif target == trunk:
                 detail = "stax trunk (st sync refreshes it)"
-            elif target.startswith("effort/"):
+            elif integration_target(target):
                 detail = "coordinator-owned"
             elif imported_frozen(branch_metadata(plan_dir, target)):
                 detail = refresh_base(plan_dir, target)
@@ -4318,8 +4378,11 @@ PR_FIELDS = "state,headRefOid,isDraft,mergeCommit,mergeable,baseRefName,reviews,
 COMPLETE = "every ship point is Done or Canceled"
 
 
-def bottom_base(node, target):
-    """The PR base of a node at the bottom of its lane."""
+def bottom_base(node, target, base="main"):
+    """The PR base of a node at the bottom of its lane. `base` is the phase's final base (`final_base`): the
+    integration PR merges the merge-point branch into it."""
+    if node.get("role") == "integration":
+        return base
     return "main" if node.get("role") == "sync" else target
 
 
@@ -4479,7 +4542,7 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None, curr
     def merge(k, s, row, info):
         n, number = nodes[k], row["pr"]
         below = lane_below(k, nodes, deps)
-        base = bottom_base(n, phase_of(plan, n)["target"])
+        base = bottom_base(n, phase_of(plan, n)["target"], final_base(phase_of(plan, n)))
         if below and st.get(below) in MERGED and row.get("parent") != base:
             add("do", "restack", k, f"#{number}: the PR below it merged")
         elif info.get("isDraft"):
@@ -4509,12 +4572,24 @@ def next_lines(plan_dir, plan, tolerant=False, *, inputs=None, triage=None, curr
             add("do", "restack", k, f"#{number} conflicts with {info.get('baseRefName')}")
         elif not checks_pass(k, number):
             add("do", "verify", k, f"#{number}: a check failed")
+        elif n.get("role") == "integration" and (s != "Ready to Merge" or coordinator_merges()) and (
+                problem := integration_suite(n)):
+            add("wait", "coordinator", k, f"#{number}: merges after the repo-wide test run passes ({problem})")
         elif coordinator_merges():
-            add("do", "merge", k, f"#{number}")
+            add("do", "merge", k, f"#{number}" + method(n))
         elif s != "Ready to Merge":
-            add("do", "ask-merge", k, f"#{number}")
+            add("do", "ask-merge", k, f"#{number}" + method(n))
         else:
             add("wait", "human", k, f"merge PR #{number}")
+
+    def method(n):
+        return " with a merge commit" if n.get("role") in ("sync", "integration") else ""
+
+    def integration_suite(n):
+        """The repo-wide test run of the phase must pass on the merge-point branch before its integration PR merges."""
+        ship = next((key for key, m in nodes.items()
+                     if m["kind"] == "ship-point" and str(m["phase"]) == str(n["phase"])), None)
+        return suite_problem(ship, nodes[ship], rows.get(ship, {})) if ship else None
 
     def task(k, s, row):
         n, number = nodes[k], row.get("pr")
@@ -6477,7 +6552,7 @@ EXPLAIN = {
     "wave": "each node of the last wave is code done: pick the next wave",
     "dispatch": "start the first worker job of a ready node",
     "adopt": "a node whose branch or PR exists: adopt it, no dispatch",
-    "integration": "the coordinator's own integration branch",
+    "integration": "the merge-point branch PR into the base",
     "verify": "check code done: wg done",
     "review": "the wave review of a draft PR at the review effort, or a change of the review effort",
     "ask-ready": "ask the human to mark PRs ready (merge_prep=human)",
@@ -9021,7 +9096,7 @@ def branch_kind(plan_dir, node, target):
     """The row of ordering.md "Targets" that refreshes and pushes this node's branch."""
     if node.get("role") in ("hotfix", "sync"):
         return node["role"]
-    if target.startswith("effort/"):
+    if integration_target(target):
         return "integration"
     return "trunk" if target == stax_trunk(plan_dir) else "frozen"
 
@@ -9187,8 +9262,9 @@ def branch_plan(plan, key, nodes, deps, st, rows, recorded=None, shared=None):
     names = {"stack": stack, "child": f"{stack}-{index:02d}-{key}", "display": f"{index:02d} {key}"}
     # effort.stacked_hotfix: HOTFIX nodes stack like any lane node (the bottom one starts from the release branch).
     if node.get("role") == "hotfix" and not plan["effort"].get("stacked_hotfix"):
-        return names | {"branch": f"hotfix/{slug}-{key}", "lower": f"origin/{RELEASE_BRANCH}",
-                        "parent": RELEASE_BRANCH, "stax": False}
+        parent = target if integration_target(target) else RELEASE_BRANCH
+        return names | {"branch": f"hotfix/{slug}-{key}", "lower": f"origin/{parent}",
+                        "parent": parent, "stax": False}
     if recorded:
         return names | {"branch": recorded["branch"], "lower": recorded["lower"], "parent": recorded["parent"], "stax": True}
     if below is None or st.get(below) in MERGED:
@@ -10041,7 +10117,7 @@ def restack_line(plan_dir, plan, node, row, nodes, deps, st):
     """The pinned target of a restack job. It refreshes a frozen base first."""
     target = phase_of(plan, node)["target"]
     kind = branch_kind(plan_dir, node, target)
-    pin = RELEASE_BRANCH if kind in ("hotfix", "sync") else target
+    pin = RELEASE_BRANCH if kind == "sync" or kind == "hotfix" and not integration_target(target) else target
     if kind == "frozen":
         refresh_base(plan_dir, target)
         sha = git_output("rev-parse", target, cwd=plan_dir)
@@ -10605,6 +10681,8 @@ def run_command(ns, d, plan, given):
         errs = check(plan)
         for e in errs:
             print(e)
+        for w in plan_warnings(plan):
+            print(f"warn {w}")
         return int(bool(errs))
     if ns.cmd == "load":
         return load(d, plan, ns.apply, ns.prune, ns.adopt)

@@ -261,6 +261,24 @@ pub(crate) fn check_plan(plan: &Value, report: &Value) -> bool {
 }
 
 pub(crate) use contract::satisfied;
+/// A phase target that collects the phase's PRs before one integration PR merges it into `main`:
+/// a merge-point branch `mp/<slug>-p<P>`, or the older long-lived `effort/<slug>`.
+pub(crate) fn integration_target(target: &str) -> bool {
+    target.starts_with("mp/") || target.starts_with("effort/")
+}
+/// The branch that a phase's work finally merges into: the phase field `base` for an integration
+/// target (`main` or the release branch), else the target itself.
+pub(crate) fn final_base(phase: &Value) -> &str {
+    let target = phase["target"].as_str().unwrap_or("main");
+    if integration_target(target) {
+        phase["base"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("main")
+    } else {
+        target
+    }
+}
 pub(crate) use graph::findings as plan_findings;
 pub(crate) use journal::record_status;
 

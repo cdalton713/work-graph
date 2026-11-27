@@ -1,6 +1,16 @@
 .bar { flex: none; display: flex; align-items: center; gap: calc(var(--u) * 3); min-height: 44px; padding: 0 calc(var(--u) * 4); border-bottom: 1px solid var(--rail); background: var(--cab-1); }
 .bar button, .bar .picker-trigger { white-space: nowrap; flex: none; }
 .bar .picker, .bar .picker-trigger { flex: 0 1 auto; min-width: 0; }
+/* Only the project picker gives up width (its name ends in an ellipsis). Each other control keeps its text on one line. */
+.project-bar > .picker:not(:first-of-type), .project-bar > .picker:not(:first-of-type) > .picker-trigger { flex: none; }
+.bar :is(.bar-share, .bar-user, .bar-version, .bar-viewer) { flex: none; white-space: nowrap; }
+.project-bar > .picker:first-of-type > .picker-trigger { overflow: hidden; }
+.project-bar > .picker:first-of-type { min-width: min(200px, 100%); }
+/* A desktop bar that is not wide: drop the brand and close the gaps so the project name keeps its room. */
+@media (min-width: 1280px) and (max-width: 1599px) {
+  .project-bar { gap: 8px; }
+  .project-bar > .brand { display: none; }
+}
 .brand { font: 600 11px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); white-space: nowrap; }
 .bar-project { font-weight: 600; color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .caret { color: var(--ink-4); margin-left: 6px; }

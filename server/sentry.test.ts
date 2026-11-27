@@ -137,7 +137,8 @@ it.each([
   try {
     const { default: configureBuild } = await import("../vite.config.ts");
     configureBuild({ command: "build", mode: "production" });
-    expect(upload).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ name: expected }) }));
+    if (expected === "dev") expect(upload).not.toHaveBeenCalled();
+    else expect(upload).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ name: expected }) }));
 
     const env = {
       WG_VERSION: version, VERCEL_GIT_COMMIT_SHA: commit, WG_SENTRY_DSN: "server", WG_SENTRY_BROWSER_DSN: "browser",

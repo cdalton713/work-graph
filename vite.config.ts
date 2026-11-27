@@ -28,7 +28,9 @@ function compressedAssets(): Plugin {
 
 export default defineConfig(({ command }) => {
   const { SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT_BROWSER } = process.env;
-  const upload = command === "build" && Boolean(SENTRY_AUTH_TOKEN && SENTRY_ORG && SENTRY_PROJECT_BROWSER);
+  const release = releaseVersion(process.env);
+  // A build with no release name (`dev`) uploads nothing: its maps would match no deployed release.
+  const upload = command === "build" && release !== "dev" && Boolean(SENTRY_AUTH_TOKEN && SENTRY_ORG && SENTRY_PROJECT_BROWSER);
   return {
     define: { "import.meta.env.WG_CONTRACT_HASH": JSON.stringify(contractHash) },
     build: { sourcemap: upload ? "hidden" : false },
@@ -40,7 +42,7 @@ export default defineConfig(({ command }) => {
         org: SENTRY_ORG,
         project: SENTRY_PROJECT_BROWSER,
         telemetry: false,
-        release: { name: releaseVersion(process.env), setCommits: false },
+        release: { name: release, setCommits: false },
         sourcemaps: { assets: "dist/**/*.js", filesToDeleteAfterUpload: "dist/**/*.map" },
       }),
     ],

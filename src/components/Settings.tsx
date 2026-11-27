@@ -4,7 +4,7 @@ import { Intro } from "./Intro";
 import { InstalledSignInHelp } from "./SignIn";
 import { accountApi } from "../api";
 import { validateNewTeam, type NewTeam } from "../lib/onboarding";
-import type { Account, AccountConnection, AccountTeam } from "../lib/types";
+import type { Account, AccountConnection, ListedTeam } from "../lib/types";
 
 export type RefreshAccount = () => Promise<Account>;
 
@@ -194,7 +194,7 @@ export function WorkspaceStatus({ workspace }: { workspace: AccountConnection })
 export function TeamForm({ workspace, refresh, draft, saveDraft }: {
   workspace: AccountConnection; refresh: RefreshAccount; draft?: NewTeam; saveDraft?: (team?: NewTeam) => void;
 }) {
-  const [teams, setTeams] = useState<AccountTeam[] | null>(null);
+  const [teams, setTeams] = useState<ListedTeam[] | null>(null);
   const [loadError, setLoadError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [choice, setChoice] = useState(draft ? ":new" : workspace.team);
@@ -218,6 +218,9 @@ export function TeamForm({ workspace, refresh, draft, saveDraft }: {
   if (status !== "ok") return null;
   if (loadError) return <><AccountError error={loadError} /><button onClick={() => setAttempt(attempt + 1)}>Retry teams</button></>;
   if (!teams) return <p role="status">Loading teams…</p>;
+  // When the workspace has sub-teams, offer only those: a top-level team holds too many projects to load.
+  const subTeams = teams.some(({ parent }) => parent);
+  const listed = subTeams ? teams.filter(({ parent }) => parent) : teams;
   return <form className="account-form" onSubmit={(event) => {
     event.preventDefault();
     void run(async () => {
@@ -233,11 +236,11 @@ export function TeamForm({ workspace, refresh, draft, saveDraft }: {
       await refresh();
     });
   }}>
-    <label>Team for {workspace.name}
+    <label>{subTeams ? "Sub-team" : "Team"} for {workspace.name}
       <select value={choice} onChange={(event) => setChoice(event.target.value)}>
-        <option value="">Select a team</option>
-        {team && !teams.some(({ key }) => key === team) && <option value={team} disabled>{team} (unavailable)</option>}
-        {teams.map(({ key, name }) => <option key={key} value={key}>{name} ({key})</option>)}
+        <option value="">{subTeams ? "Select a sub-team" : "Select a team"}</option>
+        {team && !listed.some(({ key }) => key === team) && <option value={team} disabled>{team} (unavailable)</option>}
+        {listed.map(({ key, name }) => <option key={key} value={key}>{name} ({key})</option>)}
         {saveDraft && <option value=":new">A new team that wg setup makes</option>}
       </select>
     </label>

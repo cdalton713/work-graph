@@ -105,6 +105,7 @@ export function usesTeamProjectLabels(plan?: string): boolean {
   return /^(business|enterprise)(?:[_-]|$)/i.test(plan ?? "");
 }
 
+/** A Business or Enterprise plan: team project labels and sub-teams. False when Linear does not answer. */
 export async function defaultTeamLabels(authorization: string): Promise<boolean> {
   try {
     const response = await fetch("https://api.linear.app/graphql", {
@@ -199,12 +200,12 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
     if (credential && !data) await revokeLinearToken(credential.refreshToken);
     if (connecting && (!credential || !data)) return returnTo(c, flow.next, "failed");
     if (!credential || !data) return c.json({ error: "Linear did not complete the sign-in: open the page again" }, 502);
-    const { viewer, organization, teams } = data;
+    const { viewer, organization } = data;
     if (connecting) {
       // An attached workspace is not a sign-up, so the sign-up list of WG_ALLOWED_ORGS does not apply.
       const result = await attach!.save(flow.attach as string, {
         workspaceId: organization.urlKey, linearOrgId: organization.id, name: organization.name, ownerName: viewer.name,
-        team: teams?.nodes?.length === 1 ? teams.nodes[0].key : "", teamLabels: await defaultTeamLabels(`Bearer ${credential.key}`), credential,
+        team: "", teamLabels: await defaultTeamLabels(`Bearer ${credential.key}`), credential,
       }).then(async ({ created, displaced }) => {
         if (displaced) await revokeLinearToken(displaced);
         return created ? "connected" as const : "reconnected" as const;
@@ -224,7 +225,7 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
     }
     const accountId = await save({ linearUserId: viewer.id, linearOrgId: organization.id, name: viewer.name, email: viewer.email }, {
       workspaceId: organization.urlKey, linearOrgId: organization.id, name: organization.name,
-      team: teams?.nodes?.[0]?.key ?? "", teamLabels: await defaultTeamLabels(`Bearer ${credential.key}`), credential,
+      team: "", teamLabels: await defaultTeamLabels(`Bearer ${credential.key}`), credential,
     }, observe && ((id, created) => observe(id, { id: organization.urlKey, organization: organization.id }, created)));
     const exp = Math.floor(now() / 1000) + SESSION_S;
     const session = { accountId, email: viewer.email, exp, id: randomBytes(24).toString("base64url") };

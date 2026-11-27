@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import contract from "../../skills/work-graph/contract.json";
-import { installBlock, statusMeanings, configBlock, pollWhileVisible, workspaceKeyLocation, doneSteps, firstStep, setupCommands, validateNewTeam } from "./onboarding";
+import { installBlock, statusMeanings, configBlock, pollWhileVisible, workspaceKeyLocation, doneSteps, firstStep, setupCommands, validateNewTeam, defaultTeamKey } from "./onboarding";
 import type { OnboardingState, AccountConnection } from "./types";
 
 const complete: OnboardingState = {
@@ -112,6 +112,15 @@ describe("onboarding", () => {
 
   it.each(contract.setup.statuses)("explains $name and identifies who moves it", ({ name }) => {
     expect(statusMeanings[name]).toEqual([expect.stringMatching(/\S/), expect.stringMatching(/\S/)]);
+  });
+
+  it("suggests the first and last initials as the team key", () => {
+    expect(defaultTeamKey("Christian Dalton", [])).toBe("CD");
+    expect(defaultTeamKey("Ada Byron Lovelace", [])).toBe("AL");
+    expect(defaultTeamKey("Ada", [])).toBe("A");
+    expect(defaultTeamKey("Christian Dalton", ["CD"])).toBe("CDWG");
+    expect(defaultTeamKey("Christian Dalton", ["CD", "CDWG"])).toBe("WG");
+    expect(defaultTeamKey("", ["WG"])).toBe("");
   });
 
   it("checks the team key and name before they enter the commands", () => {

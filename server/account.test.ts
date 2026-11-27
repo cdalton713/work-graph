@@ -300,7 +300,7 @@ databaseSuites((open) => {
     const output: string[] = [];
     for (const level of ["log", "warn", "error"] as const) vi.spyOn(console, level).mockImplementation((...args) => output.push(args.join(" ")));
     let signInOrg = "work";
-    const identities = new Map<string, { org: string; teams: string[] }>();
+    const identities = new Map<string, { org: string; teams: string[]; plan?: string; parents?: Record<string, string> }>();
     const revoked = new Set<string>();
     const revocations: string[] = [];
     const intake: unknown[] = [];
@@ -323,6 +323,9 @@ databaseSuites((open) => {
       if (revoked.has(token) || !identity) {
         return Response.json({ errors: [{ message: "Refused " + token.slice(-15) + " from " + token }] }, { status: 401 });
       }
+      if (query.includes("subscription") && !query.includes("teams(")) {
+        return Response.json({ data: { organization: { subscription: { type: "plan" in identity ? identity.plan : "free" } } } });
+      }
       if (query.includes("projects(")) {
         expect(identity.teams).toContain(variables.k);
         return Response.json({ data: { teams: { nodes: [{ projects: {
@@ -333,7 +336,7 @@ databaseSuites((open) => {
       return Response.json({ data: {
         viewer: { id: "ada", name: "Ada", email: "ada@example.com" },
         organization: { id: identity.org + "-id", name: "Workspace", urlKey: identity.org },
-        teams: { nodes: identity.teams.map((team) => ({ key: team, name: team })), pageInfo: { hasNextPage: false } },
+        teams: { nodes: identity.teams.map((team) => ({ key: team, name: team, parent: "parents" in identity && identity.parents?.[team] ? { key: identity.parents[team] } : null })), pageInfo: { hasNextPage: false } },
       } });
     });
     vi.stubGlobal("fetch", fetch);
@@ -562,7 +565,7 @@ databaseSuites((open) => {
       expect(response.status).toBe(201);
       const { connection, teams } = await response.json();
       expect(connection).toMatchObject({ workspace_id: "personal", kind: "api_key", status: "ok", team: "", owner_name: "Ada", created_at: expect.any(String) });
-      expect(teams).toEqual([{ key: "HOME", name: "HOME" }, { key: "SIDE", name: "SIDE" }]);
+      expect(teams).toEqual([{ key: "HOME", name: "HOME", parent: null }, { key: "SIDE", name: "SIDE", parent: null }]);
       const path = attach + "/" + connection.id;
       for (const [method, suffix] of [["GET", "/teams"], ["PATCH", ""], ["PUT", "/key"], ["DELETE", ""]]) {
         expect((await t.request(path + suffix, other.cookie, method)).status).toBe(404);
@@ -570,6 +573,15 @@ databaseSuites((open) => {
       expect((await t.request(attach, cookie, "POST", { key: personal }, { origin: "https://other.example.com" })).status).toBe(403);
       expect((await t.request(path, cookie, "PATCH", { team: "NO" })).status).toBe(400);
       expect((await t.request(path, cookie, "PATCH", { team: "HOME", team_labels: true, position: 0 })).status).toBe(200);
+      // A plan with sub-teams accepts only a sub-team: a top-level team holds too many projects to load.
+      Object.assign(t.identities.get(personal)!, { plan: "business_monthly", parents: { SIDE: "HOME" } });
+      const topLevel = await t.request(path, cookie, "PATCH", { team: "HOME" });
+      expect(topLevel.status).toBe(400);
+      expect((await topLevel.json()).error).toMatch(/sub-team/);
+      expect((await t.request(path, cookie, "PATCH", { team: "SIDE" })).status).toBe(200);
+      expect((await t.request(path, cookie, "PATCH", { team: "HOME" })).status).toBe(400);
+      Object.assign(t.identities.get(personal)!, { plan: undefined, parents: undefined });
+      expect((await t.request(path, cookie, "PATCH", { team: "HOME" })).status).toBe(200);
       expect(await (await t.request(path + "/teams", cookie)).json()).toEqual({ teams });
       const projects = async () => (await t.request("/api/projects", cookie)).json();
       expect((await projects()).projects.map(({ id }: { id: string }) => id)).toContain("personal-project");
@@ -632,6 +644,7 @@ databaseSuites((open) => {
       expect(await list()).toHaveLength(1);
       const { connection } = await (await t.request(attach, cookie, "POST", { key: original })).json();
       const path = attach + "/" + connection.id;
+      expect((await t.request(path, cookie, "PATCH", { team: "HOME" })).status).toBe(200);
       expect((await t.request(path + "/key", cookie, "PUT", { key: wrong })).status).toBe(400);
       t.revoked.add(original);
       const refused = await (await t.request("/api/projects", cookie)).json();

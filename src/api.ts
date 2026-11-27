@@ -7,7 +7,7 @@ import { pageEvent, type PageEvent } from "./lib/telemetry";
 import { maxEncodedWorkspaceLength, maxOmittedWorkspaces, omitWorkspacesHeader, retryDeadline } from "./lib/retry-after";
 import { site } from "./lib/site";
 import type { OverviewData } from "./lib/overview";
-import type { SetupTeam, SetupTeamInput, TeamSetupResult, TeamSetupState, StarterResult, Account, AccountTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShare, NewShareLink, ShareKind, ShareMember, LinearAccess, AccessGrant, ServerStatus } from "./lib/types";
+import type { SetupTeam, SetupTeamInput, TeamSetupResult, TeamSetupState, StarterResult, Account, ListedTeam, Comment, GraphData, Issue, IssuePatch, ProjectJoin, ProjectJoinPreview, ProjectList, ProjectShare, NewShareLink, ShareKind, ShareMember, LinearAccess, AccessGrant, ServerStatus } from "./lib/types";
 
 /** The open project. A write names it (`x-project`), so the server can tell its coordinator at once. */
 let openProject: string | null = null;
@@ -229,7 +229,7 @@ export const accountApi = {
   attach: (key: string) => accountWrite("/workspaces", "POST", { key }),
   replace: (id: string, key: string) => accountWrite(`/workspaces/${id}/key`, "PUT", { key }),
   teams: async (id: string, signal?: AbortSignal) =>
-    (await call<{ teams: AccountTeam[] }>(`account/workspaces/${id}/teams`, { signal })).teams,
+    (await call<{ teams: ListedTeam[] }>(`account/workspaces/${id}/teams`, { signal })).teams,
   updateWorkspace: (id: string, settings: { team?: string; team_labels?: boolean; position?: number }) =>
     accountWrite(`/workspaces/${id}`, "PATCH", settings),
   removeWorkspace: (id: string) => accountWrite(`/workspaces/${id}`, "DELETE"),

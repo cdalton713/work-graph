@@ -98,7 +98,8 @@ export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}
   const page = query.get("page");
   const route = (page: string | null) => navigate({ page }, true);
   const overview = () => { setGuide(false); navigate({ page: null, project: null, workspace: null }, true); };
-  const showGuide = !!account && (page === "setup" || (!account.onboarding.skipped && (guide || !!firstStep(account.onboarding))));
+  // Each workspace needs its own team first: without one, work-graph has no team to load projects from.
+  const showGuide = !!account && (page === "setup" || (page !== "settings" && !account.onboarding.teams) || (!account.onboarding.skipped && (guide || !!firstStep(account.onboarding))));
   useEffect(() => {
     if (account && firstStep(account.onboarding)) setGuide(true);
   }, [account]);

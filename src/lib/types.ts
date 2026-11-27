@@ -217,6 +217,11 @@ export interface AccountTeam {
   name: string;
 }
 
+/** A team in a workspace's team list. `parent` is the parent team's key; null for a top-level team. */
+export interface ListedTeam extends AccountTeam {
+  parent?: string | null;
+}
+
 export interface SetupTeam extends AccountTeam {
   private: boolean;
   parent: AccountTeam | null;

@@ -85,7 +85,7 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
   };
   return <main className="account-page">
     <div className="account-content">
-      <div className="account-heading"><h1>Setup guide</h1><button onClick={skip} disabled={busy}>Skip for now</button></div>
+      <div className="account-heading"><h1>Setup guide</h1>{done.teams && <button onClick={skip} disabled={busy}>Skip for now</button>}</div>
       <AccountError error={error} />
       <div className="account-guide">
         <nav aria-label="Setup steps">
@@ -150,7 +150,8 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
               <AccountError error={connectError} />
               {canOpenOverview && <div><button className="primary" onClick={finish}>Go to overview</button></div>}
             </>}
-            {next && step !== "name" && <div><button onClick={() => continueTo(next)}>Continue</button></div>}
+            {step === "teams" && !done.teams && <p>Create or select a team for each workspace to continue.</p>}
+            {next && step !== "name" && <div><button disabled={step === "teams" && !done.teams} onClick={() => continueTo(next)}>Continue</button></div>}
           </div>
         </section>
       </div>

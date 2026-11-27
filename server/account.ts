@@ -283,7 +283,7 @@ export function accountRoutes(options: Options) {
     const { workspaceId, organization, name, ownerName } = identity;
     const id = await accounts.addConnection(account.id, {
       workspaceId, linearOrgId: organization, name, ownerName, credential,
-      team: teams.length === 1 ? teams[0].key : "", teamLabels: await defaultTeamLabels(credential.key),
+      team: "", teamLabels: await defaultTeamLabels(credential.key),
     });
     const saved = await accounts.readTenant(account.id);
     const connection = findConnection(saved?.connections ?? [], id);
@@ -318,7 +318,12 @@ export function accountRoutes(options: Options) {
     let checkedKey: string | undefined;
     if (team !== undefined) {
       const { teams, key } = await currentTeams(tenant, row);
-      if (!teams.some((entry) => entry.key === team)) throw new LinearError("The workspace credential cannot read that team", 400);
+      const chosen = teams.find((entry) => entry.key === team);
+      if (!chosen) throw new LinearError("The workspace credential cannot read that team", 400);
+      // A top-level team holds the projects of a whole group: loading them all exceeds Linear's rate limits.
+      if (!chosen.parent && await defaultTeamLabels(row.kind === "oauth" ? `Bearer ${key}` : key)) {
+        throw new LinearError("Select a sub-team. A top-level team holds too many projects for work-graph.", 400);
+      }
       checkedKey = key;
     }
     await accounts.updateConnectionSettings(account.id, row.id, { team, teamLabels: team_labels, position }, checkedKey);

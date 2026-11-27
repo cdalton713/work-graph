@@ -132,9 +132,11 @@ databaseSuites((open) => {
       expect(await connect(session)).toBe("connected");
       const sideToken = refresh + issued;
       expect(await connections(session)).toMatchObject([
-        { workspace_id: "work", kind: "oauth", attached: false, team: "WG" },
-        { workspace_id: "side", kind: "oauth", attached: true, team: "SIDE", owner_name: "Ada Side", status: "ok" },
+        // Sign-in and connection choose no team: the setup guide asks for a sub-team.
+        { workspace_id: "work", kind: "oauth", attached: false, team: "" },
+        { workspace_id: "side", kind: "oauth", attached: true, team: "", owner_name: "Ada Side", status: "ok" },
       ]);
+      await sql.query("UPDATE linear_connections SET team = CASE workspace_id WHEN 'work' THEN 'WG' ELSE 'SIDE' END");
       expect(await sql.query("SELECT id FROM users")).toHaveLength(1);
       expect(await sql.query("SELECT id FROM tenants")).toHaveLength(1);
       const [{ id: tenantId }] = await sql.query<{ id: string }>("SELECT id FROM tenants");
@@ -331,6 +333,8 @@ databaseSuites((open) => {
       expect(await sql.query("SELECT id FROM users")).toHaveLength(1);
       expect(await sql.query("SELECT id FROM tenants")).toHaveLength(1);
       expect(await sql.query("SELECT id FROM linear_connections")).toHaveLength(1);
+      expect(await sql.query("SELECT team FROM linear_connections")).toEqual([{ team: "" }]);
+      await sql.query("UPDATE linear_connections SET team = 'WG'");
       const responses = await Promise.all(Array.from({ length: 20 }, (_, i) => request("/api/projects", first, i % 2 ? app : second)));
       for (const response of responses) expect(await response.json()).toMatchObject({ projects: [{ id: "first", workspace: "work" }] });
       expect(refreshed).toBe(1);
@@ -347,6 +351,7 @@ databaseSuites((open) => {
       await tenants.accounts.replaceCredential((await sql.query<{ id: string }>("SELECT id FROM tenants WHERE id <> $1", [tenant]))[0].id,
         (await sql.query<{ id: string }>("SELECT id FROM linear_connections WHERE id <> $1", [id]))[0].id,
         { kind: "oauth", key: access + "3", refreshToken: refresh + "3", expiresAt: new Date(now + 86400000) });
+      await sql.query("UPDATE linear_connections SET team = 'WG' WHERE tenant_id <> $1", [tenant]);
       expect(await (await request("/api/projects", another)).json()).toMatchObject({ projects: [{ id: "other" }] });
       await app.link.hub.joinPage({ close: () => {}, send: () => {} }, { tenant, workspace: "work", id: "first" }, undefined, tenant);
       expect(await (await request("/api/status", first)).json()).toMatchObject({ rooms: [{ project: "first", workspace: "work" }] });

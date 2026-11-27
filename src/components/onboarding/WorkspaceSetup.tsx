@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { accountApi, ApiError } from "../../api";
-import { validateNewTeam, type Step } from "../../lib/onboarding";
-import type { AccountConnection, AccountTeam, SetupTeam, TeamSetupState } from "../../lib/types";
+import { defaultTeamKey, validateNewTeam, type Step } from "../../lib/onboarding";
+import type { AccountConnection, ListedTeam, SetupTeam, TeamSetupState } from "../../lib/types";
 import { TeamForm, WorkspaceStatus, type RefreshAccount } from "../Settings";
 import { CopyButton } from "../ui";
 import { StatusFlow } from "./StatusFlow";
@@ -24,7 +24,7 @@ function CreateTeam({ workspace, human, plan, refresh, onCreated, onError }: {
   workspace: AccountConnection; human: string; plan: TeamSetupState["plan"]; refresh: RefreshAccount;
   onCreated: (team: SetupTeam) => void; onError: (error: unknown) => void;
 }) {
-  const [teams, setTeams] = useState<AccountTeam[]>([]);
+  const [teams, setTeams] = useState<ListedTeam[]>([]);
   const [key, setKey] = useState("");
   const [name, setName] = useState(`Work Graph – ${human}`);
   const [parent, setParent] = useState("");
@@ -38,8 +38,7 @@ function CreateTeam({ workspace, human, plan, refresh, onCreated, onError }: {
       if (controller.signal.aborted) return;
       setTeams(list);
       setParent(list.find(t => t.key === workspace.team)?.key ?? list[0]?.key ?? "");
-      const initials = human.toUpperCase().match(/\b[A-Z]/g)?.join("").slice(0, 5) ?? "";
-      setKey(["WG", initials.slice(0, 1) + "WG", initials + "WG"].find(k => !list.some(t => t.key === k)) ?? "");
+      setKey(defaultTeamKey(human, list.map(t => t.key)));
       setError(null);
     }, e => { if (!controller.signal.aborted) setError(e); });
     return () => controller.abort();

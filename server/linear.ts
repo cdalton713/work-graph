@@ -269,7 +269,7 @@ export class LinearKeyRequired extends LinearError {
   constructor() { super("Linear refused the workspace key. Replace it in your account.", 401); }
 }
 
-type ReadableTeam = { key: string; name: string };
+type ReadableTeam = { key: string; name: string; parent: string | null };
 type WorkspaceIdentity = { workspaceId: string; organization: string; name: string; ownerName: string };
 
 export async function readLinearTeams(key: string, kind: "api_key" | "oauth", identify: true):
@@ -288,7 +288,7 @@ export async function readLinearTeams(key: string, kind: "api_key" | "oauth", id
     const fields = identify && !identity ? "viewer { name } organization { id name urlKey }" : "";
     const query = `query AccountTeams($after: String) {
       ${fields}
-      teams(first: 100, after: $after) { nodes { key name } pageInfo { hasNextPage endCursor } }
+      teams(first: 100, after: $after) { nodes { key name parent { key } } pageInfo { hasNextPage endCursor } }
     }`;
     try {
       const response = await slot(() => transport.fetch(ENDPOINT, {
@@ -308,8 +308,8 @@ export async function readLinearTeams(key: string, kind: "api_key" | "oauth", id
         identity = { workspaceId: org.urlKey, organization: org.id, name: org.name, ownerName: viewer.name };
       }
       for (const team of data.teams.nodes) {
-        if (!text(team?.key) || !text(team?.name)) throw new Error();
-        teams.push({ key: team.key, name: team.name });
+        if (!text(team?.key) || !text(team?.name) || (team.parent != null && !text(team.parent.key))) throw new Error();
+        teams.push({ key: team.key, name: team.name, parent: team.parent?.key ?? null });
       }
       if (!data.teams.pageInfo?.hasNextPage) return { identity, teams };
       const cursor = data.teams.pageInfo.endCursor;

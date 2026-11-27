@@ -62,6 +62,13 @@ export function validateNewTeam(key: string, name: string): NewTeam | null {
   return /^[A-Z][A-Z0-9]{0,6}$/.test(key) && name && [...name].length <= 80 ? { key, name } : null;
 }
 
+/** First and last initials ("CD" for Christian Dalton), else a variant that no team in `taken` uses. */
+export function defaultTeamKey(human: string, taken: string[]): string {
+  const initials = human.toUpperCase().match(/\b[A-Z]/g) ?? [];
+  const short = initials.length > 1 ? initials[0]! + initials.at(-1)! : initials[0] ?? "";
+  return [short, short + "WG", "WG", "WG" + short].find(k => k && validateNewTeam(k, "x") && !taken.includes(k)) ?? "";
+}
+
 export function workspaceKeyLocation(id: string) {
   return {
     env: `LINEAR_${id.toUpperCase().replaceAll("-", "_")}_API_KEY`,

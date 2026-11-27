@@ -15,7 +15,7 @@
 
 Use `wg` on PATH. For a managed installation, the launcher is `~/.local/bin/wg` and the registered skill points to `~/.local/share/work-graph/current/skills/work-graph`. Use `wg update status` to inspect the active version and plugin review notice. If the launcher is missing, check PATH and use the verified bootstrap for that installation.
 
-During rollout, a source installation can use the checkout's `scripts/wg.py` launcher with uv. For installation, explicit source migration and recovery, see the [installation guide](../../../README.md#install-the-skill) in the source repository.
+For installation, migration from a preserved source checkout, and recovery, see the [installation guide](../../../README.md#install-the-skill) in the source repository.
 
 ## Use a hosted service
 

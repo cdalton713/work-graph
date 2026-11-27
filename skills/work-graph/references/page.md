@@ -32,7 +32,7 @@ The `work-graph status` document gives the status, wave, and result lines. Its `
 
 [contract.json](../contract.json) has `version: 2`. Its `project_labels.initiative_group` names the project label group of the initiatives. `project_labels.autonomy_group`, `autonomy_levels`, and `autonomy_default` give the autonomy label group, its child labels, and the level with no label. `project_labels.review_group`, `review_prefix`, `review_levels`, and `review_default` give the same for the review effort: each child label is the prefix plus the level. Its `card.fields` includes `started_at`. Its `status_doc.fields` includes `ran`, `wait_interval`, and `contract`. For each `satisfied` entry, `clear` lists the statuses that clear the edge when the blocker is code done. `clear_without_code_done` lists the statuses that clear it when the blocker has no `code_done_head`.
 
-1. After a contract change in `wg.py`, run `wg contract --write`.
+1. After a contract change in the native CLI, run `wg contract --write`.
 2. The page tests read the same file (`pnpm test` at the repository root). Change the page until they pass.
 3. Deploy the page again where it is hosted (the repository README "Host the page"). Until then, the page says that its contract differs from `wg`.
 

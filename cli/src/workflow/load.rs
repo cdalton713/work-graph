@@ -544,7 +544,7 @@ pub(super) fn load(
                 .unwrap_or("")
                 .trim_start_matches("**work-graph node card** ");
             let notes = format!(
-                "+++ Agent notes\n\nwork-graph node {marker}\n\nThe graph lives in plan.json; change edges there and run `wg.py load`.\n\nAcceptance and files are in the node card comment.\n\n+++"
+                "+++ Agent notes\n\nwork-graph node {marker}\n\nThe graph lives in plan.json; change edges there and run `wg load`.\n\nAcceptance and files are in the node card comment.\n\n+++"
             );
             let desc = n["description"]
                 .as_str()

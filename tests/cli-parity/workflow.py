@@ -332,7 +332,7 @@ for case in cases:
 
 with tempfile.TemporaryDirectory() as root:
     results = []
-    for name, binary in [("reference", [sys.executable, "-I", str(HERE.parents[1] / "skills/work-graph/scripts/wg.py")]),
+    for name, binary in [("reference", [sys.executable, "-I", str(HERE / "reference/wg.py")]),
                          ("candidate", [str(Path(sys.argv[1]).resolve())])]:
         work = Path(root) / name
         work.mkdir()

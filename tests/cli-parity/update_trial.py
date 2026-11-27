@@ -68,12 +68,12 @@ def make_release(directory, key, port, version, signer, signing_key):
     directory.mkdir()
     archive, manifest = directory / "bundle.tar.gz", directory / "manifest.json"
     resources = {name: (0o644, f"{name} {version}\n".encode()) for name in [SKILL, PLUGIN]}
+    for path in (REPO / "skills/work-graph/references").glob("*.md"):
+        resources[str(path.relative_to(REPO))] = (0o644, path.read_bytes())
     plugin = json.loads((REPO / PLUGIN).read_text())
     plugin["version"] = OLD if version == OLD else NEW
     resources[PLUGIN] = (0o644, json.dumps(plugin).encode())
     resources["orca-plugin/src/worker.ts"] = (0o644, b"export default {}")
-    script = "skills/work-graph/scripts/wg.py"
-    resources[script] = (0o755, (REPO / script).read_bytes())
     pack = runpy.run_path(str(REPO / "packaging/releases/package.py"))["build"]
     pack(archive, manifest, resources, dict(schema=1, version=version, target=TARGET,
          commit="a"*40, public_key=key), binary)
@@ -148,6 +148,9 @@ def trial(temp, server):
         assert (current / SKILL).read_text() == f"{SKILL} {version}\n"
         assert json.loads((current / PLUGIN).read_bytes())["version"] == (OLD if version == OLD else NEW)
 
+    # The parity harness gives each CLI process only fixture tools on PATH.
+    subprocess.run([sys.executable, "-I", REPO / "tests/cli-parity/suite.py", launcher], check=True)
+
     stamp = root / "update-check"
     def concurrent_starts():
         with concurrent.futures.ThreadPoolExecutor(6) as pool:
@@ -168,8 +171,8 @@ def trial(temp, server):
     approval.write_text(json.dumps({"local.wg-agents": initial_hash}))
     choices = registration.read_bytes(), approval.read_bytes()
     def agents(expected, profile=home):
-        proc = subprocess.run([sys.executable, "-I", current/"skills/work-graph/scripts/wg.py", "agents", "--install"],
-            env=dict(env, HOME=str(profile), ORCA_CLI_COMMAND=str(mock)), capture_output=True)
+        proc = subprocess.run([launcher, "agents", "--install"],
+            env=dict(env, HOME=str(profile), WG_UPDATE="off", ORCA_CLI_COMMAND=str(mock)), capture_output=True)
         assert proc.returncode == expected, (proc.stdout,proc.stderr)
         assert (b"--approve" in proc.stdout) == bool(expected)
         assert choices == (registration.read_bytes(), approval.read_bytes())

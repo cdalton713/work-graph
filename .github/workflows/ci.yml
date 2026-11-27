@@ -79,7 +79,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 -m unittest test_wg
-        working-directory: skills/work-graph/scripts
+        working-directory: tests/cli-parity/reference
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 10

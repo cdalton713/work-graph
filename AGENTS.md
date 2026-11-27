@@ -8,7 +8,7 @@ branch prefix, release branch, and test runner.
 
 A host serves only the page and its API. The coordinator and workers run on the user's machine.
 Each user who runs an effort needs access to Linear and a local installation of `gh`, `st`, Orca,
-`uv`, and an agent CLI (Claude Code or Codex).
+the native `wg`, and an agent CLI (Claude Code or Codex).
 
 The `Dockerfile` and Vercel support both modes. A live function test with managed Redis verified the
 bearer-token WebSocket upgrade, ping and pong frames, and the planned socket close before the function
@@ -21,9 +21,10 @@ and secrets out of the repository.
 ## Before each push
 
 1. `pnpm test` and `pnpm build` (the page).
-2. `python3 -m unittest test_wg` in `skills/work-graph/scripts` (the skill; Python 3.11 or later). `pnpm test`
+2. `python3 -m unittest test_wg` in `tests/cli-parity/reference` (the development oracle; Python 3.11 or later). `pnpm test`
    does not run it.
-3. After a change of `wg.py` that touches names, the node card, the link, or the edge rule: `wg contract --write`,
+3. Run `cargo test --locked --manifest-path cli/Cargo.toml` for the native CLI.
+4. After a CLI change that touches names, the node card, the link, or the edge rule: `wg contract --write`,
    then change the page until both suites pass (README "The contract between `wg` and the page").
 
 ## Deploy

@@ -12,7 +12,7 @@ import sys
 import time
 import unittest
 
-SCRIPTS = Path(__file__).resolve().parents[2] / "skills/work-graph/scripts"
+SCRIPTS = Path(__file__).resolve().parent / "reference"
 sys.path.insert(0, str(SCRIPTS))
 from test_wg import UsageTests
 

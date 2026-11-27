@@ -84,6 +84,8 @@ from collections import Counter
 from datetime import date as datetime_date, datetime, time as datetime_time, timezone
 from pathlib import Path
 
+SKILL_DIR = Path(__file__).resolve().parents[3] / "skills/work-graph"
+
 # ---------------------------------------------------------------- config
 
 # The local config of this machine (README "Config"). No file: one Linear workspace with LINEAR_API_KEY, the
@@ -6516,7 +6518,7 @@ EXPLAIN_MAX_LINES = 60
 
 def explain_sections():
     """Each verb's marked parts of SKILL.md and the references, in file order, with the file of each."""
-    root = Path(__file__).resolve().parent.parent
+    root = SKILL_DIR
     sections = {}
     for path in [root / "SKILL.md", *sorted((root / "references").glob("*.md"))]:
         verbs, part = None, []
@@ -8848,7 +8850,7 @@ def wg_command():
 
 
 def spec_sections():
-    text = (Path(__file__).resolve().parent.parent / "references" / "worker-spec.md").read_text()
+    text = (SKILL_DIR / "references" / "worker-spec.md").read_text()
     sections, name = {}, None
     for line in text.splitlines():
         if line.startswith("## "):
@@ -8909,7 +8911,7 @@ def spec_values(plan_dir, plan, node, entry, issue, row):
     return {"identifier": entry["identifier"], "url": issue.get("url") or "no URL", "key": node["key"],
             "path": row.get("path", "-"), "branch": row["branch"], "parent": row["parent"], "lower": row["lower"],
             "pr": row.get("pr", "-"), "wg": wg_command(), "plan_dir": shlex.quote(str(plan_path)),
-            "project": plan["effort"]["name"], "skill": str(Path(__file__).resolve().parent.parent),
+            "project": plan["effort"]["name"], "skill": str(SKILL_DIR),
             "lint": Literal(lint_step(plan, row["lower"])),
             "dispatch_spec": shlex.quote(str(plan_path / "specs" / f"{node['key']}.md"))}
 
@@ -10718,7 +10720,7 @@ def main_command(argv):
             return setup_command(ns)
         if ns.cmd == "contract":
             if ns.write:
-                (Path(__file__).resolve().parent.parent / "contract.json").write_text(contract_text())
+                (SKILL_DIR / "contract.json").write_text(contract_text())
             else:
                 sys.stdout.write(contract_text())
             return 0

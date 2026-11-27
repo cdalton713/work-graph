@@ -3,7 +3,7 @@ use tempfile::tempdir;
 
 const REFERENCE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../skills/work-graph/scripts/wg.py"
+    "/../tests/cli-parity/reference/wg.py"
 );
 
 #[test]
@@ -167,7 +167,7 @@ with wg['plan_lock'](p), wg['atomic_text_file'](p/'keymap.json') as temp:
 "#,
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../skills/work-graph/scripts/wg.py"
+                "/../tests/cli-parity/reference/wg.py"
             ),
         ])
         .arg(root.path())

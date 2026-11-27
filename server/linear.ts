@@ -6,6 +6,7 @@ import type { Comment, GraphData, Issue, IssuePatch, IssueRef, Label, Milestone,
 import { serverSite } from "./site.ts";
 import { ANSWERED_LABEL, AUTONOMY_GROUP, type AutonomyLevel, autonomyOf, PAUSED_LABEL, pausedOf, SHARED_LABEL, sharedOf } from "../src/lib/autonomy.ts";
 import { REVIEW_GROUP, type ReviewEffort, reviewLabel, reviewOf } from "../src/lib/review.ts";
+import { HOLD_LABEL, type Hold, type HoldInput, holdBody, holdFromUpdates, holdOf } from "../src/lib/hold.ts";
 import { linearWorkspace, type Workspace } from "./workspaces.ts";
 import { LinearSignInRequired } from "./linearauth.ts";
 
@@ -620,7 +621,7 @@ export async function listProjects(teamKey: string): Promise<Project[]> {
   const projects = await pages<RawProject>(
     `query($k:String!,$after:String){ teams(first:1,filter:{key:{eq:$k}}){ nodes{
        projects(first:50,after:$after){ nodes{id name url status{name type} labels(first:20){nodes{name parent{name}}}
-           marks: labels(first:10, filter:{name:{in:["${PAUSED_LABEL}","${SHARED_LABEL}"]}}){nodes{name parent{name}}}}
+           marks: labels(first:10, filter:{name:{in:["${PAUSED_LABEL}","${SHARED_LABEL}","${HOLD_LABEL}"]}}){nodes{name parent{name}}}}
          pageInfo{hasNextPage endCursor} } } } }`,
     { k: teamKey },
     (data) => {
@@ -628,10 +629,27 @@ export async function listProjects(teamKey: string): Promise<Project[]> {
       return data.teams.nodes[0].projects;
     },
   );
-  return projects
-    .map((p) => ({ id: p.id, name: p.name, url: p.url, status: p.status?.name ?? "", statusType: p.status?.type ?? "", initiative: initiativeOf(p.labels?.nodes), autonomy: autonomyOf(p.labels?.nodes), review: reviewOf(p.labels?.nodes), // The two plain marks also come by name: a project can have more labels than the first 20.
-      paused: pausedOf(p.labels?.nodes) || pausedOf(p.marks?.nodes), shared: sharedOf(p.labels?.nodes) || sharedOf(p.marks?.nodes) }))
+  const listed: Project[] = projects
+    .map((p) => ({ id: p.id, name: p.name, url: p.url, status: p.status?.name ?? "", statusType: p.status?.type ?? "", initiative: initiativeOf(p.labels?.nodes), autonomy: autonomyOf(p.labels?.nodes), review: reviewOf(p.labels?.nodes), // The plain marks also come by name: a project can have more labels than the first 20.
+      paused: pausedOf(p.labels?.nodes) || pausedOf(p.marks?.nodes), shared: sharedOf(p.labels?.nodes) || sharedOf(p.marks?.nodes),
+      ...(holdOf(p.labels?.nodes) || holdOf(p.marks?.nodes) ? { hold: null } : {}) }))
     .sort((a, b) => a.name.localeCompare(b.name));
+  const held = listed.filter((p) => "hold" in p);
+  if (held.length) {
+    const holds = await readHolds(held.map((p) => p.id));
+    for (const p of held) p.hold = holds.get(p.id) ?? null;
+  }
+  return listed;
+}
+
+/** The hold details of each project: its newest hold update, and the replies on it. One request for all. */
+async function readHolds(ids: string[]): Promise<Map<string, Hold | null>> {
+  const fields = ids.map((id, at) => `p${at}: project(id:${JSON.stringify(id)}){ projectUpdates(first:10){ nodes{ id body createdAt
+    comments(first:20){ nodes{ body createdAt } } } } }`).join("\n");
+  type RawUpdate = { id: string; body: string; createdAt: string; comments: { nodes: { body: string; createdAt: string }[] } };
+  const data = await gql(`query{ ${fields} }`, {}) as Record<string, { projectUpdates: { nodes: RawUpdate[] } } | null>;
+  return new Map(ids.map((id, at) => [id, holdFromUpdates((data[`p${at}`]?.projectUpdates.nodes ?? [])
+    .map((u) => ({ ...u, comments: u.comments.nodes })))]));
 }
 
 /**
@@ -691,6 +709,21 @@ async function setGroupLabel(projectId: string, teamKey: string, teamScoped: boo
  */
 export const setPaused = (projectId: string, paused: boolean, teamKey: string, teamScoped: boolean): Promise<void> =>
   setPlainLabel(projectId, PAUSED_LABEL, paused, teamKey, teamScoped, `work-graph: the coordinator holds each action until ${serverSite().human} resumes the effort.`);
+
+/**
+ * Put the effort on hold, or end the hold. A hold writes a project update with the details, then sets the plain
+ * labels `on-hold` and `paused`. Ending it removes both labels; the updates stay as the history in Linear.
+ */
+export async function setHold(projectId: string, hold: HoldInput | null, teamKey: string, teamScoped: boolean): Promise<void> {
+  const human = serverSite().human;
+  if (hold) {
+    const made = await gql(`mutation($i:ProjectUpdateCreateInput!){ projectUpdateCreate(input:$i){ success } }`,
+      { i: { projectId, body: holdBody(hold), health: "atRisk" } });
+    if (!made.projectUpdateCreate.success) throw new LinearError("Linear did not save the hold update", 502);
+  }
+  await setPlainLabel(projectId, HOLD_LABEL, !!hold, teamKey, teamScoped, `work-graph: the effort waits on an outside party; ${human} ends the hold.`);
+  await setPaused(projectId, !!hold, teamKey, teamScoped);
+}
 
 /** Shares a project with the read-only viewer, or stops that: the plain project label `shared` is the record. */
 export const setShared = (projectId: string, shared: boolean, teamKey: string, teamScoped: boolean): Promise<void> =>

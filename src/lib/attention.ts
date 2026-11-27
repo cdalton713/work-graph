@@ -3,6 +3,7 @@ import { agentNeeds, agentName, agentsFresh, agentsWaiting, type AgentRow, type 
 import type { ProjectSummary } from "./overview.ts";
 import type { Project } from "./types.ts";
 import { overviewMoveReason } from "./words.ts";
+import { holdEnded, holdText } from "./hold.ts";
 
 const WORKER_SILENT_MS = 20 * 60_000;
 const WORKER_REPORT_GRACE_MS = 3 * 60_000;
@@ -162,13 +163,13 @@ export function nextStep(summary: ProjectSummary, now: number): string | null {
   return `${verb}${target}${detail ? ` · ${detail}` : ""}`;
 }
 
-export const PROJECT_STATES = ["stalled", "waits", "moving", "idle"] as const;
+export const PROJECT_STATES = ["stalled", "waits", "moving", "idle", "held"] as const;
 export type ProjectStateName = (typeof PROJECT_STATES)[number];
 export interface ProjectState { state: ProjectStateName; reason: string }
 
 interface ProjectActivity {
   now: number;
-  project?: Pick<Project, "paused" | "statusType">;
+  project?: Pick<Project, "paused" | "statusType" | "hold">;
   presence?: Presence;
   agents?: Agents;
   stalls?: Stall[];
@@ -176,6 +177,12 @@ interface ProjectActivity {
 
 export function projectState(summary: ProjectSummary | null, activity: ProjectActivity): ProjectState {
   const { now, project, presence, agents } = activity;
+  // A held effort (the label `on-hold`) leaves the list until its hold ends; then it waits on the human's Resume.
+  if (project && "hold" in project && project.statusType !== "completed" && project.statusType !== "canceled") {
+    const ended = project.hold && holdEnded(project.hold, now);
+    if (ended) return { state: "waits", reason: `Hold ended · ${ended} · Resume to let the coordinator act` };
+    return { state: "held", reason: project.hold ? holdText(project.hold, now) : "On hold" };
+  }
   const paused = project?.paused || project?.statusType === "paused" || summary?.paused
     || presence?.coordinators.some((row) => row.paused);
   const complete = project?.statusType === "completed" || project?.statusType === "canceled"

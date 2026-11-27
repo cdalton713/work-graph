@@ -3272,3 +3272,50 @@ it("publishes only the browser DSN with its release and environment", async () =
   telemetryEnv.WG_SENTRY_ENVIRONMENT = "preview";
   expect((await config()).sentry).toEqual({ dsn: "browser", environment: "preview", release: "build", test: true });
 });
+
+describe("put a project on hold", () => {
+  it("writes the hold update, sets on-hold and paused, lists the hold, and ends it with Resume", async () => {
+    const on = new Set<string>();
+    const updates: { id: string; body: string; createdAt: string; comments: { nodes: unknown[] } }[] = [];
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query, variables } = JSON.parse(init.body as string);
+      const labels = { nodes: [...on].map((name) => ({ id: `${name}-id`, name, parent: null })) };
+      let data;
+      if (query.includes("projectUpdateCreate")) {
+        updates.push({ id: `u${updates.length}`, body: variables.i.body, createdAt: "2026-11-27T12:00:00Z", comments: { nodes: [] } });
+        expect(variables.i).toMatchObject({ projectId: "p1", health: "atRisk" });
+        data = { projectUpdateCreate: { success: true } };
+      }
+      else if (query.includes("projectUpdates")) data = { p0: { projectUpdates: { nodes: updates } } };
+      else if (query.includes("projectLabelCreate")) data = { projectLabelCreate: { projectLabel: { id: `${variables.i.name}-id` } } };
+      else if (query.includes("projectAddLabel")) { on.add(variables.l.replace(/-id$/, "")); data = { projectAddLabel: { success: true } }; }
+      else if (query.includes("projectRemoveLabel")) { on.delete(variables.l.replace(/-id$/, "")); data = { projectRemoveLabel: { success: true } }; }
+      else if (query.includes("projectLabels(first:250")) data = { projectLabels: { nodes: [] } };
+      else if (query.includes("projects(first:50")) data = { teams: { nodes: [{ projects: { nodes: [{ id: "p1", name: "A", url: "u", status: null, labels }], pageInfo: { hasNextPage: false, endCursor: null } } }] } };
+      else data = { project: { id: "p1", teams: { nodes: [{ key: "CD" }] }, labels }, teams: { nodes: [{ id: "team" }] } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const page = createApp(rules, { team: "CD", dist, workspaces: [workWorkspace()] });
+    const hold = (body: unknown) => page.request("/api/projects/p1/hold", { method: "POST", headers: write, body: JSON.stringify(body) });
+    const list = async () => (await page.request("/api/projects", { headers: local })).json();
+
+    const bad = await hold({ waitingFor: " " });
+    expect([bad.status, await bad.json()]).toEqual([400, { error: "waitingFor names what the effort waits for" }]);
+    expect((await hold({ waitingFor: "Shopify", until: "next week" })).status).toBe(400);
+    expect((await hold({ waitingFor: "Shopify", everyHours: 0 })).status).toBe(400);
+    expect(on.size).toBe(0);
+
+    const held = await hold({ waitingFor: "Shopify", until: "2026-12-04", check: "Has Shopify replied?" });
+    expect([held.status, (await held.json()).ok]).toEqual([200, true]);
+    expect([...on].sort()).toEqual(["on-hold", "paused"]);
+    expect((await list()).projects).toMatchObject([{ id: "p1", paused: true,
+      hold: { waitingFor: "Shopify", until: "2026-12-04", check: "Has Shopify replied?", everyHours: 24, updateId: "u0", lastCheck: null } }]);
+
+    const resume = await page.request("/api/projects/p1/commands", { method: "POST", headers: write, body: JSON.stringify({ name: "resume" }) });
+    expect(resume.status).toBe(200);
+    expect(on.size).toBe(0);
+    const after = (await list()).projects[0];
+    expect([after.paused, "hold" in after]).toEqual([false, false]);
+  });
+});

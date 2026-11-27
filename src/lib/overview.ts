@@ -128,7 +128,7 @@ export function readProjectStates(query: URLSearchParams): ProjectStateName[] {
 }
 
 export function countProjectStates(rows: OverviewRow[]): Record<ProjectStateName, number> {
-  const counts = { stalled: 0, waits: 0, moving: 0, idle: 0 };
+  const counts = { stalled: 0, waits: 0, moving: 0, idle: 0, held: 0 };
   for (const { attention } of rows) counts[attention.state]++;
   return counts;
 }

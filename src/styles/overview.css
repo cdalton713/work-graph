@@ -211,3 +211,9 @@ button.ov-section-name:hover { text-decoration: underline; }
   .ov-agent-group > summary { min-width: 44px; min-height: 44px; align-content: center; }
   .ov-agent summary { flex-wrap: wrap; }
 }
+
+/* Held projects: one closed group at the end of the list. */
+.ov-held { margin-top: 16px; }
+.ov-held > summary { cursor: pointer; list-style: revert; color: var(--ink-3); }
+.ov-held > summary .ov-section-name { color: var(--ink-2); }
+.ov-held .ov-row { opacity: 0.75; }

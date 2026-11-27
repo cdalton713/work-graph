@@ -12,6 +12,7 @@ import { EffortSheet } from "./components/EffortSheet";
 import { CreateProject, StarterSetup } from "./components/CreateProject";
 import { clearStarterHandoffs, readStarter, saveStarter, starterKey } from "./lib/starterHandoff";
 import { Overview } from "./components/Overview";
+import { HoldControl } from "./components/Hold";
 import { MemberAccess, Share } from "./components/Share";
 import { ViewSwitch, type ProjectView } from "./components/ViewSwitch";
 import { PullRefresh } from "./components/PullRefresh";
@@ -466,7 +467,13 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
       const result = await api.command(project.id, cmd, project.workspace);
       if (cmd.name === "pause" || cmd.name === "resume") {
         const target = project, on = cmd.name === "pause";
-        setDirectory((list) => list && { ...list, projects: list.projects.map((p) => p.id === target.id && p.workspace === target.workspace ? { ...p, paused: on } : p) });
+        // Resume also ends a hold (server/app.ts).
+        setDirectory((list) => list && { ...list, projects: list.projects.map((p) => {
+          if (p.id !== target.id || p.workspace !== target.workspace) return p;
+          if (on) return { ...p, paused: true };
+          const { hold: _ended, ...rest } = p;
+          return { ...rest, paused: false };
+        }) });
       }
       setCommandNote(coordinator?.state === "listening" ? done : `${done} It waits in the queue (${result.queued}) until the next wg next.`);
       setTimeout(() => setCommandNote(null), 6000);
@@ -788,6 +795,25 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
   const signOutHelp = `Signed in as ${site.user}. Select to sign out.`;
   const closeHelp = "Mark every issue in this project Done and complete the project.";
   const activeProject = project && project.statusType !== "completed" && project.statusType !== "canceled";
+  const holdControl = (dismiss?: () => void) => !sharedRole && !viewer && activeProject && project && (
+    <HoldControl held={"hold" in project} hold={project.hold} now={now} onDone={dismiss}
+      onHold={async (hold) => {
+        const target = project;
+        await api.hold(target.id, hold, target.workspace);
+        const at = new Date().toISOString();
+        setDirectory((list) => list && { ...list, projects: list.projects.map((p) => p.id === target.id && p.workspace === target.workspace
+          ? { ...p, paused: true, hold: { ...hold, updateId: "", at, lastCheck: null } } : p) });
+      }}
+      onResume={async () => {
+        const target = project;
+        await api.command(target.id, { name: "resume" }, target.workspace);
+        setDirectory((list) => list && { ...list, projects: list.projects.map((p) => {
+          if (p.id !== target.id || p.workspace !== target.workspace) return p;
+          const { hold: _ended, ...rest } = p;
+          return { ...rest, paused: false };
+        }) });
+      }} />
+  );
   const autonomyPicker = !sharedRole && activeProject && (
     <Picker wide value={[autonomy]} onChange={([level]) => void setAutonomy(level as AutonomyLevel)} disabled={autonomyBusy || viewer} title={nativeBarTitles ? autonomyHelp : undefined}
       options={AUTONOMY_LEVELS.map((level) => ({ id: level, label: level, hint: AUTONOMY_HINTS[level] }))}>
@@ -875,6 +901,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
         </Picker>
         {!compactBar && <>
           {project && <CopyButton text={project.name} label="Copy the project name" />}
+          {holdControl()}
           {autonomyPicker}
           {reviewPicker}
           {shareControl()}
@@ -909,6 +936,7 @@ export function App({ createProjects, openSettings, overviewWorkspace = site.def
               <p>Copy the viewer link: {shareLink}</p>
               <p>{stopSharingHelp}</p>
             </>}
+            {holdControl(dismiss)}
             {autonomyPicker && <div className="bar-menu-field">
               {autonomyPicker}
               <p>{autonomyHelp}</p>

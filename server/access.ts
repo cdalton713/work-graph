@@ -90,6 +90,7 @@ export const sharedRoutes: Readonly<Record<string, "list" | "project" | "issue" 
   "POST /api/projects/:id/close": "owner",
   "POST /api/projects/:id/autonomy": "owner",
   "POST /api/projects/:id/review-effort": "owner",
+  "POST /api/projects/:id/hold": "owner",
   "GET /api/projects/:id/access": "project",
   "POST /api/projects/:id/access/request": "project",
   "POST /api/projects/:id/members/:member/access": "owner",

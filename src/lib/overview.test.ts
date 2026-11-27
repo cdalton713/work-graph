@@ -171,7 +171,7 @@ describe("overviewRows", () => {
       }] }]]),
     });
     expect(rows.map((r) => r.project.id)).toEqual(["a", "e", "b", "c", "d"]);
-    expect(countProjectStates(rows)).toEqual({ stalled: 1, waits: 2, moving: 1, idle: 1 });
+    expect(countProjectStates(rows)).toEqual({ stalled: 1, waits: 2, moving: 1, idle: 1, held: 0 });
     const selected = readProjectStates(new URLSearchParams("state=idle,stalled,idle,unknown"));
     expect(selected).toEqual(["stalled", "idle"]);
     expect(filterProjectStates(rows, selected).map((r) => r.project.id)).toEqual(["a", "d"]);

@@ -1,4 +1,5 @@
 import type { AutonomyLevel } from "./autonomy";
+import type { Hold } from "./hold";
 import type { ReviewEffort } from "./review";
 
 export type StateType = "triage" | "backlog" | "unstarted" | "started" | "completed" | "canceled" | "duplicate";
@@ -47,6 +48,8 @@ export interface Project {
   paused?: boolean;
   /** The project has the plain label `shared`: the viewer shows it. */
   shared?: boolean;
+  /** The project has the plain label `on-hold`: the hold details, or null when no hold update was found. */
+  hold?: Hold | null;
 }
 export interface SharedWorkspaceInfo {
   owner: string;

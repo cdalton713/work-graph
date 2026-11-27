@@ -214,3 +214,8 @@
 .view-switch button { min-height: 44px; border: 0; border-radius: 0; }
 .view-switch button[aria-pressed="true"] { background: var(--cab-3); color: var(--ink-1); }
 .view-switch button:focus-visible { outline-offset: -2px; }
+
+/* The hold control: muted while held, the stop lamp color once the hold ended. */
+.bar-hold { white-space: nowrap; }
+.bar-hold.is-held { color: var(--ink-3); }
+.bar-hold.is-ended { color: var(--lamp-stop); font-weight: 600; }

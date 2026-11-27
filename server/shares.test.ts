@@ -214,7 +214,7 @@ databaseSuites((open) => {
       expect((await member.request("/api/issues/outside/comments", "GET", undefined, headers)).status).toBe(404);
       expect((await member.request("/api/issues/outside/comments", "POST", { body: "Outside" }, headers)).status).toBe(404);
       expect((await member.request("/api/account", "GET", undefined, headers)).status).toBe(404);
-      for (const path of ["close", "autonomy", "review-effort", "share", "share/view"]) {
+      for (const path of ["close", "autonomy", "review-effort", "hold", "share", "share/view"]) {
         expect((await member.request("/api/projects/project/" + path, "POST", {}, headers)).status).toBe(403);
       }
       expect((await member.request("/api/projects/project/commands", "POST", { name: "pause" }, headers)).status).toBe(403);

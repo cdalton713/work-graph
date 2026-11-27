@@ -3,6 +3,7 @@ import type { ProjectClaims } from "./lib/claims";
 import type { Ask, Presence } from "./lib/link";
 import type { AutonomyLevel } from "./lib/autonomy";
 import type { ReviewEffort } from "./lib/review";
+import type { HoldInput } from "./lib/hold";
 import { pageEvent, type PageEvent } from "./lib/telemetry";
 import { maxEncodedWorkspaceLength, maxOmittedWorkspaces, omitWorkspacesHeader, retryDeadline } from "./lib/retry-after";
 import { site } from "./lib/site";
@@ -268,6 +269,9 @@ export const api = {
   /** A command for the coordinator of the project. */
   command: (projectId: string, command: { name: "next" | "dispatch" | "pause" | "resume"; key?: string; issue?: string }, workspace?: string) =>
     call<{ ok: boolean; queued: number }>(`projects/${projectId}/commands`, { method: "POST", body: JSON.stringify(command) }, workspace, "command_written"),
+  /** Put the project on hold (src/lib/hold.ts). The Resume command ends the hold. */
+  hold: (projectId: string, hold: HoldInput, workspace?: string) =>
+    call<{ ok: boolean; queued: number }>(`projects/${projectId}/hold`, { method: "POST", body: JSON.stringify(hold) }, workspace, "command_written"),
   /** Set the autonomy level of the project; the coordinator gets it at once. */
   autonomy: (projectId: string, level: AutonomyLevel, workspace?: string) =>
     call<{ ok: boolean; level: AutonomyLevel; queued: number }>(`projects/${projectId}/autonomy`, { method: "POST", body: JSON.stringify({ level }) }, workspace),

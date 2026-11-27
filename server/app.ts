@@ -36,8 +36,9 @@ import { type Auth, type Session, LOGIN_PATH, authRoutes, clearSessionCookie, se
 import { LinearSignInRequired, linearAuthRoutes, linearSessionOf, type LinearAuth } from "./linearauth.ts";
 import { createGraphCache } from "./cache.ts";
 import { isAutonomy } from "../src/lib/autonomy.ts";
+import { HOLD_EVERY_DEFAULT } from "../src/lib/hold.ts";
 import { isReviewEffort } from "../src/lib/review.ts";
-import { boardRead, NeedsLinearAccess, sharedLinear, LinearReadLimited, LinearError, LinearKeyRequired, LinearReconnectRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, waitingIssues, loadGraph, markAnswered, readLinearTeams, setAutonomy, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
+import { boardRead, NeedsLinearAccess, sharedLinear, LinearReadLimited, LinearError, LinearKeyRequired, LinearReconnectRequired, addComment, gql, linearBudget, linearCache, createLinearCache, changedProjects, changedSince, closeProject, listComments, listProjects, waitingIssues, loadGraph, markAnswered, readLinearTeams, setAutonomy, setHold, setPaused, setReviewEffort, setShared, updateIssue } from "./linear.ts";
 import { type Connection, type LinkMember, LinkHub, LinkRoomFull, QUEUE_MAX, RECONNECT_GRACE_MS, RESTART_CODE, realTimers as realLinkTimers, reportLinkError, type Timers } from "./link.ts";
 import type { LinkBus } from "./linkbus.ts";
 import { redisLinkBus } from "./linkbus-redis.ts";
@@ -1203,7 +1204,9 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     }
     if (name === "pause" || name === "resume") {
       const workspace = linearWorkspace.getStore()!;
-      await setPaused(ref.id, name === "pause", workspace.team, workspace.teamLabels);
+      // Resume also ends a hold: the hold paused the effort, and one button lets it act again.
+      if (name === "pause") await setPaused(ref.id, true, workspace.team, workspace.teamLabels);
+      else await setHold(ref.id, null, workspace.team, workspace.teamLabels);
       scope().state.names.at = 0;
       await wrote(null, ref.id);
     }
@@ -1211,6 +1214,25 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       undefined, noticeId(c.req.header("Idempotency-Key"), name), sharedScope.getStore()?.member);
     const result = name === "next" ? await enqueue() : await notify(enqueue, { queued: 0, waiting: false });
     return c.json({ ok: true, queued: result.queued, ...(result.waiting ? { waiting: true } : {}) });
+  });
+  // Put the effort on hold (src/lib/hold.ts): a project update with the details, and the labels `on-hold` and
+  // `paused`. The coordinator gets a pause command. Resume (above) ends the hold.
+  api.post("/projects/:id/hold", async (c) => {
+    if (sharedScope.getStore()) throw new LinearError("Only the project owner can put this project on hold.", 403);
+    const { waitingFor, until, check, everyHours } = await json(c.req.json<{ waitingFor?: unknown; until?: unknown; check?: unknown; everyHours?: unknown }>());
+    if (typeof waitingFor !== "string" || !waitingFor.trim()) throw new LinearError("waitingFor names what the effort waits for", 400);
+    if (until != null && (typeof until !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(until))) throw new LinearError("until must be a date like 2026-12-04", 400);
+    if (check != null && typeof check !== "string") throw new LinearError("check must be text", 400);
+    const every = everyHours == null ? HOLD_EVERY_DEFAULT : Number(everyHours);
+    if (!Number.isInteger(every) || every < 1 || every > 24 * 14) throw new LinearError("everyHours must be a whole number from 1 to 336", 400);
+    const workspace = linearWorkspace.getStore()!;
+    const ref = { workspace: workspace.id, id: c.req.param("id") };
+    await setHold(ref.id, { waitingFor: waitingFor.trim(), until: until || null, check: check?.trim() || null, everyHours: every }, workspace.team, workspace.teamLabels);
+    scope().state.names.at = 0;
+    await wrote(null, ref.id);
+    const result = await notify(() => enqueueLink(ref, "command", { name: "pause", key: null, issue: null },
+      undefined, noticeId(c.req.header("Idempotency-Key"), "pause")), { queued: 0, waiting: false });
+    return c.json({ ok: true, queued: result.queued });
   });
   // The link state of a project, for `wg wake` on the human's machine: is a coordinator connected, and do messages
   // wait that only a coordinator can act on. A GET, so the host check above is the only gate; it changes nothing.

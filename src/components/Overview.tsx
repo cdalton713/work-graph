@@ -5,6 +5,7 @@ import { Reply } from "./Reply";
 import { parseOptions } from "../lib/options";
 import { ownerWords } from "../lib/words";
 import { type OverviewData, type OverviewFilter, type OverviewRow, type YourMove, NO_INITIATIVE, countProjectStates, filterProjectStates, initiativeNames, initiativeSections, movesWithAgents, movesWithAsks, overviewMoveReason, overviewRows, summaryKey } from "../lib/overview";
+import { holdEnded } from "../lib/hold";
 import { ageText, compareMoves, type Signal } from "../lib/graph";
 import { PROJECT_STATES, type ProjectStateName, type Stall, overviewTitle } from "../lib/attention";
 import { type AgentReplyResult, type Agents, type Ask, type Presence, type ProjectRef, agentName, agentNeeds, agentState, agentsFresh, agentsShown, presenceText, projectKey } from "../lib/link";
@@ -32,6 +33,7 @@ const STATE_DISPLAY = {
   waits: { signal: "stop" },
   moving: { label: "Moving", signal: "running" },
   idle: { label: "Not running", signal: "idle" },
+  held: { label: "On hold", signal: "off" },
 } satisfies Record<ProjectStateName, { label?: string; signal: Signal }>;
 
 function stored(): OverviewFilter {
@@ -211,9 +213,12 @@ export function Overview({ createAction, list: given, loading, missing, now, onO
     return projects.filter(({ project }) => words.every((word) => project.name.toLowerCase().includes(word)));
   }, [list, filter, initiatives, activity, inboxProjects]);
   const counts = countProjectStates(matching);
-  const visible = useMemo(() => filterProjectStates(matching, states), [matching, states]);
+  const filtered = useMemo(() => filterProjectStates(matching, states), [matching, states]);
+  // Held projects go in one closed group at the end, out of the sections and the inbox.
+  const visible = useMemo(() => filtered.filter(({ attention }) => attention.state !== "held"), [filtered]);
+  const held = useMemo(() => filtered.filter(({ attention }) => attention.state === "held"), [filtered]);
   const sections = useMemo(() => grouped ? initiativeSections(visible, list.workspaces) : [], [visible, list.workspaces, grouped]);
-  const rows = useMemo(() => grouped ? sections.flatMap((section) => section.rows) : visible, [sections, visible, grouped]);
+  const rows = useMemo(() => [...(grouped ? sections.flatMap((section) => section.rows) : visible), ...held], [sections, visible, held, grouped]);
   const incomplete = !!missing || list.workspaces.some((w) => w.error && (!filter.workspace || w.id === filter.workspace))
     || inboxProjects.some(({ summary }) => !summary || summary.error);
   const [category, setCategory] = useState<InboxFilter>("all");
@@ -222,7 +227,14 @@ export function Overview({ createAction, list: given, loading, missing, now, onO
   const [expanded, setExpanded] = useState<string | null>(null);
   const [issueReceipts, setIssueReceipts] = useState<Map<string, ReturnType<typeof issueReplyReceipt>>>(() => new Map());
   const [sentWorkers, setSentWorkers] = useState<Map<string, SentWorker>>(() => new Map());
-  const inbox = useMemo<InboxRow[]>(() => inboxProjects.flatMap<InboxRow>(({ project, summary, stalls }) => [
+  const inbox = useMemo<InboxRow[]>(() => inboxProjects.flatMap<InboxRow>(({ project, summary, stalls, attention }) => attention.state === "held" ? [] : [
+    ...(project.hold && !["completed", "canceled"].includes(project.statusType) && holdEnded(project.hold, activity.now) ? [{
+      project, stall: null,
+      move: {
+        identifier: "hold", title: project.name, why: attention.reason, pullRequests: [], idle: true,
+        updatedAt: project.hold.lastCheck?.at ?? project.hold.at, blocks: 0, unblocks: 0,
+      },
+    }] : []),
     ...(summary?.you ?? []).map((move) => ({ project, move, stall: null })),
     ...stalls.map((stall) => ({
       project, stall,
@@ -232,7 +244,7 @@ export function Overview({ createAction, list: given, loading, missing, now, onO
         ...(stall.issue ? summary?.moveImpacts?.[stall.issue] : undefined),
       },
     })),
-  ]).sort(compareInboxRows), [inboxProjects]);
+  ]).sort(compareInboxRows), [inboxProjects, activity.now]);
   const pendingWorkers = [...sentWorkers.values()].filter(({ project, move }) => {
     const key = summaryKey(project);
     return !!presence?.get(key)?.queued && !inbox.some((row) => summaryKey(row.project) === key && row.move.workerAsk?.id === move.workerAsk?.id)
@@ -675,7 +687,7 @@ export function Overview({ createAction, list: given, loading, missing, now, onO
             </Picker>
           )}
           {onStates && <div className="ov-state-filters" role="group" aria-label="Project state">
-            {PROJECT_STATES.map((state) => {
+            {PROJECT_STATES.filter((state) => state !== "held").map((state) => {
               const selected = states.includes(state);
               return (
                 <button type="button" key={state} className={`toggle${selected ? " is-on" : ""}`} aria-pressed={selected}
@@ -722,7 +734,16 @@ export function Overview({ createAction, list: given, loading, missing, now, onO
             <ul className="ov-list">{section.rows.map((row, i) => renderRow(row, first + i))}</ul>
           </section>
         );
-      }) : <ul className="ov-list">{rows.map(renderRow)}</ul>}
+      }) : <ul className="ov-list">{visible.map(renderRow)}</ul>}
+      {held.length > 0 && (
+        <details className="ov-section ov-held">
+          <summary className="ov-section-head">
+            <span className="ov-section-name">On hold</span>
+            <span className="ov-section-sum mono">{held.length} {held.length === 1 ? "project" : "projects"}</span>
+          </summary>
+          <ul className="ov-list">{held.map((row, i) => renderRow(row, rows.length - held.length + i))}</ul>
+        </details>
+      )}
     </div>
   );
 }

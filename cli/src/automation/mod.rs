@@ -242,6 +242,7 @@ pub fn local_command(args: &[std::ffi::OsString]) -> Option<std::process::ExitCo
 mod actions;
 pub mod activity;
 pub mod findings;
+mod hold;
 mod live_loop;
 mod publish;
 

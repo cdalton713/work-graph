@@ -652,6 +652,12 @@ impl scheduled::TickServices for Tick<'_> {
             return Ok("skipped: plan is not loaded".into());
         }
         let key = format!("{}/{}", e.scope()?, e.project()?);
+        // The agent check of a held effort; a failure is a note, so the refresh still runs.
+        let mut record = state.get(&key).cloned().unwrap_or(json!({}));
+        let hold_note = super::hold::tick(&e, &mut record)
+            .unwrap_or_else(|err| Some(format!("hold: error: {err}")));
+        state[&key] = record;
+        save_state(state_path, state)?;
         let snap = e.snapshot()?;
         for n in e.plan["nodes"]
             .as_array()
@@ -707,6 +713,10 @@ impl scheduled::TickServices for Tick<'_> {
                 )?;
                 "ok".into()
             }
+        };
+        let outcome = match hold_note {
+            Some(note) => format!("{outcome}; {note}"),
+            None => outcome,
         };
         state[&key]["last"] = json!({"at":Utc::now().to_rfc3339(),"result":outcome});
         save_state(state_path, state)?;

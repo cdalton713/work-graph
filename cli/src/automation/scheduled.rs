@@ -159,15 +159,23 @@ pub fn tick_schedule(
         ]);
     }
     let args = args.iter().map(|s| string(s)).collect::<String>();
+    // The agent CLIs run the hold check (automation/hold.rs), so launchd needs them on PATH too.
+    let agents: Vec<PathBuf> = ["claude", "codex"]
+        .into_iter()
+        .filter_map(executable)
+        .filter_map(|p| std::path::absolute(p).ok())
+        .collect();
     let mut dirs = vec![];
-    for dir in [
-        gh.parent().unwrap(),
-        program.parent().unwrap(),
-        Path::new("/usr/bin"),
-        Path::new("/bin"),
-        Path::new("/usr/sbin"),
-        Path::new("/sbin"),
-    ] {
+    for dir in [gh.parent().unwrap(), program.parent().unwrap()]
+        .into_iter()
+        .chain(agents.iter().filter_map(|p| p.parent()))
+        .chain([
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+            Path::new("/usr/sbin"),
+            Path::new("/sbin"),
+        ])
+    {
         let s = dir.display().to_string();
         if !dirs.contains(&s) {
             dirs.push(s)

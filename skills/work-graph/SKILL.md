@@ -9,7 +9,7 @@ A large effort is a **graph**. `plan.json` defines the graph. Linear (the plan's
 
 Use this skill when the effort has two or more lanes that can run at the same time, or `ops` steps between its phases. One lane in one phase with no `ops` step is a plain stack: use `stax`, with one Linear issue for each PR. There `wg` does not run, so move each issue yourself in the same step as its work.
 
-`scripts/wg.py` (written `wg`) holds the rules that must not slip: it checks the graph, syncs it to Linear, holds the claims, checks code done, guards each status change, and derives the next action. To run it, or when a shell says `command not found`: setup.md "Run wg".
+The installed `wg` command holds the rules that must not slip: it checks the graph, syncs it to Linear, holds the claims, checks code done, guards each status change, and derives the next action. To run it, or when a shell says `command not found`: setup.md "Run wg".
 
 **First in each run, ask the human for both levels** ("Autonomy level and review effort"). **`wg next <plan-dir>` is the first command of each session and of each turn.** It prints one status line, then what to do (`do`), what you wait for (`wait`), and what you must know (`note`). It changes no status, no claim, and no run field (setup.md "Queries"). `wg explain <verb>` prints what to do for one verb of these lines.
 

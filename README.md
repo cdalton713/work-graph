@@ -5,7 +5,8 @@ Linear. Coding agents do the work in parallel lanes, and a coordinator agent fol
 holds two parts:
 
 - `skills/work-graph/`: the agent skill. `SKILL.md` tells a coding agent (Claude Code, Codex) how to plan
-  and coordinate an effort. `scripts/wg.py` (the `wg` command) holds the rules that must not slip: it checks
+  and coordinate an effort. The managed CLI in `cli/` and the Python reference in
+  `scripts/wg.py` implement the `wg` command. It checks
   the graph, syncs it to Linear, takes and releases claims, checks that a PR is code done, guards each status
   change, and prints the next action.
 - The page (`src/`, `server/`): a web app that shows each effort as a graph of its nodes (phases, lanes, merge
@@ -31,7 +32,7 @@ The config supplies one tenant. The server keeps Linear data in separate caches 
 
 The skill expects these tools: [Linear](https://linear.app), the GitHub CLI (`gh`),
 [stax](https://github.com/cesarferreira/stax) (`st`) for stacked branches, [Orca](https://github.com/stablyai/orca)
-for worker agents and worktrees, and [uv](https://docs.astral.sh/uv/) to run `wg`. The page needs Node 24 and pnpm.
+for worker agents and worktrees, and [uv](https://docs.astral.sh/uv/) for the Python source launcher. The page needs Node 24 and pnpm.
 
 Each user who runs an effort needs access to Linear and these tools on their own machine,
 including an agent CLI (Claude Code or Codex). A hosted deployment serves only the page and its API.
@@ -42,17 +43,127 @@ Only a config installation can use `WG_STATE_DIR`. Other tenants keep the queue 
 
 ## Install the skill
 
+### Fresh managed installation
+
+Choose a stable release for your OS and CPU. Obtain its bootstrap digest and release public key through an
+independent authenticated channel. Follow the [bootstrap commands](packaging/install/README.md#fresh-installation)
+to verify and install the binary, skill and Orca plugin together. Put `~/.local/bin` first on PATH.
+Register `~/.local/share/work-graph/current/skills/work-graph` in your agent's skills directory.
+For example, for a new registration:
+
 ```sh
-git clone https://github.com/cdalton713/work-graph.git ~/Projects/work-graph
-ln -s ~/Projects/work-graph/skills/work-graph ~/.claude/skills/work-graph   # or your agent's skills folder
-ln -s ~/Projects/work-graph/skills/work-graph/scripts/wg.py ~/.local/bin/wg
-wg config                                                                    # what wg will use
-wg agents --install                                                          # the Orca plugin that sends agents to the page
-wg doctor                                                                    # one ok, warn, or FAIL line per check
+mkdir -p "$HOME/.claude/skills"
+ln -s "$HOME/.local/share/work-graph/current/skills/work-graph" "$HOME/.claude/skills/work-graph"
+wg config
+wg agents --install
+wg doctor
 ```
 
-`wg doctor` checks this machine and changes nothing: the Python version, the `websockets` package, that `wg` on
-PATH and each skill link point at one checkout and that checkout is not behind its `origin/main`, each workspace
+Review the plugin access request in Orca. The page has its own release cycle. Use `wg doctor` to compare
+the CLI contract with the page's `/api/config` contract. If they differ, use a CLI and page with matching
+contracts before starting an effort.
+
+### Migrate a source installation
+
+Keep the checkout, its local edits, and its Python and uv environment during rollout. Record the targets of
+your launcher and each agent's skill link with `readlink`. Preserve any local plugin edits before running
+`wg agents --install`. With the verified bootstrap and assets from the fresh installation procedure, run:
+
+```sh
+./wg-install -assets ./assets -version "$VERSION" -key "$RELEASE_KEY" -migrate-source
+```
+
+This flag replaces the recognized link at `~/.local/bin/wg` to a checkout's `skills/work-graph/scripts/wg.py`.
+For a different launcher, use its owner's instructions. Move each old skill registration to a private backup
+outside the agent's skills directory, including any edited files. Register the managed skill at the original
+location, then run `wg agents --install` and `wg doctor`. Keep the same config, credentials and plan directories.
+
+To return to the source CLI after the first install, stop scheduled jobs and running agents. Set `CHECKOUT`
+to the absolute path of the preserved checkout. In a shell, run:
+
+```sh
+(
+  set -eu
+  launcher="$HOME/.local/bin/wg"
+  source_wg="$CHECKOUT/skills/work-graph/scripts/wg.py"
+  test -x "$source_wg"
+  test "$(readlink "$launcher")" = "$HOME/.local/share/work-graph/current/wg"
+  unlink "$launcher"
+  ln -s "$source_wg" "$launcher"
+)
+```
+
+Restore the saved skill registrations in place of the managed links. Run `wg config`, `wg agents --install`
+and `wg doctor` from the source installation before resuming jobs. Leave the managed versions on disk.
+
+### Update and roll back
+
+A normal managed command starts a background release check at most once every 24 hours, including after a
+failed check. Run `wg update status` offline to see the active version, check result, rollback hold and plugin
+review notice. A read-only install continues to run its active version. Set `WG_UPDATE=off` in the environment
+of every launcher to freeze it. Set `WG_UPDATE_PIN` to an exact newer stable version to limit discovery to
+that release. Clear the pin to resume normal discovery.
+
+Run `wg update rollback` to verify and select the previous managed release. The hold prevents the next
+command from updating it again. Set `root="$HOME/.local/share/work-graph"`. When ready, remove
+`"$root/update-hold"`. To retry before the next daily check, remove `"$root/update-check"` and run `wg config`.
+If verification reports local changes, save the edited files outside the managed root and restore the signed
+files before retrying. Keep customizations outside signed version directories.
+
+After a plugin change, `wg update status` requests review. Run `wg agents --install` to compare the registered
+plugin with the bundled files and review any new access request in Orca. After review, remove
+`"$root/update-plugin-review"`. Registrations, permissions and disabled-plugin settings remain under local
+control. See the [shared updater controls](cli/src/update/README.md).
+
+### Recover signing trust
+
+**Missed transition.** Discovery checks up to eight newer stable candidates in the first 100 listed releases
+for a transition signed by the installed key. If status reports no verified transition, obtain the stable
+bridge version from the release maintainer. With updates enabled and any rollback hold intentionally cleared,
+set `BRIDGE` to that numeric version. Run:
+
+```sh
+root="$HOME/.local/share/work-graph"
+export WG_UPDATE_PIN="$BRIDGE"
+rm -f "$root/update-check"
+wg config
+wg update status
+```
+
+Repeat status until the background check finishes and the bridge is active. Then run
+`unset WG_UPDATE_PIN`, remove `"$root/update-check"`, run `wg config`, and check status again.
+If the signed bridge is unavailable, use a separately authenticated fresh installation as described below.
+
+**Suspected compromise.** Stop release publication. Revoke the signing secret and distribute a new key and
+bootstrap digest through a channel independent of the release host and the old key.
+On each affected machine, stop agents, schedules and updater processes. Disable the registered plugin in Orca
+and export `WG_UPDATE=off`. Use a trusted shell and tools for recovery. Keep the config directory, any
+`WG_CONFIG` file, credentials and effort worktrees in place. Preserve the entire old installation for recovery
+of local edits. For the documented managed paths, run:
+
+```sh
+(
+  set -eu
+  root="$HOME/.local/share/work-graph"
+  launcher="$HOME/.local/bin/wg"
+  test "$(readlink "$launcher")" = "$root/current/wg"
+  backup=$(mktemp -d "$HOME/.local/share/work-graph-recovery.XXXXXXXX")
+  mv "$launcher" "$backup/launcher"
+  mv "$root" "$backup/installation"
+  echo "$backup"
+)
+```
+
+In a new private directory, follow the fresh bootstrap commands with the **replacement** digest, key and
+recovery release. Verify the new CLI version, point skill registrations at the new managed skill, and inspect
+any saved edits as data before adapting them outside the signed tree. Compare and approve the verified plugin
+with `wg agents --install`. Run `wg doctor`, then clear `WG_UPDATE` and resume jobs. If the compromised
+software ran, review access to local credentials and replace exposed credentials before resuming.
+See [release signing and recovery](packaging/releases/README.md#signing-and-recovery).
+
+### Check the installation
+
+`wg doctor` checks each workspace
 key (present, mode 600, accepted by Linear) with the request budget that is left, `gh auth`, `st`, the Orca CLI,
 the page server (`/healthz`, and the contract of `/api/config`), the Orca plugin of `wg agents` (installed, approved,
 and as new as the checkout), the `tick`, `autostart`, and `health` schedules, and

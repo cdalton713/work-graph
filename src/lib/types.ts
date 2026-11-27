@@ -205,6 +205,8 @@ export interface Account {
   connections: AccountConnection[];
   tokens: CoordinatorToken[];
   onboarding: OnboardingState;
+  /** Linear OAuth can attach more workspaces. Off: only personal API keys attach. */
+  oauthAttach?: boolean;
 }
 
 export interface AccountTeam {

@@ -1544,7 +1544,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     app.route("/api/account", accountRoutes({
       runLinear,
       now: clock, redis: redis ?? undefined, prefix: linkPrefix ?? LINK_PREFIX,
-      telemetry, pageUrl, access,
+      telemetry, pageUrl, access, oauthAttach: !!(linearAuth?.attachWorkspaces && tenants?.attach),
       async endSession(c, session) {
         await signOut(session);
         clearSessionCookie(c);
@@ -1632,7 +1632,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       const resolve = () => ({ tenant: id, workspace });
       if (created) telemetry.emit("sign_up", {}, resolve, id);
       telemetry.emit("sign_in", {}, resolve, id);
-    } : undefined, tenants?.attach ? {
+    } : undefined, linearAuth.attachWorkspaces && tenants?.attach ? {
       async owner(c) {
         const signed = await readSession(c);
         if (readOnly || !signed || !await sessionActive(signed)) return null;

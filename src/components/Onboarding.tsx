@@ -117,7 +117,7 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
               {account.connections.map((workspace) => <article className="account-item" key={workspace.id}>
                 <h3>{workspace.name}</h3><WorkspaceStatus workspace={workspace} />
               </article>)}
-              <ConnectWorkspace refresh={refresh} page="setup" />
+              <ConnectWorkspace refresh={refresh} page="setup" oauth={account.oauthAttach} />
             </>}
             {step === "setup" && <>
               <section>

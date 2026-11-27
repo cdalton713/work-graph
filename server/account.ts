@@ -33,6 +33,8 @@ type Options = {
   pageUrl: string;
   telemetry?: Telemetry | null;
   endSession: (c: Context, session: Session) => Promise<void>;
+  /** Linear OAuth can attach more workspaces (`WG_LINEAR_ATTACH_OAUTH`). Off: the page offers only personal API keys. */
+  oauthAttach?: boolean;
 };
 const windowMs = 600_000;
 const maxAttempts = 10;
@@ -187,6 +189,7 @@ export function accountRoutes(options: Options) {
     const { tokens, connected } = await accounts.tokenSummary(id);
     return c.json({
       human, connections: connections.map(publicConnection), tokens, pageUrl: options.pageUrl,
+      oauthAttach: !!options.oauthAttach,
       onboarding: {
         name: nameConfirmed, workspaces: true, teams: connections.every(({ team }) => !!team),
         token: tokens.length > 0, connected, skipped: onboardingSkipped,

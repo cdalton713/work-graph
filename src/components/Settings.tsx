@@ -154,9 +154,17 @@ function ConnectResult() {
   return <p className={error ? "account-error" : undefined} role={error ? "alert" : "status"}>{text}</p>;
 }
 
-/** Connects another workspace with Linear sign-in. `useKey` opens the personal API key form; without it, the form shows here.
- * `page`: the screen that Linear returns to. */
-export function ConnectWorkspace({ refresh, useKey, page }: { refresh: RefreshAccount; useKey?: () => void; page?: string }) {
+/** Connects another workspace: with Linear sign-in when `oauth` is on, else with a personal API key.
+ * `useKey` opens the personal API key form; without it, the form shows here. `page`: the screen that Linear returns to. */
+export function ConnectWorkspace({ refresh, useKey, page, oauth = false }: {
+  refresh: RefreshAccount; useKey?: () => void; page?: string; oauth?: boolean;
+}) {
+  if (!oauth) {
+    return <div className="account-form">
+      <p>Attach another workspace with a personal API key from that workspace. Projects in an attached workspace stay private to you.</p>
+      {useKey ? <div><button type="button" onClick={useKey}>Use a personal API key</button></div> : <WorkspaceKeyForm refresh={refresh} />}
+    </div>;
+  }
   return <div className="account-form">
     <ConnectResult />
     <p>Linear asks which workspace to connect. Projects in a connected workspace stay private to you.</p>
@@ -388,7 +396,7 @@ export function Settings({ account, refresh, openGuide }: { account: Account; re
         <h2>Linear workspaces</h2>
         {account.connections.map((workspace) => <WorkspaceSettings key={workspace.id} workspace={workspace} count={account.connections.length} refresh={refresh} />)}
         <h3>Connect another workspace</h3>
-        <ConnectWorkspace refresh={refresh} useKey={() => setDialog("key")} />
+        <ConnectWorkspace refresh={refresh} useKey={() => setDialog("key")} oauth={account.oauthAttach} />
       </section>
       <section className="account-card">
         <h2>Coordinator tokens</h2>

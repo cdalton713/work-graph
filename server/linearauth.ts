@@ -10,6 +10,8 @@ export interface LinearAuth {
   clientSecret: string;
   secret: string;
   allowedOrgs?: string[];
+  /** Attach more workspaces with this OAuth application (`WG_LINEAR_ATTACH_OAUTH=1`). Off: only personal API keys attach. */
+  attachWorkspaces?: boolean;
 }
 
 export type OAuthCredential = { kind: "oauth"; key: string; refreshToken: string; expiresAt: Date };
@@ -53,6 +55,7 @@ export function readLinearAuth(env: NodeJS.ProcessEnv): LinearAuth {
     clientSecret: env.WG_LINEAR_CLIENT_SECRET!.trim(),
     secret: env.WG_SESSION_SECRET!.trim(),
     allowedOrgs: env.WG_ALLOWED_ORGS?.toLowerCase().split(/[,\s]+/).filter(Boolean),
+    attachWorkspaces: env.WG_LINEAR_ATTACH_OAUTH?.trim() === "1",
   };
 }
 
@@ -162,7 +165,8 @@ export function linearAuthRoutes(auth: LinearAuth, origin: () => string, now: ()
   }
   routes.get("/login", (c) => authorize(c));
   routes.get("/connect", async (c) => {
-    const account = attach && await attach.owner(c);
+    if (!attach) return c.text("not found", 404);
+    const account = await attach.owner(c);
     if (!account) return c.redirect(`${origin()}/auth/login?next=${encodeURIComponent(localUrl(c.req.query("next"), origin()))}`, 302);
     return authorize(c, account);
   });

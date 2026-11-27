@@ -678,6 +678,7 @@ Set these values in the server environment. Keep secrets in the host's secret st
 | `WG_DATA_KEY` | Yes | Encrypts Linear credentials in Postgres. Use a base64-encoded 32-byte key. | Yes |
 | `WG_DATA_KEY_OLD` | For key rotation | Earlier data keys, separated by commas or spaces. The server can still read credentials encrypted with these keys. | Yes |
 | `WG_ALLOWED_ORGS` | No | Linear workspaces that can sign in. Separate entries with commas or spaces. | No |
+| `WG_LINEAR_ATTACH_OAUTH` | No | `1` lets users attach more workspaces through the Linear OAuth application. Unset: they attach with a personal API key. | No |
 | `WG_REDIS_URL` | On a function host or with multiple instances | Redis connection URL for link state, account changes, and personal key-check counters. | Yes |
 | `WG_REDIS_PREFIX` | No | Isolates deployments on a Redis server. The default is `wg:link:`. | No |
 | `WG_LINK_MAX_AGE` | No | Maximum socket age in seconds from the join. The server can close the socket up to 10% earlier. The container accepts 60 to 2147483 seconds. Unset or 0 disables the container age limit. See the function limits below. | No |
@@ -721,13 +722,14 @@ To allow specific workspaces, list their Linear organization IDs in UUID form. W
 work, but can change or be reused. The service creates one account per Linear user in each sign-in workspace.
 
 Choose **Sign in with Linear**. The setup guide walks you through your name, workspaces, teams, and the first
-coordinator connection. To attach another workspace, choose **Connect a workspace with Linear** and select the
-workspace on Linear's consent screen. The sign-up list of `WG_ALLOWED_ORGS` does not apply to attached workspaces.
-Projects in an attached workspace stay private to you: viewers do not see them, and you cannot share them. If a
-workspace blocks third-party apps, attach it with a personal Linear API key instead. If Linear later refuses an
-attached workspace's credential, connect it again or replace its key in Settings.
+coordinator connection. You can attach another workspace with a personal Linear API key and select its team.
+If Linear refuses that key later, replace it in Settings. Projects in an attached workspace stay private to you:
+viewers do not see them, and you cannot share them.
 
-Your Linear OAuth application must accept authorizations from other workspaces before users can attach them.
+With `WG_LINEAR_ATTACH_OAUTH=1`, Settings and the guide also offer **Connect a workspace with Linear**, which
+attaches a workspace through the Linear OAuth application. The sign-up list of `WG_ALLOWED_ORGS` does not apply
+to attached workspaces. Turn it on only if your Linear OAuth application accepts authorizations from other
+workspaces; Linear refuses the others.
 
 In the guide, create a coordinator token and copy it when it appears. Run `wg login https://wg.example.com` on
 your machine and paste the token at the prompt. Run the `wg setup` command shown in the guide for each workspace,

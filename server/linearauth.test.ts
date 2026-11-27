@@ -56,8 +56,9 @@ databaseSuites((open) => {
   it("connects another workspace with Linear OAuth to the signed-in account", async () => {
     const sql = await open();
     const crypto = credentialCrypto({ WG_DATA_KEY: Buffer.alloc(32).toString("base64") });
-    const tenants = dbTenants(sql, crypto, { linearAuth: auth, now: () => now });
-    const app = createApp(rules, { team: "", dist: "/unused/", watchMs: 0, readOnly: false, linearAuth: auth, now: () => now, tenants });
+    const attachAuth = { ...auth, attachWorkspaces: true };
+    const tenants = dbTenants(sql, crypto, { linearAuth: attachAuth, now: () => now });
+    const app = createApp(rules, { team: "", dist: "/unused/", watchMs: 0, readOnly: false, linearAuth: attachAuth, now: () => now, tenants });
     const request = (path: string, cookie?: string, method = "GET") => app.request(`https://${host}${path}`, { method, headers: {
       host, ...(cookie ? { cookie } : {}), ...(method === "GET" ? {} : { origin: `https://${host}`, "content-type": "application/json" }),
     } });
@@ -125,6 +126,7 @@ databaseSuites((open) => {
       expect(anonymous.flow).toBeUndefined();
       const session = await signIn();
       expect(session).toBeTruthy();
+      expect(await (await request("/api/account", session)).json()).toMatchObject({ oauthAttach: true });
 
       org = side;
       expect(await connect(session)).toBe("connected");
@@ -189,7 +191,7 @@ databaseSuites((open) => {
       expect(issued).toBe(before + 1);
 
       // A read-only page shows no attached workspace, also when it is first, and no plan in it.
-      const viewerApp = createApp(rules, { team: "", dist: "/unused/", watchMs: 0, readOnly: true, linearAuth: auth, now: () => now, tenants });
+      const viewerApp = createApp(rules, { team: "", dist: "/unused/", watchMs: 0, readOnly: true, linearAuth: attachAuth, now: () => now, tenants });
       const viewer = (path: string) => viewerApp.request(`https://${host}${path}`, { headers: { host, cookie: session, "x-workspace": "third" } });
       try {
         const thirdRow = (await connections(session))[2];
@@ -316,6 +318,9 @@ databaseSuites((open) => {
       issued = 0;
       const first = await signIn();
       expect(await sql.query("SELECT team_labels FROM linear_connections")).toEqual([{ team_labels: true }]);
+      // Without WG_LINEAR_ATTACH_OAUTH, workspaces attach only with a personal API key.
+      expect((await request("/auth/connect", first)).status).toBe(404);
+      expect(await (await request("/api/account", first)).json()).toMatchObject({ oauthAttach: false });
       await sql.query("UPDATE linear_connections SET team_labels = false");
       const again = await signIn();
       expect(await sql.query("SELECT team_labels FROM linear_connections")).toEqual([{ team_labels: false }]);

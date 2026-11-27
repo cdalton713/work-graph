@@ -422,8 +422,8 @@ fn check(root: &Path, version: &str, repo: &str) -> Result<&'static str> {
     Ok("Installed verified release.")
 }
 
-fn plugin_notice(root: &Path, former: &Manifest, next: &Manifest) -> Result<()> {
-    if !former
+fn same_plugin_files(former: &Manifest, next: &Manifest) -> bool {
+    former
         .files
         .iter()
         .filter(|(p, _)| p.starts_with("orca-plugin/"))
@@ -431,7 +431,33 @@ fn plugin_notice(root: &Path, former: &Manifest, next: &Manifest) -> Result<()> 
             .files
             .iter()
             .filter(|(p, _)| p.starts_with("orca-plugin/")))
+}
+
+pub(crate) fn retained_plugin_matches(reference: &Path) -> Result<bool> {
+    let version = option_env!("WG_RELEASE_VERSION").ok_or("not a release")?;
+    let root = managed(version)?.canonicalize()?;
+    let Some(dir) = reference.parent() else {
+        return Ok(false);
+    };
+    if reference.file_name() != Some("orca-plugin".as_ref())
+        || dir.parent() != Some(root.join("versions").as_path())
+        || reference != reference.canonicalize()?
     {
+        return Ok(false);
+    }
+    let relative = dir.strip_prefix(&root)?;
+    let (active_dir, active) = inspect(&root, "current")?;
+    if active_dir == relative
+        || Some(active.public_key.as_str()) != option_env!("WG_RELEASE_PUBLIC_KEY")
+    {
+        return Ok(false);
+    }
+    let retained = inspect_generation(&root, relative)?;
+    Ok(same_plugin_files(&retained, &active))
+}
+
+fn plugin_notice(root: &Path, former: &Manifest, next: &Manifest) -> Result<()> {
+    if !same_plugin_files(former, next) {
         atomic(root,"update-plugin-review", b"Plugin files changed. Run wg agents --install to review the registered plugin and any requested access.")?;
     }
     Ok(())

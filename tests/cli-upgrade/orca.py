@@ -2,6 +2,7 @@
 """Synthetic Orca provider. Persist exactly the source and approval wg submits."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -24,7 +25,8 @@ def fingerprint(folder):
 
 source = json.loads(registration.read_bytes()) if registration.exists() else None
 if op == "list":
-    result = {"plugins": [{"pluginKey": key, "source": source}] if source else []}
+    result = {"plugins": [{"pluginKey": key, "source": source,
+                           "needsReconsent": permission.read_text() != source["contentHash"]}] if source else []}
 elif op == "inspect":
     result = {"contentHash": fingerprint(args[0])}
 else:
@@ -37,7 +39,9 @@ else:
         print(json.dumps({"ok": False, "error": {"code": "approval_required",
               "data": {"command": f"orca plugin {op} {args[0]} --approve {content}"}}}))
         sys.exit(1)
-    registration.write_text(json.dumps({"reference": folder, "contentHash": content}))
-    permission.write_text(content)
+    if not (op == "install" and source and source["contentHash"] == content):
+        reference = str(Path(folder).resolve()) if os.getenv("FIXTURE_CANONICAL") else folder
+        registration.write_text(json.dumps({"reference": reference, "contentHash": content}))
+        permission.write_text(content)
     result = {"pluginKey": key, "version": json.loads((Path(folder)/"orca-plugin.json").read_bytes())["version"]}
 print(json.dumps({"ok": True, "result": result}))

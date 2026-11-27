@@ -41,7 +41,7 @@ def trial(temp, server, repo, target, old, new, latest, initial_pin, recovery_pi
         p = subprocess.run([launcher, *args], env=env if updates else dict(env, WG_UPDATE="off"),
                            capture_output=True, timeout=trial_timeout)
         assert p.returncode == code, (args, p.stdout, p.stderr)
-        return p.stdout
+        return p.stderr if code == 2 else p.stdout
 
     approval = home / "permission.json"
     registered = home / "registration.json"
@@ -64,13 +64,35 @@ def trial(temp, server, repo, target, old, new, latest, initial_pin, recovery_pi
         fingerprint = prompt.decode().split("wg agents --install --approve ")[1].split()[0]
         assert json.loads((plugin / "orca-plugin.json").read_bytes())["version"] == version
         wg("agents", "--install", "--approve", fingerprint)
-        assert json.loads(registered.read_bytes()) == dict(reference=str(plugin), contentHash=fingerprint)
+        expected = plugin.resolve() if env.get("FIXTURE_CANONICAL") else plugin
+        assert json.loads(registered.read_bytes()) == dict(reference=str(expected), contentHash=fingerprint)
         assert approval.read_text() == fingerprint
         assert b"installed and current" in wg("agents", "--install")
         return permissions()
 
     bootstrap(old, initial_pin)
+    approve(old)
+    source = json.loads(registered.read_bytes())
+    checkout = shutil.copytree(plugin, temp / "checkout-plugin")
+    registered.write_text(json.dumps(dict(source, reference=str(checkout))))
+    before = permissions()
+    fingerprint = source["contentHash"]
+    wg("agents", "--install", "--approve", "wrong-fingerprint", code=3)
+    assert permissions() == before
+    message = wg("agents", "--install", "--approve", fingerprint, code=2)
+    assert str(checkout).encode() in message and b"back up" in message
+    assert permissions() == before
+
+    # Simulate the operator removing the old registration after backup.
+    registered.unlink()
+    approval.unlink()
+    env["FIXTURE_CANONICAL"] = "1"
     first = approve(old)
+    approval.write_text("revoked")
+    revoked = permissions()
+    wg("agents", "--install", code=3)
+    assert permissions() == revoked
+    assert approve(old) == first
     effort = shutil.copytree(repo / "tests/cli-parity/fixture", home / "effort")
     wg("run", "set", effort, "a", "state=running")
     state = wg("run", "show", effort, "--json")

@@ -115,6 +115,27 @@ plugin with the bundled files and review any new access request in Orca. After r
 `"$root/update-plugin-review"`. Registrations, permissions and disabled-plugin settings remain under local
 control. See the [shared updater controls](cli/src/update/README.md).
 
+### Recover a retained plugin registration
+
+After a CLI update or rollback, run `wg agents --install`. Orca can record the plugin folder as
+`current/orca-plugin` or as the resolved folder in the active release. Orca can also keep a path to a different signed release of the same installation and target.
+If its plugin files match the active release and the registered hash has approval, the command reports
+the retained path. You can continue with that registration. If the plugin files change, run the command
+again and review the requested access. If Orca keeps an unrelated checkout, the command reports
+the registered and expected paths.
+
+To replace that registration explicitly:
+
+1. Run `orca plugin list --json`. Record the plugin key, source, enabled state, and the
+   **Workspace path** and **Keep wg agents running** settings. Keep a backup of the Orca profile
+   and any edited plugin source. Check that you can read the backup before continuing.
+2. When you are ready to interrupt the plugin, run `orca plugin uninstall <plugin-key>` with
+   the key you recorded. This removes the registration, its approval and theme choices.
+3. Run `wg agents --install` through the managed launcher. Review the requested access and run the
+   printed approval command if you accept it. Restore your settings and enabled state.
+4. Run `wg agents --install` again. It should report that the plugin is installed and current.
+   Check the source in `orca plugin list --json` against the active release.
+
 ### Recover signing trust
 
 **Missed transition.** Discovery checks up to eight newer stable candidates in the first 100 listed releases

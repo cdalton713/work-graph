@@ -95,9 +95,15 @@ with TemporaryDirectory() as tmp:
         assert f"wg update {cmd}" in run("--help")
         assert f"wg update {cmd}" in run("update", cmd, "--help")
     stub("orca", '''case "$2" in
-list) echo '{"ok":true,"result":{"plugins":[]}}' ;;
+list)
+    if test -f "$HOME/plugin-installed"; then
+        printf '{"ok":true,"result":{"plugins":[{"pluginKey":"example.wg-agents","source":{"reference":"%s","contentHash":"fixture"}}]}}\n' "$EXPECTED_PLUGIN"
+    else
+        echo '{"ok":true,"result":{"plugins":[]}}'
+    fi ;;
 inspect|install) test "$3" = "$EXPECTED_PLUGIN" || exit 1
 echo "$2" >> "$HOME/plugin-calls"
+if test "$2" = install; then : > "$HOME/plugin-installed"; fi
 echo '{"ok":true,"result":{"pluginKey":"example.wg-agents","contentHash":"fixture"}}' ;;
 esac
 ''')

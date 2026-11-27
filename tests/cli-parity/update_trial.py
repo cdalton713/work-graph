@@ -176,6 +176,7 @@ def trial(temp, server):
         assert proc.returncode == expected, (proc.stdout,proc.stderr)
         assert (b"--approve" in proc.stdout) == bool(expected)
         assert choices == (registration.read_bytes(), approval.read_bytes())
+        return proc.stdout
     agents(0)
     root.chmod(0o555)
     try:
@@ -313,11 +314,30 @@ def trial(temp, server):
     agents(0, second_profile)
     assert second_choices == (registration2.read_bytes(), approval2.read_bytes())
     assert choices == (registration.read_bytes(), approval.read_bytes())
+
+    # Model Orca recording a canonical source when the operator installs a release.
+    def record_active_source():
+        source = str((current / "orca-plugin").resolve())
+        registration.write_text(json.dumps(dict(reference=source, contentHash=bridge_hash)))
+        approval.write_text(json.dumps({"local.wg-agents": bridge_hash}))
+        return registration.read_bytes(), approval.read_bytes()
+
+    def check_retained():
+        for _ in range(2):
+            message = agents(0)
+            assert b"matches the active release" in message
+            assert json.loads(registration.read_bytes())["reference"].encode() in message
+            assert b"installed and current" not in message
+
+    choices = record_active_source()
     assert invoke("update", "rollback")[0] == 0
     assert_version(NEW)
+    check_retained()
+    choices = record_active_source()
     (root / "update-hold").unlink()
     assert b"Installed verified release" in run_check()
     assert_version(LATEST)
+    check_retained()
     server.shutdown()
     server.server_close()
     assert b"Release service unavailable." in run_check()

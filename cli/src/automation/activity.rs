@@ -242,6 +242,17 @@ fn plugin_result(op: &str, reply: &Value) -> Result<Value> {
     Ok(reply["result"].clone())
 }
 
+fn registered_plugin() -> Result<Option<Value>> {
+    let listed = plugin_result("list", &plugin_reply(&["plugin", "list"])?)?;
+    let plugins = listed["plugins"]
+        .as_array()
+        .ok_or("invalid Orca plugin list")?;
+    Ok(plugins
+        .iter()
+        .find(|p| text(&p["pluginKey"]).rsplit('.').next() == Some("wg-agents"))
+        .cloned())
+}
+
 pub fn plugin(
     install_dir: &Path,
     label: &str,
@@ -265,11 +276,7 @@ pub fn plugin(
         std::fs::remove_file(legacy)?;
         writeln!(out, "removed the launchd sender {label}")?;
     }
-    let listed = plugin_result("list", &plugin_reply(&["plugin", "list"])?)?;
-    let installed = listed["plugins"].as_array().and_then(|ps| {
-        ps.iter()
-            .find(|p| text(&p["pluginKey"]).rsplit('.').next() == Some("wg-agents"))
-    });
+    let installed = registered_plugin()?;
     if uninstall {
         if let Some(p) = installed {
             let key = text(&p["pluginKey"]);
@@ -288,23 +295,50 @@ pub fn plugin(
         .into());
     }
     let inspected = plugin_result("inspect", &plugin_reply(&["plugin", "inspect", folder])?)?;
-    let mut args = vec!["plugin", "install", folder];
-    if let Some(p) = installed {
-        let source_matches = p["source"]["reference"] == folder;
-        let managed = install_dir == home()?.join(".local/share/work-graph/current/orca-plugin");
-        if (!managed || source_matches)
-            && p["source"]["contentHash"] == inspected["contentHash"]
+    let hash = inspected["contentHash"]
+        .as_str()
+        .filter(|hash| !hash.is_empty())
+        .ok_or("orca plugin inspect returned no content hash")?;
+    let managed = install_dir == home()?.join(".local/share/work-graph/current/orca-plugin");
+    let source_matches = |p: &Value| {
+        let reference = Path::new(text(&p["source"]["reference"]));
+        reference == install_dir
+            || install_dir
+                .canonicalize()
+                .is_ok_and(|active| reference == active)
+    };
+    let content_approved = |p: &Value| {
+        p["source"]["contentHash"] == hash
             && p["needsReconsent"] != true
-        {
-            writeln!(
-                out,
-                "the Orca plugin {} is installed and current ({})",
-                text(&p["pluginKey"]),
+            && p["status"] != "pending"
+    };
+    let approved_status = |p: &Value, allow_unmanaged_source: bool| {
+        if !content_approved(p) {
+            return None;
+        }
+        let key = text(&p["pluginKey"]);
+        if source_matches(p) || allow_unmanaged_source {
+            return Some(format!(
+                "the Orca plugin {key} is installed and current ({})",
                 text(&p["status"])
-            )?;
+            ));
+        }
+        let reference = text(&p["source"]["reference"]);
+        if managed && crate::update::retained_plugin_matches(Path::new(reference)).unwrap_or(false)
+        {
+            return Some(format!(
+                "the installed Orca plugin {key} matches the active release. Orca retained the managed source '{reference}'."
+            ));
+        }
+        None
+    };
+    let mut args = vec!["plugin", "install", folder];
+    if let Some(p) = &installed {
+        if let Some(status) = approved_status(p, !managed) {
+            writeln!(out, "{status}")?;
             return Ok(0);
         }
-        if source_matches {
+        if source_matches(p) {
             args = vec!["plugin", "update", text(&p["pluginKey"])];
         }
     }
@@ -342,13 +376,16 @@ pub fn plugin(
         }
         return Ok(3);
     }
-    let result = plugin_result(args[1], &reply)?;
-    writeln!(
-        out,
-        "installed the Orca plugin {} {}: it starts wg agents in an Orca terminal now and after each Orca start",
-        text(&result["pluginKey"]),
-        text(&result["version"])
-    )?;
+    plugin_result(args[1], &reply)?;
+    let registered = registered_plugin()?
+        .ok_or("Orca reported success but did not list wg-agents; check orca plugin list --json")?;
+    let Some(status) = approved_status(&registered, false) else {
+        return Err(format!(
+            "Orca lists {} at '{}' after installation. Expected '{}' with hash {} and completed consent. Check orca plugin list --json. To replace a retained source, back up the plugin data and follow the README section 'Recover a retained plugin registration'.",
+            text(&registered["pluginKey"]), text(&registered["source"]["reference"]), folder, hash
+        ).into());
+    };
+    writeln!(out, "{status}")?;
     Ok(0)
 }
 

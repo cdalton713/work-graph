@@ -159,6 +159,15 @@ print("fixture")
 
         registration["source"]["reference"] = str(generation / "orca-plugin")
         (home / "registration").write_text(json.dumps(registration))
+        count = len(events())
+        assert "installed and current" in cli("agents", "--install")
+        assert [args[1] for args in events()[count:]] == ["list", "inspect"]
+
+        # A different release can carry identical plugin bytes.
+        inactive = managed / "versions/earlier/orca-plugin"
+        shutil.copytree(generation / "orca-plugin", inactive)
+        registration["source"]["reference"] = str(inactive)
+        (home / "registration").write_text(json.dumps(registration))
         assert "--approve one" in cli("agents", "--install", code=3)
         assert events()[-1][1:3] == ["install", str(current / "orca-plugin")]
         cli("agents", "--install", "--approve", "one")

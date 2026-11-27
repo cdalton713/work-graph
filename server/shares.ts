@@ -64,8 +64,11 @@ export function shareRoutes({ access, project, limit, pageUrl, telemetry, runLin
     if (!result) throw unavailable();
     const link = (kind: ShareKind) => {
       const live = result.links.find((link) => link.kind === kind);
-      return live ? { exists: true, createdAt: live.createdAt } : { exists: false };
+      if (!live) return { exists: false };
+      return { exists: true, createdAt: live.createdAt, ...live.token && url(live.token) };
     };
+    // The answer holds the live link addresses.
+    c.header("Cache-Control", "no-store");
     return c.json({ view: link("view"), collab: link("collab"), members: result.members });
   }));
 

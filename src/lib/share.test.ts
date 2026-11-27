@@ -1,12 +1,13 @@
 import { expect, test } from "vitest";
 import { accessNotice, linkRow, orderMembers } from "./share";
 
-test("a link row uses a new address only for the current dialog", () => {
-  const live = { exists: true, createdAt: "2026-01-01" } as const;
+test("a live link row keeps its address after the first view", () => {
+  const live = { exists: true, createdAt: "2026-01-01", url: "https://example.com/join/kept" } as const;
   expect(linkRow({ exists: false })).toEqual({ state: "missing" });
-  expect(linkRow(live)).toEqual({ state: "live", made: "2026-01-01" });
-  expect(linkRow(live, "https://example.com/join/example")).toEqual({
-    state: "new", url: "https://example.com/join/example",
+  expect(linkRow(live)).toEqual({ state: "live", url: "https://example.com/join/kept", made: "2026-01-01" });
+  expect(linkRow({ exists: true, createdAt: "2026-01-01" })).toEqual({ state: "live", url: undefined, made: "2026-01-01" });
+  expect(linkRow(live, "https://example.com/join/new")).toEqual({
+    state: "live", url: "https://example.com/join/new", made: "2026-01-01",
   });
 });
 

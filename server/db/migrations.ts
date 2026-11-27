@@ -148,6 +148,8 @@ const migrations = [
       settings jsonb NOT NULL
     )`,
   ],
+  // The owner sees a live share link again: its token, encrypted. A link made before this has none.
+  ["ALTER TABLE shares ADD COLUMN token text"],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

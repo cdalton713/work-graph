@@ -296,14 +296,17 @@ databaseSuites((open) => {
         expect(await response.text()).toBe(message);
       }
       const list = await owner.request(share);
+      expect(list.headers.get("cache-control")).toBe("no-store");
       const text = await list.text();
+      // The owner sees the live link again; a revoked link stays hidden.
+      expect(JSON.parse(text).view.url).toBe("https://page.example.com/join/" + fresh);
       for (const value of [view, collab, fresh, token(issued.find(({ url }) => url).url)]) {
         const hash = createHash("sha256").update(value).digest("hex");
         expect(await db.query("SELECT 1 FROM shares WHERE token_hash = $1", [hash])).toHaveLength(1);
-        for (const secret of [value, hash]) {
-          expect(text).not.toContain(secret);
-          expect(output.join("\n")).not.toContain(secret);
-        }
+        expect(await db.query("SELECT 1 FROM shares WHERE token LIKE $1", ["%" + value + "%"])).toHaveLength(0);
+        expect(text).not.toContain(hash);
+        if (value !== fresh) expect(text).not.toContain(value);
+        for (const secret of [value, hash]) expect(output.join("\n")).not.toContain(secret);
       }
       const { members } = JSON.parse(text);
       const grace = members.find(({ name }: { name: string }) => name === "Grace");

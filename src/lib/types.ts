@@ -99,7 +99,8 @@ export interface Card {
 
 /** `GET /api/config`: what the page needs before its first render, and what a deploy check compares. */
 export type ShareKind = "view" | "collab";
-export type ShareLink = { exists: false } | { exists: true; createdAt: string };
+/** A live link has its address, except a link made before the server kept its token. */
+export type ShareLink = { exists: false } | { exists: true; createdAt: string; url?: string };
 export type NewShareLink = { url: string } | { exists: true };
 export type ShareMember = {
   id: string;

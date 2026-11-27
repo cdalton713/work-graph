@@ -131,7 +131,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
   }
 
   return {
-    shares: createShares(sql, notify),
+    shares: createShares(sql, crypto, notify),
     claims: createClaims(sql),
     plans: createPlans(sql),
     async signIn(user: User, first: NewConnection, observed?: (id: string, created: boolean) => void) {

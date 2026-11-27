@@ -1,8 +1,8 @@
 import type { LinearAccess, ShareLink, ShareMember } from "./types";
 
 export function linkRow(link: ShareLink, url?: string) {
-  if (url) return { state: "new", url } as const;
-  if (link.exists) return { state: "live", made: link.createdAt } as const;
+  if (url) return { state: "live", url, made: link.exists ? link.createdAt : undefined } as const;
+  if (link.exists) return { state: "live", url: link.url, made: link.createdAt } as const;
   return { state: "missing" } as const;
 }
 

@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { tokenHash } from "./crypto.ts";
+import { tokenHash, type CredentialCrypto } from "./crypto.ts";
 import type { Query, Sql } from "./sql.ts";
 
 export const SHARE_KINDS = ["view", "collab"] as const;
@@ -15,7 +15,9 @@ type Share = { id: string; tenant: string; connection: string; project: string; 
 const roleFor = (kind: ShareKind): MemberRole => kind === "view" ? "viewer" : "collaborator";
 type Member = { id: string; name: string; email: string; role: MemberRole; joinedAt: Date; accessRequestedAt: Date | null };
 
-export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: boolean) => Promise<void>) {
+export function createShares(sql: Sql, crypto: CredentialCrypto, notify: (tenant: string, membersOnly?: boolean) => Promise<void>) {
+  const binding = (tenant: string, share: string) => ({ tenant, connection: "share:" + share, field: "credential" as const });
+
   async function lock(query: Query, tenant: string) {
     const [row] = await query<{ owner: string }>("SELECT owner_user_id AS owner FROM tenants WHERE id = $1 FOR NO KEY UPDATE", [tenant]);
     return row?.owner;
@@ -78,7 +80,14 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
     },
 
     async list(project: ProjectScope) {
-      const links = await liveLinks(sql.query, project);
+      const rows = await sql.query<{ id: string; kind: ShareKind; createdAt: Date; token: string | null }>(
+        `SELECT id, kind, created_at AS "createdAt", token FROM shares WHERE ${scope} AND ${live}`, project);
+      const links = rows.map(({ id, kind, createdAt, token }) => {
+        let plain: string | undefined;
+        try { plain = token ? crypto.decrypt(token, binding(project[0], id)) : undefined; }
+        catch { plain = undefined; }
+        return { kind, createdAt, token: plain };
+      });
       const members = await sql.query<Member>(`SELECT u.id, u.name, u.email, m.role, m.joined_at AS "joinedAt",
         m.access_requested_at AS "accessRequestedAt"
         FROM project_members m JOIN users u ON u.id = m.user_id WHERE ${scope}
@@ -144,8 +153,9 @@ export function createShares(sql: Sql, notify: (tenant: string, membersOnly?: bo
         for (const kind of selection ? [selection.kind] : SHARE_KINDS) {
           if (!selection?.rotate && links.some((link) => link.kind === kind)) continue;
           const token = randomBytes(32).toString("base64url");
-          await query(`INSERT INTO shares (id, tenant_id, connection_id, project_id, project_name, kind, token_hash)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)`, [randomUUID(), ...project, name, kind, tokenHash(token)]);
+          const id = randomUUID();
+          await query(`INSERT INTO shares (id, tenant_id, connection_id, project_id, project_name, kind, token_hash, token)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [id, ...project, name, kind, tokenHash(token), crypto.encrypt(token, binding(tenant, id))]);
           created[kind] = token;
         }
         return { created, revoked };

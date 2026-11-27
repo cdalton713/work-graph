@@ -3,7 +3,7 @@ import { usageEnabled } from "../lib/telemetry";
 import { accountApi } from "../api";
 import { configBlock, installBlock, doneSteps, firstStep, pollWhileVisible, setupCommands, steps, workspaceKeyLocation, type Step } from "../lib/onboarding";
 import type { Account, SetupTeam } from "../lib/types";
-import { AccountError, copySecret, NameForm, TokenForm, useAccountAction, WorkspaceKeyForm, WorkspaceStatus, type RefreshAccount } from "./Settings";
+import { AccountError, ConnectWorkspace, copySecret, NameForm, TokenForm, useAccountAction, WorkspaceStatus, type RefreshAccount } from "./Settings";
 import { Intro } from "./Intro";
 import { CopyButton } from "./ui";
 import { WorkspaceSetup } from "./onboarding/WorkspaceSetup";
@@ -115,7 +115,7 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
               {account.connections.map((workspace) => <article className="account-item" key={workspace.id}>
                 <h3>{workspace.name}</h3><WorkspaceStatus workspace={workspace} />
               </article>)}
-              <WorkspaceKeyForm refresh={refresh} />
+              <ConnectWorkspace refresh={refresh} />
             </>}
             {step === "setup" && <>
               <section>

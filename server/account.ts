@@ -18,7 +18,7 @@ type Account = NonNullable<Awaited<ReturnType<Accounts["readTenant"]>>>;
 type Connection = Account["connections"][number];
 
 export function accountUsage(account: Account, selected?: Pick<Connection, "workspaceId" | "linearOrgId"> | null): UsageScope | null {
-  const workspace = selected === undefined ? account.connections.find(({ kind }) => kind === "oauth") : selected;
+  const workspace = selected === undefined ? account.connections.find(({ attached }) => !attached) : selected;
   return workspace ? {
     tenant: account.id, workspace: { id: workspace.workspaceId, organization: workspace.linearOrgId },
   } : null;
@@ -77,7 +77,7 @@ export function attemptLimit({ redis, prefix, now }: Pick<Options, "redis" | "pr
 function publicConnection(row: Connection) {
   return {
     id: row.id, workspace_id: row.workspaceId, name: row.name, kind: row.kind, status: row.status,
-    team: row.team, team_labels: row.teamLabels, position: row.position,
+    team: row.team, team_labels: row.teamLabels, position: row.position, attached: row.attached,
     owner_name: row.ownerName, created_at: row.createdAt,
   };
 }
@@ -256,8 +256,13 @@ export function accountRoutes(options: Options) {
   routes.delete("/", async (c) => {
     if ((await body(c)).confirm !== "delete") return c.json({ error: "Enter delete to confirm account deletion" }, 400);
     const { accounts, account, session } = c.var;
-    const oauth = account.connections.find(({ kind }) => kind === "oauth");
-    const credential = oauth && await accounts.readCredential(account.id, oauth.id).catch(() => null);
+    const oauth = account.connections.find(({ attached }) => !attached);
+    const credential = oauth?.kind === "oauth" ? await accounts.readCredential(account.id, oauth.id).catch(() => null) : null;
+    // Attached workspaces: revoke what Linear accepts; the account deletion removes the rest.
+    await Promise.all(account.connections.filter(({ attached, kind }) => attached && kind === "oauth").map(async ({ id }) => {
+      const attachedCredential = await accounts.readCredential(account.id, id).catch(() => null);
+      if (attachedCredential?.kind === "oauth") await revokeLinearToken(attachedCredential.refreshToken);
+    }));
     const revocation = oauth && credential?.kind === "oauth" && await revokeLinearToken(credential.refreshToken)
       ? { id: oauth.id, refreshToken: credential.refreshToken }
       : undefined;
@@ -286,11 +291,13 @@ export function accountRoutes(options: Options) {
   routes.put("/workspaces/:id/key", async (c) => {
     const { accounts, account } = c.var;
     const row = findConnection(account.connections, c.req.param("id"));
-    if (row.kind !== "api_key") throw new LinearError("The sign-in workspace uses Linear sign-in", 403);
+    if (!row.attached) throw new LinearError("The sign-in workspace uses Linear sign-in", 403);
     const { credential, identity, teams } = await verify(c, account.id);
+    const previous = row.kind === "oauth" ? await accounts.readCredential(account.id, row.id).catch(() => null) : null;
     await accounts.replaceCredential(account.id, row.id, credential, {
       ownerName: identity.ownerName, organization: identity.organization, teams: teams.map(({ key }) => key),
     });
+    if (previous?.kind === "oauth") await revokeLinearToken(previous.refreshToken);
     const saved = await accounts.readTenant(account.id);
     return c.json({ connection: publicConnection(findConnection(saved?.connections ?? [], row.id)), teams });
   });
@@ -383,8 +390,10 @@ export function accountRoutes(options: Options) {
   routes.delete("/workspaces/:id", async (c) => {
     const { accounts, account } = c.var;
     const row = findConnection(account.connections, c.req.param("id"));
-    if (row.kind !== "api_key") throw new LinearError("The sign-in workspace cannot be removed", 403);
+    if (!row.attached) throw new LinearError("The sign-in workspace cannot be removed", 403);
+    const previous = row.kind === "oauth" ? await accounts.readCredential(account.id, row.id).catch(() => null) : null;
     await accounts.removeConnection(account.id, row.id, true);
+    if (previous?.kind === "oauth") await revokeLinearToken(previous.refreshToken);
     telemetry?.emit("workspace_removed", { kind: row.kind }, () => accountUsage(account, row), account.id);
     return c.json({ ok: true });
   });

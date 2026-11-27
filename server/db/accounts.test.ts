@@ -60,6 +60,29 @@ databaseSuites((open) => {
     expect(changed.mock.calls).toEqual(Array.from({ length: 8 }, () => [tenant]));
   });
 
+  test("attaches OAuth workspaces, replaces their credential, and keeps the sign-in workspace", async () => {
+    const tenant = await store.createAccount(user, "Ada", connection);
+    const oauth = (n: number) => ({ kind: "oauth", key: `access-${n}`, refreshToken: `${refreshToken}-${n}`, expiresAt: new Date(0) } as const);
+    const side = { ...connection, workspaceId: "side", linearOrgId: "side-org", name: "Side", credential: oauth(1) };
+    await expect(store.attachOAuth(tenant, { ...side, linearOrgId: "org" })).rejects.toThrow("The sign-in workspace uses Linear sign-in");
+    const first = await store.attachOAuth(tenant, side);
+    expect(first.created).toBe(true);
+    await store.setNeedsKey(tenant, first.id);
+    expect(await store.attachOAuth(tenant, { ...side, credential: oauth(2), ownerName: "Side owner" })).toEqual({ id: first.id, created: false });
+    expect((await store.readTenant(tenant))!.connections.map(({ workspaceId, attached, status, kind, ownerName }) =>
+      ({ workspaceId, attached, status, kind, ownerName }))).toEqual([
+      { workspaceId: "first", attached: false, status: "ok", kind: "api_key", ownerName: "Ada" },
+      { workspaceId: "side", attached: true, status: "ok", kind: "oauth", ownerName: "Side owner" },
+    ]);
+    expect(await store.readCredential(tenant, first.id)).toMatchObject({ key: "access-2" });
+    const home = (await store.readTenant(tenant))!.connections[0].id;
+    await expect(store.removeConnection(tenant, home, true)).rejects.toThrow("Connection not found");
+    for (let i = 2; i < MAX_CONNECTIONS; i++) await store.attachOAuth(tenant, { ...side, workspaceId: `w${i}`, linearOrgId: `o${i}` });
+    await expect(store.attachOAuth(tenant, { ...side, workspaceId: "over", linearOrgId: "over" })).rejects.toThrow("Connection limit reached");
+    await store.removeConnection(tenant, first.id, true);
+    expect((await store.readTenant(tenant))!.connections).toHaveLength(MAX_CONNECTIONS - 1);
+  });
+
   test("applies uniqueness and limits with concurrent writes", async () => {
     const tenant = await store.createAccount(user, "Ada", connection);
     await expect(store.createAccount(user, "Ada", connection)).rejects.toThrow("Database record already exists");

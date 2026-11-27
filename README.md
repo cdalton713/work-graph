@@ -610,8 +610,13 @@ To allow specific workspaces, list their Linear organization IDs in UUID form. W
 work, but can change or be reused. The service creates one account per Linear user in each sign-in workspace.
 
 Choose **Sign in with Linear**. The setup guide walks you through your name, workspaces, teams, and the first
-coordinator connection. You can attach another workspace with a personal Linear API key and select its team.
-If Linear refuses that key later, replace it in Settings.
+coordinator connection. To attach another workspace, choose **Connect a workspace with Linear** and select the
+workspace on Linear's consent screen. The sign-up list of `WG_ALLOWED_ORGS` does not apply to attached workspaces.
+Projects in an attached workspace stay private to you: viewers do not see them, and you cannot share them. If a
+workspace blocks third-party apps, attach it with a personal Linear API key instead. If Linear later refuses an
+attached workspace's credential, connect it again or replace its key in Settings.
+
+Your Linear OAuth application must accept authorizations from other workspaces before users can attach them.
 
 In the guide, create a coordinator token and copy it when it appears. Run `wg login https://wg.example.com` on
 your machine and paste the token at the prompt. Run the `wg setup` command shown in the guide for each workspace,
@@ -655,8 +660,8 @@ Adapt this privacy text to your installation. Fill in the retention periods befo
 ### Delete an account
 
 Account deletion removes the account, its workspace connections and stored credentials, and its coordinator
-token records from Postgres. It ends the current session and attempts to revoke the OAuth grant at Linear.
-If the revoke fails, remove the app under **Authorized applications** in Linear's settings. Manage any
+token records from Postgres. It ends the current session and attempts to revoke each OAuth grant at Linear.
+If a revoke fails, remove the app under **Authorized applications** in Linear's settings. Manage any
 personal API keys separately in Linear. Project and issue records stay in Linear. Previously sent usage logs follow your Datadog retention policy.
 
 ### Service limits

@@ -21,13 +21,18 @@ type Connection = Settings & {
   id: string; workspaceId: string; linearOrgId: string; position: number;
   kind: ConnectionCredential["kind"]; status: "ok" | "needs_key"; expiresAt: Date | null;
   ownerName: string | null; createdAt: Date;
+  /** Not the sign-in workspace: its Linear organization differs from the owner's. */
+  attached: boolean;
 };
 type EncryptedConnection = Connection & { tenantId: string; credential: string | null; refreshToken: string | null };
 type Token = { id: string; name: string; createdAt: Date; lastUsedAt: Date | null; revokedAt: Date | null };
 
 const connectionFields = `id, workspace_id AS "workspaceId", linear_org_id AS "linearOrgId",
   name, team, team_labels AS "teamLabels", position, kind, status, expires_at AS "expiresAt",
-  owner_name AS "ownerName", created_at AS "createdAt"`;
+  owner_name AS "ownerName", created_at AS "createdAt",
+  linear_org_id <> (SELECT u.linear_org_id FROM tenants t JOIN users u ON u.id = t.owner_user_id
+    WHERE t.id = linear_connections.tenant_id) AS attached`;
+const ownerOrg = `(SELECT u.linear_org_id FROM tenants t JOIN users u ON u.id = t.owner_user_id WHERE t.id = $1)`;
 const encryptedFields = `${connectionFields}, tenant_id AS "tenantId", credential, refresh_token AS "refreshToken"`;
 const tokenFields = `id, name, created_at AS "createdAt", last_used_at AS "lastUsedAt", revoked_at AS "revokedAt"`;
 
@@ -274,7 +279,8 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
         return {
           ...account,
           workspaces: connections.flatMap<Workspace>((row) => {
-            const workspace = { connectionId: row.id, organizationId: row.linearOrgId, id: row.workspaceId, name: row.name, team: row.team, teamLabels: row.teamLabels };
+            const workspace = { connectionId: row.id, organizationId: row.linearOrgId, id: row.workspaceId, name: row.name,
+              team: row.team, teamLabels: row.teamLabels, attached: row.attached };
             if (row.status === "needs_key") return [{ ...workspace, kind: row.kind, key: "", needsKey: true }];
             let credential: ConnectionCredential;
             try {
@@ -289,6 +295,25 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
             return [{ ...workspace, kind: credential.kind, key: credential.key, oauthKey: oauthKey?.(row.id, credential) }];
           }),
         };
+      });
+    },
+
+    /** Connects another workspace with Linear OAuth, or replaces the credential of the attached workspace of that organization. */
+    attachOAuth(tenant: string, input: NewConnection & { credential: OAuthCredential }) {
+      return change(tenant, async (query, account) => {
+        const [owner] = await query<{ org: string }>("SELECT linear_org_id AS org FROM users WHERE id = $1", [account.owner]);
+        if (owner?.org === input.linearOrgId) throw new Error("The sign-in workspace uses Linear sign-in");
+        const [row] = await query<{ id: string }>(`SELECT id FROM linear_connections
+          WHERE tenant_id = $1 AND linear_org_id = $2 FOR UPDATE`, [account.id, input.linearOrgId]);
+        if (row) {
+          await query(`UPDATE linear_connections SET kind = $3, credential = $4, refresh_token = $5,
+            expires_at = $6, status = 'ok', owner_name = $7 WHERE tenant_id = $1 AND id = $2`,
+          [account.id, row.id, ...encrypt(account.id, row.id, input.credential), input.ownerName ?? null]);
+          return { id: row.id, created: false };
+        }
+        const rows = await orderedIds(query, account.id);
+        if (rows.length >= MAX_CONNECTIONS) throw new Error("Connection limit reached");
+        return { id: await insertConnection(query, account.id, input, rows.length), created: true };
       });
     },
 
@@ -307,7 +332,7 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
         const [row] = await query<Connection>(`SELECT ${connectionFields}
           FROM linear_connections WHERE tenant_id = $1 AND id = $2`, [account.id, connection]);
         if (!row) throw new Error("Connection not found");
-        if (verified && (row.kind !== "api_key" || row.linearOrgId !== verified.organization)) {
+        if (verified && (!row.attached || row.linearOrgId !== verified.organization)) {
           throw new Error("The replacement key must belong to the same Linear organization");
         }
         const team = !verified || verified.teams.includes(row.team) ? row.team
@@ -343,11 +368,11 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
       });
     },
 
-    async removeConnection(tenant: string, connection: string, apiKeyOnly = false) {
+    async removeConnection(tenant: string, connection: string, attachedOnly = false) {
       requireUuid(connection);
       return change(tenant, async (query) => {
         requireConnection(await query(`DELETE FROM linear_connections WHERE tenant_id = $1 AND id = $2
-          AND (NOT $3 OR kind = 'api_key') RETURNING id`, [tenant, connection, apiKeyOnly]));
+          AND (NOT $3 OR linear_org_id <> ${ownerOrg}) RETURNING id`, [tenant, connection, attachedOnly]));
         await updatePositions(query, tenant, await orderedIds(query, tenant));
       });
     },

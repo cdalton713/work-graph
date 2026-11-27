@@ -7,11 +7,11 @@ const complete: OnboardingState = {
   name: true, workspaces: true, teams: true, token: true, connected: true, skipped: false,
 };
 const home: AccountConnection = {
-  id: "first", workspace_id: "example", name: "Example", kind: "oauth", status: "ok",
+  id: "first", workspace_id: "example", name: "Example", kind: "oauth", attached: false, status: "ok",
   team: "WG", team_labels: false, position: 0, owner_name: "Ada", created_at: "",
 };
 const account = { human: "Ada", pageUrl: "https://example.com", connections: [home] };
-const second = { ...home, id: "second", workspace_id: "extra", team: "", position: 1 };
+const second = { ...home, id: "second", workspace_id: "extra", attached: true, team: "", position: 1 };
 
 describe("onboarding", () => {
   it("marks the status step done only after verification", () => {

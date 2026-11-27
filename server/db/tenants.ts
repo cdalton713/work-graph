@@ -123,6 +123,7 @@ export function dbTenants(sql: Sql, crypto: CredentialCrypto, { redis, prefix = 
     accounts,
     accountStore: () => accounts,
     signIn: accounts.signIn,
+    attach: accounts.attachOAuth,
     async fromSession(session) {
       const tenant = session ? await byId(session.accountId ?? session.id) : null;
       return tenant ? { tenant, role: "owner" } : null;

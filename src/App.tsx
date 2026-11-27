@@ -109,7 +109,7 @@ export function ServiceApp({ createProjects }: { createProjects?: boolean } = {}
     document.addEventListener("visibilitychange", wake);
     return () => document.removeEventListener("visibilitychange", wake);
   }, [installed, onAccountScreen, refresh, run]);
-  const signInWorkspace = account?.connections.find(({ kind }) => kind === "oauth")?.workspace_id;
+  const signInWorkspace = account?.connections.find(({ attached }) => !attached)?.workspace_id;
   const accountView = page === "settings" ? "settings_viewed" : showGuide ? "onboarding_viewed" : null;
   const lastAccountView = useRef<typeof accountView>(null);
   useEffect(() => {

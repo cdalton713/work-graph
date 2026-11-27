@@ -182,6 +182,8 @@ export interface AccountConnection {
   workspace_id: string;
   name: string;
   kind: "oauth" | "api_key";
+  /** Not the sign-in workspace. The owner connected it later; its projects stay private. */
+  attached: boolean;
   status: "ok" | "needs_key";
   team: string;
   team_labels: boolean;

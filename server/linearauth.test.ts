@@ -36,6 +36,96 @@ it.each(["WG_HOSTED", "WG_DATA_KEY", "WG_SESSION_SECRET", "WG_LINEAR_CLIENT_ID",
 );
 
 databaseSuites((open) => {
+  it("connects another workspace with Linear OAuth to the signed-in account", async () => {
+    const sql = await open();
+    const crypto = credentialCrypto({ WG_DATA_KEY: Buffer.alloc(32).toString("base64") });
+    const tenants = dbTenants(sql, crypto, { linearAuth: auth, now: () => now });
+    const app = createApp(rules, { team: "", dist: "/unused/", watchMs: 0, readOnly: false, linearAuth: auth, now: () => now, tenants });
+    const request = (path: string, cookie?: string, method = "GET") => app.request(`https://${host}${path}`, { method, headers: {
+      host, ...(cookie ? { cookie } : {}), ...(method === "GET" ? {} : { origin: `https://${host}`, "content-type": "application/json" }),
+    } });
+    const work = { id: allowedOrgId, name: "Work", urlKey: "work" };
+    // Not in WG_ALLOWED_ORGS: the sign-up list does not limit attached workspaces.
+    const side = { id: "0c1d2b9e-6f4a-4c3e-9d8b-2a1f5e7c9b30", name: "Side", urlKey: "side" };
+    let org = work, issued = 0;
+    const revoked: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/oauth/revoke")) {
+        revoked.push((init.body as URLSearchParams).get("token")!);
+        return new Response(null, { status: 200 });
+      }
+      if (url.endsWith("/oauth/token")) return Response.json({ access_token: access + ++issued, refresh_token: refresh + issued, expires_in: 86400 });
+      const { query } = JSON.parse(String(init.body));
+      if (query.includes("subscription")) return Response.json({ data: { organization: { subscription: { type: "free" } } } });
+      return Response.json({ data: {
+        viewer: { id: org === work ? "ada" : "ada-side", name: org === work ? "Ada" : "Ada Side", email: "ada@example.com" },
+        organization: org, teams: { nodes: [{ key: org === work ? "WG" : "SIDE" }] },
+      } });
+    }));
+    const sessionOf = (response: Response) =>
+      response.headers.getSetCookie().find((value) => value.startsWith("__Host-wg_session="))?.split(";")[0];
+    async function start(path: string, session?: string) {
+      const response = await request(path, session);
+      const location = new URL(response.headers.get("location")!);
+      return { location, flow: response.headers.getSetCookie()[0]?.split(";")[0], state: location.searchParams.get("state") };
+    }
+    async function connect(session?: string, callbackSession = session, query = `code=${code}`) {
+      const { flow, state, location } = await start("/auth/connect?next=" + encodeURIComponent("/?page=settings"), session);
+      expect(location.searchParams.get("prompt")).toBe("consent");
+      const response = await request(`/auth/callback?${query}&state=${state}`, [callbackSession, flow].filter(Boolean).join("; "));
+      expect(response.status).toBe(302);
+      expect(sessionOf(response)).toBeUndefined();
+      const back = new URL(response.headers.get("location")!);
+      expect(back.origin + back.pathname + "?page=settings").toBe(`https://${host}/?page=settings`);
+      return back.searchParams.get("connect");
+    }
+    try {
+      await migrate(sql);
+      const anonymous = await start("/auth/connect?next=/settings");
+      expect(anonymous.location.href).toBe(`https://${host}/auth/login?next=${encodeURIComponent(`https://${host}/settings`)}`);
+      expect(anonymous.flow).toBeUndefined();
+      const login = await start("/auth/login");
+      expect(login.location.searchParams.get("prompt")).toBeNull();
+      const session = sessionOf(await request(`/auth/callback?code=${code}&state=${login.state}`, login.flow))!;
+      expect(session).toBeTruthy();
+
+      org = side;
+      expect(await connect(session)).toBe("connected");
+      const account = await (await request("/api/account", session)).json();
+      expect(account.connections).toMatchObject([
+        { workspace_id: "work", kind: "oauth", attached: false, team: "WG" },
+        { workspace_id: "side", kind: "oauth", attached: true, team: "SIDE", owner_name: "Ada Side", status: "ok" },
+      ]);
+      expect(await sql.query("SELECT id FROM users")).toHaveLength(1);
+      expect(await sql.query("SELECT id FROM tenants")).toHaveLength(1);
+      const tenant = (await tenants.byId((await sql.query<{ id: string }>("SELECT id FROM tenants"))[0].id))!;
+      expect(tenant.workspaces.map(({ id, attached }) => [id, attached])).toEqual([["work", false], ["side", true]]);
+
+      expect(await connect(session)).toBe("reconnected");
+      expect(await sql.query("SELECT id FROM linear_connections")).toHaveLength(2);
+      expect(revoked).toEqual([]);
+
+      org = work;
+      expect(await connect(session)).toBe("signin-workspace");
+      expect(revoked).toEqual([refresh + issued]);
+      expect(await sql.query("SELECT id FROM linear_connections")).toHaveLength(2);
+
+      const before = issued;
+      expect(await connect(session, session, "error=access_denied")).toBe("denied");
+      expect(await connect(session, "")).toBe("expired");
+      expect(issued).toBe(before);
+
+      const removed = await request(`/api/account/workspaces/${account.connections[1].id}`, session, "DELETE");
+      expect(removed.status).toBe(200);
+      expect(revoked).toEqual([refresh + before, refresh + (before - 1)]);
+      expect(await sql.query("SELECT workspace_id FROM linear_connections")).toEqual([{ workspace_id: "work" }]);
+    } finally {
+      app.link.stop();
+      tenants.close();
+      await sql.close();
+    }
+  });
+
   it("signs in, isolates accounts, rotates credentials, and repairs a refused refresh", async () => {
     const sql = await open();
     const crypto = credentialCrypto({ WG_DATA_KEY: Buffer.alloc(32).toString("base64") });

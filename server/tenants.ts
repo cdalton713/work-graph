@@ -25,6 +25,7 @@ export interface SharedWorkspace {
 export interface Tenants {
   sharedWorkspaces?(account: string): Promise<SharedWorkspace[]>;
   signIn?: ReturnType<typeof import("./db/accounts.ts").createAccounts>["signIn"];
+  attach?: ReturnType<typeof import("./db/accounts.ts").createAccounts>["attachOAuth"];
   accountStore?: () => Lookup<ReturnType<typeof import("./db/accounts.ts").createAccounts>>;
   fromSession(session: Session | null): Lookup<{ tenant: Tenant; role: TenantRole }>;
   fromToken(authorization: string | undefined): Lookup<Tenant>;

@@ -846,7 +846,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     if (c.req.path === "/api/config" && (method === "GET" || method === "HEAD")) {
       const tenant = membership?.tenant ?? (!tenants ? await directory.byId(CONFIG_TENANT_ID) : null);
       const site = tenant ? siteOf(tenant) : createSite(DEFAULT_HUMAN, "default");
-      const disconnected = !!linearAuth && !!tenant?.workspaces.find((w) => w.kind === "oauth")?.needsKey;
+      const disconnected = !!linearAuth && !!tenant?.workspaces.find((w) => w.kind === "oauth" && !w.attached)?.needsKey;
       if (membership) {
         await dropIdle(membership.tenant.id);
         const state = states.get(membership.tenant.id);
@@ -878,7 +878,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const selected = listsWorkspaces ? undefined : header("x-workspace");
     const id = selected || tenant.workspaces[0]?.id;
     const workspace = tenant.workspaces.find((w) => w.id === id);
-    if (viewer && !tokenTenant && !listsWorkspaces && workspace?.rejectApiKey) return c.json({ error: "Workspace not found" }, 404);
+    if (viewer && !tokenTenant && !listsWorkspaces && workspace?.attached) return c.json({ error: "Workspace not found" }, 404);
     if (workspace?.needsKey) throw new LinearSignInRequired();
     if (!workspace && (selected || !listsWorkspaces)) {
       return c.json({ error: `workspace ${id ?? "default"} is not configured` }, 400);
@@ -929,7 +929,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
   api.use(bodyLimit({ maxSize: 2_000_000, onError: (c) => c.json({ error: "request body too large" }, 413) }));
   const readProjectList = async (viewer = false, omitted?: Set<string>): Promise<ProjectList> => {
     const { tenant, state: { lists, sharedNames } } = scope();
-    const workspaces = viewer ? tenant.workspaces.filter((workspace) => !workspace.rejectApiKey) : tenant.workspaces;
+    const workspaces = viewer ? tenant.workspaces.filter((workspace) => !workspace.attached) : tenant.workspaces;
     const order = omitted ? 0 : ++lists.started;
     if (workspaces.some(w => omitted?.has(w.id) && w.needsKey)) throw new LinearSignInRequired();
     const results = await Promise.allSettled(workspaces.map(async workspace => {
@@ -960,7 +960,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
         ? result.value.map((p) => ({ ...p, workspace: workspaces[at].id, workspaceName: workspaces[at].name }))
         : []),
     };
-    const privateIds = new Set(workspaces.filter((workspace) => workspace.rejectApiKey).map(({ id }) => id));
+    const privateIds = new Set(workspaces.filter((workspace) => workspace.attached).map(({ id }) => id));
     const shared = { ...list, workspaces: list.workspaces.filter(({ id }) => !privateIds.has(id)),
       projects: list.projects.filter((p) => p.shared && !privateIds.has(p.workspace)) };
     // A slower list that started earlier cannot restore a share removed from the newer list.
@@ -1260,7 +1260,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const { shared } = await json(c.req.json<{ shared?: unknown }>());
     if (typeof shared !== "boolean") throw new LinearError("shared must be true or false", 400);
     const workspace = linearWorkspace.getStore()!;
-    if (workspace.rejectApiKey) throw new LinearError("Projects in an attached workspace are private", 403);
+    if (workspace.attached) throw new LinearError("Projects in an attached workspace are private", 403);
     await setShared(c.req.param("id"), shared, workspace.team, workspace.teamLabels);
     const { names, sharedNames, lists } = scope().state;
     names.at = 0;
@@ -1390,7 +1390,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
     const viewer = shared ? shared.role === "viewer" : membership?.role === "viewer";
     const workspace = shared?.workspace.id ?? requested;
     const selected = shared?.workspace ?? tenant.workspaces.find((w) => w.id === workspace);
-    if (viewer && selected?.rejectApiKey) return c.json({ error: "Workspace not found" }, 404);
+    if (viewer && selected?.attached) return c.json({ error: "Workspace not found" }, 404);
     if (selected?.needsKey) throw new LinearSignInRequired();
     if (!selected) return c.json({ error: `workspace ${workspace} is not configured` }, 400);
     const wanted = c.req.query("project");
@@ -1607,7 +1607,7 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       (await sharedFor(membership.tenant)).find(({ id }) => id === body.workspace) : undefined;
     const tenant = shared?.owner ?? membership.tenant;
     const workspace = shared?.workspace ?? tenant.workspaces.find(({ id }) => id === body.workspace);
-    if (workspace && !(membership.role === "viewer" && workspace.rejectApiKey)) {
+    if (workspace && !(membership.role === "viewer" && workspace.attached)) {
       const role = readOnly ? "viewer" : shared?.role ?? membership.role;
       const event = pageEvents[body.event as PageEvent];
       telemetry.emit(event.event, { ...event.fields, role }, () => usageScope(tenant, workspace), tenant.id);
@@ -1627,6 +1627,19 @@ export function createApp(rules: Rules, { team, dist, watchMs = 30_000, now, lin
       const resolve = () => ({ tenant: id, workspace });
       if (created) telemetry.emit("sign_up", {}, resolve, id);
       telemetry.emit("sign_in", {}, resolve, id);
+    } : undefined, tenants?.attach ? {
+      async owner(c) {
+        const signed = await readSession(c);
+        if (readOnly || !signed || !await sessionActive(signed)) return null;
+        const membership = await directory.fromSession(signed);
+        return membership?.role === "owner" ? membership.tenant.id : null;
+      },
+      async save(account, workspace) {
+        const result = await tenants.attach!(account, workspace);
+        const scope = () => ({ tenant: account, workspace: { id: workspace.workspaceId, organization: workspace.linearOrgId } });
+        if (result.created) telemetry?.emit("workspace_attached", { kind: "oauth" }, scope, account);
+        return result;
+      },
     } : undefined) : authRoutes(auth!, origin, clock, signOut));
   }
 

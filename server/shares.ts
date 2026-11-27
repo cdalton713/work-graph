@@ -49,7 +49,7 @@ export function shareRoutes({ access, project, limit, pageUrl, telemetry, runLin
     const workspace = tenant.workspaces.find(({ id }) => id === workspaceId);
     const row = (await accounts.readTenant(tenant.id))?.connections.find(({ workspaceId: id }) => id === workspaceId);
     if (!row) throw unavailable();
-    if (row.kind === "api_key") throw new LinearError("Projects in an API key workspace cannot be shared", 400);
+    if (row.attached) throw new LinearError("Projects in an attached workspace cannot be shared", 400);
     if (!workspace) throw unavailable();
     const projectId = c.req.param("id")!;
     return run({ account, workspace, projectId, key: [tenant.id, row.id, projectId], resolve: async () => {

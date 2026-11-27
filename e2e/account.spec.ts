@@ -78,11 +78,11 @@ test("settings dialogs fit a short visual viewport and the token can be copied",
   await screens.settings(page);
   await checkLayout(page.getByRole("main"));
   const main = page.getByRole("main");
-  for (const name of ["Attach another workspace", "Delete account", "Make a token"]) {
+  for (const name of ["Use a personal API key", "Delete account", "Make a token"]) {
     await main.getByRole("button", { name, exact: true }).first().click();
     const dialog = page.getByRole("dialog");
     await checkLayout(dialog);
-    if (name === "Attach another workspace") await simulateKeyboard(page);
+    if (name === "Use a personal API key") await simulateKeyboard(page);
     await checkKeyboardDialog(dialog);
     if (name !== "Make a token") {
       await dialog.getByRole("button", { name: "Close", exact: true }).click();
@@ -247,7 +247,7 @@ test("account screens keep their desktop layout at 1440 pixels", async ({ page }
 
   await screens.settings(page);
   await expectBox(page.getByRole("heading", { name: "Settings", exact: true }), { x: 280, y: 76, width: 880 }, { height: 38 });
-  await page.getByRole("button", { name: "Attach another workspace" }).click();
+  await page.getByRole("button", { name: "Use a personal API key" }).click();
   // The instructions in this dialog can wrap onto one extra line.
   await expectBox(page.getByRole("dialog"), { x: 500, width: 440, centerY: 450 }, { height: 282, heightTolerance: 20 });
 

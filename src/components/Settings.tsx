@@ -118,17 +118,66 @@ export function WorkspaceKeyForm({ workspace, refresh }: { workspace?: AccountCo
     <AccountError error={error} />
     <p><a href="https://linear.app/settings/api" target="_blank" rel="noreferrer">Open Linear API key settings</a>. The service encrypts
       your key, hides it after you save it, and deletes it when you remove the workspace.</p>
-    <div><button className="primary" disabled={busy}>{workspace ? "Replace key" : "Attach another workspace"}</button></div>
+    <div><button className="primary" disabled={busy}>{workspace ? "Replace key" : "Connect workspace"}</button></div>
   </form>;
 }
 
+/** The page address to return to after Linear, without the result of an earlier connection. */
+function returnPath() {
+  const query = new URLSearchParams(location.search);
+  query.delete("connect");
+  return location.pathname + (query.size ? `?${query}` : "");
+}
+
+export const connectUrl = () => `/auth/connect?next=${encodeURIComponent(returnPath())}`;
+
+const connectMessages: Record<string, [string, boolean]> = {
+  connected: ["Linear connected the workspace.", false],
+  reconnected: ["Linear connected the workspace again.", false],
+  "signin-workspace": ["That is your sign-in workspace. Connect again and choose another workspace on the Linear screen.", true],
+  limit: ["This account has the maximum number of workspaces. Remove a workspace, then connect again.", true],
+  denied: ["Linear did not connect a workspace, because the request was canceled.", true],
+  failed: ["Linear did not complete the connection. Try again.", true],
+  expired: ["Your session ended before Linear answered. Sign in, then connect again.", true],
+};
+
+/** The result of the last connection with Linear, from the `connect` value that the server adds to the address. */
+function ConnectResult() {
+  const [result] = useState(() => new URLSearchParams(location.search).get("connect"));
+  useEffect(() => {
+    if (result) history.replaceState(history.state, "", returnPath());
+  }, [result]);
+  const message = result ? connectMessages[result] : undefined;
+  if (!message) return null;
+  const [text, error] = message;
+  return <p className={error ? "account-error" : undefined} role={error ? "alert" : "status"}>{text}</p>;
+}
+
+/** Connects another workspace with Linear sign-in. `useKey` opens the personal API key form; without it, the form shows here. */
+export function ConnectWorkspace({ refresh, useKey }: { refresh: RefreshAccount; useKey?: () => void }) {
+  return <div className="account-form">
+    <ConnectResult />
+    <p>Linear asks which workspace to connect. Projects in a connected workspace stay private to you.</p>
+    <div className="account-actions">
+      <button type="button" className="primary" onClick={() => location.assign(connectUrl())}>Connect a workspace with Linear</button>
+      {useKey && <button type="button" onClick={useKey}>Use a personal API key</button>}
+    </div>
+    {!useKey && <details>
+      <summary>Use a personal API key instead</summary>
+      <WorkspaceKeyForm refresh={refresh} />
+    </details>}
+  </div>;
+}
+
 export function WorkspaceStatus({ workspace }: { workspace: AccountConnection }) {
+  const linear = workspace.kind === "oauth";
   return <><p className="account-muted">
-    {workspace.kind === "oauth" ? "Sign-in workspace" : "Personal API key"} · {workspace.status === "ok" ? "Active" :
-      workspace.kind === "api_key" ? "Needs a new key" :
-        <a href={`/auth/login?next=${encodeURIComponent(location.pathname + location.search)}`}>Sign in again</a>}
+    {!workspace.attached ? "Sign-in workspace" : linear ? "Connected with Linear" : "Personal API key"} · {workspace.status === "ok" ? "Active" :
+      !linear ? "Needs a new key" :
+        workspace.attached ? <a href={connectUrl()}>Connect again</a> :
+          <a href={`/auth/login?next=${encodeURIComponent(location.pathname + location.search)}`}>Sign in again</a>}
   </p>
-  {workspace.kind === "oauth" && workspace.status !== "ok" && <InstalledSignInHelp />}
+  {linear && !workspace.attached && workspace.status !== "ok" && <InstalledSignInHelp />}
   </>;
 }
 
@@ -302,13 +351,13 @@ function WorkspaceSettings({ workspace, count, refresh }: { workspace: AccountCo
         onClick={() => change({ position: position - 1 })}>Move up</button>
       <button type="button" disabled={busy || position >= count - 1} aria-label={`Move ${name} down`}
         onClick={() => change({ position: position + 1 })}>Move down</button>
-      {workspace.kind === "api_key" && <>
-        {workspace.status === "ok" && <button onClick={() => setDialog("replace")}>Replace key</button>}
+      {workspace.attached && <>
+        {workspace.kind === "api_key" && workspace.status === "ok" && <button onClick={() => setDialog("replace")}>Replace key</button>}
         <button className="danger" onClick={() => setDialog("remove")}>Remove workspace</button>
       </>}
     </div>
     <AccountError error={error} />
-    {workspace.kind === "api_key" && workspace.status === "needs_key" && <WorkspaceKeyForm workspace={workspace} refresh={refresh} />}
+    {workspace.attached && workspace.kind === "api_key" && workspace.status === "needs_key" && <WorkspaceKeyForm workspace={workspace} refresh={refresh} />}
     {dialog === "replace" && <AccountDialog title={`Replace key for ${name}`} close={() => setDialog(null)}>
       <WorkspaceKeyForm workspace={workspace} refresh={async () => {
         const result = await refresh();
@@ -316,13 +365,13 @@ function WorkspaceSettings({ workspace, count, refresh }: { workspace: AccountCo
         return result;
       }} />
     </AccountDialog>}
-    {dialog === "remove" && <Confirm title="Remove workspace" description={`Remove ${name} and its saved API key from this account?`}
+    {dialog === "remove" && <Confirm title="Remove workspace" description={`Remove ${name} and its saved Linear credential from this account?`}
       close={() => setDialog(null)} action={async () => { await accountApi.removeWorkspace(id); await refresh(); }} />}
   </article>;
 }
 
 export function Settings({ account, refresh, openGuide }: { account: Account; refresh: RefreshAccount; openGuide: () => void }) {
-  const [dialog, setDialog] = useState<"attach" | "token" | "delete" | null>(null);
+  const [dialog, setDialog] = useState<"key" | "token" | "delete" | null>(null);
   const [revoke, setRevoke] = useState<Account["tokens"][number] | null>(null);
   const date = (value: string) => new Date(value).toLocaleString();
   return <main className="account-page">
@@ -336,7 +385,8 @@ export function Settings({ account, refresh, openGuide }: { account: Account; re
       <section className="account-card">
         <h2>Linear workspaces</h2>
         {account.connections.map((workspace) => <WorkspaceSettings key={workspace.id} workspace={workspace} count={account.connections.length} refresh={refresh} />)}
-        <div><button onClick={() => setDialog("attach")}>Attach another workspace</button></div>
+        <h3>Connect another workspace</h3>
+        <ConnectWorkspace refresh={refresh} useKey={() => setDialog("key")} />
       </section>
       <section className="account-card">
         <h2>Coordinator tokens</h2>
@@ -359,7 +409,7 @@ export function Settings({ account, refresh, openGuide }: { account: Account; re
         <div><button className="danger" onClick={() => setDialog("delete")}>Delete account</button></div>
       </section>
     </div>
-    {dialog === "attach" && <AccountDialog title="Attach another workspace" close={() => setDialog(null)}>
+    {dialog === "key" && <AccountDialog title="Connect with a personal API key" close={() => setDialog(null)}>
       <WorkspaceKeyForm refresh={async () => {
         const result = await refresh();
         setDialog(null);

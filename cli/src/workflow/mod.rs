@@ -60,7 +60,7 @@ pub(crate) fn snapshot_using(
     let nodes = keymap["nodes"]
         .as_object()
         .filter(|m| !m.is_empty())
-        .ok_or("keymap.json has no nodes; run wg.py load --apply first")?;
+        .ok_or("keymap.json has no nodes; run wg load --apply first")?;
     let mut client = connect()?;
     let ids = nodes
         .values()

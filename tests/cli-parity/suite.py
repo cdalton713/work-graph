@@ -19,7 +19,7 @@ sys.path.insert(0, str(HERE))
 from services import fixture_service
 
 SKILL = HERE.parents[1] / "skills/work-graph"
-REFERENCE = [sys.executable, "-I", str(SKILL / "scripts/wg.py")]
+REFERENCE = [sys.executable, "-I", str(HERE / "reference/wg.py")]
 
 
 def files(root):

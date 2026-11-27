@@ -10,7 +10,7 @@ This plugin keeps that process running, so you do not have to keep a terminal op
 - When that terminal is gone, it opens a new background terminal named `wg agents` that runs
   `while :; do wg agents --wait; sleep 10; done`.
 - `--wait` lets the new sender wait while another sender holds the lock. The loop starts the sender again
-  when it exits, for example after `wg.py` changed.
+  when it exits, for example after `wg` executable changed.
 - It opens the terminal in the Orca workspace that the setting "Workspace path" names. When that is empty,
   it uses the first local checkout named `work-graph`.
 - The palette command "work-graph: start wg agents" runs the check now and shows the result.

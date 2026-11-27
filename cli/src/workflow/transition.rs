@@ -449,16 +449,9 @@ fn milestone(
         let record = std::fs::read(dir.join("evidence").join(format!("@full-{phase}.json")))
             .ok()
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-        let script = std::env::current_exe()
-            .ok()
-            .and_then(|exe| Some(exe.parent()?.join("skills/work-graph/scripts/wg.py")));
-        let command = script.filter(|path| path.is_file()).map_or_else(
-            || "wg".to_owned(),
-            |path| format!("python3 -I {}", crate::page::shell_quote(&path)),
-        );
         let plan_dir = dir.canonicalize().map_err(|e| e.to_string())?;
         let hint = format!(
-            "in a clean worktree at origin/{target}: {command} evidence {} @full-{phase}",
+            "in a clean worktree at origin/{target}: wg evidence {} @full-{phase}",
             crate::page::shell_quote(&plan_dir)
         );
         let Some(r) = record else {

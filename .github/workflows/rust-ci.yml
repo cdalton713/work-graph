@@ -1,10 +1,10 @@
 name: Rust preview
 on:
   pull_request:
-    paths: ['cli/**', 'packaging/**', 'tests/cli-upgrade/**', 'orca-plugin/**', 'skills/work-graph/**', '.github/workflows/release-cli.yml', 'tests/cli-parity/**', 'skills/work-graph/scripts/**', '.github/workflows/rust-ci.yml']
+    paths: ['cli/**', 'packaging/**', 'tests/cli-upgrade/**', 'orca-plugin/**', 'skills/work-graph/**', '.github/workflows/release-cli.yml', 'tests/cli-parity/**', '.github/workflows/rust-ci.yml']
   push:
     branches: [main]
-    paths: ['cli/**', 'packaging/**', 'tests/cli-upgrade/**', 'orca-plugin/**', 'skills/work-graph/**', '.github/workflows/release-cli.yml', 'tests/cli-parity/**', 'skills/work-graph/scripts/**', '.github/workflows/rust-ci.yml']
+    paths: ['cli/**', 'packaging/**', 'tests/cli-upgrade/**', 'orca-plugin/**', 'skills/work-graph/**', '.github/workflows/release-cli.yml', 'tests/cli-parity/**', '.github/workflows/rust-ci.yml']
 permissions:
   contents: read
 

@@ -151,7 +151,7 @@ fn journal_recovery_and_invalid_graph_match_reference() {
                     "-I",
                     concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../skills/work-graph/scripts/wg.py"
+                        "/../tests/cli-parity/reference/wg.py"
                     ),
                 ]);
                 c
@@ -177,13 +177,14 @@ fn journal_recovery_and_invalid_graph_match_reference() {
 fn contract_write_uses_the_selected_checkout() {
     let root = tempfile::tempdir().unwrap();
     let skill = root.path().join("skills/work-graph");
-    let scripts = skill.join("scripts");
+    fs::create_dir_all(&skill).unwrap();
+    let scripts = root.path().join("tests/cli-parity/reference");
     fs::create_dir_all(&scripts).unwrap();
     let oracle = scripts.join("wg.py");
     fs::copy(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../skills/work-graph/scripts/wg.py"
+            "/../tests/cli-parity/reference/wg.py"
         ),
         &oracle,
     )

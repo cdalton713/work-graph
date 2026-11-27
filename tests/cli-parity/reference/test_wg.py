@@ -5184,7 +5184,7 @@ class ContractTests(unittest.TestCase):
     def test_contract_json_is_what_the_code_does(self):
         # A change of a name, the card, or the rule of `satisfied` must come with `wg contract --write`,
         # and with the same file in octo/wg-ui (src/lib/contract.json).
-        path = Path(wg.__file__).resolve().parent.parent / "contract.json"
+        path = wg.SKILL_DIR / "contract.json"
         self.assertEqual(path.read_text(), wg.contract_text(), "run: wg contract --write")
 
     def test_each_sample_card_carries_its_data_block(self):
@@ -7694,18 +7694,18 @@ class ExplainTests(unittest.TestCase):
         self.assertIn("**Merge request**", text)
 
     def test_the_coordinator_text_names_wg_explain(self):
-        text = (Path(wg.__file__).resolve().parent.parent / "references" / "coordinator.md").read_text()
+        text = (wg.SKILL_DIR / "references" / "coordinator.md").read_text()
         self.assertIn("wg explain <verb>", text)
 
     def test_the_start_text_has_a_word_limit(self):
         # The text that a coordinator reads in full at each session start and at each autostart.
-        root = Path(wg.__file__).resolve().parent.parent
+        root = wg.SKILL_DIR
         for name, limit in (("SKILL.md", 2200), ("references/coordinator.md", 1800)):
             with self.subTest(name=name):
                 self.assertLessEqual(len((root / name).read_text().split()), limit)
 
     def test_each_relative_link_of_the_skill_text_names_a_file(self):
-        root = Path(wg.__file__).resolve().parent.parent
+        root = wg.SKILL_DIR
         for path in [root / "SKILL.md", *sorted((root / "references").glob("*.md"))]:
             for target in re.findall(r"\]\(([^)#:]+\.md)(?:#[^)]*)?\)", path.read_text()):
                 with self.subTest(file=path.name, target=target):

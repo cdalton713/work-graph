@@ -5,8 +5,7 @@ Linear. Coding agents do the work in parallel lanes, and a coordinator agent fol
 holds two parts:
 
 - `skills/work-graph/`: the agent skill. `SKILL.md` tells a coding agent (Claude Code, Codex) how to plan
-  and coordinate an effort. The managed CLI in `cli/` and the Python reference in
-  `scripts/wg.py` implement the `wg` command. It checks
+  and coordinate an effort. The native CLI in `cli/` provides the `wg` command. It checks
   the graph, syncs it to Linear, takes and releases claims, checks that a PR is code done, guards each status
   change, and prints the next action.
 - The page (`src/`, `server/`): a web app that shows each effort as a graph of its nodes (phases, lanes, merge
@@ -32,7 +31,7 @@ The config supplies one tenant. The server keeps Linear data in separate caches 
 
 The skill expects these tools: [Linear](https://linear.app), the GitHub CLI (`gh`),
 [stax](https://github.com/cesarferreira/stax) (`st`) for stacked branches, [Orca](https://github.com/stablyai/orca)
-for worker agents and worktrees, and [uv](https://docs.astral.sh/uv/) for the Python source launcher. The page needs Node 24 and pnpm.
+for worker agents and worktrees, and the native `wg` executable. The page needs Node 24 and pnpm.
 
 Each user who runs an effort needs access to Linear and these tools on their own machine,
 including an agent CLI (Claude Code or Codex). A hosted deployment serves only the page and its API.
@@ -45,6 +44,7 @@ Only a config installation can use `WG_STATE_DIR`. Other tenants keep the queue 
 
 ### Fresh managed installation
 
+The signed 0.1.1 Linux release passed CLI parity checks on Ubuntu 24.04 on x86_64 and arm64. Both binaries require glibc 2.39 and OpenSSL 3.
 Choose a stable release for your OS and CPU. Obtain its bootstrap digest and release public key through an
 independent authenticated channel. Follow the [bootstrap commands](packaging/install/README.md#fresh-installation)
 to verify and install the binary, skill and Orca plugin together. Put `~/.local/bin` first on PATH.
@@ -65,7 +65,7 @@ contracts before starting an effort.
 
 ### Migrate a source installation
 
-Keep the checkout, its local edits, and its Python and uv environment during rollout. Record the targets of
+Keep the legacy checkout, its local edits, and its Python and uv environment for recovery. Record the targets of
 your launcher and each agent's skill link with `readlink`. Preserve any local plugin edits before running
 `wg agents --install`. With the verified bootstrap and assets from the fresh installation procedure, run:
 
@@ -114,6 +114,27 @@ After a plugin change, `wg update status` requests review. Run `wg agents --inst
 plugin with the bundled files and review any new access request in Orca. After review, remove
 `"$root/update-plugin-review"`. Registrations, permissions and disabled-plugin settings remain under local
 control. See the [shared updater controls](cli/src/update/README.md).
+
+### Recover a retained plugin registration
+
+After a CLI update or rollback, run `wg agents --install`. Orca can record the plugin folder as
+`current/orca-plugin` or as the resolved folder in the active release. Orca can also keep a path to a different signed release of the same installation and target.
+If its plugin files match the active release and the registered hash has approval, the command reports
+the retained path. You can continue with that registration. If the plugin files change, run the command
+again and review the requested access. If Orca keeps an unrelated checkout, the command reports
+the registered and expected paths.
+
+To replace that registration explicitly:
+
+1. Run `orca plugin list --json`. Record the plugin key, source, enabled state, and the
+   **Workspace path** and **Keep wg agents running** settings. Keep a backup of the Orca profile
+   and any edited plugin source. Check that you can read the backup before continuing.
+2. When you are ready to interrupt the plugin, run `orca plugin uninstall <plugin-key>` with
+   the key you recorded. This removes the registration, its approval and theme choices.
+3. Run `wg agents --install` through the managed launcher. Review the requested access and run the
+   printed approval command if you accept it. Restore your settings and enabled state.
+4. Run `wg agents --install` again. It should report that the plugin is installed and current.
+   Check the source in `orca plugin list --json` against the active release.
 
 ### Recover signing trust
 
@@ -335,7 +356,7 @@ On a hosted page with accounts, only the account that sends the lines can see th
 Keep `wg agents` running on the machine that runs Orca. Run `wg login` for the workspace page so the sender can
 use the token for that page. `wg doctor <dir>` shows the sender service and the last successful send for that effort.
 
-The sender checks for config and token changes each cycle. If `wg.py` changes, the sender exits, and the
+The sender checks for config and token changes each cycle. If the `wg` executable changes, the sender exits, and the
 plugin's terminal starts the new code.
 
 When no report came for 3 minutes, the page shows "agent view stopped". `wg agents --uninstall` removes the plugin.
@@ -458,7 +479,7 @@ For a service with separate Linear accounts, see [Run the hosted service](#run-t
 
 **What a host does not do.** The host serves only the page and its API. The coordinator and
 workers run on the user's machine. Each user who runs an effort needs access to Linear and
-local copies of `gh`, `st`, Orca, `uv`, and an agent CLI (Claude Code or Codex).
+local copies of `gh`, `st`, Orca, and an agent CLI (Claude Code or Codex).
 
 The `Dockerfile` builds the page and its server. Run the container behind a proxy that serves HTTPS, and set:
 
@@ -649,7 +670,7 @@ identifies the existing project, issues, cards, and milestone.
 ## Run the hosted service
 
 The service hosts the page and its API. Accounts share a server and keep their workspaces private.
-Each user runs `wg`, Orca, `gh`, `st`, `uv`, and an agent CLI on their own machine.
+Each user runs `wg`, Orca, `gh`, `st`, and an agent CLI on their own machine.
 
 To enable push for the hosted service, set the same VAPID keys on every instance (see [Config](#config)).
 The service stores subscriptions in Postgres and encrypts them with `WG_DATA_KEY`. Device removal and
@@ -954,9 +975,9 @@ Checks of a viewer: `GET /healthz` gives `{"ok":true}`; `GET /api/config` gives 
 ## The contract between `wg` and the page
 
 `skills/work-graph/contract.json` holds the status names, the node card format, the link protocol, and the rule
-that says when a blocker is done. `wg contract --write` makes it from `wg.py`, and it does not depend on the local
-config. The tests of both parts read it: `python3 -m unittest` in `skills/work-graph/scripts`, and `pnpm test`
-here. After a change of `wg.py`, write the file again and change the page until both pass.
+that says when a blocker is done. `wg contract --write` makes it from the native CLI, and it does not depend on the local
+config. The tests of both parts read it: `python3 -m unittest` in `tests/cli-parity/reference`, and `pnpm test`
+here. After a CLI contract change, write the file again and change the page until both pass.
 
 ## License
 

@@ -67,7 +67,7 @@ wg.project_entries = lambda *_: [objects[km["milestones"]["1"]]]
 wg.gql = lambda _, variables: {"comment": objects[variables["id"]]}
 wg.validate_shared_mapping({"nodes": {}, "milestones": {}}, km, "second", km["project"]["id"], p, {})
 `],
-  { cwd: "skills/work-graph/scripts", input: JSON.stringify([result.plan, result.keymap, Object.fromEntries(saved)]), encoding: "utf8", env: { ...process.env, WG_CONFIG: "/nonexistent/work-graph-test-config" } });
+  { cwd: "tests/cli-parity/reference", input: JSON.stringify([result.plan, result.keymap, Object.fromEntries(saved)]), encoding: "utf8", env: { ...process.env, WG_CONFIG: "/nonexistent/work-graph-test-config" } });
   expect(checked.stderr).toBe("");
   expect(checked.status).toBe(0);
 });

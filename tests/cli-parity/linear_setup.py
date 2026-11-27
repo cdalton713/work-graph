@@ -9,9 +9,8 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(ROOT / "skills/work-graph/scripts"))
+sys.path.insert(0, str(HERE / "reference"))
 from services import Handler, fixture_service
 from test_wg import SetupTests, TEST_CONFIG
 
@@ -120,11 +119,11 @@ def main():
                                                      {"id": "sample", "team": "WG", "key_env": ["FIXTURE_KEY"], "team_labels": 0}]}))
         env = dict(PATH=os.environ["PATH"], HOME=home, WG_CONFIG=str(config), WG_LINK="off",
                    FIXTURE_KEY="fixture-key", **network)
-        expected = exercise([sys.executable, "-I", str(ROOT / "skills/work-graph/scripts/wg.py")], env, config)
+        expected = exercise([sys.executable, "-I", str(HERE / "reference/wg.py")], env, config)
         actual = exercise([candidate], env, config)
         for a, e in zip(actual, expected, strict=True):
             assert a == e, (a, e)
-        for command in ([sys.executable, "-I", str(ROOT / "skills/work-graph/scripts/wg.py")], [candidate]):
+        for command in ([sys.executable, "-I", str(HERE / "reference/wg.py")], [candidate]):
             check_routing(command, env, config)
         check_rejected_inputs([candidate], env, config)
 

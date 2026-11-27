@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE.parents[1] / "skills/work-graph/scripts/wg.py"
+SCRIPT = HERE / "reference/wg.py"
 BINARY = Path(sys.argv[1]).resolve()
 
 

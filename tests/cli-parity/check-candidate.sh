@@ -4,7 +4,7 @@ suite=$(cd "$(dirname "$0")" && pwd)
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 mkdir "$fixture/entry"
-ln -s "$suite/../../skills/work-graph/scripts/wg.py" "$fixture/entry/wg"
+ln -s "$suite/reference/wg.py" "$fixture/entry/wg"
 python3 - "$fixture" <<'PY'
 from pathlib import Path
 import shlex

@@ -5,7 +5,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 
 export const TITLE = 'wg agents'
 // `--wait` waits while another sender holds the lock. The loop starts the sender again after it exits,
-// for example when wg.py changed.
+// for example when the wg executable changed.
 export const COMMAND = 'while :; do wg agents --wait; sleep 10; done'
 const CHECK_MS = 60_000
 

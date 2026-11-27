@@ -89,6 +89,12 @@ html:has(.sheet[open]), body:has(.sheet[open]) { overflow: hidden; }
   color: var(--ink-1); background: var(--cab-3); overflow: hidden;
 }
 .sheet::backdrop { background: rgb(0 0 0 / 60%); }
+@media (min-width: 720px) {
+  .sheet.is-narrow {
+    inset: 0; margin: auto; width: min(620px, calc(100% - 48px)); height: fit-content;
+    border-bottom: 1px solid var(--rail-2); border-radius: var(--r-2);
+  }
+}
 .sheet-layout {
   display: flex; flex-direction: column; max-height: inherit;
   padding-bottom: env(safe-area-inset-bottom);

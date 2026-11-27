@@ -17,5 +17,10 @@ test("the hold form fits the screen and picks a date on its calendar", async ({ 
   await expect(calendar.locator(".cal-day.is-on")).toHaveCount(1);
   const width = page.viewportSize()!.width;
   expect(await sheet.evaluate((element) => element.querySelector(".sheet-body")!.scrollWidth)).toBeLessThanOrEqual(width);
+  if (width >= 720) {
+    const box = (await sheet.boundingBox())!;
+    expect(box.width).toBeLessThanOrEqual(620);
+    expect(Math.abs(box.x + box.width / 2 - width / 2)).toBeLessThan(2);
+  }
   await page.screenshot({ path: `test-results/hold-${info.project.name}.png` });
 });

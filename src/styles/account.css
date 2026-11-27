@@ -115,7 +115,7 @@
 .setup-labels { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 6px 12px; }
 .setup-labels li { display: flex; gap: 8px; }
 
-.hold-form { max-width: 560px; }
+.hold-form { max-width: 600px; }
 .hold-form p { margin: 0; }
 .hold-form .hold-intro { color: var(--ink-2); }
 .hold-form label, .hold-field { display: grid; gap: 6px; width: 100%; }

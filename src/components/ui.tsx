@@ -323,11 +323,13 @@ export function Hint({ text, children, className, infoLabel }: {
 }
 
 /** A modal panel anchored to the bottom of the window. */
-export function Sheet({ open, title, onClose, children }: {
+export function Sheet({ open, title, onClose, children, narrow }: {
   open: boolean;
   title: string;
   onClose: () => void;
   children: ReactNode;
+  /** On a wide screen, a centered dialog sized to a form instead of a sheet across the whole width. */
+  narrow?: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const backdropPress = useRef(false);
@@ -363,7 +365,7 @@ export function Sheet({ open, title, onClose, children }: {
     return x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom;
   }
 
-  return <dialog ref={dialog} className="sheet" aria-labelledby={heading} onKeyDown={keepTabInside}
+  return <dialog ref={dialog} className={narrow ? "sheet is-narrow" : "sheet"} aria-labelledby={heading} onKeyDown={keepTabInside}
     onClose={(event) => { if (open && !event.currentTarget.open) onClose(); }}
     onCancel={(event) => { event.preventDefault(); onClose(); }}
     onPointerDown={(event) => {

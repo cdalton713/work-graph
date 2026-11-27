@@ -62,7 +62,7 @@ function HoldSheet({ held, hold, now, onHold, onResume, onClose }: {
 
   if (held) {
     const ended = hold ? holdEnded(hold, now) : null;
-    return <Sheet open title="On hold" onClose={() => { if (!busy) onClose(); }}>
+    return <Sheet open narrow title="On hold" onClose={() => { if (!busy) onClose(); }}>
       <div className="account-form hold-form">
         <p>{hold ? holdText(hold, now) : "This project has the label on-hold, but Linear has no hold update for it."}</p>
         {ended && <p><b>The hold ended:</b> {ended}.</p>}
@@ -75,7 +75,7 @@ function HoldSheet({ held, hold, now, onHold, onResume, onClose }: {
     </Sheet>;
   }
 
-  return <Sheet open title="Put on hold" onClose={() => { if (!busy) onClose(); }}>
+  return <Sheet open narrow title="Put on hold" onClose={() => { if (!busy) onClose(); }}>
     <form className="account-form hold-form" onSubmit={submit}>
       <p className="hold-intro">The project leaves the Overview list and the inbox, and the coordinator pauses. It comes back as your move on the date, or when the agent check says the wait is over.</p>
       <label><span className="hold-label">Waiting for</span><input required maxLength={200} disabled={busy} value={waitingFor} placeholder="Shopify app review"

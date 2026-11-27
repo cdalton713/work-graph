@@ -2,6 +2,7 @@ import type { NoticeSettings } from "./lib/types";
 import type { ProjectClaims } from "./lib/claims";
 import type { Ask, Presence } from "./lib/link";
 import type { AutonomyLevel } from "./lib/autonomy";
+import type { AgentSettings } from "./lib/agents";
 import type { ReviewEffort } from "./lib/review";
 import type { HoldInput } from "./lib/hold";
 import { pageEvent, type PageEvent } from "./lib/telemetry";
@@ -226,6 +227,7 @@ export const accountApi = {
     accountWrite<SetupTeam>(`/workspaces/${encodeURIComponent(id)}/teams`, "POST", input),
   read: (signal?: AbortSignal) => call<Account>("account", { signal }),
   saveName: (human: string) => accountWrite("", "PATCH", { human }),
+  saveAgents: (agents: AgentSettings) => accountWrite<{ agents: AgentSettings }>("/agents", "PUT", { agents }),
   onboarding: (state: { name?: true; skipped?: boolean; step?: "workspaces" | "teams" | "setup"; complete?: true }) => accountWrite("/onboarding", "POST", state),
   attach: (key: string) => accountWrite("/workspaces", "POST", { key }),
   replace: (id: string, key: string) => accountWrite(`/workspaces/${id}/key`, "PUT", { key }),

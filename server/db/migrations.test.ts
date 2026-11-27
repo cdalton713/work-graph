@@ -18,7 +18,7 @@ databaseSuites((open) => {
     const sql = await database();
     await Promise.all([migrate(sql), migrate(sql)]);
     await migrate(sql);
-    expect(await sql.query("SELECT version FROM schema_migrations ORDER BY version")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }]);
+    expect(await sql.query("SELECT version FROM schema_migrations ORDER BY version")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }]);
     for (const table of ["users", "tenants", "linear_connections", "coordinator_tokens", "project_plans", "push_devices", "push_settings"]) {
       expect(await sql.query(`SELECT * FROM ${table}`)).toEqual([]);
     }
@@ -47,7 +47,7 @@ databaseSuites((open) => {
         } });
       }),
     });
-    expect(timeouts).toHaveLength(14);
+    expect(timeouts).toHaveLength(15);
     for (const timeout of timeouts) expect(timeout).toEqual([{ statement_timeout: "0" }]);
     expect(await sql.query("SHOW statement_timeout")).toEqual(original);
   });

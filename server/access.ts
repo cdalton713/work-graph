@@ -110,6 +110,7 @@ export const sharedRoutes: Readonly<Record<string, "list" | "project" | "issue" 
   "POST /api/account/tokens": "denied",
   "DELETE /api/account/tokens/:id": "denied",
   "POST /api/account/onboarding": "denied",
+  "PUT /api/account/agents": "denied",
   "POST /api/account/workspaces": "denied",
   "PUT /api/account/workspaces/:id/key": "denied",
   "PATCH /api/account/workspaces/:id": "denied",

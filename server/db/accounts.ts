@@ -4,6 +4,7 @@ import type { Workspace } from "../workspaces.ts";
 import { LinearSignInRequired, type OAuthCredential } from "../linearauth.ts";
 import { coordinatorToken, tokenHash, type CredentialCrypto } from "./crypto.ts";
 import type { Query, Sql } from "./sql.ts";
+import type { AgentSettings } from "../../src/lib/agents.ts";
 import { createPlans } from "./plans.ts";
 import { createClaims } from "./claims.ts";
 import { createShares } from "./shares.ts";
@@ -216,8 +217,8 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
     async readTenant(tenant: string) {
       requireUuid(tenant);
       return sql.transaction(async ({ query }) => {
-        const [account] = await query<{ id: string; human: string; nameConfirmed: boolean; onboardingSkipped: boolean; user: User }>(`
-          SELECT t.id, t.human, t.name_confirmed AS "nameConfirmed", t.onboarding_skipped AS "onboardingSkipped",
+        const [account] = await query<{ id: string; human: string; nameConfirmed: boolean; onboardingSkipped: boolean; agents: AgentSettings; user: User }>(`
+          SELECT t.id, t.human, t.name_confirmed AS "nameConfirmed", t.onboarding_skipped AS "onboardingSkipped", t.agents,
             json_build_object('linearUserId', u.linear_user_id,
             'linearOrgId', u.linear_org_id, 'email', u.email, 'name', u.name) AS "user"
           FROM tenants t JOIN users u ON u.id = t.owner_user_id WHERE t.id = $1 FOR SHARE OF t`, [tenant]);
@@ -231,6 +232,12 @@ export function createAccounts(sql: Sql, crypto: CredentialCrypto, changed: (ten
     setHuman(tenant: string, human: string) {
       return change(tenant, async (query) => {
         await query("UPDATE tenants SET human = $2 WHERE id = $1", [tenant, human]);
+      });
+    },
+
+    setAgents(tenant: string, agents: AgentSettings) {
+      return change(tenant, async (query) => {
+        await query("UPDATE tenants SET agents = $2 WHERE id = $1", [tenant, JSON.stringify(agents)]);
       });
     },
 

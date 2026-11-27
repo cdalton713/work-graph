@@ -150,6 +150,8 @@ const migrations = [
   ],
   // The owner sees a live share link again: its token, encrypted. A link made before this has none.
   ["ALTER TABLE shares ADD COLUMN token text"],
+  // The account default of the coordinator and worker agents, for the wg config block (src/lib/agents.ts).
+  ["ALTER TABLE tenants ADD COLUMN agents jsonb NOT NULL DEFAULT '{}'::jsonb"],
 ];
 
 export async function migrate(sql: Sql): Promise<void> {

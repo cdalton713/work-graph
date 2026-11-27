@@ -13,7 +13,7 @@ export const steps = [
 export type Step = (typeof steps)[number]["id"];
 export type NewTeam = { key: string; name: string };
 export type NewTeams = Record<string, NewTeam>;
-type SetupAccount = Pick<Account, "human" | "pageUrl" | "connections">;
+type SetupAccount = Pick<Account, "human" | "pageUrl" | "connections" | "agents">;
 
 export function doneSteps({ name, workspaces, teams, token, connected }: OnboardingState, statuses = false): Record<Step, boolean> {
   return { welcome: name || token || connected, name, workspaces, teams, statuses, setup: token, connect: connected };
@@ -26,7 +26,7 @@ export function firstStep(state: OnboardingState, statuses?: boolean): Step | nu
   return steps.find(({ id }) => !done[id])?.id ?? null;
 }
 
-export function configBlock({ human, connections, pageUrl }: SetupAccount, drafts: NewTeams): string {
+export function configBlock({ human, connections, pageUrl, agents }: SetupAccount, drafts: NewTeams): string {
   return JSON.stringify({
     human,
     page_url: pageUrl,
@@ -37,6 +37,7 @@ export function configBlock({ human, connections, pageUrl }: SetupAccount, draft
       team_labels: workspace.team_labels,
       key_env: [],
     })),
+    ...(agents && Object.keys(agents).length ? { agents } : {}),
   }, null, 2);
 }
 

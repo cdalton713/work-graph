@@ -9,6 +9,7 @@ import type { Session } from "./auth.ts";
 import type { Telemetry, UsageScope } from "./telemetry.ts";
 import type { Tenant } from "./tenants.ts";
 import type { SetupTeamInput } from "../src/lib/types.ts";
+import { validateAgents } from "../src/lib/agents.ts";
 import type { Workspace } from "./workspaces.ts";
 import type { InWorkspace } from "./linearaccess.ts";
 import { createSetupTeam, PrivateTeamFailed, setupCommand, teamSetup } from "./teamsetup.ts";
@@ -185,10 +186,10 @@ export function accountRoutes(options: Options) {
 
   routes.get("/", async (c) => {
     const { accounts, account } = c.var;
-    const { id, human, connections, nameConfirmed, onboardingSkipped } = account;
+    const { id, human, connections, nameConfirmed, onboardingSkipped, agents } = account;
     const { tokens, connected } = await accounts.tokenSummary(id);
     return c.json({
-      human, connections: connections.map(publicConnection), tokens, pageUrl: options.pageUrl,
+      human, connections: connections.map(publicConnection), tokens, pageUrl: options.pageUrl, agents: agents ?? {},
       oauthAttach: !!options.oauthAttach,
       onboarding: {
         name: nameConfirmed, workspaces: true, teams: connections.every(({ team }) => !!team),
@@ -205,6 +206,14 @@ export function accountRoutes(options: Options) {
     }
     await c.var.accounts.setHuman(c.var.account.id, human);
     return c.json({ human, message: "Set the same human name in your wg config." });
+  });
+
+  // The account default of the coordinator and worker agents. The page puts it in the wg config block.
+  routes.put("/agents", async (c) => {
+    const agents = validateAgents((await body(c)).agents);
+    if (typeof agents === "string") return c.json({ error: agents }, 400);
+    await c.var.accounts.setAgents(c.var.account.id, agents);
+    return c.json({ agents });
   });
 
   routes.post("/tokens", async (c) => {

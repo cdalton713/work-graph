@@ -55,6 +55,12 @@ describe("onboarding", () => {
     ]);
   });
 
+  it("adds the chosen agents and leaves them out when none are set", () => {
+    const agents = { worker: { agent: "codex" as const, model: "gpt-6.1-sol", effort: "high" } };
+    expect(JSON.parse(configBlock({ ...account, agents }, {})).agents).toEqual(agents);
+    expect(JSON.parse(configBlock({ ...account, agents: {} }, {}))).not.toHaveProperty("agents");
+  });
+
   it("names the workspace-specific environment variable and key file", () => {
     expect(workspaceKeyLocation("extra-team")).toEqual({
       env: "LINEAR_EXTRA_TEAM_API_KEY",

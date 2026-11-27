@@ -457,6 +457,10 @@ installation config. Changing the agent drops the model and effort from the
 lower-priority setting for the previous agent. The default worker is Codex. The default coordinator is
 Orca's default agent. `wg config [<plan-dir>]` shows the resolved roles.
 
+On the hosted page, the "Install wg" step of the setup guide and Settings have an Agents form. It saves the
+choice on your account and adds it as the `agents` object of the config block to copy. The form lists known
+models and effort levels for each agent and also takes another model ID.
+
 A follow-up job uses the settings in the node's run row before the plan and
 config defaults. Command flags can override those settings. To apply changes
 to an installed coordinator automation, run `wg autostart <plan-dir> --install`

@@ -26,12 +26,24 @@ test("a new account completes the verified setup steps", async ({ page, context 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await next.click();
   await expect(page.locator(".account-step h3")).toHaveText([
-    "1. Add these settings to ~/.config/work-graph/config.json", "2. Set up your Linear key",
-    "3. Coordinator token", "4. Then run these commands",
+    "1. Choose the agents", "2. Add these settings to ~/.config/work-graph/config.json", "3. Set up your Linear key",
+    "4. Coordinator token", "5. Then run these commands",
   ]);
+  await expect(page.getByLabel("Worker effort")).toBeDisabled();
+  await page.getByLabel("Worker agent").selectOption("codex");
+  await page.getByLabel("Worker model").selectOption("gpt-6.1-sol");
+  await page.getByLabel("Worker effort").selectOption("high");
+  await page.getByLabel("Coordinator agent").selectOption("claude");
+  await page.getByLabel("Coordinator model").selectOption(":custom");
+  await page.getByLabel("Coordinator model ID").fill("claude-next");
+  await page.getByRole("button", { name: "Save agents" }).click();
+  await expect(page.getByText("Agents saved.")).toBeVisible();
   await page.getByRole("button", { name: "Copy wg config" }).click();
   const config = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
   expect(config.workspaces[0].team).toBe("WG");
+  expect(config.agents).toEqual({
+    coordinator: { agent: "claude", model: "claude-next" }, worker: { agent: "codex", model: "gpt-6.1-sol", effort: "high" },
+  });
   await page.getByRole("button", { name: "Copy all", exact: true }).click();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
   expect(copied.split("\n")).toEqual([

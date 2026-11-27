@@ -391,6 +391,22 @@ databaseSuites((open) => {
     } finally { await t.close(); }
   });
 
+  it("saves the default agents of the account", async () => {
+    const t = await setup();
+    try {
+      const { cookie } = await t.owner("ada");
+      expect((await (await t.request(root, cookie)).json()).agents).toEqual({});
+      for (const agents of [null, { worker: { effort: "high" } }, { worker: { agent: "pi" } }, { reviewer: {} }]) {
+        expect((await t.request(root + "/agents", cookie, "PUT", { agents })).status).toBe(400);
+      }
+      const agents = { coordinator: { agent: "claude", model: "claude-opus-5-5", effort: "high" }, worker: { agent: "codex", model: "" } };
+      expect(await (await t.request(root + "/agents", cookie, "PUT", { agents })).json())
+        .toEqual({ agents: { coordinator: agents.coordinator, worker: { agent: "codex" } } });
+      expect((await (await t.request(root, cookie)).json()).agents)
+        .toEqual({ coordinator: agents.coordinator, worker: { agent: "codex" } });
+    } finally { await t.close(); }
+  });
+
   async function coordinatorSocket(app: ReturnType<typeof createApp>, token: string) {
     const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
     app.injectWebSocket(server as Parameters<typeof app.injectWebSocket>[0]);

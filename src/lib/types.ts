@@ -1,3 +1,4 @@
+import type { AgentSettings } from "./agents";
 import type { AutonomyLevel } from "./autonomy";
 import type { Hold } from "./hold";
 import type { ReviewEffort } from "./review";
@@ -211,6 +212,8 @@ export interface Account {
   connections: AccountConnection[];
   tokens: CoordinatorToken[];
   onboarding: OnboardingState;
+  /** The account default of the coordinator and worker agents, for the `agents` object of the wg config. */
+  agents?: AgentSettings;
   /** Linear OAuth can attach more workspaces. Off: only personal API keys attach. */
   oauthAttach?: boolean;
 }

@@ -154,3 +154,9 @@
 .cal-day.is-on { border-color: var(--lamp-done); background: color-mix(in srgb, var(--lamp-done) 22%, transparent); color: var(--ink-1); font-weight: 600; }
 @media (pointer: coarse) { .cal-day { height: 40px; } .cal-quick button, .cal-nav { min-height: 40px; } }
 .cal-summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }
+
+/* The agent, model, and effort of each role (Agents.tsx). */
+.agent-roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.agent-role { display: grid; align-content: start; gap: 8px; min-width: 0; margin: 0; padding: 10px 12px; border: 1px solid var(--rail); border-radius: 8px; }
+.agent-role legend { padding: 0 4px; font-weight: 600; }
+.agent-role label { width: 100%; }

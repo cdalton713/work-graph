@@ -1,6 +1,7 @@
 import { Notices } from "./Notices";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Intro } from "./Intro";
+import { AgentsForm } from "./Agents";
 import { InstalledSignInHelp } from "./SignIn";
 import { accountApi } from "../api";
 import { validateNewTeam, type NewTeam } from "../lib/onboarding";
@@ -257,6 +258,23 @@ export function TeamForm({ workspace, refresh, draft, saveDraft }: {
   </form>;
 }
 
+/** The account default of the coordinator and worker agents. The setup guide copies it into the wg config. */
+export function AccountAgents({ account, refresh }: { account: Account; refresh: RefreshAccount }) {
+  const { busy, error, run } = useAccountAction();
+  const [saved, setSaved] = useState(false);
+  return <>
+    <AgentsForm key={JSON.stringify(account.agents ?? {})} value={account.agents ?? {}} busy={busy} error={error}
+      note="wg reads these from the agents object of ~/.config/work-graph/config.json. A project can set its own in the page header."
+      save={(agents) => void run(async () => {
+        setSaved(false);
+        await accountApi.saveAgents(agents);
+        await refresh();
+        setSaved(true);
+      })} />
+    {saved && <p role="status">Agents saved. Copy the new config block into your wg config.</p>}
+  </>;
+}
+
 export async function copySecret(text: string, trigger: HTMLButtonElement) {
   try {
     if (navigator.clipboard) {
@@ -400,6 +418,10 @@ export function Settings({ account, refresh, openGuide }: { account: Account; re
         {account.connections.map((workspace) => <WorkspaceSettings key={workspace.id} workspace={workspace} count={account.connections.length} refresh={refresh} />)}
         <h3>Connect another workspace</h3>
         <ConnectWorkspace refresh={refresh} useKey={() => setDialog("key")} oauth={account.oauthAttach} />
+      </section>
+      <section className="account-card">
+        <h2>Agents</h2>
+        <AccountAgents account={account} refresh={refresh} />
       </section>
       <section className="account-card">
         <h2>Coordinator tokens</h2>

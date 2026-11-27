@@ -3,7 +3,7 @@ import { usageEnabled } from "../lib/telemetry";
 import { accountApi } from "../api";
 import { configBlock, installBlock, doneSteps, firstStep, pollWhileVisible, setupCommands, steps, workspaceKeyLocation, type Step } from "../lib/onboarding";
 import type { Account, SetupTeam } from "../lib/types";
-import { AccountError, ConnectWorkspace, copySecret, NameForm, TokenForm, useAccountAction, WorkspaceStatus, type RefreshAccount } from "./Settings";
+import { AccountAgents, AccountError, ConnectWorkspace, copySecret, NameForm, TokenForm, useAccountAction, WorkspaceStatus, type RefreshAccount } from "./Settings";
 import { Intro } from "./Intro";
 import { CopyButton } from "./ui";
 import { WorkspaceSetup } from "./onboarding/WorkspaceSetup";
@@ -121,12 +121,17 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
             </>}
             {step === "setup" && <>
               <section>
-                <h3>1. Add these settings to <code>~/.config/work-graph/config.json</code></h3>
+                <h3>1. Choose the agents</h3>
+                <p>Choose who runs the coordinator and the worker jobs. Leave a field at Default to use the agent's own default.</p>
+                <AccountAgents account={account} refresh={refresh} />
+              </section>
+              <section>
+                <h3>2. Add these settings to <code>~/.config/work-graph/config.json</code></h3>
                 {account.connections.some(({ team }) => !team) && <p>Choose a team for each workspace before you run the setup commands.</p>}
                 <Command text={config} label="Copy wg config" />
               </section>
               <section>
-                <h3>2. Set up your Linear key</h3>
+                <h3>3. Set up your Linear key</h3>
                 <p><a href={readme + "#config"} target="_blank" rel="noreferrer">Set up a local Linear key</a> for each workspace on your computer so <code>wg</code> can work with its team. Set the environment variable or save the key in the file with permissions 600.</p>
                 <ul className="account-key-locations">
                   {account.connections.map(({ id, name, workspace_id }) => {
@@ -135,9 +140,9 @@ export function Onboarding({ account, refresh, overview }: { account: Account; r
                   })}
                 </ul>
               </section>
-              <section><h3>3. Coordinator token</h3><TokenForm refresh={refresh} /></section>
+              <section><h3>4. Coordinator token</h3><TokenForm refresh={refresh} /></section>
               <section className="account-form">
-                <h3>4. Then run these commands</h3>
+                <h3>5. Then run these commands</h3>
                 <p><a href={readme + "#install-the-skill"} target="_blank" rel="noreferrer">Read the installation instructions</a>.</p>
                 <CopyAll text={installBlock(commands)} />
                 <p>Paste the coordinator token when <code>wg login</code> asks for it.</p>

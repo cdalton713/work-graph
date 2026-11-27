@@ -13,6 +13,8 @@ export interface Issue {
   blocks: IssueRef[]; blockedBy: IssueRef[]; card: { id: string; body: string } | null;
   /** Not in the project; shown because a project issue has a blocks relation with it. Read-only. */
   external: boolean;
+  /** Archived in Linear (wg archives settled issues on the Free plan). Read-only. */
+  archived?: boolean;
   pullRequests: PullRequest[];
 }
 /** A GitHub pull request linked to the issue. `reviewUrl` is its page in Linear's code review, when Linear has it. */

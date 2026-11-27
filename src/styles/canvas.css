@@ -138,6 +138,7 @@
 }
 
 .station-wave { color: var(--ink-2); }
+.station-archived { color: var(--ink-3); }
 .station-soak { color: var(--ink-2); text-transform: none; letter-spacing: 0; }
 
 .station-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

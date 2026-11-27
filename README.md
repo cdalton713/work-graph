@@ -381,7 +381,8 @@ or action, or the stall if there is one. The browser tab shows the inbox count.
 
 In a workspace on Linear's Free plan (250 issues; archived issues do not count), `wg` archives each completed and
 canceled issue of the workspace at each `wg move` to Done or Canceled and at each `wg tick`. `wg archive <dir>`
-shows the list; `--apply` archives it. `wg` and the page read archived issues and their relations.
+shows the list; `--apply` archives it. `wg` and the page read archived issues and their relations. The page
+shows each archived issue of the project as a read-only node, marked archived; the server refuses each write to it.
 
 Each Linear team of a plan needs the statuses Triage, Backlog, Todo, Ready, In Progress, `Needs <human>`,
 In Review, Ready to Merge, Merged, Verifying, Done, Canceled, and Duplicate

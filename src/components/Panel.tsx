@@ -77,7 +77,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
   const elapsed = runTime(card, now);
   const team = data.teams[issue.teamId];
   // The issue of another team, and each issue on the viewer, has no control that writes.
-  const foreign = issue.external || !team;
+  const foreign = issue.external || !!issue.archived || !team;
   const locked = foreign || readOnly;
   const [title, setTitle] = useState(issue.title);
   const [draft, setDraft] = useState<string | null>(null);
@@ -141,7 +141,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
   const held = dependents.filter((id) => !satisfied(node, graph.byId.get(id)!)).length;
   const thread = comments?.filter((c) => !c.body.startsWith(CARD_PREFIX)) ?? [];
 
-  const dispatch = onDispatch && card?.key && /(^|\n)do dispatch\b/.test(card.next ?? "") ? (
+  const dispatch = onDispatch && !issue.archived && card?.key && /(^|\n)do dispatch\b/.test(card.next ?? "") ? (
     <button type="button" className="primary" onClick={() => void onDispatch(card.key!, issue.identifier)}>Dispatch</button>
   ) : null;
   const { marked } = reviewOf(issue, card);
@@ -197,6 +197,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
         <Lamp signal={node.signal} />
         <a className="mono panel-id" href={issue.url} target="_blank" rel="noreferrer" aria-label={`Open ${issue.identifier} in Linear`}>{issue.identifier} ↗</a>
         <span className="chip">{node.kind}</span>
+        {issue.archived && <span className="chip chip-fixed">archived</span>}
         {node.claim && <span className="chip chip-claim"><Lamp signal="running" pulse />{node.claim}</span>}
         <span className="station-fill" />
         {phone && onShowInGraph && (
@@ -219,10 +220,12 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
         {node.waitsOnOther && <p className="notice">This issue waits on {node.waitsOnOther}.</p>}
         {foreign && !readOnly && (
           <p className="notice">
-            {issue.external
-              ? `${issue.identifier} is in team ${issue.teamKey}, outside this project${card ? "; wg maps it as a node of this effort" : ""}. `
-              : `${issue.identifier} is in team ${issue.teamKey}. `}
-            This page writes only to its own team, so the issue is read-only here. <a href={issue.url} target="_blank" rel="noreferrer">Change it in Linear ↗</a>
+            {issue.archived
+              ? `${issue.identifier} is archived in Linear, so it is read-only here. `
+              : <>{issue.external
+                ? `${issue.identifier} is in team ${issue.teamKey}, outside this project${card ? "; wg maps it as a node of this effort" : ""}. `
+                : `${issue.identifier} is in team ${issue.teamKey}. `}
+              This page writes only to its own team, so the issue is read-only here. </>} <a href={issue.url} target="_blank" rel="noreferrer">Change it in Linear ↗</a>
           </p>
         )}
         {agent && (
@@ -386,7 +389,7 @@ export function Panel({ node, claim, onRelease, now, graph, data, onPatch, onGo,
               <Rich linkHints text={c.body} />
             </article>
           ))}
-          {!readOnly && (
+          {!readOnly && !issue.archived && (
             <Reply options={replyOptions} label="Comment" placeholder="Add a comment (Markdown)."
               draftKey={[data.workspace ?? site.defaultWorkspace, data.project.id, issue.id, "comment"]} send={async (body) => {
               const created = await api.comment(issue.id, body, data.workspace, data.project.id);

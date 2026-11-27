@@ -174,6 +174,32 @@ describe("loadGraph", () => {
     expect(linked.blockedBy.map((issue) => issue.id)).toEqual(["main", "f"]);
     expect(calls).toHaveLength(3);
   });
+
+  it("reads the archived issues of the project and marks them archived", async () => {
+    const page = <T>(nodes: T[]) => ({ nodes, pageInfo: { hasNextPage: false, endCursor: null } });
+    const state = { id: "s", name: "Done", type: "completed", color: "" };
+    const raw = (id: string, archivedAt: string | null) => ({
+      id, identifier: id, title: id, url: "u", state, project: { id: "p" }, description: null, priority: 0, sortOrder: 0,
+      updatedAt: "today", archivedAt, team: { id: "t", key: "CD" }, assignee: null, labels: { nodes: [] },
+      projectMilestone: null, comments: { nodes: [] }, attachments: { nodes: [] }, relations: page([]), inverseRelations: page([]),
+    });
+    const issueQueries: string[] = [];
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query } = JSON.parse(init.body as string);
+      let data;
+      if (query.includes("viewer{")) data = { viewer: { id: "me" }, project: { id: "p", name: "P", url: "u", projectMilestones: { nodes: [] } } };
+      else if (query.includes("project(id:")) {
+        issueQueries.push(query);
+        data = { project: { issues: page([raw("open", null), raw("old", "2026-11-01T00:00:00Z")]) } };
+      } else if (query.includes("members(first")) data = { teams: { nodes: [] } };
+      else data = { issueLabels: page([]) };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    const { issues } = await loadGraph("p");
+    expect(issueQueries[0]).toContain("includeArchived:true");
+    expect(issues.map((i) => [i.identifier, i.archived])).toEqual([["open", false], ["old", true]]);
+  });
 });
 
 describe("initiativeOf", () => {
@@ -458,5 +484,20 @@ describe("addComment", () => {
     const error = await addComment("i1", "hi", "TM").catch((e: unknown) => e);
     expect(error).toBeInstanceOf(LinearError);
     expect(error).toMatchObject({ status: 502, message: "Linear did not save the comment" });
+  });
+
+  it("refuses a comment or an edit on an archived issue before any write", async () => {
+    vi.stubEnv("LINEAR_API_KEY", "test-key");
+    const queries: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const { query } = JSON.parse(init.body as string);
+      queries.push(query);
+      const data = { issue: { team: { key: "TM" }, project: null, archivedAt: "2026-11-01T00:00:00Z", description: "",
+        labels: { nodes: [] }, comments: { nodes: [] } } };
+      return { ok: true, json: async () => ({ data }) };
+    }));
+    await expect(addComment("i1", "hi", "TM")).rejects.toMatchObject({ status: 403, message: "this issue is archived: it is read-only here" });
+    await expect(updateIssue("i1", { priority: 2 }, "TM")).rejects.toMatchObject({ status: 403 });
+    expect(queries.some((q) => q.includes("mutation"))).toBe(false);
   });
 });

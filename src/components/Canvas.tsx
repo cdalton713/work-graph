@@ -81,6 +81,7 @@ const Station = memo(function Station({ data }: NodeProps<StationNode>) {
             title={`Runner: ${claim.holder}${claim.stale ? " (stale claim)" : ""}`}>{claim.stale && "⚠ "}{claim.initials}</span>}
           <span className="station-tags">
             {KIND_MARK[node.kind] && <span>{KIND_MARK[node.kind]}</span>}
+            {issue.archived && <span className="station-archived" title="Archived in Linear. Read-only.">ARCHIVED</span>}
             {card?.wave === "yes" && <span className="station-wave" title="In the current wave.">WAVE</span>}
             {worker && <span className="station-worker" title={`A worker runs on this issue now (${node.claim}${card?.job ? `, job ${card.job}` : ""}).`}>{worker}{card?.job ? ` · ${card.job}` : ""}</span>}
             {soak && <span className="station-soak" title={`The soak ends at ${new Date(card!.soak_until!).toLocaleString()}.`}>soak {soak}</span>}

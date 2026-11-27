@@ -60,7 +60,7 @@ interface RawAttachment { url: string | null; title: string | null; metadata: Re
 interface RawIssue {
   project?: { id: string; name: string } | null;
   id: string; identifier: string; title: string; description: string | null; priority: number; url: string;
-  sortOrder: number; updatedAt: string; team: { id: string; key: string }; state: State; assignee: RawUser | null;
+  sortOrder: number; updatedAt: string; archivedAt?: string | null; team: { id: string; key: string }; state: State; assignee: RawUser | null;
   labels: { nodes: RawLabel[] }; projectMilestone: { id: string } | null;
   relations: Connection<{ type: string; relatedIssue: RawRef }>;
   inverseRelations: Connection<{ type: string; issue: RawRef }>;
@@ -505,7 +505,7 @@ const INVERSE_RELATIONS = `nodes{type issue{${REF}}} pageInfo{hasNextPage endCur
 // Linear refuses a query that costs more than 10,000 points. One issue with 30 relations each way costs
 // about 400, so 25 issues of that size are too many. completeIssue loads the relations past this page.
 const RELATION_PAGE = 20;
-const ISSUE = `id identifier title description priority url sortOrder updatedAt
+const ISSUE = `id identifier title description priority url sortOrder updatedAt archivedAt
   project{id name}
   team{id key} ${STATE} assignee{id name displayName avatarUrl}
   labels(first:20){nodes{id name color parent{name}}}
@@ -568,7 +568,7 @@ export function normalizeIssue(i: RawIssue, projectId: string | undefined): Issu
     labels: i.labels.nodes.map(label), milestoneId: i.projectMilestone?.id ?? null,
     blocks: i.relations.nodes.filter((r) => r.type === "blocks").map((r) => ref(r.relatedIssue, projectId)),
     blockedBy: i.inverseRelations.nodes.filter((r) => r.type === "blocks").map((r) => ref(r.issue, projectId)),
-    card: i.comments.nodes[0] ?? null, external: false, pullRequests: pullRequestsOf(i.attachments),
+    card: i.comments.nodes[0] ?? null, external: false, archived: !!i.archivedAt, pullRequests: pullRequestsOf(i.attachments),
   };
 }
 
@@ -872,12 +872,16 @@ const WAITING_ISSUE = `id identifier title updatedAt sortOrder team{id key} ${ST
 export async function waitingIssues(projectId: string, includeExternal: boolean) {
   const relations = includeExternal ? `relations(first:${RELATION_PAGE},includeArchived:true){${RELATIONS}}
     inverseRelations(first:${RELATION_PAGE},includeArchived:true){${INVERSE_RELATIONS}}` : "";
-  return projectIssues(projectId, WAITING_ISSUE + relations, includeExternal);
+  return projectIssues(projectId, WAITING_ISSUE + relations, includeExternal, false);
 }
 
-async function projectIssues(projectId: string, fields: string, includeExternal: boolean) {
+/**
+ * `archived`: also the archived issues of the project. On Linear's Free plan, wg archives each Done and
+ * Canceled issue; the graph shows them read-only.
+ */
+async function projectIssues(projectId: string, fields: string, includeExternal: boolean, archived = true) {
   const raw = await pages<RawIssue>(
-    `query($id:String!,$after:String){ project(id:$id){ issues(first:25,after:$after){
+    `query($id:String!,$after:String){ project(id:$id){ issues(first:25,after:$after${archived ? ",includeArchived:true" : ""}){
        nodes{${fields}} pageInfo{hasNextPage endCursor} } } }`,
     { id: projectId },
     (data) => data.project.issues,
@@ -899,7 +903,7 @@ async function projectIssues(projectId: string, fields: string, includeExternal:
     outside.forEach((id) => known.add(id));
     const found: Issue[] = [];
     for (let at = 0; at < outside.length; at += 25) {
-      const data = await gql(`query($ids:[ID!]){ issues(first:25,filter:{id:{in:$ids}}){ nodes{${fields}} } }`, { ids: outside.slice(at, at + 25) });
+      const data = await gql(`query($ids:[ID!]){ issues(first:25,filter:{id:{in:$ids}},includeArchived:${archived}){ nodes{${fields}} } }`, { ids: outside.slice(at, at + 25) });
       const linked = await mapLimit(data.issues.nodes as RawIssue[], MAX_PARALLEL, (i) => completeIssue(i, projectId));
       found.push(...linked.map((i) => ({ ...i, external: true })));
     }
@@ -971,17 +975,17 @@ export async function loadGraph(projectId: string): Promise<GraphData> {
 const isProtected = (l: Label) => l.group === "agent" || l.name.startsWith("agent:") || KIND_LABELS.has(l.name);
 const EDITABLE = new Set(["title", "description", "stateId", "priority", "assigneeId", "labelIds"]);
 
-interface Writable { team: { key: string }; project: { id: string } | null; description: string | null; labels: { nodes: RawLabel[] }; comments: { nodes: { id: string }[] } }
+interface Writable { team: { key: string }; project: { id: string } | null; archivedAt: string | null; description: string | null; labels: { nodes: RawLabel[] }; comments: { nodes: { id: string }[] } }
 
 /**
  * The issue, as far as a write needs it. Only the workspace's configured team is writable.
- * Issues with no project are included; linked ENG issues stay read-only.
+ * Issues with no project are included; linked ENG issues and archived issues stay read-only.
  */
 async function writable(issueId: string, team: string): Promise<Writable> {
   let data: Data;
   try {
     data = await gql(
-      `query($id:String!){ issue(id:$id){ team{key} project{id} description labels(first:50){nodes{id name parent{name}}}
+      `query($id:String!){ issue(id:$id){ team{key} project{id} archivedAt description labels(first:50){nodes{id name parent{name}}}
          comments(first:1, filter:{body:{startsWith:"${CARD_PREFIX}"}}){nodes{id}} } }`,
       { id: issueId },
     );
@@ -995,6 +999,7 @@ async function writable(issueId: string, team: string): Promise<Writable> {
   if (shared && issue?.project?.id !== shared.projectId) throw new LinearError("no issue with this id in the shared project", 404);
   if (!issue) throw new LinearError(`issue ${issueId} not found`, 404);
   if (issue.team.key !== team) throw new LinearError(`this issue is not in team ${team}: it is read-only here`, 403);
+  if (issue.archivedAt) throw new LinearError("this issue is archived: it is read-only here", 403);
   return issue;
 }
 
@@ -1072,7 +1077,9 @@ export async function listComments(issueId: string, inProject?: string): Promise
 export async function addComment(issueId: string, body: unknown, team: string, project?: ProjectOfWrite): Promise<Comment> {
   if (typeof body !== "string" || !body.trim()) throw new LinearError("comment body is empty", 400);
   if (body.startsWith(CARD_PREFIX)) throw new LinearError("that text is reserved for the wg node card", 400);
-  project?.((await writable(issueId, team)).project?.id ?? null);
+  // Check before the call: `project?.(...)` skips its argument when there is no listener.
+  const issue = await writable(issueId, team);
+  project?.(issue.project?.id ?? null);
   const data = await gql(
     `mutation($i:CommentCreateInput!){ commentCreate(input:$i){ success comment{${COMMENT}} } }`,
     { i: { issueId, body } },

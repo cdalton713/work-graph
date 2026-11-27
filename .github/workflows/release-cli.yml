@@ -42,6 +42,8 @@ jobs:
           cargo +1.98.1 build --locked --release --target "$TARGET" --manifest-path cli/Cargo.toml --bin wg-preview
           python3 -I packaging/releases/package.py build "$GITHUB_REF_NAME" "$TARGET" dist-release \
             --binary "cli/target/$TARGET/release/wg-preview"
+      - name: Exercise managed upgrades with disposable signing keys
+        run: tests/cli-upgrade/run.sh "$TARGET"
       - name: Check tagged resources and run the extracted executable
         run: |
           python3 -I packaging/releases/package.py test "$GITHUB_REF_NAME" "$TARGET" dist-release \

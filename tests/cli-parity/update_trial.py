@@ -26,6 +26,9 @@ ASSETS = f"/fixture/release/releases/download/wg-v{NEW}/{PREFIX}"
 class Service(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.requests.append(self.path)
+        if self.path == getattr(self.server, "stalled_path", None):
+            self.server.resume.wait(30)
+            return
         body = self.server.responses.get(self.path)
         if body is None:
             self.send_error(404)
@@ -109,6 +112,12 @@ def trial(temp, server):
     server.responses[DISCOVERY] = json.dumps(dict(tag_name=f"wg-v{NEW}", draft=False, prerelease=False)).encode()
     for suffix, name in [(".json", "manifest.json"), (".sig", "manifest.sig"), (".tar.gz", "bundle.tar.gz")]:
         server.responses[ASSETS + suffix] = (temp / NEW / name).read_bytes()
+
+    if os.environ.get("WG_NATIVE_UPGRADE_TRIAL") == "1":
+        native = runpy.run_path(str(REPO / "tests/cli-upgrade/native.py"))
+        native["trial"](temp, server, REPO, TARGET, OLD, NEW, LATEST, first[1], successor[1],
+                        DISCOVERY, wait_for)
+        server.requests.clear()
 
     home = temp / "home"
     root = home / ".local/share/work-graph"

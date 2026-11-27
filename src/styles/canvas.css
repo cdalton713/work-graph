@@ -91,6 +91,8 @@
 .station-tags > * { flex: none; }
 .station-worker { color: var(--sig); }
 .station-pr { color: var(--ink-2); }
+/* With a review mark, a run time and a long status, the row is wider than the card: the PR and its mark shrink, so the status stays inside. */
+.station-top > .station-pr { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .station-pr i { font-style: normal; color: var(--lamp-done); }
 .station-status { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; color: var(--sig); }
 .station-title { font-weight: 500; line-height: 1.25; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }

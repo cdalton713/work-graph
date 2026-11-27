@@ -1,0 +1,2 @@
+# Rust build output: cargo test makes over 20,000 files, more than a Vercel upload accepts.
+cli/target
